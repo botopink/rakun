@@ -124,3 +124,29 @@ it); the consumer declares both.
 - The spec (intent, steps, test scenarios) → [`../../tasks/v0.beta.11/specs/rakun.md`](../../tasks/v0.beta.11/specs/rakun.md).
 - The runnable end-to-end app → [`./examples/rakun/`](examples/rakun/).
 - The HTTP server backing `Rakun.run` starts → [`../botopink-lang/libs/server/AGENTS.md`](../botopink-lang/libs/server/AGENTS.md).
+
+## CI
+
+`.github/workflows/test.yml` runs `zig build test-libs -- --lib rakun
+--target <t>` for `{commonJS, erlang, beam}` on `ubuntu-22.04` +
+`macos-14`, plus `commonJS` on `windows-2022`. No `wasm` cell —
+rakun's server surface targets node + the BEAM. `BOTOPINK_LANG_REF`
+repo variable pins a specific botopink-lang ref (default `main`).
+
+Bootstrap: check out this lib + a fresh `botopink-lang` clone, place
+this lib under `botopink-lang/repository/rakun/`, then `zig build
+install && zig build test-libs`.
+
+## Tagging (auto)
+
+`.github/workflows/tag.yml` reads `version` from `botopink.json` and
+tags every push to `feat`/`master`/`main`:
+
+- **feat** → moving `<version>-feat` tag (force-pushed on every push).
+- **master** / **main** → immutable `<version>` tag. Pushing the same
+  SHA twice is a no-op; pushing a *different* SHA without bumping
+  `version` is a hard error (bump it in `botopink.json` to publish a
+  new release).
+
+Set `requires.rakun = "feat"` in a consumer's `botopink.json` and run
+`bpmp sync` to preview unreleased work.

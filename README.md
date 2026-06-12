@@ -1,5 +1,7 @@
 # rakun
 
+[![CI](https://github.com/botopink/rakun/actions/workflows/test.yml/badge.svg?branch=feat)](https://github.com/botopink/rakun/actions/workflows/test.yml)
+
 > Spring-style application framework for botopink — an IoC container with
 > constructor dependency injection plus a declarative web layer.
 
