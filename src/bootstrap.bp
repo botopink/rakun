@@ -1,0 +1,39 @@
+//// rakun — application bootstrap (`Rakun.run`).
+////
+//// The entry point a program calls after declaring its components: it reads the
+//// router the controller decorators built (held in the host runtime) and starts
+//// the HTTP server on the configured port. The server itself is the
+//// framework-agnostic `libs/server` backing — rakun hands it a dispatcher
+//// closure and `server` owns the socket; the dependency arrow is rakun → server,
+//// never the reverse.
+////
+//// `Rakun` is a concrete type here (the boundary interface that used to live in
+//// `rakun.d.bp` is now this real record). `run` is an associated fn, called as
+//// `Rakun.run(App(port: 8080, basePath: "/"))`.
+////
+//// The dispatcher closure is `(method, path, headersJson, queryJson, body) ->
+//// Response`: `server` decodes the socket request into those scalars (headers and
+//// query JSON-encoded), rakun's `rkDispatchHttp` matches the route, builds a LIVE
+//// `Request` (query/header/body populated), runs the handler, and returns its
+//// `Response`; `server` writes the status + body back over the wire.
+////
+//// Consumer note (G2): the runtime `.mjs` files (`rakun`'s `runtime.mjs`,
+//// `server`'s `server.mjs`) must be shipped next to the emitted modules for a
+//// built program to resolve the `#[@external]` requires. rakun's own tests
+//// exercise `rkDispatchHttp` directly (the same pipeline, no socket), so they do
+//// not depend on that shipping.
+
+import {serverServe} from "server";
+import {rkDispatchHttp} from "runtime";    // sibling module — explicit import so the
+                                           // emitted closure `require`s it at runtime
+
+pub record Rakun {
+    // Start the application: hand `libs/server` a dispatcher over the host router
+    // and listen on `app.port`. The listening socket keeps the process alive, so
+    // `run` returns once the server is up.
+    pub fn run(app: App) {
+        val _handle = serverServe(app.port, { method, path, headersJson, queryJson, body ->
+            rkDispatchHttp(method, path, headersJson, queryJson, body)
+        });
+    }
+}

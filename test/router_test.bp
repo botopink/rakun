@@ -1,0 +1,55 @@
+// rakun — router + DI integration: a controller→service→repository chain wired
+// end to end by the decorators, exercised through `rkDispatch`.
+//
+// Run by `botopink test` from `libs/rakun/`. The component decorators `@emit`
+// factories + route registrations; this test never names them — it dispatches a
+// request and asserts the Response, which transitively builds the whole DI chain
+// (F2: constructor injection) and runs the mapped handler (F4: router). The
+// runtime fns the emitted code calls (`rkScan`/`rkEnter`/`rkDone`/
+// `rkRegisterRoute`) are imported here because the wiring is spliced into this
+// module.
+
+import {repository, service, restController, route, getMapping};
+import {Request, Response};
+import {rkScan, rkSingleton, rkEnter, rkDone, rkRegisterRoute, rkDispatch, rkRouteCount};
+
+#[repository]
+record UserRepo {
+    pub fn all(self: Self) -> Array<string> {
+        return ["ana", "bob"];
+    }
+}
+
+#[service]
+record UserService {
+    repo: UserRepo,                      // injected by type
+
+    pub fn list(self: Self) -> Array<string> {
+        return self.repo.all();
+    }
+}
+
+#[restController, route("/api/users")]
+record UserController {
+    svc: UserService,                    // injected by type
+
+    #[getMapping("/")]
+    pub fn index(self: Self, req: Request) -> Response {
+        return Response.json(self.svc.list().join(", "));
+    }
+}
+
+test "rakun router: GET a mapped route builds the DI chain and returns 200" {
+    val resp = rkDispatch("GET", "/api/users/");
+    assert resp.status == 200;
+    assert resp.body == "ana, bob";
+}
+
+test "rakun router: an unmapped path returns 404" {
+    val resp = rkDispatch("GET", "/nope");
+    assert resp.status == 404;
+}
+
+test "rakun router: the mapped route is registered" {
+    assert rkRouteCount() == 1;
+}

@@ -1,0 +1,126 @@
+// rakun — DI scopes (F2-scopes): singleton scope, `#[value]` property injection,
+// and `#[configuration]`/`#[bean]` factories, exercised through the emitted
+// `__rkMake_<Type>()` factories.
+//
+// Run by `botopink test` from `libs/rakun/`. The decorators `@emit` the
+// singleton factories (and, for a configuration, one `__rkMake_<ReturnType>()`
+// per `#[bean]`); these tests call them directly and assert the runtime wiring
+// (`runtime.mjs`): a single instance per type, config-backed fields, and
+// bean-typed injection. The runtime fns the emitted code calls are imported here
+// because the wiring is spliced into this module. Each scenario uses its own
+// types so the host `buildCount` registry (shared across this file's test blocks)
+// stays unambiguous.
+
+import {repository, service, restController, route, getMapping, configuration, bean, value};
+import {Request, Response};
+import {rkScan, rkSingleton, rkEnter, rkDone, rkRegisterRoute, rkBuildCount};
+import {rkSetProp, rkProp, rkPropInt};
+
+// ── singleton scope: a 3-level diamond resolves ONE instance per type ─────────
+
+#[repository]
+record DiamRepo {
+    pub fn tag(self: Self) -> string {
+        return "r";
+    }
+}
+
+#[service]
+record DiamService {
+    repo: DiamRepo,                          // injected by type
+
+    pub fn svc(self: Self) -> string {
+        return self.repo.tag() + "s";
+    }
+}
+
+#[restController, route("/diamond")]
+record DiamController {
+    service: DiamService,                    // injected by type
+    repo: DiamRepo,                          // ALSO depends on the repo (the diamond)
+
+    #[getMapping("/")]
+    pub fn index(self: Self, req: Request) -> Response {
+        return Response.ok(self.service.svc() + self.repo.tag());
+    }
+}
+
+test "rakun scope: a 3-level diamond resolves ONE shared instance per type" {
+    val a = __rkMake_DiamController();
+    val b = __rkMake_DiamController();
+    // Repo is needed by BOTH the service and the controller, yet built once.
+    assert rkBuildCount("DiamRepo") == 1;
+    assert rkBuildCount("DiamService") == 1;
+    assert rkBuildCount("DiamController") == 1;
+    // The shared instances still produce the right values through the chain.
+    assert a.service.svc() == "rs";
+    assert a.repo.tag() == "r";
+    assert b.service.svc() == "rs";
+}
+
+// ── `#[value("key")]` property injection (NOT a DI edge) ──────────────────────
+
+#[service]
+record SettingsService {
+    #[value("rk.port")]
+    port: i32,                               // filled from config, not the DI graph
+
+    #[value("rk.name")]
+    name: string,
+
+    pub fn portValue(self: Self) -> i32 {
+        return self.port;
+    }
+
+    pub fn appName(self: Self) -> string {
+        return self.name;
+    }
+}
+
+test "rakun value: #[value] fills a field from config, not the DI graph" {
+    val _p = rkSetProp("rk.port", "8080");
+    val _n = rkSetProp("rk.name", "rakun");
+    val s = __rkMake_SettingsService();
+    // A clean compile already proves `i32`/`string` were not treated as DI edges
+    // (no `__rkMake_i32` factory exists); these assert the values were injected.
+    assert s.portValue() == 8080;
+    assert s.appName() == "rakun";
+}
+
+// ── `#[configuration]` + `#[bean]`: a bean return type is injectable ──────────
+
+record Clock {
+    zone: string,
+
+    pub fn now(self: Self) -> string {
+        return "now@" + self.zone;
+    }
+}
+
+#[configuration]
+record BeanConfig {
+    #[bean]
+    pub fn clock(self: Self) -> Clock {      // Clock becomes a managed singleton
+        return Clock(zone: "UTC");
+    }
+}
+
+#[service]
+record StampService {
+    clock: Clock,                            // injected by type — the #[bean] singleton
+
+    pub fn stamp(self: Self) -> string {
+        return self.clock.now();
+    }
+}
+
+test "rakun bean: #[bean] output is injectable by its return type" {
+    val s = __rkMake_StampService();
+    assert s.stamp() == "now@UTC";
+    // The bean itself is a singleton, resolved by its return-type name.
+    val c1 = __rkMake_Clock();
+    val c2 = __rkMake_Clock();
+    assert rkBuildCount("Clock") == 0;       // beans don't go through rkEnter/rkDone
+    assert c1.now() == "now@UTC";
+    assert c2.now() == "now@UTC";
+}

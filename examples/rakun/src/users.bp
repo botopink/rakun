@@ -1,0 +1,60 @@
+// rakun example — layered dependency injection + REST routing.
+//
+// The Spring triad — #[repository] (data) → #[service] (logic) →
+// #[restController] (HTTP) — wired by CONSTRUCTOR INJECTION: each layer declares
+// its dependency as a record field, and rakun resolves it by type. The route
+// decorators follow Spring's names (`getMapping`, …) because `get`/`set`/`new`
+// are reserved keyword tokens in botopink.
+
+import {repository, service, restController, route, getMapping} from "rakun";
+import {Request, Response} from "rakun";
+import {rkScan, rkSingleton, rkEnter, rkDone, rkRegisterRoute} from "rakun";
+
+// ---- data layer ----
+
+#[repository]
+pub record UserRepository {
+    pub fn all(self: Self) -> Array<string> {
+        return ["ana", "bob", "cleo"];
+    }
+
+    pub fn has(self: Self, name: string) -> bool {
+        return self.all().indexOf(name) != -1;
+    }
+}
+
+// ---- business layer ----
+
+#[service]
+pub record UserService {
+    repo: UserRepository,                 // injected by type
+
+    pub fn list(self: Self) -> Array<string> {
+        return self.repo.all();
+    }
+
+    pub fn greet(self: Self, name: string) -> string {
+        return if (self.repo.has(name)) {
+            "Hello, " + name + "!";
+        } else {
+            "unknown user: " + name;
+        };
+    }
+}
+
+// ---- web layer ----
+
+#[restController, route("/api/users")]
+pub record UserController {
+    service: UserService,                 // injected by type
+
+    #[getMapping("/")]
+    pub fn index(self: Self, req: Request) -> Response {
+        return Response.json(self.service.list().join(", "));
+    }
+
+    #[getMapping("/:name")]
+    pub fn show(self: Self, req: Request) -> Response {
+        return Response.ok(self.service.greet(req.param("name")));
+    }
+}

@@ -1,0 +1,46 @@
+// rakun — wiring tests: decorators applied to real records.
+//
+// Run by `botopink test` from `libs/rakun/`. These exercise the decorator
+// bodies on correctly-shaped declarations and the wiring they contribute via
+// `@emit` + the host runtime (`runtime.mjs`):
+//
+//   • placement (F3): a clean compile means every decorator accepted its site.
+//   • component scan (F2): each `#[service]`/`#[repository]` emits a
+//     `rkScan("Name")` self-registration that runs at module load, so the host
+//     scan registry lists every managed component without any cross-decorator
+//     compile-time state. `rkScan` is imported here because the emitted code is
+//     spliced into this module and calls it.
+//
+// Wrong-placement REJECTION is covered generically by the compiler's own
+// annotation-processor suite (`comptime/tests/decorator_invocation.zig`) — a
+// compile-failure can't be expressed as a runtime `assert` here.
+
+import {service, repository, rkScan, rkSingleton, rkEnter, rkDone, rkScannedNames, rkScannedCount};
+
+#[repository]
+record GreetRepo {
+    pub fn all(self: Self) -> Array<string> {
+        return ["ana", "bob"];
+    }
+}
+
+#[service]
+record GreetService {
+    repo: GreetRepo,                 // constructor injection by type
+
+    pub fn list(self: Self) -> Array<string> {
+        return self.repo.all();
+    }
+}
+
+test "rakun di: #[service]/#[repository] records construct and run" {
+    val svc = GreetService(repo: GreetRepo());
+    assert svc.list().join(",") == "ana,bob";
+}
+
+test "rakun scan: component decorators register every annotated record" {
+    val names = rkScannedNames();
+    assert names.contains("GreetRepo");
+    assert names.contains("GreetService");
+    assert rkScannedCount() == 2;
+}

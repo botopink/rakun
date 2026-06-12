@@ -1,0 +1,227 @@
+//// rakun — decorator bodies (annotation processors, lib-side).
+////
+//// These are the `#[service]`/`#[getMapping("/x")]`/… markers, implemented as
+//// generic comptime decorator functions: each takes the reflected declaration
+//// it is applied to as its first parameter (`comptime decl: @Decl`) and the
+//// annotation arguments as the trailing ones. The compiler core knows NOTHING
+//// about rakun — it only recognises the `@Decl`-first signature, type-checks the
+//// trailing arguments against it (arity + types), and runs the body over the
+//// annotated declaration. Every rule below lives here, in botopink.
+////
+//// This file holds the PLACEMENT rules (F3): a component marker must sit on a
+//// record, a route marker on a method, `#[value]` on a field. Argument arity /
+//// type checking is automatic from the signatures (e.g. `getMapping(path:
+//// string)` rejects `#[getMapping()]` and `#[getMapping(1)]`). The DI/router
+//// WIRING the same decorators contribute (F2/F4) is layered on via `@emit`.
+////
+//// Reached via `from "rakun"`; see ./AGENTS.md and ./docs.md.
+
+// ---- component markers (annotate a record) ----
+//
+// A component is a managed singleton. `#[service]`/`#[repository]`/`#[controller]`
+// are Spring's stereotypes — semantically identical to `#[component]` here, kept
+// distinct for intent + future per-stereotype behaviour.
+
+// Each component marker contributes the IoC wiring on top of its placement rule.
+// In order, the body:
+//   1. `@emit`s `rkScan("Name")` — module-load self-registration into the scan
+//      registry (F2: the scan discovers every component, no shared comptime state);
+//   2. `@emit`s a SINGLETON factory `__rkMake_Name()` that constructs the record
+//      once and caches it (`rkSingleton`), injecting each field by type via that
+//      type's own factory (F2: constructor injection) — except a `#[value("key")]`
+//      field, which is filled from config (`rkProp`/`rkPropInt`) and is NOT a DI
+//      edge. Construction is bracketed by `rkEnter`/`rkDone` so a dependency cycle
+//      raises at first construction;
+//   3. enforces placement (must annotate a record).
+// The `@emit`s run before the placement `fail`, and a failed outcome discards the
+// contributions — so only correctly placed records wire up. The emitted code calls
+// `rkScan`/`rkSingleton`/`rkEnter`/`rkDone`/`rkProp(Int)`, which are in scope at the
+// application site (`import {service, rkScan, rkSingleton, rkEnter, rkDone, …} from
+// "rakun"`).
+//
+// Decorator-body constraints (see ../AGENTS.md): the body can't call sibling fns
+// (each is lowered alone into the eval script), so the per-field injection rule
+// and the factory builder are inlined in every component marker rather than shared.
+
+pub fn component(comptime decl: @Decl) {
+    @emit("val __rkScan_" + decl.name + " = rkScan(\"" + decl.name + "\");");
+    var args: Array<string> = [];
+    decl.fields.forEach({ f ->
+        var valKey = "";
+        f.annotations.forEach({ a -> if (a.name == "value") { valKey = a.args.join(""); } });
+        val expr = if (valKey != "") {
+            if (f.typeName == "i32") { "rkPropInt(" + valKey + ")"; } else { "rkProp(" + valKey + ")"; };
+        } else {
+            "__rkMake_" + f.typeName + "()";
+        };
+        args.push(f.name + ": " + expr);
+    });
+    @emit("pub fn __rkMake_" + decl.name + "() -> " + decl.name + " { return rkSingleton(\"" + decl.name + "\", { -> val _e = rkEnter(\"" + decl.name + "\"); val v = " + decl.name + "(" + args.join(", ") + "); val _d = rkDone(\"" + decl.name + "\"); v }); }");
+    if (decl.kind != DeclKind.Record) { decl.fail("#[component] must annotate a record"); }
+}
+
+pub fn service(comptime decl: @Decl) {
+    @emit("val __rkScan_" + decl.name + " = rkScan(\"" + decl.name + "\");");
+    var args: Array<string> = [];
+    decl.fields.forEach({ f ->
+        var valKey = "";
+        f.annotations.forEach({ a -> if (a.name == "value") { valKey = a.args.join(""); } });
+        val expr = if (valKey != "") {
+            if (f.typeName == "i32") { "rkPropInt(" + valKey + ")"; } else { "rkProp(" + valKey + ")"; };
+        } else {
+            "__rkMake_" + f.typeName + "()";
+        };
+        args.push(f.name + ": " + expr);
+    });
+    @emit("pub fn __rkMake_" + decl.name + "() -> " + decl.name + " { return rkSingleton(\"" + decl.name + "\", { -> val _e = rkEnter(\"" + decl.name + "\"); val v = " + decl.name + "(" + args.join(", ") + "); val _d = rkDone(\"" + decl.name + "\"); v }); }");
+    if (decl.kind != DeclKind.Record) { decl.fail("#[service] must annotate a record"); }
+}
+
+pub fn repository(comptime decl: @Decl) {
+    @emit("val __rkScan_" + decl.name + " = rkScan(\"" + decl.name + "\");");
+    var args: Array<string> = [];
+    decl.fields.forEach({ f ->
+        var valKey = "";
+        f.annotations.forEach({ a -> if (a.name == "value") { valKey = a.args.join(""); } });
+        val expr = if (valKey != "") {
+            if (f.typeName == "i32") { "rkPropInt(" + valKey + ")"; } else { "rkProp(" + valKey + ")"; };
+        } else {
+            "__rkMake_" + f.typeName + "()";
+        };
+        args.push(f.name + ": " + expr);
+    });
+    @emit("pub fn __rkMake_" + decl.name + "() -> " + decl.name + " { return rkSingleton(\"" + decl.name + "\", { -> val _e = rkEnter(\"" + decl.name + "\"); val v = " + decl.name + "(" + args.join(", ") + "); val _d = rkDone(\"" + decl.name + "\"); v }); }");
+    if (decl.kind != DeclKind.Record) { decl.fail("#[repository] must annotate a record"); }
+}
+
+// A controller is a component (scan + singleton factory) that ALSO contributes
+// routes: for every method carrying a `#[getMapping(path)]`/… annotation, `@emit`
+// a `rkRegisterRoute(verb, prefix + path, handler)` whose handler builds the
+// controller via its factory and calls the method. The `#[route("/prefix")]` on
+// the record (if any) is the path prefix.
+
+pub fn controller(comptime decl: @Decl) {
+    @emit("val __rkScan_" + decl.name + " = rkScan(\"" + decl.name + "\");");
+    var cargs: Array<string> = [];
+    decl.fields.forEach({ f ->
+        var valKey = "";
+        f.annotations.forEach({ a -> if (a.name == "value") { valKey = a.args.join(""); } });
+        val expr = if (valKey != "") {
+            if (f.typeName == "i32") { "rkPropInt(" + valKey + ")"; } else { "rkProp(" + valKey + ")"; };
+        } else {
+            "__rkMake_" + f.typeName + "()";
+        };
+        cargs.push(f.name + ": " + expr);
+    });
+    @emit("pub fn __rkMake_" + decl.name + "() -> " + decl.name + " { return rkSingleton(\"" + decl.name + "\", { -> val _e = rkEnter(\"" + decl.name + "\"); val v = " + decl.name + "(" + cargs.join(", ") + "); val _d = rkDone(\"" + decl.name + "\"); v }); }");
+    var prefix = "\"\"";
+    decl.annotations.forEach({ a -> if (a.name == "route") { prefix = a.args.join(""); } });
+    decl.methods.forEach({ m ->
+        m.annotations.forEach({ a ->
+            val verb = if (a.name == "getMapping") { "GET"; } else if (a.name == "postMapping") { "POST"; } else if (a.name == "putMapping") { "PUT"; } else if (a.name == "patchMapping") { "PATCH"; } else if (a.name == "deleteMapping") { "DELETE"; } else { ""; };
+            if (verb != "") { @emit("val __rkRoute_" + decl.name + "_" + m.name + " = rkRegisterRoute(\"" + verb + "\", " + prefix + " + " + a.args.join("") + ", { req -> __rkMake_" + decl.name + "()." + m.name + "(req) });"); }
+        });
+    });
+    if (decl.kind != DeclKind.Record) { decl.fail("#[controller] must annotate a record"); }
+}
+
+pub fn restController(comptime decl: @Decl) {
+    @emit("val __rkScan_" + decl.name + " = rkScan(\"" + decl.name + "\");");
+    var rargs: Array<string> = [];
+    decl.fields.forEach({ f ->
+        var valKey = "";
+        f.annotations.forEach({ a -> if (a.name == "value") { valKey = a.args.join(""); } });
+        val expr = if (valKey != "") {
+            if (f.typeName == "i32") { "rkPropInt(" + valKey + ")"; } else { "rkProp(" + valKey + ")"; };
+        } else {
+            "__rkMake_" + f.typeName + "()";
+        };
+        rargs.push(f.name + ": " + expr);
+    });
+    @emit("pub fn __rkMake_" + decl.name + "() -> " + decl.name + " { return rkSingleton(\"" + decl.name + "\", { -> val _e = rkEnter(\"" + decl.name + "\"); val v = " + decl.name + "(" + rargs.join(", ") + "); val _d = rkDone(\"" + decl.name + "\"); v }); }");
+    var rprefix = "\"\"";
+    decl.annotations.forEach({ a -> if (a.name == "route") { rprefix = a.args.join(""); } });
+    decl.methods.forEach({ m ->
+        m.annotations.forEach({ a ->
+            val verb = if (a.name == "getMapping") { "GET"; } else if (a.name == "postMapping") { "POST"; } else if (a.name == "putMapping") { "PUT"; } else if (a.name == "patchMapping") { "PATCH"; } else if (a.name == "deleteMapping") { "DELETE"; } else { ""; };
+            if (verb != "") { @emit("val __rkRoute_" + decl.name + "_" + m.name + " = rkRegisterRoute(\"" + verb + "\", " + rprefix + " + " + a.args.join("") + ", { req -> __rkMake_" + decl.name + "()." + m.name + "(req) });"); }
+        });
+    });
+    if (decl.kind != DeclKind.Record) { decl.fail("#[restController] must annotate a record"); }
+}
+
+// ---- configuration / factory markers ----
+
+// `#[configuration]` marks a record whose `#[bean]` methods are factories. The
+// configuration is itself a managed singleton (scan + factory), and for every
+// `#[bean]` method it `@emit`s a `__rkMake_<ReturnType>()` that builds the
+// configuration and calls the bean — so the bean's RETURN TYPE becomes injectable
+// by type anywhere a component declares a field of it (Spring's @Bean). The bean
+// output is a singleton too (cached by its return-type name).
+pub fn configuration(comptime decl: @Decl) {
+    @emit("val __rkScan_" + decl.name + " = rkScan(\"" + decl.name + "\");");
+    var gargs: Array<string> = [];
+    decl.fields.forEach({ f ->
+        var valKey = "";
+        f.annotations.forEach({ a -> if (a.name == "value") { valKey = a.args.join(""); } });
+        val expr = if (valKey != "") {
+            if (f.typeName == "i32") { "rkPropInt(" + valKey + ")"; } else { "rkProp(" + valKey + ")"; };
+        } else {
+            "__rkMake_" + f.typeName + "()";
+        };
+        gargs.push(f.name + ": " + expr);
+    });
+    @emit("pub fn __rkMake_" + decl.name + "() -> " + decl.name + " { return rkSingleton(\"" + decl.name + "\", { -> val _e = rkEnter(\"" + decl.name + "\"); val v = " + decl.name + "(" + gargs.join(", ") + "); val _d = rkDone(\"" + decl.name + "\"); v }); }");
+    decl.methods.forEach({ m ->
+        var isBean = false;
+        m.annotations.forEach({ a -> if (a.name == "bean") { isBean = true; } });
+        if (isBean) { @emit("pub fn __rkMake_" + m.returnType + "() -> " + m.returnType + " { return rkSingleton(\"" + m.returnType + "\", { -> __rkMake_" + decl.name + "()." + m.name + "() }); }"); }
+    });
+    if (decl.kind != DeclKind.Record) { decl.fail("#[configuration] must annotate a record"); }
+}
+
+// `#[bean]` marks a factory method: its return type becomes an injectable singleton.
+// The `#[configuration]` body does the wiring (it sees every method); this marker
+// just enforces placement.
+pub fn bean(comptime decl: @Decl) {
+    if (decl.kind != DeclKind.Method) { decl.fail("#[bean] must annotate a method"); }
+}
+
+// `#[inject]` marks a field for explicit constructor injection by type.
+pub fn inject(comptime decl: @Decl) {
+    if (decl.kind != DeclKind.Field) { decl.fail("#[inject] must annotate a field"); }
+}
+
+// `#[value("key")]` pulls a config property into a field (Spring's @Value). The
+// component factory reads the annotation off the field and fills it from
+// `rkProp`/`rkPropInt` instead of the DI graph; this marker enforces placement.
+pub fn value(comptime decl: @Decl, key: string) {
+    if (decl.kind != DeclKind.Field) { decl.fail("#[value] must annotate a field"); }
+}
+
+// ---- web / route markers ----
+
+// `#[route("/prefix")]` sets a controller-level path prefix (Spring @RequestMapping).
+pub fn route(comptime decl: @Decl, prefix: string) {
+    if (decl.kind != DeclKind.Record) { decl.fail("#[route] must annotate a record (controller)"); }
+}
+
+pub fn getMapping(comptime decl: @Decl, path: string) {
+    if (decl.kind != DeclKind.Method) { decl.fail("#[getMapping] must annotate a method"); }
+}
+
+pub fn postMapping(comptime decl: @Decl, path: string) {
+    if (decl.kind != DeclKind.Method) { decl.fail("#[postMapping] must annotate a method"); }
+}
+
+pub fn putMapping(comptime decl: @Decl, path: string) {
+    if (decl.kind != DeclKind.Method) { decl.fail("#[putMapping] must annotate a method"); }
+}
+
+pub fn patchMapping(comptime decl: @Decl, path: string) {
+    if (decl.kind != DeclKind.Method) { decl.fail("#[patchMapping] must annotate a method"); }
+}
+
+pub fn deleteMapping(comptime decl: @Decl, path: string) {
+    if (decl.kind != DeclKind.Method) { decl.fail("#[deleteMapping] must annotate a method"); }
+}

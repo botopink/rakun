@@ -1,0 +1,91 @@
+// rakun — the live HTTP dispatch pipeline (F5), exercised through `rkDispatchHttp`.
+//
+// Run by `botopink test` from `libs/rakun/`. `rkDispatchHttp` is the EXACT seam
+// `libs/server` calls for every socket request (`Rakun.run` hands it over): it
+// matches the route, builds a LIVE `Request` (path params + query + headers +
+// body all populated), runs the handler, and returns its `Response`. These tests
+// drive that seam directly with the same scalars the node-`http` server decodes a
+// request into — so they cover the full request → handler → response path the
+// wire uses, minus the socket (node's single thread can't both serve and block on
+// a client in one synchronous test). The real socket transport is `server.mjs`,
+// exercised live by the buildable `examples/rakun` app (`Rakun.run`).
+//
+// The runtime fns the emitted wiring calls are imported here because the
+// decorators' `@emit`ted code is spliced into this module.
+
+import {repository, service, restController, route, getMapping, postMapping};
+import {Request, Response};
+import {rkScan, rkSingleton, rkEnter, rkDone, rkRegisterRoute, rkDispatchHttp};
+
+#[repository]
+record HttpUserRepo {
+    pub fn all(self: Self) -> Array<string> {
+        return ["ana", "bob"];
+    }
+}
+
+#[service]
+record HttpUserService {
+    repo: HttpUserRepo,
+
+    pub fn list(self: Self) -> Array<string> {
+        return self.repo.all();
+    }
+
+    pub fn greet(self: Self, name: string) -> string {
+        return "Hello, " + name + "!";
+    }
+}
+
+#[restController, route("/api")]
+record HttpController {
+    svc: HttpUserService,
+
+    #[getMapping("/users")]
+    pub fn index(self: Self, req: Request) -> Response {
+        return Response.json(self.svc.list().join(", "));
+    }
+
+    #[getMapping("/hello/:name")]
+    pub fn hello(self: Self, req: Request) -> Response {
+        return Response.ok(self.svc.greet(req.param("name")));
+    }
+
+    // Echoes query + header + body so the test can assert each was populated by
+    // the live `Request` the dispatcher builds (not the empty in-process one).
+    #[getMapping("/echo")]
+    pub fn echo(self: Self, req: Request) -> Response {
+        return Response.ok("q=" + req.query("q") + " h=" + req.header("x-tag"));
+    }
+
+    #[postMapping("/submit")]
+    pub fn submit(self: Self, req: Request) -> Response {
+        return Response.created("got: " + req.body());
+    }
+}
+
+test "rakun http: GET a mapped route returns 200 with the joined list" {
+    val resp = rkDispatchHttp("GET", "/api/users", "{}", "{}", "");
+    assert resp.status == 200;
+    assert resp.body == "ana, bob";
+}
+
+test "rakun http: a path param reaches the handler" {
+    val resp = rkDispatchHttp("GET", "/api/hello/ana", "{}", "{}", "");
+    assert resp.status == 200;
+    assert resp.body == "Hello, ana!";
+}
+
+test "rakun http: query, header and body are populated on the live request" {
+    val resp = rkDispatchHttp("GET", "/api/echo", "{\"x-tag\":\"abc\"}", "{\"q\":\"hi\"}", "");
+    assert resp.status == 200;
+    assert resp.body == "q=hi h=abc";
+    val posted = rkDispatchHttp("POST", "/api/submit", "{}", "{}", "payload");
+    assert posted.status == 201;
+    assert posted.body == "got: payload";
+}
+
+test "rakun http: an unmapped path returns 404" {
+    val resp = rkDispatchHttp("GET", "/api/nope", "{}", "{}", "");
+    assert resp.status == 404;
+}

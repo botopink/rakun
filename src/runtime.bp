@@ -1,0 +1,91 @@
+//// rakun — runtime surface (host-backed): the DI container + router seams.
+////
+//// These `declare fn`s map to `runtime.mjs` (see it for the rationale: botopink
+//// has no top-level mutable state, so the scan registry / DI cache / router live
+//// in the host). The `#[@external]` path is the SIBLING `./runtime.mjs`: the CLI
+//// ships the runtime `.mjs` next to every emitted module (G2 — both the lib's own
+//// `botopink test` output and a consumer's `botopink build` output), so the
+//// `require("./runtime.mjs")` resolves in either tree. These decls are the seam.
+////
+//// `pub` so a module compiled with rakun can reference them from the
+//// self-registering `val`s the decorators `@emit`. Reached via `from "rakun"`.
+
+// ── component scan ──────────────────────────────────────────────────────────
+// A component decorator emits `val _ = rkScan("TypeName");` at module load.
+
+#[@external(node, "./runtime.mjs", "scan")]
+pub declare fn rkScan(name: string) -> i32;
+
+#[@external(node, "./runtime.mjs", "scannedNames")]
+pub declare fn rkScannedNames() -> string;
+
+#[@external(node, "./runtime.mjs", "scannedCount")]
+pub declare fn rkScannedCount() -> i32;
+
+// ── dependency-cycle guard ──────────────────────────────────────────────────
+// A component factory brackets its construction with `rkEnter`/`rkDone`; a cycle
+// makes `rkEnter` raise at first construction (see runtime.mjs).
+
+#[@external(node, "./runtime.mjs", "enter")]
+pub declare fn rkEnter(name: string) -> i32;
+
+#[@external(node, "./runtime.mjs", "done")]
+pub declare fn rkDone(name: string) -> i32;
+
+// ── singleton scope ─────────────────────────────────────────────────────────
+// A component factory is `rkSingleton("Type", { -> …construct… })`: the first
+// resolve runs the thunk and caches the instance, every later resolve returns
+// it. Generic over the constructed type `T` (like `onze`'s host cells), so the
+// emitted factory stays typed at `-> Type`. `rkBuildCount` reports how many
+// times a type's constructor actually ran (1 for a singleton) — the scope assert.
+
+#[@external(node, "./runtime.mjs", "singleton")]
+pub declare fn rkSingleton<T>(name: string, build: fn() -> T) -> T;
+
+#[@external(node, "./runtime.mjs", "buildCount")]
+pub declare fn rkBuildCount(name: string) -> i32;
+
+// ── property injection (`#[value("key")]`) ──────────────────────────────────
+// A `#[value("key")]` field is filled from the config source, NOT the DI graph.
+// `rkProp` reads a string property, `rkPropInt` the same parsed as an `i32`, so
+// the emitted constructor argument is typed to the field.
+
+#[@external(node, "./runtime.mjs", "setProp")]
+pub declare fn rkSetProp(key: string, value: string) -> i32;
+
+#[@external(node, "./runtime.mjs", "prop")]
+pub declare fn rkProp(key: string) -> string;
+
+#[@external(node, "./runtime.mjs", "propInt")]
+pub declare fn rkPropInt(key: string) -> i32;
+
+// ── router ──────────────────────────────────────────────────────────────────
+// A controller decorator emits `rkRegisterRoute(verb, path, handler)` per mapped
+// method; `rkDispatch` runs the matching handler (or returns a 404 Response).
+//
+// The handler is generic over the request type `Req` (it is always `Request` in
+// practice): the emitted `{ req -> __rkMake_C().handler(req) }` closure binds
+// `req` to a fresh type var that unifies NOMINALLY with the handler method's
+// `Request` parameter. Pinning the param to the `Request` interface here instead
+// would expand it structurally, and a structural interface does not unify with a
+// nominal `Request` parameter — so the generic seam is what keeps the wiring typed.
+
+#[@external(node, "./runtime.mjs", "registerRoute")]
+pub declare fn rkRegisterRoute<Req>(verb: string, path: string, handler: fn(req: Req) -> Response) -> i32;
+
+#[@external(node, "./runtime.mjs", "routeCount")]
+pub declare fn rkRouteCount() -> i32;
+
+#[@external(node, "./runtime.mjs", "routePaths")]
+pub declare fn rkRoutePaths() -> string;
+
+#[@external(node, "./runtime.mjs", "dispatch")]
+pub declare fn rkDispatch(verb: string, path: string) -> Response;
+
+// The real-server dispatch seam: `libs/server` hands a socket request here as
+// scalars (headers/query JSON-encoded so the boundary stays scalar). We match,
+// build a LIVE `Request` (query/header/body populated), run the handler, and
+// return its `Response`. `Rakun.run` passes a closure over this to the server.
+
+#[@external(node, "./runtime.mjs", "dispatchHttp")]
+pub declare fn rkDispatchHttp(verb: string, path: string, headersJson: string, queryJson: string, body: string) -> Response;

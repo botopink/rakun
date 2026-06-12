@@ -1,0 +1,86 @@
+//// rakun — HTTP primitives + application config (real implementation).
+////
+//// Unlike the declaration-only markers in `rakun.d.bp`, these are concrete
+//// botopink types with bodies: they are emitted and run. Reached via
+//// `from "rakun"` and pulled into a project's compilation only when imported
+//// (opt-in, like a `from "std"` package module).
+////
+//// `Response` is Spring's `ResponseEntity` analogue: an immutable status+body
+//// pair with associated builders (`Response.ok(...)`, `Response.json(...)`, …).
+//// `HttpMethod` is the request-verb enum; `App` is the bootstrap config record.
+
+pub enum HttpMethod {
+    Get,
+    Post,
+    Put,
+    Patch,
+    Delete,
+    Head,
+    Options,
+}
+
+// ---- HTTP request (runtime boundary) ----
+//
+// `Request` is the inbound HTTP request. The server supplies the concrete
+// instance at runtime (`runtime.mjs#makeRequest`, built by `dispatch`/
+// `dispatchHttp`), so it is an INTERFACE — signatures only, emits nothing. It
+// lives here (a real, compiled module) rather than in the declaration-only
+// `rakun.d.bp` so its method return types are inferred for handlers.
+//
+// `param`/`query`/`header` return a plain `string` — the empty string `""` when
+// absent — rather than `?string`: a matched route's path params are always
+// present, and "" is the natural default for a missing query/header (Spring's
+// `@RequestParam(defaultValue = "")`). This keeps handlers free of optional
+// unwrapping at the boundary.
+pub interface Request {
+    val method: HttpMethod
+    val path: string
+
+    fn param(self: Self, name: string) -> string
+    fn query(self: Self, name: string) -> string
+    fn header(self: Self, name: string) -> string
+    fn body(self: Self) -> string
+}
+
+pub record Response {
+    status: i32,
+    body: string,
+
+    // associated constructors (Spring ResponseEntity analogues)
+    pub fn ok(body: string) -> Response {
+        return Response(status: 200, body: body);
+    }
+
+    pub fn json(body: string) -> Response {
+        return Response(status: 200, body: body);
+    }
+
+    pub fn created(body: string) -> Response {
+        return Response(status: 201, body: body);
+    }
+
+    pub fn withStatus(code: i32, body: string) -> Response {
+        return Response(status: code, body: body);
+    }
+
+    pub fn notFound() -> Response {
+        return Response(status: 404, body: "");
+    }
+
+    pub fn badRequest(message: string) -> Response {
+        return Response(status: 400, body: message);
+    }
+}
+
+pub record App {
+    port: i32,
+    basePath: string,
+}
+
+test "rakun http: Response builders set status" {
+    assert Response.ok("hi").status == 200;
+    assert Response.created("made").status == 201;
+    assert Response.notFound().status == 404;
+    assert Response.badRequest("bad").status == 400;
+    assert Response.withStatus(418, "tea").status == 418;
+}

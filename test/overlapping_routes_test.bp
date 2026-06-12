@@ -1,0 +1,72 @@
+// rakun — overlapping route prefixes + leaf-component DI (B3 net-new).
+//
+// Run by `botopink test` from `libs/rakun/`. Each `test/` file is compiled and
+// run as its OWN module (its own host runtime process), so the route/scan
+// registries here are independent of `router_test.bp` / `di_test.bp`.
+//
+// Two controllers share the path PREFIX `/shop/cart`: one maps the prefix
+// itself, the other maps a deeper path under it. Both must register, and
+// `rkDispatch` must pick the controller whose FULL path (route + mapping) equals
+// the request — not merely a prefix of it. One controller injects a LEAF service
+// (no dependencies of its own), proving a dependency-free component resolves
+// through the DI chain.
+
+import {service, restController, route, getMapping};
+import {Request, Response};
+import {rkScan, rkSingleton, rkEnter, rkDone, rkRegisterRoute, rkDispatch, rkRouteCount, rkRoutePaths};
+
+// A leaf component: a #[service] with NO injected fields. It resolves on its own.
+#[service]
+record Clock {
+    pub fn now(self: Self) -> string {
+        return "12:00";
+    }
+}
+
+// Controller A maps the prefix `/shop/cart` exactly. It injects the leaf service.
+#[restController, route("/shop/cart")]
+record CartController {
+    clock: Clock,                        // leaf dependency, no deps of its own
+
+    #[getMapping("")]
+    pub fn summary(self: Self, req: Request) -> Response {
+        return Response.json("cart @ " + self.clock.now());
+    }
+}
+
+// Controller B maps a DEEPER path that shares A's prefix.
+#[restController, route("/shop/cart")]
+record CartItemsController {
+    #[getMapping("/items")]
+    pub fn items(self: Self, req: Request) -> Response {
+        return Response.json("two items");
+    }
+}
+
+test "rakun: both overlapping-prefix controllers register a route" {
+    assert rkRouteCount() == 2;
+}
+
+test "rakun: dispatch on the shared prefix hits the prefix controller (leaf DI)" {
+    val resp = rkDispatch("GET", "/shop/cart");
+    assert resp.status == 200;
+    assert resp.body == "cart @ 12:00";   // leaf `Clock` resolved + injected
+}
+
+test "rakun: dispatch on the deeper path hits the deeper controller" {
+    val resp = rkDispatch("GET", "/shop/cart/items");
+    assert resp.status == 200;
+    assert resp.body == "two items";
+}
+
+test "rakun: a path that is only a prefix of a route does not match" {
+    // `/shop` is a prefix of both routes but maps to neither → 404.
+    assert rkDispatch("GET", "/shop").status == 404;
+}
+
+// LIMITATION (recorded): "a missing dependency type → clear error" is a
+// COMPILE-time diagnostic (a #[service]/#[controller] whose field names an
+// unregistered component type fails the DI wiring during annotation processing).
+// A compile failure cannot be expressed as a runtime `assert` in a `.bp` test —
+// it is covered by the compiler's annotation-processor suite (Front A /
+// compiler-core), the same place wrong-decorator-placement rejection lives.
