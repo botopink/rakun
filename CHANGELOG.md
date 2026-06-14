@@ -12,7 +12,7 @@
 - **Real HTTP server** (F5): `Rakun.run()` + node `http` module.
 - Generic core: `commonJS` `require("../"×depth)` resolution + `libs.zig`
   sidecar shipping for `.mjs` files.
-- 13 unit tests green + example serving over real HTTP.
+- Unit-test suite green + example serving over real HTTP.
 
 ## 0.0.0 — v0.beta.5
 

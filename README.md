@@ -19,23 +19,27 @@ import {service, restController, get, post, value, bean, configuration} from "ra
 ## Quick example
 
 ```bp
+import {service, restController, get, route} from "rakun";
+
 #[service]
-record Greeter {}
-fn (g: Greeter) hello(name: String) -> String {
-    "hi, " ++ name
+pub record Greeter {
+    pub fn hello(self: Self, name: string) -> string {
+        return "hi, " + name;
+    }
 }
 
 #[restController]
 #[route("/api")]
-record HelloController {
-    val greeter: Greeter,
-}
-#[get("/hello/:name")]
-fn (c: HelloController) hello(name: String) -> String {
-    c.greeter.hello(name)
+pub record HelloController {
+    greeter: Greeter,
+
+    #[get("/hello/:name")]
+    pub fn hello(self: Self, name: string) -> string {
+        return self.greeter.hello(name);
+    }
 }
 
-fn main() -> Unit {
+fn main() {
     Rakun.run();
 }
 ```
