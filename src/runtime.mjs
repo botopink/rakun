@@ -1,9 +1,9 @@
-// rakun — host runtime: the mutable seams behind `#[@external]`.
+// rakun — host runtime: the mutable seams behind `#[@External.Node]`.
 //
 // botopink is immutable-first and has no top-level mutable globals, so the
 // framework's runtime state — the component scan registry, the dependency-cycle
 // guard, the config properties, and the router table — lives here, reached from
-// `runtime.bp` through `#[@external(node, …)]` declarations. The decorators
+// `runtime.bp` through `#[@External.Node(…)]` declarations. The decorators
 // (`decorators.bp`) emit self-registering `val`s and factory fns that call into
 // these; `Rakun.run` reads the router back. The compiler core learns nothing
 // about rakun.

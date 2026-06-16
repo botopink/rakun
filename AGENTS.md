@@ -21,7 +21,7 @@ route registration per mapped method (reading `decl.methods` + the `#[route]`
 prefix); a `#[configuration]` `@emit`s a `__rkMake_<ReturnType>()` per `#[bean]`
 method. botopink has no top-level mutable state, so the registries those calls
 feed — the scan list, the singleton cache, the cycle guard, the config props, the
-router table — live in `runtime.mjs`, reached through the `#[@external]`
+router table — live in `runtime.mjs`, reached through the `#[@External.Node]`
 declarations in `runtime.bp`. The emitted code references those runtime fns by
 name, so a module declaring components also imports them (`import {service,
 rkScan, rkSingleton, rkEnter, rkDone, rkRegisterRoute, …} from "rakun"`). The HTTP
@@ -42,7 +42,7 @@ rakun/
 │   │                    (builders) · `App` config · `Request` interface
 │   ├── runtime.mjs    ← host runtime: the mutable seams (scan list · singleton cache ·
 │   │                    cycle guard · config props · router table + dispatch/dispatchHttp)
-│   ├── runtime.bp     ← `#[@external]` decls binding the `runtime.mjs` seams
+│   ├── runtime.bp     ← `#[@External.Node]` decls binding the `runtime.mjs` seams
 │   │                    (`rkScan`/`rkSingleton`/`rkEnter`/`rkDone`/`rkProp`/
 │   │                    `rkRegisterRoute`/`rkDispatch`/`rkDispatchHttp`/…); sibling
 │   │                    `./runtime.mjs` shipped next to the emitted module (G2)
@@ -107,7 +107,7 @@ it); the consumer declares both.
   `rakun.d.bp`. `Request.param`/`query`/`header` return a plain `string` (`""` when
   absent), not `?string` — interface-method optional returns don't yet get the
   `@Option` lowering, and a required path var / empty default is the cleaner contract.
-- **Host state behind `#[@external]`.** The one mutable seam is `runtime.mjs`; the
+- **Host state behind `#[@External.Node]`.** The one mutable seam is `runtime.mjs`; the
   core never sees it. Decorator bodies obey the comptime constraints (no sibling
   calls, `if`-expr, bare-`if` only last, block-lambdas) — see
   [`../botopink-lang/modules/compiler-core/src/comptime/AGENTS.md`](../botopink-lang/modules/compiler-core/src/comptime/AGENTS.md).
