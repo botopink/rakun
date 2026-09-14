@@ -21,7 +21,7 @@ route registration per mapped method (reading `decl.methods` + the `#[route]`
 prefix); a `#[configuration]` `@emit`s a `__rkMake_<ReturnType>()` per `#[bean]`
 method. botopink has no top-level mutable state, so the registries those calls
 feed — the scan list, the singleton cache, the cycle guard, the config props, the
-router table — live in `runtime.mjs`, reached through the `#[@external]`
+router table — live in `runtime.mjs`, reached through the `#[@External.Node]`
 declarations in `runtime.bp`. The emitted code references those runtime fns by
 name, so a module declaring components also imports them (`import {service,
 rkScan, rkSingleton, rkEnter, rkDone, rkRegisterRoute, …} from "rakun"`). The HTTP
@@ -42,7 +42,7 @@ rakun/
 │   │                    (builders) · `App` config · `Request` interface
 │   ├── runtime.mjs    ← host runtime: the mutable seams (scan list · singleton cache ·
 │   │                    cycle guard · config props · router table + dispatch/dispatchHttp)
-│   ├── runtime.bp     ← `#[@external]` decls binding the `runtime.mjs` seams
+│   ├── runtime.bp     ← `#[@External.Node]` decls binding the `runtime.mjs` seams
 │   │                    (`rkScan`/`rkSingleton`/`rkEnter`/`rkDone`/`rkProp`/
 │   │                    `rkRegisterRoute`/`rkDispatch`/`rkDispatchHttp`/…); sibling
 │   │                    `./runtime.mjs` shipped next to the emitted module (G2)
@@ -107,7 +107,7 @@ it); the consumer declares both.
   `rakun.d.bp`. `Request.param`/`query`/`header` return a plain `string` (`""` when
   absent), not `?string` — interface-method optional returns don't yet get the
   `@Option` lowering, and a required path var / empty default is the cleaner contract.
-- **Host state behind `#[@external]`.** The one mutable seam is `runtime.mjs`; the
+- **Host state behind `#[@External.Node]`.** The one mutable seam is `runtime.mjs`; the
   core never sees it. Decorator bodies obey the comptime constraints (no sibling
   calls, `if`-expr, bare-`if` only last, block-lambdas) — see
   [`../botopink-lang/modules/compiler-core/src/comptime/AGENTS.md`](../botopink-lang/modules/compiler-core/src/comptime/AGENTS.md).
@@ -124,3 +124,54 @@ it); the consumer declares both.
 - The spec (intent, steps, test scenarios) → [`../../tasks/v0.beta.11/specs/rakun.md`](../../tasks/v0.beta.11/specs/rakun.md).
 - The runnable end-to-end app → [`./examples/rakun/`](examples/rakun/).
 - The HTTP server backing `Rakun.run` starts → [`../botopink-lang/libs/server/AGENTS.md`](../botopink-lang/libs/server/AGENTS.md).
+
+## CI
+
+`.github/workflows/test.yml` runs `zig build test-libs -- --lib rakun
+--target <t>` for `{commonJS, erlang, beam}` on `ubuntu-22.04` +
+`macos-14`, plus `commonJS` on `windows-2022`. No `wasm` cell —
+rakun's server surface targets node + the BEAM. `BOTOPINK_LANG_REF`
+repo variable pins a specific botopink-lang ref (default `main`).
+
+Bootstrap: check out this lib + a fresh `botopink-lang` clone, place
+this lib under `botopink-lang/repository/rakun/`, then `zig build
+install && zig build test-libs`.
+
+## Tagging (auto)
+
+`.github/workflows/tag.yml` reads `version` from `botopink.json` and
+tags every push to `feat`/`master`/`main`:
+
+- **feat** → moving `<version>-feat` tag (force-pushed on every push).
+- **master** / **main** → immutable `<version>` tag. Pushing the same
+  SHA twice is a no-op; pushing a *different* SHA without bumping
+  `version` is a hard error (bump it in `botopink.json` to publish a
+  new release).
+
+Set `requires.rakun = "feat"` in a consumer's `botopink.json` and run
+`bpmp sync` to preview unreleased work.
+
+## Local gate
+
+`scripts/git-hooks/pre-commit` is the tracked source of truth for the
+local pre-commit gate. Two install paths:
+
+- **From the meta workspace** — run `scripts/install-hooks.sh` at the
+  root of [botopink/projects][meta]. It walks `.gitmodules` and
+  symlinks the meta's hook plus a shim into every submodule's git dir,
+  so a commit in this lib delegates to the shared
+  [`lib/runners/bp-lib.sh`][bp-lib] runner.
+- **From a standalone clone** — run `scripts/install-hooks.sh` (when
+  this lib ships one) or symlink `scripts/git-hooks/pre-commit` into
+  `.git/hooks/pre-commit` manually. The shim falls back to the
+  self-contained `scripts/git-hooks/lib/runner-standalone.sh` so the
+  gate works without the meta nearby.
+
+The gate runs `botopink test` over `src/` + `test/`. The compiler
+binary is located via (in order) `$BOTOPINK_BIN`, the nearest
+ancestor `repository/botopink-lang/zig-out/bin/botopink`, then
+`$PATH`. If none resolve, the gate prints a yellow warning and exits
+0 — CI runs the full suite and catches any regression there.
+
+[meta]: https://github.com/botopink/projects
+[bp-lib]: https://github.com/botopink/projects/blob/feat/scripts/git-hooks/lib/runners/bp-lib.sh

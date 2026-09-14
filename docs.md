@@ -104,7 +104,7 @@ and is **not** wired into `build.zig`. It is an **application-level** lib reache
 via `from "rakun"`, opted into per project (which also declares `server` as a
 dependency, since `Rakun.run` starts it). The runtime `.mjs` files are shipped
 next to the emitted modules by the CLI (**G2**), so a consumer build resolves
-every `#[@external]` require.
+every `#[@External.Node]` require.
 
 ## See also
 
