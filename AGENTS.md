@@ -26,7 +26,8 @@ declarations in `runtime.bp`. The emitted code references those runtime fns by
 name, so a module declaring components also imports them (`import {service,
 rkScan, rkSingleton, rkEnter, rkDone, rkRegisterRoute, …} from "rakun"`). The HTTP
 value types + the `Request` interface are real emitted code (`http.bp`);
-`Rakun.run` (`bootstrap.bp`) starts the framework-agnostic `libs/server`.
+`Rakun.run` (`bootstrap.bp`) starts rakun's own node `http` transport
+(`rkServe` → `serve` in `runtime.mjs`).
 
 ## Tree
 
@@ -34,7 +35,8 @@ value types + the `Request` interface are real emitted code (`http.bp`);
 rakun/
 ├── AGENTS.md          ← you are here
 ├── docs.md            ← what this lib provides + Spring mapping + loading notes
-├── botopink.json      ← package metadata (dependencies: [server]; files: http ·
+├── botopink.json      ← package metadata (target: commonJS; targets: [commonJS]
+│                        lib-test whitelist; no dependencies; files: http ·
 │                        runtime · decorators · bootstrap · rakun.d)
 ├── src/
 │   ├── root.bp        ← module-tree root: `pub mod decorators; http; runtime; bootstrap;`
@@ -42,13 +44,14 @@ rakun/
 │   │                    (builders) · `App` config · `Request` interface
 │   ├── runtime.mjs    ← host runtime: the mutable seams (scan list · singleton cache ·
 │   │                    cycle guard · config props · router table + dispatch/dispatchHttp)
+│   │                    + the node `http` transport (`serve`)
 │   ├── runtime.bp     ← `#[@External.Node]` decls binding the `runtime.mjs` seams
 │   │                    (`rkScan`/`rkSingleton`/`rkEnter`/`rkDone`/`rkProp`/
-│   │                    `rkRegisterRoute`/`rkDispatch`/`rkDispatchHttp`/…); sibling
+│   │                    `rkRegisterRoute`/`rkDispatch`/`rkDispatchHttp`/`rkServe`/…); sibling
 │   │                    `./runtime.mjs` shipped next to the emitted module (G2)
 │   ├── decorators.bp  ← the markers AS comptime decorator fns: placement rules +
 │   │                    the DI/router/scope/bean wiring they `@emit`
-│   ├── bootstrap.bp   ← `Rakun` (concrete record): `Rakun.run(app)` starts `libs/server`
+│   ├── bootstrap.bp   ← `Rakun` (concrete record): `Rakun.run(app)` starts `rkServe`
 │   └── rakun.d.bp     ← declaration-only: the `Context` IoC interface (future)
 └── test/
     ├── di_test.bp     ← placement + component scan
@@ -71,8 +74,17 @@ runtime fns by name). The declaration module `rakun.d.bp` (the future `Context`
 interface) is **not** in the tree: it is wired through `botopink.json` `files`.
 `.d.bp` modules are not resolved by `mod` paths (the resolver follows only
 `<name>.bp` / `<name>/mod.bp`), mirroring how `libs/std` keeps its ambient `.d.bp`
-out of `root.bp`. rakun declares `server` as a **dependency** (`Rakun.run` starts
-it); the consumer declares both.
+out of `root.bp`. rakun declares **no dependencies**: the HTTP transport
+`Rakun.run` starts is `serve` in its own `runtime.mjs` (bound as `rkServe`), so a
+consumer declares only `rakun`. (It used to name a `server` library that exists in
+no repository — `botopink check` failed with `LibNotFound` before reading rakun's
+source.)
+
+`botopink.json` carries both target keys on purpose: `"target": "commonJS"` is
+the build target the CLI reads (`config.zig`), and `"targets": ["commonJS"]` is
+the per-lib whitelist `botopink-lib-test` reads (`lib-test-runner/src/discovery.zig`)
+to skip the erlang/beam cells. Dropping `"targets"` would widen the lib-test
+matrix, not fix a no-op key.
 
 ## Design at a glance
 
@@ -96,8 +108,8 @@ it); the consumer declares both.
   `Request`/`Response`, or 404. `rkRegisterRoute` is generic over the request type
   so the emitted closure's `req` unifies nominally with the handler's `Request`.
 - **Bootstrap** — `Rakun.run(App(port: 8080, basePath: "/api"))` (`bootstrap.bp`)
-  reads the router back and starts `libs/server`, dispatching each live request via
-  `rkDispatchHttp`. The runtime `.mjs` files ship next to the emitted modules (G2).
+  reads the router back and starts `rkServe` (node `http`), dispatching each live
+  request via `rkDispatchHttp`. The runtime `.mjs` files ship next to the emitted modules (G2).
 
 ## Conventions
 
@@ -123,7 +135,6 @@ it); the consumer declares both.
 
 - The spec (intent, steps, test scenarios) → [`../../tasks/v0.beta.11/specs/rakun.md`](../../tasks/v0.beta.11/specs/rakun.md).
 - The runnable end-to-end app → [`./examples/rakun/`](examples/rakun/).
-- The HTTP server backing `Rakun.run` starts → [`../botopink-lang/libs/server/AGENTS.md`](../botopink-lang/libs/server/AGENTS.md).
 
 ## CI
 
@@ -131,7 +142,7 @@ it); the consumer declares both.
 --target <t>` for `{commonJS, erlang, beam}` on `ubuntu-22.04` +
 `macos-14`, plus `commonJS` on `windows-2022`. No `wasm` cell —
 rakun's server surface targets node + the BEAM. `BOTOPINK_LANG_REF`
-repo variable pins a specific botopink-lang ref (default `main`).
+repo variable pins a specific botopink-lang ref (default `feat`).
 
 Bootstrap: check out this lib + a fresh `botopink-lang` clone, place
 this lib under `botopink-lang/repository/rakun/`, then `zig build

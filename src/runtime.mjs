@@ -11,6 +11,8 @@
 // State is module-global (one node process per run / per `botopink test`
 // module). The Erlang/BEAM equivalent is a recorded follow-up.
 
+import { createServer } from "node:http";
+
 // ── component scan ──────────────────────────────────────────────────────────
 // Every component decorator emits `rkScan(name)` at module load, so the set of
 // managed component types is known without cross-decorator compile-time state.
@@ -138,7 +140,7 @@ function match(verb, path) {
 
 // A request handed to a handler. `params` are the bound path segments; `query`
 // and `headers` are plain string maps (empty for the in-process `dispatch`, real
-// for `dispatchHttp` from `libs/server`); `body` is the raw request body. This is
+// for `dispatchHttp` from `serve`); `body` is the raw request body. This is
 // the concrete value behind rakun's `Request` interface — its `param`/`query`/
 // `header` return the botopink `?string` (a present value or `undefined`).
 function makeRequest(verb, path, params, query, headers, body) {
@@ -168,8 +170,8 @@ export function dispatch(verb, path) {
   return m.route.handler(req);
 }
 
-// The real-server dispatch seam (`Rakun.run` hands this to `libs/server`):
-// `libs/server` accepts a socket request and calls back here with the raw pieces
+// The real-server dispatch seam (`Rakun.run` hands a closure over this to `serve`):
+// `serve` accepts a socket request and calls back here with the raw pieces
 // (headers/query encoded as JSON strings so the framework boundary stays scalar).
 // We match the route, build a LIVE `Request` (query/header/body all populated),
 // run the handler, and return its `{status, body}` for the server to write back.
@@ -191,4 +193,39 @@ export function dispatchHttp(verb, path, headersJson, queryJson, body) {
   for (const k of Object.keys(headers)) lower[k.toLowerCase()] = String(headers[k]);
   const req = makeRequest(verb, path, m.params, parseObj(queryJson), lower, body || "");
   return m.route.handler(req);
+}
+
+// ── HTTP server ─────────────────────────────────────────────────────────────
+// `Rakun.run` hands `serve` a port and a dispatcher `(method, path, headersJson,
+// queryJson, body) -> Response`. `serve` owns the socket: it decodes each request
+// into those scalars (headers and query JSON-encoded), calls the dispatcher, and
+// writes the returned `{status, body}` back. The listening socket keeps the node
+// process alive; `serve` returns the port it listens on. A dispatcher that throws
+// answers 500 instead of tearing the process down.
+
+export function serve(port, dispatcher) {
+  const server = createServer((req, res) => {
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => {
+      const url = new URL(req.url || "/", "http://localhost");
+      const query = Object.fromEntries(url.searchParams);
+      let out;
+      try {
+        out = dispatcher(
+          req.method || "GET",
+          url.pathname,
+          JSON.stringify(req.headers),
+          JSON.stringify(query),
+          Buffer.concat(chunks).toString("utf8"),
+        );
+      } catch (err) {
+        out = { status: 500, body: String((err && err.message) || err) };
+      }
+      res.statusCode = out.status;
+      res.end(out.body);
+    });
+  });
+  server.listen(port);
+  return port;
 }

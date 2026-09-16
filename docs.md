@@ -10,8 +10,8 @@ injection container paired with a declarative web layer, plus a real bootstrap
 that starts an HTTP server. It is **opt-in** — reached via `from "rakun"` and
 never auto-loaded into the type environment. **The compiler core knows nothing
 about rakun** — every behaviour is plain botopink (`@Decl` reflection + comptime
-decorator bodies + `@emit`) over a host runtime (`runtime.mjs`), with the HTTP
-transport in the framework-agnostic `libs/server`.
+decorator bodies + `@emit`) over a host runtime (`runtime.mjs`), which also
+carries the node `http` transport (`serve`, bound as `rkServe`).
 
 ## What it provides
 
@@ -37,7 +37,8 @@ transport in the framework-agnostic `libs/server`.
   a cycle A→B→A raises at first construction (runtime — a single decorator has no
   whole-graph view).
 - **Bootstrap** — `Rakun.run(App(port: 8080, basePath: "/api"))` reads the host
-  router and starts `libs/server`, dispatching every live request to the handler.
+  router and starts the node `http` server (`rkServe`), dispatching every live
+  request to the handler.
 
 ## Spring → rakun mapping
 
@@ -101,14 +102,14 @@ field). See the runnable end-to-end app under
 
 Unlike `libs/std`, this package is **not** `@embedFile`'d into a `prelude.zig`
 and is **not** wired into `build.zig`. It is an **application-level** lib reached
-via `from "rakun"`, opted into per project (which also declares `server` as a
-dependency, since `Rakun.run` starts it). The runtime `.mjs` files are shipped
+via `from "rakun"`, opted into per project. rakun has no library dependencies:
+the HTTP transport `Rakun.run` starts is its own `runtime.mjs` `serve`, over node's
+`http` module (commonJS only). The runtime `.mjs` files are shipped
 next to the emitted modules by the CLI (**G2**), so a consumer build resolves
 every `#[@External.Node]` require.
 
 ## See also
 
 - The embedded standard library → [`../botopink-lang/libs/std/docs.md`](../botopink-lang/libs/std/docs.md).
-- The HTTP server backing → [`../botopink-lang/libs/server/docs.md`](../botopink-lang/libs/server/docs.md).
 - The runnable end-to-end app → [`./examples/rakun/`](examples/rakun/).
 - The `.bp` libraries group contract → [`../AGENTS.md`](../AGENTS.md).
