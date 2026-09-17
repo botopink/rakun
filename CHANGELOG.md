@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **The 1.0.3 surface** (botopink-lang front 12): records and the enum are `type`s, `Request`
+  and `Context` are `behavior`s, and the sources are `botopink format`ted. The component
+  markers check `decl.kind != DeclKind.Type` plus `decl.variants.length > 0` (an enum-shaped
+  `type` is rejected: "#[service] must annotate a type with fields, not an enum"). commonJS
+  17/17; the example server answers every baseline route identically.
 - The examples gate no longer aborts silently on a `scripts/known-broken-examples.txt`
   holding only comments or blank lines: the runner reads the list with `awk`, whose
   "no entry" is not a failure under `set -euo pipefail`.

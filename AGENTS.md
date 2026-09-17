@@ -12,9 +12,9 @@ behaviour is plain botopink + a host runtime, on the generic annotation-processo
 mechanism (`@Decl` reflection, comptime decorator bodies, `@emit`).
 
 How the wiring works: each component decorator (`decorators.bp`) is a comptime fn
-over the annotated record. It `@emit`s, at the application site, (1) a scan
+over the annotated `type` (`DeclKind.Type` with no `variants` — an enum-shaped `type` is rejected). It `@emit`s, at the application site, (1) a scan
 self-registration and (2) a SINGLETON factory `__rkMake_<Type>()` that constructs
-the record once (`rkSingleton`) and caches it, injecting each field by its own
+the value once (`rkSingleton`) and caches it, injecting each field by its own
 factory — except a `#[value("key")]` field, filled from config (`rkProp`/
 `rkPropInt`) and kept OFF the DI graph. A controller additionally `@emit`s one
 route registration per mapped method (reading `decl.methods` + the `#[route]`
@@ -25,7 +25,7 @@ router table — live in `runtime.mjs`, reached through the `#[@External.Node]`
 declarations in `runtime.bp`. The emitted code references those runtime fns by
 name, so a module declaring components also imports them (`import {service,
 rkScan, rkSingleton, rkEnter, rkDone, rkRegisterRoute, …} from "rakun"`). The HTTP
-value types + the `Request` interface are real emitted code (`http.bp`);
+value types + the `Request` behavior are real emitted code (`http.bp`);
 `Rakun.run` (`bootstrap.bp`) starts rakun's own node `http` transport
 (`rkServe` → `serve` in `runtime.mjs`).
 
@@ -40,8 +40,8 @@ rakun/
 │                        runtime · decorators · bootstrap · rakun.d)
 ├── src/
 │   ├── root.bp        ← module-tree root: `pub mod decorators; http; runtime; bootstrap;`
-│   ├── http.bp        ← concrete, emitted: `HttpMethod` enum · `Response` record
-│   │                    (builders) · `App` config · `Request` interface
+│   ├── http.bp        ← concrete, emitted: `HttpMethod` enum-shaped type · `Response` type
+│   │                    (builders) · `App` config · `Request` behavior
 │   ├── runtime.mjs    ← host runtime: the mutable seams (scan list · singleton cache ·
 │   │                    cycle guard · config props · router table + dispatch/dispatchHttp)
 │   │                    + the node `http` transport (`serve`)
@@ -51,8 +51,8 @@ rakun/
 │   │                    `./runtime.mjs` shipped next to the emitted module (G2)
 │   ├── decorators.bp  ← the markers AS comptime decorator fns: placement rules +
 │   │                    the DI/router/scope/bean wiring they `@emit`
-│   ├── bootstrap.bp   ← `Rakun` (concrete record): `Rakun.run(app)` starts `rkServe`
-│   └── rakun.d.bp     ← declaration-only: the `Context` IoC interface (future)
+│   ├── bootstrap.bp   ← `Rakun` (concrete type): `Rakun.run(app)` starts `rkServe`
+│   └── rakun.d.bp     ← declaration-only: the `Context` IoC behavior (future)
 └── test/
     ├── di_test.bp     ← placement + component scan
     ├── router_test.bp ← DI chain + router dispatch (200 / 404) end to end
@@ -71,7 +71,7 @@ a deprecated blind `src/` scan. It declares the four compiled modules
 `pub mod decorators; pub mod http; pub mod runtime; pub mod bootstrap;` (all
 public surface, reached via `from "rakun"`; the `@emit`ted wiring imports the
 runtime fns by name). The declaration module `rakun.d.bp` (the future `Context`
-interface) is **not** in the tree: it is wired through `botopink.json` `files`.
+behavior) is **not** in the tree: it is wired through `botopink.json` `files`.
 `.d.bp` modules are not resolved by `mod` paths (the resolver follows only
 `<name>.bp` / `<name>/mod.bp`), mirroring how `libs/std` keeps its ambient `.d.bp`
 out of `root.bp`. rakun declares **no dependencies**: the HTTP transport
@@ -92,7 +92,7 @@ matrix, not fix a no-op key.
   `#[controller]`/`#[restController]`) are scanned at module load; each gets an
   emitted **singleton** factory `__rkMake_<Type>()` (`rkSingleton` — one instance
   per type, shared across a 3-level chain / diamond).
-- **Constructor injection** — a dependency is declared as a `record` field and
+- **Constructor injection** — a dependency is declared as a field of the `type` and
   resolved **by type** (the factory calls the field type's own factory).
   Immutable-first: no setter/field injection.
 - **`#[value("key")]` property injection** — a `#[value]` field is filled from the
@@ -114,10 +114,10 @@ matrix, not fix a no-op key.
 ## Conventions
 
 - **`.bp` over `.d.bp`.** Logic lands in real emitted `.bp` (`http.bp` incl. the
-  `Request` interface, `runtime.bp`'s `declare fn`s, `decorators.bp` bodies,
-  `bootstrap.bp`). Only the future `Context` interface stays declaration-only in
+  `Request` behavior, `runtime.bp`'s `declare fn`s, `decorators.bp` bodies,
+  `bootstrap.bp`). Only the future `Context` behavior stays declaration-only in
   `rakun.d.bp`. `Request.param`/`query`/`header` return a plain `string` (`""` when
-  absent), not `?string` — interface-method optional returns don't yet get the
+  absent), not `?string` — behavior-method optional returns don't yet get the
   `@Option` lowering, and a required path var / empty default is the cleaner contract.
 - **Host state behind `#[@External.Node]`.** The one mutable seam is `runtime.mjs`; the
   core never sees it. Decorator bodies obey the comptime constraints (no sibling

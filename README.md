@@ -22,7 +22,7 @@ import {service, restController, get, post, value, bean, configuration} from "ra
 import {service, restController, get, route} from "rakun";
 
 #[service]
-pub record Greeter {
+pub type Greeter {
     pub fn hello(self: Self, name: string) -> string {
         return "hi, " + name;
     }
@@ -30,9 +30,9 @@ pub record Greeter {
 
 #[restController]
 #[route("/api")]
-pub record HelloController {
+pub type HelloController(
     greeter: Greeter,
-
+) {
     #[get("/hello/:name")]
     pub fn hello(self: Self, name: string) -> string {
         return self.greeter.hello(name);

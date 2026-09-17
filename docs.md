@@ -16,15 +16,15 @@ carries the node `http` transport (`serve`, bound as `rkServe`).
 ## What it provides
 
 - **HTTP layer** — `Response` with builders (`Response.ok`/`json`/`created`/
-  `withStatus`/`notFound`/`badRequest`), the `HttpMethod` enum, the `App`
-  bootstrap config, and the `Request` interface (`param`/`query`/`header`/`body`).
+  `withStatus`/`notFound`/`badRequest`), the `HttpMethod` enum-shaped `type`, the `App`
+  bootstrap config, and the `Request` behavior (`param`/`query`/`header`/`body`).
 - **IoC container** — components (`#[component]`/`#[service]`/`#[repository]`/
   `#[controller]`/`#[restController]`) scanned at module load; each gets an emitted
   factory `__rkMake_<Type>()`.
 - **Singleton scope** — one shared instance per component type: the factory is
   `rkSingleton("Type", { -> …construct… })`, so a 3-level chain (or a diamond)
   resolves a single repo/service instance.
-- **Constructor dependency injection** — declare a dependency as a `record` field;
+- **Constructor dependency injection** — declare a dependency as a field of the `type`;
   rakun resolves it by type. No setter/field injection.
 - **`#[configuration]` + `#[bean]`** — a `#[bean]` method's return type becomes an
   injectable singleton (an emitted `__rkMake_<ReturnType>()` calls the bean).
@@ -47,7 +47,7 @@ carries the node `http` transport (`serve`, bound as `rkServe`).
 | `@Component` / `@Service` / `@Repository` | `#[component]` / `#[service]` / `#[repository]` |
 | `@RestController` + `@RequestMapping("/api")` | `#[restController, route("/api")]` |
 | `@GetMapping("/x")` … | `#[getMapping("/x")]`, `#[postMapping]`, `#[putMapping]`, `#[patchMapping]`, `#[deleteMapping]` |
-| `@Autowired` (constructor) | a `record` field — injected by type |
+| `@Autowired` (constructor) | a field of the `type` — injected by type |
 | `@Configuration` + `@Bean` | `#[configuration]` + `#[bean]` |
 | `@Value("server.port")` | `#[value("server.port")]` |
 | `SpringApplication.run(App.class)` | `Rakun.run(App(port: 8080, basePath: "/api"))` |
@@ -67,16 +67,18 @@ import {service, restController, route, getMapping} from "rakun";
 import {rkScan, rkSingleton, rkEnter, rkDone, rkRegisterRoute} from "rakun";
 
 #[service]
-pub record GreetingService {
+pub type GreetingService {
     pub fn greet(self: Self, name: string) -> string {
         return "Hello, " + name + "!";
     }
 }
 
-#[restController, route("/api")]
-pub record GreetingController {
-    greeting: GreetingService,           // injected by type
-
+#[restController]
+#[route("/api")]
+pub type GreetingController(
+    // injected by type
+    greeting: GreetingService,
+) {
     #[getMapping("/hello/:name")]
     pub fn hello(self: Self, req: Request) -> Response {
         return Response.ok(self.greeting.greet(req.param("name")));

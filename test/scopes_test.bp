@@ -19,26 +19,30 @@ import {rkSetProp, rkProp, rkPropInt};
 // ── singleton scope: a 3-level diamond resolves ONE instance per type ─────────
 
 #[repository]
-record DiamRepo {
+type DiamRepo {
     pub fn tag(self: Self) -> string {
         return "r";
     }
 }
 
 #[service]
-record DiamService {
-    repo: DiamRepo,                          // injected by type
-
+type DiamService(
+    // injected by type
+    repo: DiamRepo,
+) {
     pub fn svc(self: Self) -> string {
         return self.repo.tag() + "s";
     }
 }
 
-#[restController, route("/diamond")]
-record DiamController {
-    service: DiamService,                    // injected by type
-    repo: DiamRepo,                          // ALSO depends on the repo (the diamond)
-
+#[restController]
+#[route("/diamond")]
+type DiamController(
+    // injected by type
+    service: DiamService,
+    // ALSO depends on the repo (the diamond)
+    repo: DiamRepo,
+) {
     #[getMapping("/")]
     pub fn index(self: Self, req: Request) -> Response {
         return Response.ok(self.service.svc() + self.repo.tag());
@@ -61,13 +65,11 @@ test "rakun scope: a 3-level diamond resolves ONE shared instance per type" {
 // ── `#[value("key")]` property injection (NOT a DI edge) ──────────────────────
 
 #[service]
-record SettingsService {
-    #[value("rk.port")]
-    port: i32,                               // filled from config, not the DI graph
-
-    #[value("rk.name")]
-    name: string,
-
+type SettingsService(
+    // filled from config, not the DI graph
+    #[value("rk.port")] port: i32,
+    #[value("rk.name")] name: string,
+) {
     pub fn portValue(self: Self) -> i32 {
         return self.port;
     }
@@ -89,26 +91,28 @@ test "rakun value: #[value] fills a field from config, not the DI graph" {
 
 // ── `#[configuration]` + `#[bean]`: a bean return type is injectable ──────────
 
-record Clock {
+type Clock(
     zone: string,
-
+) {
     pub fn now(self: Self) -> string {
         return "now@" + self.zone;
     }
 }
 
 #[configuration]
-record BeanConfig {
+type BeanConfig {
     #[bean]
-    pub fn clock(self: Self) -> Clock {      // Clock becomes a managed singleton
+    pub fn clock(self: Self) -> Clock {
+        // Clock becomes a managed singleton
         return Clock(zone: "UTC");
     }
 }
 
 #[service]
-record StampService {
-    clock: Clock,                            // injected by type — the #[bean] singleton
-
+type StampService(
+    // injected by type — the #[bean] singleton
+    clock: Clock,
+) {
     pub fn stamp(self: Self) -> string {
         return self.clock.now();
     }
@@ -120,7 +124,7 @@ test "rakun bean: #[bean] output is injectable by its return type" {
     // The bean itself is a singleton, resolved by its return-type name.
     val c1 = __rkMake_Clock();
     val c2 = __rkMake_Clock();
-    assert rkBuildCount("Clock") == 0;       // beans don't go through rkEnter/rkDone
+    assert rkBuildCount("Clock") == 0; // beans don't go through rkEnter/rkDone
     assert c1.now() == "now@UTC";
     assert c2.now() == "now@UTC";
 }
