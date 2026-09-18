@@ -86,6 +86,17 @@ the per-lib whitelist `botopink-lib-test` reads (`lib-test-runner/src/discovery.
 to skip the erlang/beam cells. Dropping `"targets"` would widen the lib-test
 matrix, not fix a no-op key.
 
+`erlang` stays out of it for a reason that is rakun's, not the compiler's:
+every `rk*` host cell in `src/runtime.bp` carries an `@External.Node` form and
+no erlang one, so an erlang run stops at `function rkScan/1 undefined`
+(re-measured 2026-09-18 — only `http.bp`'s single test, which touches no host
+cell, passes). emilia's and onze's host cells each fit one inline
+`@External.Erlang` expression over the process dictionary; rakun's DI graph,
+router and HTTP server are 231 lines of `runtime.mjs` that do not. The way out
+is a library shipping an `.erl` host module beside its `.mjs` sidecar — the CLI
+(`compiler-cli/src/cli/libs.zig`, `shipMjsSidecars`) has no `.erl` counterpart,
+and that is the open item to watch.
+
 ## Design at a glance
 
 - **IoC container** — components (`#[component]`/`#[service]`/`#[repository]`/
@@ -141,8 +152,10 @@ matrix, not fix a no-op key.
 `.github/workflows/test.yml` runs `zig build test-libs -- --lib rakun
 --target <t>` for `{commonJS, erlang, beam}` on `ubuntu-22.04` +
 `macos-14`, plus `commonJS` on `windows-2022`. No `wasm` cell —
-rakun's server surface targets node + the BEAM. `BOTOPINK_LANG_REF`
-repo variable pins a specific botopink-lang ref (default `feat`).
+rakun's server surface targets node + the BEAM. The `erlang` rows keep
+`allow_fail: true` (see the `botopink.json` note above for what actually blocks
+them). `BOTOPINK_LANG_REF` repo variable pins a specific botopink-lang ref
+(default `feat`).
 
 Bootstrap: check out this lib + a fresh `botopink-lang` clone, place
 this lib under `botopink-lang/repository/rakun/`, then `zig build
@@ -191,4 +204,13 @@ into a throwaway `--out`); CI runs the same function once per workflow.
 that builds, or a listed path that no longer exists, fails the gate too.
 When a fix makes an example build, delete its line in the same commit. The list may be absent,
 empty or hold only `#` comments — each means no example is allowed to fail.
-`examples/rakun` builds; nothing is listed.
+`examples/rakun` builds; nothing is listed. It also **runs**: `botopink run`
+inside it serves `GET /api/users/` → `ana, bob, cleo`, `GET /api/users/ana` →
+`Hello, ana!`, `GET /api/posts/` → `hello world | rakun rocks`,
+`POST /api/posts/` → 201 `created: hi` and `GET /api/nope` → 404, which is what
+its `src/main.bp` header documents. Its `main.bp` imports the whole type
+closure of each module it uses (`UserController`, `UserService`,
+`UserRepository`, `Request`, `Response`, …): importing a type re-checks its
+declaration in the importing module, so every type its fields and method
+signatures name has to be in scope there too, or the build reds with
+`unknown type '<Name>'`.
