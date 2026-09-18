@@ -93,9 +93,16 @@ no erlang one, so an erlang run stops at `function rkScan/1 undefined`
 cell, passes). emilia's and onze's host cells each fit one inline
 `@External.Erlang` expression over the process dictionary; rakun's DI graph,
 router and HTTP server are 231 lines of `runtime.mjs` that do not. The way out
-is a library shipping an `.erl` host module beside its `.mjs` sidecar — the CLI
-(`compiler-cli/src/cli/libs.zig`, `shipMjsSidecars`) has no `.erl` counterpart,
-and that is the open item to watch.
+is a library shipping an `.erl` host module beside its `.mjs` sidecar.
+
+**That is no longer blocked on the CLI.** `libs.shipErlSidecars`
+(`compiler-cli/src/cli/libs.zig:564`) is `shipMjsSidecars`' erlang counterpart:
+it reads the `atom:atom(` qualifiers out of the emitted erlang and copies the
+host `<atom>.erl` a lib keeps in `src/sidecars/` or `src/` into the output. It
+is wired into `botopink test` (`test_cmd.zig:194`). What is left is rakun's own
+work — writing the 231 lines as an `.erl` module and putting `@External.Erlang`
+on the 17 host cells — plus the `build.zig` call site, which is still open and
+belongs to the compiler, not here.
 
 ## Design at a glance
 
