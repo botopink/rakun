@@ -62,6 +62,11 @@ rakun/
     └── overlapping_routes_test.bp ← two controllers sharing a path prefix both
                           register; dispatch matches the FULL path; a leaf (no-dep)
                           #[service] resolves through the DI chain
+└── modules/           ← 1.0.6-beta scaffolding: one package per Spring Boot starter
+    ├── README.md      ← the module ↔ starter map and the shared-container rules
+    └── rakun-<area>/  ← `botopink.json` (depends on `rakun` via `path: ../../`) +
+                          `src/root.bp` placeholder; contents land per front
+                          (`specs/1.0.6-beta/`). Not in the lib-test whitelist yet
 ```
 
 ## Module tree (`root.bp`)
