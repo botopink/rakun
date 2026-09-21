@@ -1,0 +1,277 @@
+//// rakun-web — RFC 9457 problem details: the raise, the advice, the digest
+//// that reaches the body and the reason that never does.
+////
+//// Every assertion runs on BOTH rows. The raise itself is the host's — botopink
+//// has no typed raise and no user-visible catch of one — so `raiseProblem` and
+//// the `try`/`catch` around `chain.next(req)` are two cells of `chain.mjs` /
+//// `rakun_chain.erl`, and everything ABOVE them (the shape, the defaults, the
+//// serialization, the refusals) is botopink, compiled twice and asserted twice.
+////
+//// A refusal text carries NO double quote: on the erlang row `throwsWith` reads
+//// the `~p` rendering, in which a `"` is escaped. Measured during this front.
+
+import {asserts} from "std";
+import {Response} from "rakun";
+import {rkSetProp} from "rakun";
+import {
+    Chain,
+    WebRequest,
+    runChain,
+    registerFilter,
+    resetChain,
+    orderProblem,
+    orderApplication,
+    headerValue,
+    headerCount,
+    rkChainSetTerminal,
+    rkHeaderClear,
+} from "filter";
+import {
+    ProblemDetail,
+    problemFor,
+    problemJson,
+    problemResponse,
+    problemMediaType,
+    blankType,
+    statusReason,
+    jsonEscape,
+    raiseProblem,
+    registerAdvice,
+    adviceTags,
+    resetAdvice,
+    duplicateAdviceProblem,
+    renderProblem,
+    fillProblem,
+    errorEntry,
+    problemDetailsEnabled,
+    problemLog,
+    rkRaiseProblem,
+} from "error";
+
+// ── fixtures ────────────────────────────────────────────────────────────────
+
+fn okTerminal() -> i32 {
+    return rkChainSetTerminal({ method, path, headersWire, queryWire, body ->
+        Response.ok("handled " + path);
+    });
+}
+
+fn raisingTerminal(tag: string, detail: string) -> i32 {
+    return rkChainSetTerminal({ method, path, headersWire, queryWire, body ->
+        val _r = raiseProblem(tag, detail);
+        Response.ok("never");
+    });
+}
+
+fn statusTerminal(status: i32, body: string) -> i32 {
+    return rkChainSetTerminal({ method, path, headersWire, queryWire, body2 ->
+        Response.withStatus(status, body);
+    });
+}
+
+fn guarded() -> i32 {
+    val _r = resetChain();
+    val _a = resetAdvice();
+    val _p = rkSetProp("rakun.web.problemdetails.enabled", "");
+    return registerFilter("problem", orderProblem(), { req, chain -> errorEntry(req, chain) });
+}
+
+fn get(path: string) -> Response {
+    return runChain("GET", path, "", "", "");
+}
+
+// ── the record and the wire shape ───────────────────────────────────────────
+
+test "rakun-web problem: the defaults are RFC 9457's" {
+    val p: ProblemDetail = problemFor(404, "no order 42", "/api/orders/42");
+    assert p.typeUri == blankType();
+    assert blankType() == "about:blank";
+    assert p.title == "Not Found";
+    assert p.status == 404;
+    assert p.detail == "no order 42";
+    assert p.instance == "/api/orders/42";
+}
+
+test "rakun-web problem: the JSON member is type even though the field is typeUri" {
+    val p: ProblemDetail = problemFor(404, "gone", "/x");
+    val wire: string = problemJson(p);
+    assert wire.startsWith("{\"type\":\"about:blank\"");
+    assert wire.contains("\"title\":\"Not Found\"");
+    assert wire.contains("\"status\":404");
+    assert wire.contains("\"detail\":\"gone\"");
+    assert wire.contains("\"instance\":\"/x\"");
+    assert wire.contains("\"typeUri\"") == false;
+}
+
+test "rakun-web problem: a value carrying a quote or a newline cannot break the document" {
+    assert jsonEscape("a\"b") == "a\\\"b";
+    assert jsonEscape("a\nb") == "a\\nb";
+    assert jsonEscape("a\\b") == "a\\\\b";
+    val p: ProblemDetail = problemFor(400, "he said \"no\"\nthen left", "/x");
+    val wire: string = problemJson(p);
+    assert wire.contains("he said \\\"no\\\"\\nthen left");
+    assert wire.endsWith("\"}");
+}
+
+test "rakun-web problem: the reason phrase table covers the families it does not name" {
+    assert statusReason(404) == "Not Found";
+    assert statusReason(422) == "Unprocessable Content";
+    assert statusReason(500) == "Internal Server Error";
+    assert statusReason(418) == "Client Error";
+    assert statusReason(599) == "Server Error";
+    assert statusReason(200) == "";
+}
+
+test "rakun-web problem: a problem response carries application/problem+json" {
+    val _c = rkHeaderClear();
+    val res: Response = problemResponse(problemFor(404, "gone", "/x"));
+    assert res.status == 404;
+    assert headerValue("Content-Type") == problemMediaType();
+    assert problemMediaType() == "application/problem+json";
+}
+
+// ── the advice registry ─────────────────────────────────────────────────────
+
+test "rakun-web advice: a tag registered twice fails naming both owners" {
+    val _a = resetAdvice();
+    val _1 = registerAdvice("order.not-found", "FirstAdvice.handle", { detail -> problemFor(404, detail, "") });
+    try asserts.throwsWith({ ->
+        registerAdvice("order.not-found", "SecondAdvice.handle", { detail -> problemFor(404, detail, "") });
+        0;
+    }, duplicateAdviceProblem("order.not-found", "FirstAdvice.handle", "SecondAdvice.handle"));
+    assert adviceTags().join(",") == "order.not-found";
+}
+
+test "rakun-web advice: two advice types both contribute" {
+    val _a = resetAdvice();
+    val _1 = registerAdvice("order.not-found", "OrderAdvice.notFound", { detail -> problemFor(404, detail, "") });
+    val _2 = registerAdvice("payment.declined", "PaymentAdvice.declined", { detail -> problemFor(402, detail, "") });
+    assert adviceTags().join(",") == "order.not-found,payment.declined";
+}
+
+test "rakun-web advice: an untagged raise is refused at the call site" {
+    try asserts.throwsWith({ ->
+        raiseProblem("", "nothing");
+        0;
+    }, "raiseProblem needs a tag");
+}
+
+// ── the error entry ─────────────────────────────────────────────────────────
+
+test "rakun-web error: a tagged raise with a matching handler answers that handler's ProblemDetail" {
+    val _g = guarded();
+    val _a = registerAdvice("order.not-found", "OrderAdvice.notFound", { detail ->
+        ProblemDetail(
+            typeUri: "https://example.com/problems/not-found",
+            title: "Order not found",
+            status: 404,
+            detail: detail,
+            instance: "/api/orders",
+        );
+    });
+    val _t = raisingTerminal("order.not-found", "no order 42");
+    val res: Response = get("/api/orders/42");
+    assert res.status == 404;
+    assert res.body.contains("\"type\":\"https://example.com/problems/not-found\"");
+    assert res.body.contains("\"title\":\"Order not found\"");
+    assert res.body.contains("\"detail\":\"no order 42\"");
+    assert headerValue("Content-Type") == problemMediaType();
+}
+
+test "rakun-web error: an unmatched tagged raise answers 500 with about:blank, a digest, and no reason" {
+    val _g = guarded();
+    val _t = raisingTerminal("order.exploded", "the database is on fire at 10.0.0.7");
+    val res: Response = get("/api/orders/42");
+    assert res.status == 500;
+    assert res.body.contains("\"type\":\"about:blank\"");
+    assert res.body.contains("\"title\":\"Internal Server Error\"");
+    assert res.body.contains("correlation ");
+    // The reason text is in the LOG under the digest and nowhere near the body.
+    assert res.body.contains("database is on fire") == false;
+    assert res.body.contains("10.0.0.7") == false;
+    assert problemLog().contains("database is on fire");
+    assert problemLog().contains("order.exploded");
+}
+
+test "rakun-web error: the digest in the body is the digest in the log line" {
+    val _g = guarded();
+    val _t = raisingTerminal("order.exploded", "secret reason");
+    val res: Response = get("/api/orders/42");
+    val marker = "correlation ";
+    val at: i32 = res.body.indexOf(marker);
+    assert at > 0;
+    // The digest runs to the closing quote of the `detail` member.
+    val rest: string = res.body.split(marker).at(1).unwrapOr("");
+    val digest: string = rest.split("\"").at(0).unwrapOr("");
+    assert digest != "";
+    assert problemLog().contains(digest);
+}
+
+test "rakun-web error: a handler's own Response is passed through untouched" {
+    val _g = guarded();
+    val _t = okTerminal();
+    val res: Response = get("/x");
+    assert res.status == 200;
+    assert res.body == "handled /x";
+    assert headerCount() == 0;
+}
+
+test "rakun-web error: a handler's own 4xx WITH a body is never rewritten, property or not" {
+    val _g = guarded();
+    val _p = rkSetProp("rakun.web.problemdetails.enabled", "true");
+    val _t = statusTerminal(404, "no such thing");
+    val res: Response = get("/x");
+    assert res.status == 404;
+    assert res.body == "no such thing";
+    val _off = rkSetProp("rakun.web.problemdetails.enabled", "");
+}
+
+test "rakun-web error: problemdetails.enabled fills an EMPTY-bodied 404 and leaves it empty when off" {
+    val _g = guarded();
+    val _t = statusTerminal(404, "");
+    val off: Response = get("/x");
+    assert problemDetailsEnabled() == false;
+    assert off.status == 404;
+    assert off.body == "";
+
+    val _g2 = guarded();
+    val _p = rkSetProp("rakun.web.problemdetails.enabled", "true");
+    val _t2 = statusTerminal(404, "");
+    assert problemDetailsEnabled();
+    val on: Response = get("/x");
+    assert on.status == 404;
+    assert on.body.contains("\"type\":\"about:blank\"");
+    assert on.body.contains("\"title\":\"Not Found\"");
+    assert on.body.contains("\"instance\":\"/x\"");
+    val _off = rkSetProp("rakun.web.problemdetails.enabled", "");
+}
+
+test "rakun-web error: a 2xx is never filled in, whatever the property says" {
+    val _c = rkHeaderClear();
+    val _p = rkSetProp("rakun.web.problemdetails.enabled", "true");
+    val res: Response = fillProblem(Response.ok(""), "/x");
+    assert res.status == 200;
+    assert res.body == "";
+    val _off = rkSetProp("rakun.web.problemdetails.enabled", "");
+}
+
+test "rakun-web error: renderProblem with no advice at all still answers a conforming 500" {
+    val _a = resetAdvice();
+    val _c = rkHeaderClear();
+    val res: Response = renderProblem("nobody.handles.this", "detail", "/x");
+    assert res.status == 500;
+    assert res.body.contains("\"type\":\"about:blank\"");
+    assert headerValue("Content-Type") == problemMediaType();
+}
+
+test "rakun-web error: the entry short-circuits nothing a filter above it did" {
+    val _g = guarded();
+    val _t = okTerminal();
+    val _a = registerFilter("after", orderApplication(), { req, chain ->
+        val inner: Response = chain.next(req);
+        Response.withStatus(inner.status, "[" + inner.body + "]");
+    });
+    val res: Response = get("/x");
+    assert res.status == 200;
+    assert res.body == "[handled /x]";
+}

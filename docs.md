@@ -70,6 +70,10 @@ sidecar naming rule and what is still blocked.
 - **Bootstrap** — `Rakun.run(App(port: 8080, basePath: "/api"))` reads the host
   router and starts the node `http` server (`rkServe`), dispatching every live
   request to the handler.
+- **The filter chain** — a separate member, `from "rakun-web"`: one ordered list
+  of entries between the socket and the route handler, with `#[filter]` and
+  `#[middleware]` as its two entry points, `Next` for redirect/rewrite, CORS with
+  deny-all defaults, and RFC 9457 problem details. See § The filter chain below.
 
 ## Spring → rakun mapping
 
@@ -1068,6 +1072,125 @@ unsatisfiable, and are refused at compile time.
 Because the stereotypes' `__rkMake_<Type>()` is frozen for this milestone, a
 profile-gated component is reached through the emitted `__rkAutoGated_<Type>()`
 when you want the refusal rather than the value.
+
+## The filter chain (`from "rakun-web"`)
+
+`modules/rakun-web/` is a separate member. Depend on it with
+`{ "rakun-web": { "workspace": true } }` inside the workspace, and call
+`bootWeb()` once at startup — that installs the built-in entries, validates the
+CORS policy and hands the runner to the host, so front 04's dispatcher finds it.
+
+### One chain, two entry points
+
+```bp
+import {filter, order, Chain, WebRequest} from "rakun-web";
+import {Response, rkScan, rkSingleton, rkEnter, rkDone, toI32} from "rakun";
+import {registerFilter} from "rakun-web";
+
+#[filter]
+#[order("-10")]
+pub type TimingFilter {
+    pub fn handle(self: Self, req: WebRequest, chain: Chain) -> Response {
+        return chain.next(req);
+    }
+}
+```
+
+```bp
+// middleware.bp, at the project root
+import {middleware, matcher, Next, Chain, WebRequest} from "rakun-web";
+import {registerMiddleware, gateByMatcher, skip} from "rakun-web";
+
+#[middleware]
+#[matcher("/dashboard/:path*")]
+pub fn appMiddleware(req: WebRequest, chain: Chain) -> Response {
+    val token = req.header("authorization");
+    return if (token == "") Next.redirect("/login") else chain.next(req);
+}
+```
+
+A filter that does not call `chain.next(req)` short-circuits, which is how a
+security filter answers 401 without the handler ever running. A filter that
+calls it may read what came back and answer something else.
+
+**`#[order]` takes a string.** `#[order(-100)]` does not parse — a negative
+integer literal in a decorator argument is a parse error on both targets — so the
+number is quoted and parsed with `toI32`. See `AGENTS.md` § Language notes.
+
+### The order band
+
+`−400` request id · `−300` security · `−250` URL rules · `−200` CORS ·
+`−150` API version · `−100` problem-detail boundary · `−50` `middleware.bp` ·
+`0` application filters · `+100` metrics · `+200` compression ·
+`+300` server identification. `orderBand()` answers the whole table.
+
+### `Next`
+
+`Next.pass()` continues the chain, `Next.redirect(url)` answers 307 with
+`Location`, `Next.permanentRedirect(url)` answers 308, and `Next.rewrite(path)`
+re-targets the route table while `req.path` keeps the URL the client asked for.
+`pass()` and `rewrite()` answer status **0**, which is not a valid HTTP status
+and never reaches the wire: the chain reads it as "continue".
+
+### Response headers
+
+```bp
+val res = withHeader(Response.ok("{}"), "Content-Type", "application/json");
+val two = withHeaders(res, [#("X-A", "1"), #("X-B", "2")]);
+```
+
+`withHeader` returns the `Response` it was given and **replaces by name**,
+case-insensitively. Two names are special: `Set-Cookie` is refused (queue cookies
+with front 62's `cookies().set` and hand `endRequest()`'s blob to
+`writeCookies`), and `Vary` is unioned rather than replaced.
+
+### CORS
+
+```bp
+#[provides]
+pub fn corsPolicy() -> CorsPolicy {
+    return corsPolicy(["https://example.com"], ["GET", "POST"], [], [], false, 600);
+}
+```
+
+or, per controller:
+
+```bp
+#[crossOrigin("https://example.com", "GET,POST")]
+#[route("/api")]
+#[restController]
+pub type ApiController { }
+```
+
+With no policy nothing is allowed and no CORS header is ever set. The wildcard
+together with `allowCredentials: true` fails at boot. A preflight for a path with
+no route answers 404.
+
+### Problem details
+
+```bp
+#[controllerAdvice]
+pub type OrderAdvice {
+    #[exceptionHandler("order.not-found")]
+    pub fn notFound(self: Self, detail: string) -> ProblemDetail {
+        return ProblemDetail(
+            typeUri: "https://example.com/problems/not-found",
+            title: "Order not found",
+            status: 404,
+            detail: detail,
+            instance: "/api/orders",
+        );
+    }
+}
+
+// in a handler:
+val _ = raiseProblem("order.not-found", "no order 42");
+```
+
+The tag is a **string**, not a type name: botopink has no typed raise and
+`try … catch` works over `@Result` alone. A raise nothing handles answers 500
+with `about:blank` and a correlation digest; the reason goes to the log under
+that digest and never into the body.
 
 ## Loading notes
 

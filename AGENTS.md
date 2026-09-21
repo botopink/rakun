@@ -182,12 +182,47 @@ rakun/
 │   │                             scan order · singleton/build count · the parseInt rule ·
 │   │                             route order · the `Response` round-trip shape. The same
 │   │                             assertions on BOTH rows — green on commonJS and on erlang
-│   └── rakun-<area>/  ← the thirteen scaffolds (actuator · cache · client · data · hateoas ·
-│                        logging · messaging · scheduling · security · session · test ·
-│                        validation · web): `botopink.json` (files [root.bp] · targets per
-│                        `specs/1.0.10-beta/03-rakun/modules.md` § Targets · dependencies
-│                        { "rakun": { "workspace": true } }) + a two-comment `src/root.bp`;
-│                        contents land per front
+│   ├── rakun-web/     ← THE FILTER CHAIN (§ The filter chain): the one ordered chain
+│   │   │                between the socket and the route handler, its two entry
+│   │   │                points, CORS and RFC 9457 problem details. target/targets
+│   │   │                erlang; depends on `rakun` by `{ "workspace": true }`
+│   │   ├── src/
+│   │   │   ├── root.bp        ← `pub mod filter; error; middleware; cors; convention;`
+│   │   │   ├── filter.bp      ← the chain: `WebRequest` · `Chain` · `Filter` ·
+│   │   │   │                    `chainNext`/`runChain` · the order band · the
+│   │   │   │                    status-0 sentinel · `withHeader`/`withHeaders` ·
+│   │   │   │                    the `Set-Cookie` list · the route read
+│   │   │   ├── middleware.bp  ← `Next` (pass · redirect · permanentRedirect ·
+│   │   │   │                    rewrite), the matcher front 65 owns the grammar
+│   │   │   │                    of, and the one-middleware rule
+│   │   │   ├── cors.bp        ← `CorsPolicy`, the three restrictive defaults, the
+│   │   │   │                    preflight, the per-controller mappings
+│   │   │   ├── error.bp       ← `ProblemDetail`, `raiseProblem`, the advice
+│   │   │   │                    registry and the error entry
+│   │   │   ├── convention.bp  ← the five markers (`#[filter]` · `#[order]` ·
+│   │   │   │                    `#[middleware]`/`#[matcher]` · `#[crossOrigin]` ·
+│   │   │   │                    `#[controllerAdvice]`/`#[exceptionHandler]`), the
+│   │   │   │                    request-id built-in and `bootWeb()`
+│   │   │   ├── chain.mjs      ← the registries and the four per-request
+│   │   │   │                    accumulators, node half. Knows no grammar
+│   │   │   └── sidecars/rakun_chain.erl ← the same on the BEAM (ETS behind an
+│   │   │                        owner process + the process dictionary), plus
+│   │   │                        `run/6`, the seam `dispatch_http/5` calls
+│   │   └── test/
+│   │       ├── middleware_test.bp ← ordering as ONE string · short-circuit ·
+│   │       │                     `Next` · the matcher · `withHeader`
+│   │       ├── cors_test.bp   ← the deny-all default · the echoed origin · the
+│   │       │                     preflight · the two boot refusals
+│   │       ├── error_test.bp  ← the RFC 9457 shape · the advice · the digest
+│   │       │                     that reaches the body and the reason that does not
+│   │       └── decorators_test.bp ← the five markers and what they emit; NOTHING
+│   │                             here resets a table
+│   └── rakun-<area>/  ← the twelve remaining scaffolds (actuator · cache · client ·
+│                        data · hateoas · logging · messaging · scheduling · security ·
+│                        session · test · validation): `botopink.json` (files [root.bp] ·
+│                        targets per `specs/1.0.10-beta/03-rakun/modules.md` § Targets ·
+│                        dependencies { "rakun": { "workspace": true } }) + a
+│                        two-comment `src/root.bp`; contents land per front
 ├── examples/
 │   ├── rakun/         ← member `rakun-example` (an application: entry main.bp, target commonJS,
 │   │                    depends on `rakun` via { "workspace": true }); the sixty-second app
@@ -2333,6 +2368,271 @@ rows.
 `reportStateOf(name)` / `reportReasonOf(name)` / `reportNames()` when it wants
 the same decision as structured members rather than as a block. There is one
 producer; a second renderer would be a second answer.
+## The filter chain — `modules/rakun-web/`
+
+`modules/rakun-web/` is the member front 07 fills, and it is the first member
+besides the core with real code and its own tests. One ordered chain sits
+between the socket and the route handler; everything cross-cutting in track B
+enters through it and through nothing else.
+
+**Measured 2026-09-21 against compiler `2e6bb4ac`, with front 07 AND front 72 in
+the tree:** `botopink test` (the member's own target, erlang) is **83/83** and
+`botopink test --target commonJS` is **83/83**. `modules/rakun` is untouched by
+this front and reads what front 72 left — 346/346 on commonJS, 344 passing / 2
+failing on erlang, the two still front 04's `server_test.bp:74,80`. (Front 07
+was written against the pre-72 core, where the same two cells were the only
+reds at 302/300; neither count is this front's and neither moved because of
+it.) Before this front the member had no `test/` directory at all, so
+`botopink-lang/scripts/restricted-targets.txt`'s line
+`rakun-web commonJS 0 03-rakun/F07` keeps its pinned `0` and loses its reason:
+"no tests yet" is now "83 tests, all green".
+
+### Why there is ONE chain and two entry points
+
+The 1.0.6 draft asked for Spring filters; the 1.0.7 draft asked for a Next-style
+`middleware.bp`. Two pipelines would mean two orderings, a CORS header set in one
+and overwritten in the other, and no answer to "does my filter run before the
+middleware". So `#[filter]` and `#[middleware]` are two REGISTRATIONS into one
+list, at two default orders.
+
+| Entry point | Registers as | Default order | Suits |
+|---|---|---|---|
+| `#[filter]` on a component | one entry per component, ordered by `#[order("N")]` | `0` | reusable concerns: CORS, compression, metrics, security |
+| `#[middleware]` on a `pub fn` in `middleware.bp` | exactly one entry | `−50` | the application's own request gate: auth redirects, rewrites, locale |
+
+`test/middleware_test.bp` writes the same redirect both ways in one cell and
+asserts the two responses agree field for field, which is the honest way to make
+the claim checkable.
+
+### The order band
+
+Negative is early, positive is late. `orderBand()` is the whole table as one
+string, so a test asserts it as a WHOLE rather than row by row.
+
+| Order | Entry | Owner |
+|---|---|---|
+| −400 | request id | 07 (ships) |
+| −300 | security | 10 |
+| −250 | URL rules: redirects, rewrites, `basePath` | 65 |
+| −200 | CORS | 07 (ships) |
+| −150 | API version resolution | 07 (not reached) |
+| −100 | problem-detail / error boundary | 07 (ships) |
+| −50 | `middleware.bp` | 07 (ships) |
+| 0 | application filters, default | the application |
+| +100 | metrics and tracing | 11 |
+| +200 | compression | 07 (not reached) |
+| +300 | server identification | 07 (not reached) |
+
+Compression is late on purpose: it must see the final body, including one an
+error handler produced.
+
+### Where it hooks in, and the one thing that is untestable from `.bp`
+
+Front 04's `dispatch_http/5` calls `rakun_chain:run/6` when the module is loaded
+and the handler directly when it is not. `run/6` looks for a RUNNER — botopink's
+`runChain/5`, handed over by `bootWeb()` — and falls back to calling the handler
+itself when none is registered, so a build carrying rakun-web but never booting
+its web layer behaves exactly as front 04 does. **Neither branch is reachable
+from a `.bp` cell**: `run/6` needs a socket and a live route table, and the
+suite has neither. What the cells drive is `runChain/5` directly, which is the
+same function `run/6` calls. The seam itself is covered by reading the two
+modules, not by a test, and this paragraph is the record of that.
+
+### The chain's request value is NOT `Request`, and why
+
+rakun's `Request` is a host-supplied `behavior`, and a method on one does not
+dispatch on the erlang row: `req.header("origin")` lowers to a map field read of
+`header` followed by a call. That is the defect keeping `test/server_test.bp:74`
+and `:80` red in the core (`{badkey,param}` / `{badfun, #{…}}`), and a chain
+that cannot read a header cannot do CORS. So the chain carries its own RECORD,
+`WebRequest(method, path, target, headersWire, queryWire, body)`, built from the
+same scalars the dispatcher already has, with `header`/`hasHeader`/`names`/
+`query` methods that read through front 62's wire grammar
+(`headerLookup`/`headerNames`/`headerPresent`, imported, not re-spelled). Record
+methods dispatch on both rows. The spec writes `Filter.handle(self, req:
+Request, chain: Chain)`; the deviation is one type name and it is here because
+the spec's spelling does not run.
+
+`path` is what the client asked for and never changes. `target` is what the
+route table is asked about, and `Next.rewrite` is the only thing that moves it —
+so a rewrite is invisible to the client and visible to the router.
+
+### The status-0 sentinel
+
+`Response` is frozen at `(status, body)` with no header builder, so a
+middleware's "continue" and "rewrite" cannot be ordinary responses. Zero is not a
+valid HTTP status, so `Next.pass()` and `Next.rewrite(p)` answer
+`Response(status: 0, body: "")`; `chainNext` reads it as "continue to the next
+entry" and consumes the `rewrite` signal on the way. A sentinel that walks off
+the END of the chain becomes a 404 rather than reaching the wire — asserted, not
+assumed.
+
+### `withHeader`, and replace-by-name
+
+`Response` has no header field, so `withHeader(res, name, value)` writes through
+a per-request accumulator and returns the SAME `Response`. Name matching is
+case-insensitive (RFC 9110 §5.1) and **the semantics are replace-by-name**, with
+exactly two exceptions:
+
+- **`Set-Cookie`** is a boot-time REFUSAL naming front 62's list API. A replace
+  would set one cookie and drop the rest. `writeCookies(blob)` takes
+  `endRequest()`'s `\n`-separated lines and writes one `Set-Cookie:` per
+  element; `responseHead()` is the only place the two accumulators meet.
+- **`Vary`** is unioned over the comma-separated token set, case-insensitively,
+  first spelling kept — the CORS entry adds `Origin`, a future compression entry
+  adds `Accept-Encoding`, and both must survive.
+
+`withHeaders(res, pairs)` takes the spec's `#(string, string)[]` — MEASURED, not
+assumed: a tuple-array parameter, an array literal of `#("X-A", "1")` pairs at
+the call site, and `.0` / `.1` field reads all compile and answer on BOTH rows
+against `2e6bb4ac`. It started as a flat `["name", "value", …]` array with an
+odd length refused, and the pair type is strictly better because it makes "a
+name with no value" unrepresentable rather than refusable. Same replace rule
+between its own entries.
+
+**The BEAM half mirrors every write into `rakun_runtime:set_reply_header/2`** so
+the line reaches the socket, guarded by `function_exported/3`. The node half does
+not: `runtime.mjs` is frozen, carries no `setReplyHeader`, and this front does
+not unfreeze it — so on the node row the accumulator is rakun-web's alone and the
+node server writes no reply header, exactly as before front 07.
+
+### CORS: the three restrictive defaults
+
+1. **No origin is allowed until one is named.** `denyAll()` is the policy with no
+   policy, and `Access-Control-Allow-Origin` is never set from it.
+2. **The wildcard with credentials fails at BOOT**, naming the combination, and
+   there is no property that downgrades it. Either half alone is legal.
+3. **A preflight for a path with no route answers 404**, not a permissive 204 —
+   `routeExists` reads front 04's `rkRoutePaths()` and matches `:name` segments.
+
+`Access-Control-Allow-Origin` ECHOES the request origin and never answers `*` for
+an allowed one, and `Vary: Origin` is set on **every** response the policy looked
+at, allowed or not. A preflight from a disallowed origin, or for a method the
+policy does not allow, answers **403** rather than a bare 204: 204 with no
+allow-origin reads to a browser exactly like a misconfiguration, and 403 says
+which side said no. The spec does not pin that case; this is the restrictive
+reading and it is written down here rather than left to the code.
+
+The global policy is a `#[provides]`d `CorsPolicy` read out of front 06's
+container by TYPE NAME (`rkResolve("CorsPolicy")` — the string and the annotated
+binding are paired by hand, front 06's own recorded gap). A per-controller
+`#[crossOrigin("https://a.test", "GET,POST")]` is keyed by the controller's
+`#[route]` prefix; the LONGEST matching prefix wins, ties go to declaration
+order, and an override NARROWS the global policy rather than resetting it — the
+fields the decorator cannot spell come from the bean.
+
+### Problem details, and what an "exception" is here
+
+botopink has no exception hierarchy: `throw` is legal only inside `#[@result]`
+and yields an `Error(e)` VALUE, and `try … catch` works over `@Result` alone. So
+`#[exceptionHandler("NotFoundException")]` has nothing to catch. What exists on
+the BEAM is a raise, and rakun-web gives it one shape — `raiseProblem(tag,
+detail)` raises `{rakun_problem, Tag, Detail}` in the host, and the error entry
+at −100 runs the rest of the chain inside a host `try`/`catch`. **The tag is a
+string, not a type name.**
+
+- a tagged raise with a matching advice → that advice's `ProblemDetail`, served
+  as `application/problem+json`;
+- an untagged raise, or a tagged one nothing handles → **500**, `about:blank`, a
+  correlation DIGEST in `detail`, and the full reason in the log under that
+  digest. There is no property that puts the reason in the body and no
+  development mode that changes it.
+- a handler's own `Response` → passed through untouched. With
+  `rakun.web.problemdetails.enabled=true` a bare 4xx/5xx with an EMPTY body is
+  filled with the standard shape; one WITH a body is never rewritten.
+
+The record field is `typeUri` and the JSON member is `type` (RFC 9457 §3.1); the
+mapping lives once, in `problemJson`, and a cell asserts the wire carries `type`
+and not `typeUri`. `jsonEscape` is asserted against a detail carrying a quote
+and a newline, so a raise cannot break the document.
+
+`#[controllerAdvice]` is type-level and `#[exceptionHandler("tag")]` a
+method-level placement marker: a method `@Decl` carries no owner, so the advice
+walks its own methods and does the wiring. A tag registered twice fails at boot
+naming both owners.
+
+### The matcher, and the line front 65 owns
+
+`#[matcher("/dashboard/:path*")]` restricts an entry. **The grammar is front
+65's**; front 07 executes it and invents none. Front 65 has not landed, so this
+module runs exactly the three forms the two READMEs use in their own examples — a
+literal segment, `:param`, and a trailing `:param*` — and REFUSES everything else
+(`*`, `(`, `[`, `?`, `{`) with a located message naming front 65. A pattern that
+quietly matches nothing is the failure mode decision 67 exists to prevent.
+
+### Language notes this module is written around
+
+- **A negative integer literal in a decorator argument does not parse.**
+  `#[mark(-20)]` is `error: this token cannot appear here … unexpected 20`, on
+  BOTH targets, while `#[mark(20)]` compiles. Measured against `2e6bb4ac` with
+  the smallest program there is (a `pub fn mark(comptime decl: @Decl, n: i32)`
+  and two one-type test files). Every order in the band below zero is therefore
+  unwritable as an integer, so **`#[order]` takes a STRING** — `#[order("-100")]`
+  — parsed with front 05's `toI32`, and the emitted line is
+  `registerFilter("X", toI32("-100"), …)`. When the parser accepts the minus
+  sign the signature becomes `n: i32` and the `toI32(` wrapper is deleted;
+  nothing else moves. This is the one place this front's surface differs from
+  the spec for a compiler reason rather than a design one.
+- **A `@panic` message must carry no double quote.** On the erlang row
+  `asserts.throwsWith` reads the `~p` RENDERING of the raised binary, in which a
+  `"` inside the message is escaped to `\"`; on commonJS it reads the raw
+  message. So one needle cannot match both rows if either side carries a quote.
+  Measured: the needle `withHeader("Set-Cookie"` passes on commonJS and fails on
+  erlang, and `withHeader(\"Set-Cookie\"` does the reverse. Every refusal in
+  this module is written around it, the way front 62's are written around the em
+  dash — and for the same class of reason.
+- **A method on a host-supplied `behavior` does not dispatch on erlang.** See
+  *The chain's request value is NOT `Request`* above; it is front 04's
+  `server_test.bp:74,80` and it is why `WebRequest` exists.
+- **A trailing-lambda `loop` body needs its `;`.** `loop (xs) { x -> f(x) };`
+  is `unexpected }`; `loop (xs) { x -> f(x); };` compiles. Three lines cost a
+  compile each while writing `filter.bp`.
+- **Wrong placement is not expressible as a cell.** `#[filter]` on a function is
+  a COMPILE failure, so a file containing one has no cell to run. A clean
+  compile of `test/decorators_test.bp` IS the placement assertion, exactly as
+  `modules/rakun/test/di_test.bp` records for the stereotypes.
+- **A registration emitted by a marker cannot be snapshotted in a file that also
+  rebuilds the table.** An `@emit`ted module-load `val` lands at the END of the
+  emitted module, so `test/decorators_test.bp` never resets the chain and the
+  ordering cells live next door. `botopink test` runs each test FILE in its own
+  process, which is what makes the split work.
+
+### Why this member ships BOTH host files
+
+The registries are not pure: an entry is a FUNCTION, an advice is a FUNCTION, and
+no string table holds one. That is front 22's test, so `src/chain.mjs` and
+`src/sidecars/rakun_chain.erl` are both this front's own files — `runtime.mjs`
+stays frozen and untouched. The atom is `rakun_chain`, never `chain`:
+`shipErlSidecars` skips a qualifier matching a module the build emitted,
+rakun-web emits `chain`, and the skip is SILENT.
+
+What the hosts hold: the ordered entry table (`{Order, Seq}` on an
+`ordered_set`, so ties break by registration order and the table is WALKED per
+request, not rebuilt), the advice table, the per-controller CORS mappings, a
+boot-time key/value table, an ordering trace, and four per-request accumulators
+(reply headers, `Set-Cookie` lines, the rewrite signal, the terminal closure).
+What they do NOT hold: the order band, the sentinel rule, the replace-by-name
+rule, the `Vary` union, the `Set-Cookie` refusal, the CORS decision, the RFC 9457
+shape and every refusal message — all botopink, compiled twice, asserted twice.
+
+The per-request four are the BEAM process dictionary and the boot-time tables are
+ETS behind a dedicated owner process (`rakun_file_router`'s shape, and for the
+same reason: a table dies with its creator, and a registration runs in whatever
+process loaded the module).
+
+### What front 07 did NOT reach
+
+Steps 1, 2, 3, 3b and 4 of the spec are in. Five steps are not, and none is
+stubbed:
+
+| Step | What it needs |
+|---|---|
+| 5 — static error pages | File IO from `src/` (`std/fs`), and a decision about `Accept: text/html` that belongs with step 6. The resolution ORDER is already fixed in `convention.bp` (`errorPageCandidates`): `<error-path>/404.html`, then `<…>/4xx.html`, then `<…>/5xx.html` |
+| 6 — content negotiation | The `MessageConverter` behavior, an `Accept` q-value parser and a media-type registry. No blocker; it is work |
+| 7 — `WebCustomizer` | `WebRegistry` with `addConverter`/`addCorsMapping`/`addFilter`/`addFormatter`, which needs step 6's converter registry first |
+| 8 — API versioning | The resolution is string work with no blocker; the `Deprecation`/`Sunset` pair needs front 05 keys that exist |
+| 9 — compression | `zlib` cells on both hosts, plus the `br` boot refusal. No blocker; it is work |
+| 10 — graceful shutdown | **Blocked, and not on front 76.** Step 2 of the sequence is "close the listening socket, keep every connection process alive" — and the listening socket is `rakun_runtime.erl`'s, in `modules/rakun/`, which front 07 does not own. The drain cannot be written from this member. Front 76's `readinessDrained()` is the SOFT half and the spec says how to land without it; the socket is the hard half |
 
 ## Design at a glance
 

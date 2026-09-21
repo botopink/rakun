@@ -12,7 +12,7 @@ to a sibling or to the umbrella is a located error.
 
 ## Members today
 
-Fourteen members exist. The thirteen scaffolds are **kept under their names** by the reconciliation
+Fourteen members exist. The twelve remaining scaffolds are **kept under their names** by the reconciliation
 table of `03-rakun/modules.md` § Verdicts (no rename applied to a scaffold); each is a two-comment
 `src/root.bp` until its front lands, and its manifest lists `files: ["root.bp"]` so it ships one module
 rather than nothing. `targets` follows `03-rakun/modules.md` § Targets.
@@ -32,7 +32,11 @@ rather than nothing. `targets` follows `03-rakun/modules.md` § Targets.
 | [rakun-session](./rakun-session/) | root | erlang | `spring-session-jdbc` / `-data-redis` | 18 | scaffold |
 | [rakun-test](./rakun-test/) | root | commonJS, erlang | `-test` | 19 | scaffold |
 | [rakun-validation](./rakun-validation/) | root | commonJS, erlang | `-validation` | 14 | scaffold |
-| [rakun-web](./rakun-web/) | root | erlang | `-webmvc` (websocket is `rakun-websocket`) | 07 · 65 · 82 | scaffold |
+| [rakun-web](./rakun-web/) | root · filter · error · middleware · cors · convention | erlang | `-webmvc` (websocket is `rakun-websocket`) | 07 · 65 · 82 | real code, 83 tests |
+
+`modules/rakun-web/` stopped being a scaffold with front 07: it carries the filter chain, CORS and
+RFC 9457 problem details, two host files (`src/chain.mjs`, `src/sidecars/rakun_chain.erl`) and four
+test files — see `repository/rakun/AGENTS.md` § The filter chain.
 
 Every scaffold's `dependencies` is `{ "rakun": { "workspace": true } }` only. The sibling edges of
 `03-rakun/modules.md` § The cut (`rakun-session → rakun-web, rakun-data`, `rakun-security → rakun-web,
