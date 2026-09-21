@@ -1,0 +1,241 @@
+//// rakun — the request context: the frame, its epoch, and the five phases.
+////
+//// WHY THIS EXISTS. A rakun handler gets a `Request` value and that value
+//// exists only inside the function the router dispatched to. A `#[service]`
+//// three calls down cannot see it, a page rendered by the SSR pipeline is never
+//// handed one, and `Response` is `(status, body)` with `src/http.bp` frozen, so
+//// there is no field to put a `Set-Cookie` in. Authentication, theme
+//// personalization, draft mode, per-request deduplication and the
+//// dynamic-rendering decision all bottom out here.
+////
+//// THE SCOPE IS A FRAME, NOT A PROCESS. On the BEAM a request is served by a
+//// process, and process-local state is very nearly request scope — but a
+//// keep-alive connection process serves many requests in sequence, so process
+//// identity is NOT request identity. A scope that is implicit in the process is
+//// a scope that leaks the previous request's cookies into the next one. So the
+//// frame is explicit and carries an EPOCH: every handle minted from it carries
+//// the epoch it was minted with, and a handle used after `endRequest`, or from
+//// the next request on the same connection, raises instead of writing into
+//// somebody else's response.
+////
+//// READING OUTSIDE A REQUEST IS A HARD FAILURE. `headers()` with no frame does
+//// not answer an empty map, does not answer `null` and does not consult a
+//// default: it raises. There is no `headersOr(default)`, no
+//// `rakun.request.lenient` property and no predicate to branch around it — a
+//// predicate is an escape hatch with a different spelling. A library that has
+//// to work both inside and outside a request takes the values as parameters.
+////
+//// WHY THIS FRONT SHIPS BOTH HOST FILES WHERE FRONT 05 SHIPPED NONE. Front 05's
+//// three measurements still hold and none is violated here: every cell below
+//// carries BOTH forms, so neither row has a call with no binding; `runtime.mjs`
+//// is frozen but `request_context.mjs` is this front's own file; and the atom
+//// `rakun_request_context` is named in emitted output, so `shipErlSidecars`
+//// copies it. What decides the shape is front 22's test — is the thing being
+//// stored PURE? A config reader is; this frame is not. It carries a queue of
+//// deferred THUNKS and a memo table of arbitrary typed VALUES, and no string
+//// table holds either. The hosts hold a slot store, a keyed line list, a queue,
+//// a table and a counter; the phase rules, the wire grammars, the cookie
+//// serialization and every refusal message are botopink, compiled twice.
+
+import {rkPropInt} from "runtime";
+
+// ── the five phases ─────────────────────────────────────────────────────────
+//
+// | | `headers()` | `cookies()` | `.set`/`.delete` | `after()` | marks dynamic |
+// |---|---|---|---|---|---|
+// | `Middleware` | yes | yes | yes | yes | n/a |
+// | `Render` | yes | yes | RAISES | yes | yes |
+// | `Action` | yes | yes | yes | yes | n/a |
+// | `Handler` | yes | yes | yes | yes | yes |
+// | `After` | yes | yes | RAISES | RAISES | n/a |
+//
+// A cookie write during render raises rather than warns: by the time a render
+// is running the response head may already be on the wire. `After` is the
+// frozen copy — the response is gone, so every write would be a no-op waiting
+// to be found in production, and raising is the cheaper discovery.
+
+pub type RequestPhase {
+    Middleware,
+    Render,
+    Action,
+    Handler,
+    After,
+}
+
+pub fn phaseName(phase: RequestPhase) -> string {
+    val name = case phase {
+        RequestPhase.Middleware -> "middleware";
+        RequestPhase.Render -> "render";
+        RequestPhase.Action -> "action";
+        RequestPhase.Handler -> "handler";
+        RequestPhase.After -> "after";
+    };
+    return name;
+}
+
+// Total by construction: the only writer of the slot is `phaseName`. An unknown
+// spelling is a host that was written around rather than through this module,
+// and it raises rather than picking a phase for it.
+pub fn phaseFrom(name: string) -> RequestPhase {
+    if (name == "middleware") return RequestPhase.Middleware;
+    if (name == "render") return RequestPhase.Render;
+    if (name == "action") return RequestPhase.Action;
+    if (name == "handler") return RequestPhase.Handler;
+    if (name == "after") return RequestPhase.After;
+    @panic("rakun request: `" + name + "` is not a request phase");
+    return RequestPhase.Handler;
+}
+
+// `headersWire` is `name\tvalue` lines, `\n`-separated, names already lowercased
+// by the dispatcher. Cookies are parsed out of the `cookie` header by this
+// front, not passed separately.
+pub type RequestScope(
+    id: string,
+    phase: RequestPhase,
+    method: string,
+    path: string,
+    query: string,
+    headersWire: string,
+    strict: bool,
+)
+
+// ── the host cells ──────────────────────────────────────────────────────────
+//
+// A keyed slot store over one process-dictionary key, and nothing else. The
+// host never reads a slot's MEANING: `beginRequest` writes them and the
+// accessors below read them back.
+
+#[@External.Node("./request_context.mjs", "begin"),
+  @External.Erlang("rakun_request_context", "begin_frame")]
+pub declare fn rkReqBegin(id: string) -> i64;
+
+#[@External.Node("./request_context.mjs", "end"),
+  @External.Erlang("rakun_request_context", "end_frame")]
+pub declare fn rkReqEnd() -> i32;
+
+#[@External.Node("./request_context.mjs", "isLive"),
+  @External.Erlang("rakun_request_context", "is_live")]
+pub declare fn rkReqLive() -> bool;
+
+#[@External.Node("./request_context.mjs", "epoch"),
+  @External.Erlang("rakun_request_context", "epoch")]
+pub declare fn rkReqEpoch() -> i64;
+
+#[@External.Node("./request_context.mjs", "slot"),
+  @External.Erlang("rakun_request_context", "slot")]
+pub declare fn rkReqSlot(name: string) -> string;
+
+#[@External.Node("./request_context.mjs", "putSlot"),
+  @External.Erlang("rakun_request_context", "put_slot")]
+pub declare fn rkReqPutSlot(name: string, value: string) -> i32;
+
+// ── the refusals ────────────────────────────────────────────────────────────
+//
+// Each message is a function of its own, for the reason `durationProblem` is:
+// a test reads the text without the halt taking the test down, and the words a
+// consumer will paste into a search engine are written once.
+
+pub fn noFrameProblem(what: string) -> string {
+    return "rakun request: request context is not established - " + what
+        + " is legal only while a request is in flight";
+}
+
+pub fn nestedFrameProblem(outerPath: string) -> string {
+    return "rakun request: a request context is already established for `" + outerPath
+        + "` - beginRequest inside a request scope is a dispatcher bug, not a feature";
+}
+
+pub fn staleEpochProblem(what: string) -> string {
+    return "rakun request: this " + what
+        + " handle belongs to a request that has ended - a handle captured across "
+        + "requests would write into somebody else's response";
+}
+
+// ── the frame ───────────────────────────────────────────────────────────────
+
+pub fn requestLive() -> bool {
+    return rkReqLive();
+}
+
+fn demand(what: string) -> i32 {
+    if (rkReqLive() == false) @panic(noFrameProblem(what));
+    return 0;
+}
+
+pub fn beginRequest(scope: RequestScope) -> i64 {
+    if (rkReqLive()) @panic(nestedFrameProblem(rkReqSlot("path")));
+    val epoch = rkReqBegin(scope.id);
+    val _m = rkReqPutSlot("method", scope.method);
+    val _p = rkReqPutSlot("path", scope.path);
+    val _q = rkReqPutSlot("query", scope.query);
+    val _w = rkReqPutSlot("headers", scope.headersWire);
+    val _f = rkReqPutSlot("phase", phaseName(scope.phase));
+    val _s = rkReqPutSlot("strict", if (scope.strict) "1" else "");
+    return epoch;
+}
+
+pub fn endRequest() -> string {
+    val _d = demand("endRequest()");
+    val _e = rkReqEnd();
+    return "";
+}
+
+pub fn setPhase(phase: RequestPhase) -> i32 {
+    val _d = demand("setPhase()");
+    return rkReqPutSlot("phase", phaseName(phase));
+}
+
+pub fn requestPhase() -> RequestPhase {
+    val _d = demand("requestPhase()");
+    return phaseFrom(rkReqSlot("phase"));
+}
+
+pub fn requestId() -> string {
+    val _d = demand("requestId()");
+    return rkReqSlot("id");
+}
+
+pub fn requestEpoch() -> i64 {
+    val _d = demand("requestEpoch()");
+    return rkReqEpoch();
+}
+
+pub fn requestPath() -> string {
+    val _d = demand("requestPath()");
+    return rkReqSlot("path");
+}
+
+pub fn requestMethod() -> string {
+    val _d = demand("requestMethod()");
+    return rkReqSlot("method");
+}
+
+pub fn requestQuery() -> string {
+    val _d = demand("requestQuery()");
+    return rkReqSlot("query");
+}
+
+// `strict` is set by front 60's build-time prerenderer and by nothing else.
+// With `strict = false` — the serving path — a dynamic read marks and
+// continues; with `strict = true` it raises, naming the function and the route,
+// which is how `output: 'export'` fails the build rather than shipping a page
+// that read a cookie at build time.
+pub fn requestStrict() -> bool {
+    val _d = demand("requestStrict()");
+    return rkReqSlot("strict") != "";
+}
+
+// The epoch a handle has to match. Split out so every handle type asks the same
+// question in the same words.
+pub fn checkEpoch(epoch: i64, what: string) -> i32 {
+    val _d = demand(what + "()");
+    if (rkReqEpoch() != epoch) @panic(staleEpochProblem(what));
+    return 0;
+}
+
+// The deferred-work budget, read where front 05's table can set it.
+pub fn afterTimeoutMs() -> i32 {
+    val raw: i32 = rkPropInt("rakun.request.after.timeout");
+    if (raw <= 0) return 30000;
+    return raw;
+}

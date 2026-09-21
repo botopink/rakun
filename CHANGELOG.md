@@ -11,6 +11,43 @@
 > passing / 2 failing, the two reds being `{badkey,param}`/`{badkey,query}` in
 > front 04's `server_test.bp`.
 
+- **The request frame, its epoch and the five phases** (front 62, step 1).
+  `modules/rakun/src/request_context.bp` opens the scope every server-side read
+  of a cookie or a header goes through: `beginRequest(RequestScope(…))` writes
+  one key and answers a monotonic epoch, `setPhase`/`requestPhase` store the one
+  phase front 12's `rkCachePhase()` is to read, and `endRequest()` erases the
+  key. A nested `beginRequest` raises naming the outer scope's path, an
+  `endRequest` with no frame raises, and after `endRequest` the key is ERASED
+  rather than blanked — `requestEpoch()` raises rather than answering zero.
+
+  **The scope is a frame, not a process.** A keep-alive connection process
+  serves many requests in sequence, so process identity is not request identity,
+  and a scope implicit in the process leaks the previous request's cookies into
+  the next one. Every handle carries the epoch it was minted with; a handle used
+  after `endRequest`, or from the next request on the same connection, raises.
+  That assertion is the first test in the file, deliberately.
+
+  **This front ships both host files, and the argument is front 22's, not front
+  05's.** The test is whether the thing being stored is PURE. Front 05's config
+  readers were, so one implementation over `std` answered both rows. This frame
+  is not: it carries a queue of deferred thunks and a memo table of arbitrary
+  typed values, and no string table holds either — the same sentence front 22
+  wrote about a registered renderer. `request_context.mjs` and
+  `sidecars/rakun_request_context.erl` hold a slot store and nothing else; the
+  phase table, both wire grammars, the cookie serialization, the draft signature
+  and every refusal message are botopink, compiled twice. Front 05's three
+  measurements are each satisfied rather than waived: every cell carries both
+  forms, `runtime.mjs` is untouched, and the atom `rakun_request_context` is
+  named in emitted output, verified in `.botopinkbuild/test-out/`.
+
+  One new compiler shape is recorded in `AGENTS.md` rather than worked around:
+  **a `@panic` message must be pure ASCII**, because `asserts.throwsWith`
+  catches through `io_lib:format("~p:~p", …)` and `~p` renders a binary holding
+  a non-Latin-1 byte as a list of numbers — an em dash in a refusal makes the
+  message match no needle at all. Measured: `botopink test` 148/148 (was
+  136/136); `botopink test --target erlang` 146 passing / 2 failing (was 134/2),
+  the same two front-04 `request/6` reds.
+
 - **The route table crosses the boundary, and one matcher reads it on both
   rows** (front 22, steps 3 and 4). `RouteEntry(kind, pattern, slot, verb)`
   writes as `kind|pattern|slot|verb`, one record per line in registration order,

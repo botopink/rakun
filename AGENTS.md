@@ -81,6 +81,15 @@ rakun/
 │   │   │   │                    list of (wire line, render fn). Knows no grammar
 │   │   │   ├── sidecars/rakun_file_router.erl ← the same registry on the BEAM, in
 │   │   │   │                    ETS behind a dedicated owner process
+│   │   │   ├── request_context.bp ← THE REQUEST CONTEXT (§ The request context):
+│   │   │   │                    the frame, its epoch, the five phases and the
+│   │   │   │                    refusal texts. Every accessor raises outside a
+│   │   │   │                    request and there is no flag that changes it
+│   │   │   ├── request_context.mjs ← the frame, node half: a module-global slot
+│   │   │   │                    store. Knows no phase, no header, no cookie
+│   │   │   ├── sidecars/rakun_request_context.erl ← the frame on the BEAM: ONE
+│   │   │   │                    process-dictionary key plus an ETS area that
+│   │   │   │                    outlives it, for work that runs after the response
 │   │   │   ├── bootstrap.bp   ← `Rakun` (concrete type): `Rakun.run(app)` starts `rkServe`
 │   │   │   └── rakun.d.bp     ← declaration-only: the `Context` IoC behavior (future)
 │   │   └── test/
@@ -97,6 +106,8 @@ rakun/
 │   │       │                     the accessors they emit; no `rkAppReset()`, because
 │   │       │                     a module-load registration cannot be snapshotted in
 │   │       │                     its own module
+│   │       ├── request_context_test.bp ← the frame lifecycle and the epoch
+│   │       │                     discipline, the keep-alive case FIRST
 │   │       ├── file_router_scan_test.bp ← the scan over real fixture trees under
 │   │       │                     `test/fixtures/{routing,conflict-both,conflict-roots,
 │   │       │                     middleware}`: the conflicts, the `_` skip, `app` vs
@@ -602,6 +613,88 @@ here, over `fs.list`. A name is a directory when listing it succeeds:
 `fs.stat` would say so more directly, but its `FileStat` carries an `i64` field
 and an integer literal is `i32` with no widening, so the `catch` value of a
 `try fs.stat(…)` cannot be written at all.
+
+## The request context
+
+`modules/rakun/src/request_context.bp` is the scope every server-side read of a
+cookie or a header goes through. Before it, a `Request` existed only inside the
+function the router dispatched to: a `#[service]` three calls down could not see
+it, a page the SSR pipeline renders is never handed one, and `Response` is
+`(status, body)` with `http.bp` frozen, so there was no field to put a
+`Set-Cookie` in.
+
+**The scope is a FRAME with an EPOCH, not a process.** On the BEAM a request is
+served by a process and process-local state is very nearly request scope — but a
+keep-alive connection process serves many requests in sequence, so process
+identity is not request identity. A scope implicit in the process leaks the
+previous request's cookies into the next one. So the frame is one explicit key
+carrying a monotonic `epoch`, and every handle minted from it carries the epoch
+it was minted with; a handle used after `endRequest`, or from the next request on
+the same connection, RAISES rather than writing into somebody else's response.
+That is the first test in `test/request_context_test.bp`, deliberately.
+
+| Verb | Who calls it | What it does |
+|---|---|---|
+| `beginRequest(scope)` | front 04's acceptor, front 23's SSR pipeline, front 24's action dispatcher, front 07's chain | writes the one frame key and answers the epoch. Over an existing frame it RAISES, naming the outer scope's path |
+| `setPhase(p)` / `requestPhase()` | the same dispatchers | one phase, stored once. Front 12's `rkCachePhase()` is to read this slot, not a second one |
+| `endRequest()` | the same caller, always, including on the failure path | answers the queued `Set-Cookie` lines and erases the key. With no frame it RAISES |
+
+**Reading outside a request is a hard failure.** `requestPhase()` with no frame
+does not answer a default, does not answer `null` and consults no property: it
+raises `request context is not established`. There is no lenient mode, no
+`…Or(default)` and no predicate to branch around it — a predicate is an escape
+hatch with a different spelling, and the milestone's standing rule is that the
+most restrictive behaviour wins with no knob around it. A library that has to
+work inside and outside a request takes the values as parameters. `requestLive()`
+exists for a DISPATCHER deciding whether it already opened a frame, not for an
+accessor deciding whether to answer.
+
+### Why this front ships BOTH host files where front 05 shipped none
+
+Front 05's three measurements still hold and none of them is violated here:
+every cell carries both forms, so neither row has a call with no binding;
+`runtime.mjs` is frozen but `request_context.mjs` is this front's own file; and
+the atom `rakun_request_context` is named in emitted output, so
+`shipErlSidecars` copies it — verified by looking at
+`.botopinkbuild/test-out/rakun_request_context.erl`, not by trusting exit 0.
+
+What decides the shape is front 22's test, and it is one question: **is the
+thing being stored pure?** Front 05's config readers were — one implementation
+over `std` answered both rows and a sidecar would have been a second copy of
+something botopink can do. This frame is not pure. It carries a queue of
+deferred THUNKS and a memo table of arbitrary typed VALUES, and no string table
+holds either; the same sentence front 22 wrote about a registered renderer. So
+the hosts hold a slot store, a keyed line list, a queue, a table and a counter —
+and the phase table, both wire grammars, the cookie serialization, the draft
+signature and every refusal message are botopink, compiled to both targets.
+Neither host knows what a phase permits or what a cookie looks like, which is
+what makes "the two rows cannot disagree about what a request context says" a
+property rather than a hope.
+
+**The module atom may not be `request_context`.** rakun emits
+`rakun/request_context`, whose basename is `request_context`, and
+`shipErlSidecars` skips a qualifier matching a module this build emitted —
+silently. The sidecar is `src/sidecars/rakun_request_context.erl`, the same rule
+that names `rakun_runtime` and `rakun_file_router`.
+
+**An ETS area beside the process dictionary.** The frame is the serving
+process's dictionary. Deferred work runs in a CHILD process, so its bookkeeping
+can live in neither, and the shared area is ETS owned by a dedicated process —
+`rakun_file_router`'s shape, for `rakun_file_router`'s reason.
+
+### Language notes this module is written around
+
+- **A `@panic` message must be pure ASCII.** `asserts.throwsWith` catches
+  through `io_lib:format("~p:~p", …)`, and `~p` renders a binary holding a
+  non-Latin-1 byte as a LIST OF NUMBERS — so a refusal carrying an em dash is
+  caught, rendered as `<<114,97,107,…>>`, and matches no needle at all. Every
+  refusal text in this module uses `-` where the prose around it uses `—`, and
+  the assertions are the reason. Measured, not guessed: the first run of
+  `test/request_context_test.bp` on the erlang row failed six cells on it.
+- **A refusal is a function.** `noFrameProblem` / `nestedFrameProblem` /
+  `staleEpochProblem` are `pub fn`s returning the text, for the reason
+  `durationProblem` is one: a test reads the words without the halt taking the
+  test down, and every raise site spells the refusal once.
 
 ## Externalized configuration
 

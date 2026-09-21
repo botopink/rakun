@@ -1,0 +1,185 @@
+//// rakun — the request context.
+////
+//// Every assertion here runs on BOTH rows (`botopink test` and
+//// `botopink test --target erlang`), from this one file. The front's assigned
+//// target is erlang — a request scope is a server thing — but the rule the
+//// library has enforced since front 04 is that a host cell carries both forms
+//// or it does not exist, and the honest consequence is that the same
+//// assertions answer on both rows.
+////
+//// A raise is asserted with `asserts.throwsWith`, which is the only way to read
+//// a `@panic` without the halt taking the test down. The body ends in `0;` for
+//// the reason `std/asserts` documents: a closure whose only statement is a
+//// `@panic` does not unify with `void`.
+
+import {asserts} from "std";
+import {
+    RequestPhase,
+    RequestScope,
+    phaseName,
+    phaseFrom,
+    beginRequest,
+    endRequest,
+    setPhase,
+    requestPhase,
+    requestId,
+    requestEpoch,
+    requestPath,
+    requestMethod,
+    requestQuery,
+    requestStrict,
+    requestLive,
+    checkEpoch,
+    noFrameProblem,
+    nestedFrameProblem,
+    staleEpochProblem,
+    afterTimeoutMs,
+} from "request_context";
+
+fn scopeOf(id: string, phase: RequestPhase, path: string) -> RequestScope {
+    return RequestScope(
+        id: id,
+        phase: phase,
+        method: "GET",
+        path: path,
+        query: "",
+        headersWire: "",
+        strict: false,
+    );
+}
+
+// ── the keep-alive test, first in the file ──────────────────────────────────
+//
+// This is the bug the whole front is shaped around: a connection process serves
+// many requests in sequence, so process identity is not request identity. A
+// handle minted in the first request and used in the second has to raise, not
+// write a cookie into somebody else's response.
+
+test "rakun request: two requests on one process get different epochs and an old handle raises" {
+    val first = beginRequest(scopeOf("r-1", RequestPhase.Handler, "/one"));
+    val _e1 = endRequest();
+    val second = beginRequest(scopeOf("r-2", RequestPhase.Handler, "/two"));
+    assert second > first;
+    val _ok = checkEpoch(second, "cookies");
+    try asserts.throwsWith({ ->
+        checkEpoch(first, "cookies");
+        0;
+    }, "belongs to a request that has ended");
+    val _e2 = endRequest();
+}
+
+test "rakun request: beginRequest answers an epoch strictly greater than the previous one" {
+    val a = beginRequest(scopeOf("a", RequestPhase.Handler, "/a"));
+    val _ea = endRequest();
+    val b = beginRequest(scopeOf("b", RequestPhase.Handler, "/b"));
+    val _eb = endRequest();
+    val c = beginRequest(scopeOf("c", RequestPhase.Handler, "/c"));
+    val _ec = endRequest();
+    assert b > a;
+    assert c > b;
+}
+
+test "rakun request: an accessor with no frame raises and names the mechanism" {
+    assert requestLive() == false;
+    try asserts.throwsWith({ ->
+        requestPhase();
+        0;
+    }, "request context is not established");
+    try asserts.throwsWith({ ->
+        requestId();
+        0;
+    }, "request context is not established");
+    try asserts.throwsWith({ ->
+        requestEpoch();
+        0;
+    }, "request context is not established");
+}
+
+test "rakun request: beginRequest inside a request scope raises, naming the outer path" {
+    val _e = beginRequest(scopeOf("outer", RequestPhase.Handler, "/dashboard/settings"));
+    try asserts.throwsWith({ ->
+        beginRequest(scopeOf("inner", RequestPhase.Handler, "/inner"));
+        0;
+    }, "/dashboard/settings");
+    val _x = endRequest();
+}
+
+test "rakun request: endRequest with no frame raises" {
+    try asserts.throwsWith({ ->
+        endRequest();
+        0;
+    }, "request context is not established");
+}
+
+test "rakun request: the key is erased, not blanked" {
+    val _e = beginRequest(scopeOf("erase", RequestPhase.Handler, "/erase"));
+    val _x = endRequest();
+    assert requestLive() == false;
+    try asserts.throwsWith({ ->
+        requestEpoch();
+        0;
+    }, "request context is not established");
+}
+
+test "rakun request: the scope's fields read back off the frame" {
+    val _e = beginRequest(RequestScope(
+        id: "req-77",
+        phase: RequestPhase.Handler,
+        method: "POST",
+        path: "/api/posts",
+        query: "page=2",
+        headersWire: "accept\ttext/html",
+        strict: false,
+    ));
+    assert requestId() == "req-77";
+    assert requestMethod() == "POST";
+    assert requestPath() == "/api/posts";
+    assert requestQuery() == "page=2";
+    assert requestStrict() == false;
+    val _x = endRequest();
+}
+
+test "rakun request: setPhase is visible to requestPhase in the same process" {
+    val _e = beginRequest(scopeOf("phase", RequestPhase.Render, "/p"));
+    assert phaseName(requestPhase()) == "render";
+    val _s = setPhase(RequestPhase.Action);
+    assert phaseName(requestPhase()) == "action";
+    val _x = endRequest();
+}
+
+test "rakun request: every phase round-trips through its name" {
+    assert phaseName(phaseFrom("middleware")) == "middleware";
+    assert phaseName(phaseFrom("render")) == "render";
+    assert phaseName(phaseFrom("action")) == "action";
+    assert phaseName(phaseFrom("handler")) == "handler";
+    assert phaseName(phaseFrom("after")) == "after";
+    try asserts.throwsWith({ ->
+        phaseFrom("whenever");
+        0;
+    }, "is not a request phase");
+}
+
+test "rakun request: a strict frame reads back strict" {
+    val _e = beginRequest(RequestScope(
+        id: "prerender",
+        phase: RequestPhase.Render,
+        method: "GET",
+        path: "/about",
+        query: "",
+        headersWire: "",
+        strict: true,
+    ));
+    assert requestStrict() == true;
+    val _x = endRequest();
+}
+
+test "rakun request: the refusal texts say what they mean" {
+    assert noFrameProblem("headers()")
+        == "rakun request: request context is not established - headers() is legal only while a request is in flight";
+    assert nestedFrameProblem("/one").contains("beginRequest inside a request scope is a dispatcher bug");
+    assert staleEpochProblem("cookies").contains("somebody else's response");
+}
+
+test "rakun request: the deferred-work budget defaults to thirty seconds" {
+    assert afterTimeoutMs() == 30000;
+}

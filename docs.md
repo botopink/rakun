@@ -218,6 +218,45 @@ one URL, a registered segment with no directory and a directory that registered
 nothing. `appDirOf()` reads `onze.appDir` (front 05) and defaults to `app`, so
 moving between `app/` and `src/app/` is one config line.
 
+## The request context
+
+`request_context.bp` is the server-side scope. Nothing else on the server can
+reach the in-flight request: a `Request` lives only inside the function the
+router dispatched to.
+
+```bp
+import {RequestPhase, RequestScope, beginRequest, endRequest, requestPhase} from "rakun";
+
+val epoch = beginRequest(RequestScope(
+    id: "req-77",
+    phase: RequestPhase.Handler,
+    method: "GET",
+    path: "/api/posts",
+    query: "page=2",
+    headersWire: wire,
+    strict: false,
+));
+val body = runHandler();
+val setCookies = endRequest();
+```
+
+`headersWire` is `name\tvalue` lines, `\n`-separated, names already lowercased
+by the dispatcher. `endRequest()` must run on the failure path too, or the next
+request on a keep-alive connection starts inside the previous one's frame.
+
+The scope is a FRAME with an EPOCH, not a process: a connection process serves
+many requests in sequence, so every handle minted from the frame carries the
+epoch it was minted with and raises if it is used after `endRequest` or from the
+next request. Reading outside a request is a hard failure — `requestPhase()`
+with no frame raises `request context is not established`, and there is no
+lenient mode, no `…Or(default)` and no predicate to branch around it. A library
+that has to work both inside and outside a request takes the values as
+parameters.
+
+The five phases are `Middleware`, `Render`, `Action`, `Handler` and `After`, and
+the phase is stored once: front 12's `rkCachePhase()` reads this slot rather
+than keeping a second one.
+
 ## Loading notes
 
 Unlike `libs/std`, this package is **not** `@embedFile`'d into a `prelude.zig`
