@@ -1,0 +1,195 @@
+//// rakun — per-request memoization.
+////
+//// The loader's side effect is an ETS counter rather than a local, for the
+//// reason the front's own text gives: "the second call does not evaluate its
+//// `load` argument at all — the loader increments an ETS counter and the
+//// counter reads 1". A local would be captured by the closure and prove
+//// nothing about whether the closure ran.
+////
+//// Every cell here runs on both rows. Where the mechanism differs — `preload`
+//// is a spawned child on the BEAM and an eager load on node — the assertion is
+//// the one both rows answer: the loader ran once and the memo carries its
+//// value.
+
+import {asserts} from "std";
+import {
+    RequestPhase,
+    RequestScope,
+    beginRequest,
+    endRequest,
+    rkReqShareBump,
+    rkReqShareCount,
+    rkReqShareReset,
+    rkReqSleep,
+} from "request_context";
+import {
+    memoKey,
+    memoKeyProblem,
+    memoize,
+    preload,
+    memoState,
+    memoHits,
+    memoMisses,
+} from "request_memo";
+
+fn memoScope(id: string) -> RequestScope {
+    return RequestScope(
+        id: id,
+        phase: RequestPhase.Render,
+        method: "GET",
+        path: "/blog/hello",
+        query: "",
+        headersWire: "",
+        strict: false,
+    );
+}
+
+fn loadPost() -> string {
+    rkReqShareBump("loads");
+    return "the post";
+}
+
+fn slowPost() -> string {
+    rkReqSleep(150);
+    rkReqShareBump("loads");
+    return "the slow post";
+}
+
+#[@future]
+fn loadPostAsync() -> @Future<string> {
+    rkReqShareBump("loads");
+    return "the async post";
+}
+
+fn explodingLoad() -> string {
+    @panic("the database is on fire");
+    return "";
+}
+
+test "rakun memo: a key is readable, prefixed and refuses the separator" {
+    assert memoKey("post", ["7"]) == "post|7";
+    assert memoKey("post", ["7", "en"]) == "post|7|en";
+    assert memoKey("post", []) == "post";
+    try asserts.throwsWith({ ->
+        memoKey("post", ["a|b"]);
+        0;
+    }, "holds the separator");
+    assert memoKeyProblem("a|b").contains("answers the wrong record");
+}
+
+test "rakun memo: two memoize calls with one key run the loader once" {
+    val _z = rkReqShareReset();
+    val _e = beginRequest(memoScope("m-1"));
+    val first: string = memoize(memoKey("post", ["7"]), { -> loadPost() });
+    val second: string = memoize(memoKey("post", ["7"]), { -> loadPost() });
+    assert first == "the post";
+    assert second == "the post";
+    assert rkReqShareCount("loads") == 1;
+    assert memoHits() == 1;
+    assert memoMisses() == 1;
+    val _x = endRequest();
+}
+
+test "rakun memo: two different keys run the loader twice" {
+    val _z = rkReqShareReset();
+    val _e = beginRequest(memoScope("m-2"));
+    val _a: string = memoize(memoKey("post", ["7"]), { -> loadPost() });
+    val _b: string = memoize(memoKey("post", ["8"]), { -> loadPost() });
+    assert rkReqShareCount("loads") == 2;
+    assert memoMisses() == 2;
+    assert memoHits() == 0;
+    val _x = endRequest();
+}
+
+test "rakun memo: a memo does not survive its request" {
+    val _z = rkReqShareReset();
+    val _e = beginRequest(memoScope("m-3a"));
+    val _a: string = memoize("post|7", { -> loadPost() });
+    val _x = endRequest();
+
+    val _e2 = beginRequest(memoScope("m-3b"));
+    assert memoState("post|7") == 0;
+    val _b: string = memoize("post|7", { -> loadPost() });
+    assert rkReqShareCount("loads") == 2;
+    assert memoMisses() == 1;
+    val _x2 = endRequest();
+}
+
+test "rakun memo: preload then memoize runs the loader once and answers the preloaded value" {
+    val _z = rkReqShareReset();
+    val _e = beginRequest(memoScope("m-4"));
+    val started: i32 = preload("post|7", { -> loadPost() });
+    assert started == 1;
+    val value: string = memoize("post|7", { -> loadPost() });
+    assert value == "the post";
+    assert rkReqShareCount("loads") == 1;
+    assert memoState("post|7") == 1;
+    val _x = endRequest();
+}
+
+test "rakun memo: memoize over a preload that is still running waits for the child" {
+    val _z = rkReqShareReset();
+    val _e = beginRequest(memoScope("m-5"));
+    val _p: i32 = preload("post|slow", { -> slowPost() });
+    val value: string = memoize("post|slow", { -> slowPost() });
+    assert value == "the slow post";
+    assert rkReqShareCount("loads") == 1;
+    assert memoState("post|slow") == 1;
+    val _x = endRequest();
+}
+
+test "rakun memo: a second preload for one key does not start a second load" {
+    val _z = rkReqShareReset();
+    val _e = beginRequest(memoScope("m-6"));
+    val first: i32 = preload("post|7", { -> loadPost() });
+    val second: i32 = preload("post|7", { -> loadPost() });
+    assert first == 1;
+    assert second == 0;
+    val value: string = memoize("post|7", { -> loadPost() });
+    assert value == "the post";
+    assert rkReqShareCount("loads") == 1;
+    val _x = endRequest();
+}
+
+test "rakun memo: a loader that raises does not poison the key" {
+    val _z = rkReqShareReset();
+    val _e = beginRequest(memoScope("m-7"));
+    try asserts.throwsWith({ ->
+        memoize("post|boom", { -> explodingLoad() });
+        0;
+    }, "the database is on fire");
+    assert memoState("post|boom") == 0;
+    val value: string = memoize("post|boom", { -> loadPost() });
+    assert value == "the post";
+    assert rkReqShareCount("loads") == 1;
+    val _x = endRequest();
+}
+
+// The front's own row: with the loader `#[@future]`-annotated, the eager erlang
+// lowering means the FIRST call stores a value, so the second call is the
+// resolved-value row of the table and never re-runs it.
+test "rakun memo: a future-returning loader memoizes the same way" {
+    val _z = rkReqShareReset();
+    val _e = beginRequest(memoScope("m-8"));
+    val first = memoize("post|async", { -> loadPostAsync() });
+    val second = memoize("post|async", { -> loadPostAsync() });
+    assert rkReqShareCount("loads") == 1;
+    assert memoHits() == 1;
+    assert memoMisses() == 1;
+    val _x = endRequest();
+}
+
+test "rakun memo: memoize outside a request raises" {
+    try asserts.throwsWith({ ->
+        memoize("post|7", { -> loadPost() });
+        0;
+    }, "request context is not established");
+    try asserts.throwsWith({ ->
+        preload("post|7", { -> loadPost() });
+        0;
+    }, "request context is not established");
+    try asserts.throwsWith({ ->
+        memoHits();
+        0;
+    }, "request context is not established");
+}

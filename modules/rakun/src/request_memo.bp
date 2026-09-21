@@ -1,0 +1,90 @@
+//// rakun — per-request memoization: the `React.cache` analogue.
+////
+//// `§ 9`'s "fetches idênticos no mesmo render são automaticamente memoizados"
+//// and `§ 18`'s `generateMetadata`/page dedup are the same rule seen twice, and
+//// the scope they need is the one `request_context.bp` opens. One table per
+//// FRAME: a miss runs the loader and stores, a hit answers the stored value and
+//// does not evaluate the loader at all, and two requests with the same key run
+//// the loader twice — a memo that survives a request is a cache, and caches
+//// belong to front 12.
+////
+//// WHY `preload` IS NOT BUILT ON `@Future`. On erlang `@Future<T>` lowers
+//// EAGERLY — `libs/std/src/http.bp` says so in as many words: "Erlang is eager:
+//// `@Future<T>` resolves to `T` in the eager-lowering arm" — so `await` is
+//// identity and a future is a value that has already been computed. `preload`
+//// therefore spawns a BEAM process and stores a PENDING marker holding the
+//// child's pid; a later `memoize` with the same key waits on that child's
+//// monitor rather than starting a second load. There is no third state in which
+//// the frame holds an unresolved future, which is a simplification the BEAM
+//// gives away and this front takes rather than modelling a promise it cannot
+//// observe.
+////
+//// Node has no process, so `preload` there runs the loader immediately and
+//// stores the resolved value: the "pending" row of the front's table is a BEAM
+//// shape. Every assertion the front makes about preload — the loader runs once,
+//// the memo answers the preloaded value — holds on both rows; what differs is
+//// whether anything was ever in flight.
+
+import {demandRequest, rkMemoState, rkMemoResolve, rkMemoPreload, rkMemoCount} from "request_context";
+
+// `memoKey(name, parts)` joins with `|` and prefixes the name — the same shape
+// front 12's `cacheKey` uses, with two differences. It does not HASH, because a
+// request-scoped table is small and a readable key is worth more than a fixed
+// width; and it REFUSES a part carrying the separator, which is the rule
+// `file_router.bp`'s wire format already applies to a segment name. A key that
+// two different argument lists can produce is a memo that answers the wrong
+// record, and that is the one bug a memo can have.
+
+pub fn memoKeyProblem(part: string) -> string {
+    return "rakun memo: the key part `" + part
+        + "` holds the separator `|` - two different argument lists would build one key, "
+        + "and a memo that answers the wrong record is the one bug a memo can have";
+}
+
+pub fn memoKey(name: string, parts: Array<string>) -> string {
+    var out: string = name;
+    var i = 0;
+    loop (i < parts.length()) {
+        val part: string = parts.at(i).unwrapOr("");
+        if (part.contains("|")) @panic(memoKeyProblem(part));
+        out = out + "|" + part;
+        i = i + 1;
+    };
+    if (name.contains("|")) @panic(memoKeyProblem(name));
+    return out;
+}
+
+// The three cases a caller can produce within one request, stated so nothing is
+// left to decide: nothing stored runs the loader and stores it; a resolved
+// value answers without evaluating the loader; a pending marker waits on the
+// child and stores what it answers.
+pub fn memoize<T>(key: string, load: fn() -> T) -> T {
+    val _d = demandRequest("memoize()");
+    return rkMemoResolve(key, load);
+}
+
+// `§ 9`'s preload pattern. A caller who wants SEVERAL preloads in flight should
+// reach for front 02's async primitives, which take unstarted tasks
+// (`Array<fn() -> @Future<T>>`) for exactly this reason, rather than calling
+// this in a loop.
+pub fn preload<T>(key: string, load: fn() -> T) -> i32 {
+    val _d = demandRequest("preload()");
+    return rkMemoPreload(key, load);
+}
+
+// 0 nothing · 1 a resolved value · 2 a preload still running. Front 23 reads it
+// to tell "not loaded" from "loading" without starting a second load.
+pub fn memoState(key: string) -> i32 {
+    val _d = demandRequest("memoState()");
+    return rkMemoState(key);
+}
+
+pub fn memoHits() -> i32 {
+    val _d = demandRequest("memoHits()");
+    return rkMemoCount("hits");
+}
+
+pub fn memoMisses() -> i32 {
+    val _d = demandRequest("memoMisses()");
+    return rkMemoCount("misses");
+}

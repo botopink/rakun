@@ -167,6 +167,30 @@
   `botopink test` 195/195; `botopink test --target erlang` 186 passing / 9
   failing, the same nine that are not this front's.
 
+- **`request_memo.bp` — the `React.cache` analogue** (front 62, step 6).
+  `memoize(key, load)` is `rkSingleton` one scope down: two calls with one key
+  run the loader once, `memoHits()` is 1 and `memoMisses()` is 1, and the hit
+  does not evaluate the loader at all — asserted with an ETS counter, because a
+  local would be captured by the closure and prove nothing. Two requests with
+  the same key run the loader twice; a loader that raises stores nothing, so the
+  next call runs it again. `preload(k, load)` then `memoize(k, load)` runs the
+  loader once and answers the preloaded value, a second `preload` for one key
+  starts nothing, and a `memoize` over a preload that is still running waits for
+  the child — asserted with a loader that sleeps. The `#[@future]` row holds
+  too: the eager erlang lowering means the first call stores a value, so the
+  second is the resolved-value row.
+
+  `preload` is not built on `@Future` and cannot be: on erlang `@Future<T>`
+  lowers eagerly, so `await` is identity and there is no third state in which
+  the frame holds an unresolved future. It spawns a monitored child and stores a
+  pending marker instead. Node has no process, so `preload` there runs the
+  loader immediately — the pending row is a BEAM shape, and every assertion the
+  front makes holds on both rows. `memoKey` joins with `|`, prefixes the name,
+  does not hash, and refuses a part carrying the separator: a key two argument
+  lists can produce is a memo that answers the wrong record. Measured:
+  `botopink test` 205/205; `botopink test --target erlang` 196 passing / 9
+  failing, the same nine that are not this front's.
+
 - **The route table crosses the boundary, and one matcher reads it on both
   rows** (front 22, steps 3 and 4). `RouteEntry(kind, pattern, slot, verb)`
   writes as `kind|pattern|slot|verb`, one record per line in registration order,

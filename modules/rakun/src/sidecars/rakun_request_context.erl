@@ -38,6 +38,7 @@
          after_stat/1, after_log/0, after_reset/0]).
 -export([share_bump/1, share_count/1, share_put/2, share_get/1, share_reset/0,
          sleep/1]).
+-export([memo_state/1, memo_resolve/2, memo_preload/2, memo_count/1]).
 
 %% reachable for a test or a later front
 -export([ensure/0, owner/1]).
@@ -333,3 +334,101 @@ sleep(Ms) when Ms > 0 ->
     0;
 sleep(_) ->
     0.
+
+%% ═══ the per-request memo table ══════════════════════════════════════════════
+%% `singleton/2` one scope down: answer the stored value, or run the thunk and
+%% store it. The table lives IN the frame, so it dies with the request — a memo
+%% that survives a request is a cache, and caches belong to front 12.
+%%
+%% `preload/2` spawns a monitored child and stores a PENDING marker holding its
+%% pid; a later `memo_resolve/2` waits on that monitor rather than starting a
+%% second load. A child that dies without answering is not a poisoned key: the
+%% waiter runs the loader itself. A loader that RAISES in the waiter's own
+%% process propagates and stores nothing, which is the same rule seen from the
+%% other side.
+
+memo_state(Key) ->
+    case get(?FRAME) of
+        #{memo := M} ->
+            case maps:get(Key, M, none) of
+                none -> 0;
+                {value, _} -> 1;
+                {pending, _, _} -> 2
+            end;
+        _ -> 0
+    end.
+
+memo_resolve(Key, Load) ->
+    case get(?FRAME) of
+        #{memo := M} ->
+            case maps:get(Key, M, none) of
+                {value, V} ->
+                    _ = memo_bump(<<"hits">>),
+                    V;
+                {pending, Pid, Ref} ->
+                    _ = memo_bump(<<"hits">>),
+                    V = memo_await(Key, Pid, Ref, Load),
+                    memo_store(Key, V),
+                    V;
+                none ->
+                    _ = memo_bump(<<"misses">>),
+                    V = Load(),
+                    memo_store(Key, V),
+                    V
+            end;
+        _ -> Load()
+    end.
+
+memo_await(Key, Pid, Ref, Load) ->
+    receive
+        {memo_ready, Key, V} ->
+            erlang:demonitor(Ref, [flush]),
+            V;
+        {'DOWN', Ref, process, Pid, _} ->
+            Load()
+    after 30000 ->
+        exit(Pid, kill),
+        erlang:demonitor(Ref, [flush]),
+        Load()
+    end.
+
+memo_preload(Key, Load) ->
+    case get(?FRAME) of
+        #{memo := M} = F ->
+            case maps:get(Key, M, none) of
+                none ->
+                    Parent = self(),
+                    {Pid, Ref} = spawn_monitor(fun() ->
+                        Parent ! {memo_ready, Key, Load()}
+                    end),
+                    put(?FRAME, F#{memo := M#{Key => {pending, Pid, Ref}}}),
+                    1;
+                _ -> 0
+            end;
+        _ -> 0
+    end.
+
+%% Re-read the frame: `Load()` may have written slots or queued a cookie, and
+%% the map this function was handed would be stale.
+memo_store(Key, V) ->
+    case get(?FRAME) of
+        #{memo := M} = F -> put(?FRAME, F#{memo := M#{Key => {value, V}}}), 0;
+        _ -> 0
+    end.
+
+memo_bump(Name) ->
+    case get(?FRAME) of
+        #{slots := S} = F ->
+            Key = <<"memo:", Name/binary>>,
+            N = binary_to_integer(maps:get(Key, S, <<"0">>)) + 1,
+            put(?FRAME, F#{slots := S#{Key => integer_to_binary(N)}}),
+            N;
+        _ -> 0
+    end.
+
+memo_count(Name) ->
+    case get(?FRAME) of
+        #{slots := S} ->
+            binary_to_integer(maps:get(<<"memo:", Name/binary>>, S, <<"0">>));
+        _ -> 0
+    end.

@@ -85,6 +85,8 @@ rakun/
 │   │   │   │                    the frame, its epoch, the five phases and the
 │   │   │   │                    refusal texts. Every accessor raises outside a
 │   │   │   │                    request and there is no flag that changes it
+│   │   │   ├── request_memo.bp ← the `React.cache` analogue over the frame's
+│   │   │   │                    table: `memoize` · `preload` · `memoKey`
 │   │   │   ├── request_context.mjs ← the frame, node half: a module-global slot
 │   │   │   │                    store. Knows no phase, no header, no cookie
 │   │   │   ├── sidecars/rakun_request_context.erl ← the frame on the BEAM: ONE
@@ -108,6 +110,8 @@ rakun/
 │   │       │                     its own module
 │   │       ├── request_context_test.bp ← the frame lifecycle and the epoch
 │   │       │                     discipline, the keep-alive case FIRST
+│   │       ├── request_memo_test.bp ← hit/miss counts, per-request lifetime,
+│   │       │                     preload single-flight, non-poisoning
 │   │       ├── file_router_scan_test.bp ← the scan over real fixture trees under
 │   │       │                     `test/fixtures/{routing,conflict-both,conflict-roots,
 │   │       │                     middleware}`: the conflicts, the `_` skip, `app` vs
@@ -820,6 +824,37 @@ loader increments an ETS counter". `rkReqSleep` is a BLOCKING sleep —
 `timer:sleep/1` on the BEAM, `Atomics.wait` on node — because front 01's `clock`
 module does not exist yet and the deferred-work assertions need a thunk that is
 still running.
+
+### Per-request memoization — `request_memo.bp`
+
+`memoize(key, load)` is `rkSingleton` one scope down: answer the stored value,
+or run the thunk and store it. The table lives IN the frame, so it dies with the
+request — a memo that survives a request is a cache, and caches belong to front
+12. A hit does not evaluate the loader AT ALL, which is asserted with an ETS
+counter rather than a local: a local would be captured by the closure and prove
+nothing about whether the closure ran.
+
+**`preload` is not built on `@Future`, and cannot be.** On erlang `@Future<T>`
+lowers eagerly — `libs/std/src/http.bp` says so in as many words — so `await` is
+identity and a future is a value that has already been computed. `preload`
+therefore spawns a monitored child and stores a PENDING marker holding its pid;
+a later `memoize` with that key waits on the monitor rather than starting a
+second load, and a child that dies without answering is not a poisoned key (the
+waiter runs the loader itself). There is no third state in which the frame holds
+an unresolved future. Node has no process, so `preload` there runs the loader
+immediately and stores the resolved value: the pending row is a BEAM shape, and
+every assertion the front makes — the loader runs once, the memo answers the
+preloaded value — holds on both rows.
+
+`memoKey(name, parts)` joins with `|` and prefixes the name, and REFUSES a part
+carrying the separator — the rule `file_router.bp`'s wire format already applies
+to a segment name. A key two different argument lists can produce is a memo that
+answers the wrong record, which is the one bug a memo can have. It does not
+hash: a request-scoped table is small and a readable key is worth more than a
+fixed width.
+
+A loader that raises stores nothing, so the next `memoize` with that key runs it
+again.
 
 ### Language notes this module is written around
 

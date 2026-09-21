@@ -224,3 +224,56 @@ export function sleep(ms) {
   }
   return 0;
 }
+
+// ── the per-request memo table ───────────────────────────────────────────────
+//
+// `rkSingleton` one scope down: answer the stored value, or run the thunk and
+// store it. The table lives IN the frame, so it dies with the request — a memo
+// that survives a request is a cache, and caches belong to front 12.
+//
+// Node has no process, so `preload` runs the loader immediately and stores the
+// resolved value; the "pending" row of the front's table is a BEAM shape and
+// this row can only ever be at the resolved one. Every assertion the front
+// makes about preload — the loader runs once, the memo answers the preloaded
+// value — holds either way; what differs is whether anything was ever in
+// flight.
+
+function memoBump(name) {
+  if (!live()) return 0;
+  const key = "memo:" + name;
+  const n = (frame.slots.get(key) ? Number(frame.slots.get(key)) : 0) + 1;
+  frame.slots.set(key, String(n));
+  return n;
+}
+
+export function memoCount(name) {
+  if (!live()) return 0;
+  const v = frame.slots.get("memo:" + name);
+  return v ? Number(v) : 0;
+}
+
+export function memoState(key) {
+  if (!live()) return 0;
+  return frame.memo.has(key) ? 1 : 0;
+}
+
+export function memoResolve(key, load) {
+  if (!live()) return load();
+  if (frame.memo.has(key)) {
+    memoBump("hits");
+    return frame.memo.get(key);
+  }
+  memoBump("misses");
+  const value = load();
+  if (live()) frame.memo.set(key, value);
+  return value;
+}
+
+export function memoPreload(key, load) {
+  if (!live()) return 0;
+  if (frame.memo.has(key)) return 0;
+  memoBump("misses");
+  const value = load();
+  if (live()) frame.memo.set(key, value);
+  return 1;
+}

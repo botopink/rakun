@@ -344,6 +344,24 @@ Node cannot interrupt a synchronous function, so it counts a thunk that overran
 in the same slot — same counters, same log, one interruption real and one after
 the fact.
 
+### Per-request memoization
+
+```bp
+import {memoKey, memoize, preload} from "rakun";
+
+fn getPost(id: string) -> string {
+    return memoize(memoKey("post", [id]), { -> loadPost(id) });
+}
+```
+
+One table per request. A miss runs the loader and stores; a hit answers the
+stored value and does not evaluate the loader at all; two requests with the same
+key run it twice — a memo that survives a request is a cache, and caches belong
+to front 12. `preload(key, load)` starts the load early (a spawned child on the
+BEAM, an eager load on node) and a later `memoize` with that key waits for it
+rather than starting a second one. `memoKey` does not hash and refuses a part
+carrying its `|` separator.
+
 ## Loading notes
 
 Unlike `libs/std`, this package is **not** `@embedFile`'d into a `prelude.zig`
