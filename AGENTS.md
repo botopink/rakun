@@ -390,6 +390,53 @@ this front's work and is not on the critical path. The refusal is the point: a
 construct outside the subset stops the boot naming the line rather than loading
 a value that is not the one the file says.
 
+### Placeholders, `${random.*}` and the typed readers
+
+`${key}` and `${key:default}` resolve at LOAD time, recursively, over the merged
+entries first and the property table second. An unresolvable `${key}` with no
+default is a startup failure naming the key and the property that referenced it —
+there is no mode in which it silently becomes the empty string — and a cycle
+(`a=${b}`, `b=${a}`) is a failure naming the chain.
+
+`${random.*}` is not a source and is not resolved at load time. `rkValue(key)`
+resolves it at REFERENCE time, so `${random.int[1024,65536]}` answers differently
+per reference and is never cached: `value`, `int`, `long`, `uuid`, `int(10)` and
+`int[lo,hi]`. The table keeps the placeholder text, which is what makes the
+"differs between two references" property true and is also the one thing
+`#[value("key")]` does not see — `decorators.bp` is frozen and emits `rkProp`,
+not `rkValue`, so a `${random.*}` key read through `#[value]` answers the
+placeholder. Recorded rather than worked around.
+
+| Reader | Answers | Row 8 |
+|---|---|---|
+| `rkValue(key)` | `string`, with `${random.*}` resolved | `rkValueOr(key, fallback)` |
+| `rkPropBool(key, fallback)` | `true`/`yes`/`on`/`1` and their opposites | the argument |
+| `rkPropIntOr(key, fallback)` | `i32` | the argument |
+| `rkPropFloat(key, fallback)` | `f64` | the argument |
+| `rkPropList(key)` | `string[]` from `key[0]`, `key[1]`, … or from a comma-separated scalar | empty |
+| `rkPropDuration(key, unit)` | `Duration` | — |
+| `rkPropSize(key, unit)` | `DataSize` | — |
+
+**Relaxed binding lives in the reader**, not in the emitter: each tries the
+written key, then the kebab-case spelling, then the camelCase one, then the
+underscored upper-case one, so `remoteAddress` binds from `remote-address`, from
+`remoteAddress` and from `REMOTE_ADDRESS` without the caller knowing which
+spelling a file used.
+
+`Duration` parses `30` (against the `#[unit]` default), `30s`, `500ms`, `2m`,
+`1h`, `1d`, `PT30S` and `PT1H30M`; `DataSize` parses `10`, `10B`, `10KB`,
+`10MB`, `10GB` and `10TB`. An unparsable value is a startup failure naming the
+key, the value and the accepted forms — never a zero. The refusal MESSAGE is its
+own function (`durationProblem` / `dataSizeProblem` / `boolProblem`) and the
+parser asserts on it, which is what lets a test read the message without the
+halt taking the test with it.
+
+Both carry `i32` where the spec writes `i64`: an integer literal is `i32` and
+there is no widening and no cast, so an `i64` field cannot be given a value at
+all. It is not the narrowing it reads as — a botopink integer is a JavaScript
+number on the node row and a BEAM integer on the erlang one, so `10GB`
+(10737418240) is exact on both and is asserted as such.
+
 ### Language notes this module is written around
 
 Each was measured against the compiler at `repository/botopink-lang`, not
@@ -413,6 +460,16 @@ guessed, and each costs a spelling in `src/config.bp`:
 - On the erlang row `try` unwraps only in a `val` binding — `return try f()` and
   `g(try f())` both hand on the `{ok, …}` wrapper.
 - `from` is a keyword and cannot name a parameter.
+- `${…}` INTERPOLATES inside a string literal, so a literal `${` has to be built
+  (`"$" + "{"`); `"${" + body + "}"` silently compiles to the interpolation of
+  `" + body + "` and the value comes out as that text.
+- `x.field.length()` is emitted as a call against JavaScript's `length` PROPERTY
+  and dies on the node row; bind the field to a local first.
+- A `loop (cond)` or `loop (0..n)` body is lowered to recursion on commonJS, so a
+  thousand iterations exceeds the JavaScript stack. std's
+  `random.intInRange` also floors a float by walking one recursive step per unit
+  of range, which blows the stack for anything the size of a port space — hence
+  `randomBelow`, rejection sampling over composed decimal digits.
 - A module-level `val` with an ALL-CAPS name is emitted as an erlang VARIABLE and
   comes back `unbound`, which takes the whole module down; every constant here is
   a function.

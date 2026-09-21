@@ -36,7 +36,7 @@
 ////     module also references a sibling erlang module. `env` and `fs` are reached
 ////     here beside rakun's own host cells, which is exactly that case.
 
-import {fs, env} from "std";
+import {fs, env, random} from "std";
 import {rkSetProp, rkProp} from "runtime";
 import {matches, expand, setResolved} from "profiles";
 
@@ -1094,7 +1094,10 @@ pub fn rkConfigLoadFrom(args: string[]) -> @Result<i32, string> {
     merged = mergeInto(merged, flattenDocs(profileDocs.docs, actives, platform));
     merged = mergeInto(merged, high);
 
-    val written = rkConfigApply(merged);
+    val resolvedValues = resolveAll(merged);
+    if (resolvedValues.error != "") throw resolvedValues.error;
+
+    val written = rkConfigApply(resolvedValues.entries);
     val _ = setResolved(actives);
     return written;
 }
@@ -1103,4 +1106,529 @@ pub fn rkConfigLoadFrom(args: string[]) -> @Result<i32, string> {
 pub fn rkConfigLoad() -> @Result<i32, string> {
     val n = try rkConfigLoadFrom(env.args());
     return n;
+}
+
+// ── step 4: placeholders ────────────────────────────────────────────────────
+// `${key}` and `${key:default}`, resolved recursively with a depth limit, over
+// the merged entries first and the property table second. An unresolvable
+// `${key}` with NO default is a startup failure naming the key and the property
+// that referenced it — there is no mode in which it silently becomes the empty
+// string. A cycle (`a=${b}`, `b=${a}`) is a failure naming the chain rather than
+// a loop.
+//
+// `${random.*}` is NOT a source and is NOT resolved here: it is resolved at
+// REFERENCE time by `rkValue`, so `${random.int[1024,65536]}` answers
+// differently per reference and is never cached.
+
+pub type Res(
+    value: string,
+    error: string,
+)
+
+// `${` cannot be written as a literal: botopink INTERPOLATES `${…}` inside a
+// string, so `"${" + body + "}"` compiles to the interpolation of the expression
+// `" + body + "` and the value comes out as the text ` + body + `. Every literal
+// placeholder in this module is built through this function.
+fn openBrace() -> string {
+    return "$" + "{";
+}
+
+fn indexFrom(s: string, needle: string, start: i32) -> i32 {
+    var i = start;
+    var found = -1;
+    loop (i < s.length()) {
+        if (found < 0) {
+            if (charOf(s, i) == needle) found = i;
+        };
+        i = i + 1;
+    };
+    return found;
+}
+
+pub fn resolveIn(raw: string, owner: string, entries: Array<Entry>, trail: string[]) -> Res {
+    var out = "";
+    var err = "";
+    var i = 0;
+    loop (i < raw.length()) {
+        val opens = (charOf(raw, i) == "$" && charOf(raw, i + 1) == "{");
+        if (opens) {
+            val close = indexFrom(raw, "}", i + 2);
+            if (close < 0) {
+                out = out + charOf(raw, i);
+                i = i + 1;
+            } else {
+                val body: string = sub(raw, i + 2, close);
+                val r = resolveRef(body, owner, entries, trail);
+                if (r.error != "") {
+                    if (err == "") err = r.error;
+                };
+                out = out + r.value;
+                i = close + 1;
+            };
+        } else {
+            out = out + charOf(raw, i);
+            i = i + 1;
+        };
+    };
+    return Res(value: out, error: err);
+}
+
+fn resolveRef(body: string, owner: string, entries: Array<Entry>, trail: string[]) -> Res {
+    val colon = body.indexOf(":");
+    val key: string = if (colon < 0) body.trim() else sub(body, 0, colon).trim();
+    val fallback: string = if (colon < 0) "" else sub(body, colon + 1, body.length());
+    if (key.startsWith("random.")) return Res(value: openBrace() + body + "}", error: "") else if (trail.length > 32) return Res(
+        value: "",
+        error: owner + ": placeholder nesting deeper than 32 — " + trail.join(" -> "),
+    ) else if (containsName(trail, key)) return Res(
+        value: "",
+        error: owner + ": placeholder cycle — " + trail.join(" -> ") + " -> " + key,
+    ) else {
+        val present = (entryHas(entries, key) || rkProp(key) != "");
+        if (present == false) {
+            if (colon < 0) return Res(
+                value: "",
+                error: owner + ": unresolvable placeholder " + openBrace() + key + "} — nothing sets `" + key + "` and the reference carries no `:default`",
+            ) else {
+                var deeper = trail;
+                deeper.push(key);
+                return resolveIn(fallback, owner, entries, deeper);
+            };
+        } else {
+            val found: string = if (entryHas(entries, key)) entryAt(entries, key) else rkProp(key);
+            var deeper = trail;
+            deeper.push(key);
+            return resolveIn(found, owner, entries, deeper);
+        };
+    };
+}
+
+fn containsName(xs: string[], name: string) -> bool {
+    var found = false;
+    loop (xs) { x -> if (x == name) { found = true; }; };
+    return found;
+}
+
+pub type Resolution(
+    entries: Array<Entry>,
+    error: string,
+)
+
+pub fn resolveAll(entries: Array<Entry>) -> Resolution {
+    var out: Array<Entry> = [];
+    var err = "";
+    loop (entries) { e ->
+        var trail: string[] = [];
+        trail.push(e.key);
+        val r = resolveIn(e.value, e.key, entries, trail);
+        if (r.error != "") {
+            if (err == "") err = r.error;
+        };
+        out.push(Entry(key: e.key, value: r.value));
+    };
+    return Resolution(entries: out, error: err);
+}
+
+// ── `${random.*}`, at reference time ────────────────────────────────────────
+// `value`, `int`, `long`, `uuid`, `int(10)` and `int[1024,65536]`, over std's
+// `random`. Never cached: two references to the same key answer differently,
+// which is the whole point of the form.
+
+pub fn resolveRandom(raw: string) -> string {
+    var out = "";
+    var i = 0;
+    loop (i < raw.length()) {
+        val opens = (charOf(raw, i) == "$" && charOf(raw, i + 1) == "{");
+        if (opens) {
+            val close = indexFrom(raw, "}", i + 2);
+            if (close < 0) {
+                out = out + charOf(raw, i);
+                i = i + 1;
+            } else {
+                val body: string = sub(raw, i + 2, close);
+                if (body.startsWith("random.")) out = out + randomFor(body) else out = out + openBrace() + body + "}";
+                i = close + 1;
+            };
+        } else {
+            out = out + charOf(raw, i);
+            i = i + 1;
+        };
+    };
+    return out;
+}
+
+fn randomFor(body: string) -> string {
+    val spec: string = sub(body, 7, body.length());
+    if (spec == "value") return randomHex(32) else if (spec == "uuid") return randomUuid() else if (spec == "long") return "" + randomBelow(
+        2000000000
+    ) + "" + randomBelow(1000000000) else if (spec == "int") return "" + randomBelow(2147483647) else if (spec.startsWith("int(")) {
+        val inner: string = sub(spec, 4, spec.length() - 1);
+        return "" + randomBelow(toI32(inner));
+    } else if (spec.startsWith("int[")) {
+        val inner: string = sub(spec, 4, spec.length() - 1);
+        val comma = inner.indexOf(",");
+        if (comma < 0) return "" + randomBelow(toI32(inner)) else {
+            val lo = toI32(sub(inner, 0, comma));
+            val hi = toI32(sub(inner, comma + 1, inner.length()));
+            return "" + randomBetween(lo, hi);
+        };
+    } else return openBrace() + body + "}";
+}
+
+// std's `random.intInRange` walks up to `hi - lo` recursive steps to floor a
+// float (`floorWalk`), which blows the JavaScript stack for a range the size of
+// a TCP port space. Rejection sampling over composed decimal digits is uniform,
+// needs no float-to-int conversion (botopink has no cast) and costs a bounded
+// number of draws: for a 5-digit bound roughly two thirds of draws are accepted.
+fn digitsOf(n: i32) -> i32 {
+    var d = 1;
+    var bound = 10;
+    loop (bound <= n) {
+        bound = bound * 10;
+        d = d + 1;
+    };
+    return d;
+}
+
+fn drawDigits(d: i32) -> i32 {
+    var v = 0;
+    var i = 0;
+    loop (i < d) {
+        v = v * 10 + random.intInRange(0, 9);
+        i = i + 1;
+    };
+    return v;
+}
+
+pub fn randomBelow(n: i32) -> i32 {
+    if (n <= 1) return 0 else {
+        val d = digitsOf(n - 1);
+        var v = n;
+        var tries = 0;
+        loop ((v >= n && tries < 64)) {
+            v = drawDigits(d);
+            tries = tries + 1;
+        };
+        if (v >= n) return 0 else return v;
+    };
+}
+
+pub fn randomBetween(lo: i32, hi: i32) -> i32 {
+    if (hi <= lo) return lo else return lo + randomBelow(hi - lo + 1);
+}
+
+fn randomHex(n: i32) -> string {
+    var out = "";
+    var i = 0;
+    loop (i < n) {
+        out = out + hexDigit(randomBelow(16));
+        i = i + 1;
+    };
+    return out;
+}
+
+fn hexDigit(n: i32) -> string {
+    return "0123456789abcdef".at(n).unwrapOr("0");
+}
+
+// RFC 4122 version 4: the version nibble is `4` and the variant nibble is one of
+// `8`, `9`, `a`, `b`. A "random UUID" that is not a valid v4 is a bug a reader
+// only finds in production.
+fn randomUuid() -> string {
+    val variant: string = "89ab".at(randomBelow(4)).unwrapOr("8");
+    return randomHex(8) + "-" + randomHex(4) + "-4" + randomHex(3) + "-" + variant + randomHex(3) + "-" + randomHex(12);
+}
+
+// ── step 8: `Duration` and `DataSize` ───────────────────────────────────────
+//
+// The spec writes these as `i64`. An integer LITERAL is `i32` and there is no
+// widening and no cast, so an `i64` field cannot be given a value at all today;
+// both carry `i32`, which is not the narrowing it reads as — a botopink integer
+// is a JavaScript number on the node row and a BEAM integer on the erlang one,
+// so `10GB` (10737418240) is exact on both. The type NAME is the only thing the
+// gap costs.
+//
+// An unparsable value is a startup failure naming the key, the value and the
+// accepted forms — never a zero. `assert` is the halt: a typed reader is called
+// from an emitted factory, which is not a `#[@result]` context, and a wrong
+// configuration value must stop the program rather than be carried into a
+// request as a silent default.
+
+pub type Duration(
+    millis: i32,
+)
+
+pub type DataSize(
+    bytes: i32,
+)
+
+fn durationUnitMillis(unit: string) -> i32 {
+    val u: string = unit.toLower();
+    if (u == "nanos") return 0 else if (u == "millis") return 1 else if (u == "milliseconds") return 1 else if (u == "seconds") return 1000 else if (u == "minutes") return 60000 else if (u == "hours") return 3600000 else if (u == "days") return 86400000 else return 1;
+}
+
+fn durationSuffixMillis(suffix: string) -> i32 {
+    if (suffix == "ms") return 1 else if (suffix == "s") return 1000 else if (suffix == "m") return 60000 else if (suffix == "h") return 3600000 else if (suffix == "d") return 86400000 else return -1;
+}
+
+fn splitDigits(raw: string) -> string {
+    var out = "";
+    var i = 0;
+    var run = true;
+    loop (run) {
+        val c = charOf(raw, i);
+        if (isDigit(c)) {
+            out = out + c;
+            i = i + 1;
+        } else run = false;
+    };
+    return out;
+}
+
+// `PT1H30M`, `PT30S`, `PT0.5S` is refused (no fractional seconds in the subset).
+fn isoDurationMillis(raw: string) -> i32 {
+    val body: string = sub(raw, 2, raw.length());
+    var total = 0;
+    var digits = "";
+    var i = 0;
+    var bad = false;
+    loop (i < body.length()) {
+        val c = charOf(body, i);
+        if (isDigit(c)) digits = digits + c else {
+            val step: i32 = if (c == "H") 3600000 else if (c == "M") 60000 else if (c == "S") 1000 else -1;
+            if (step < 0) bad = true else total = total + toI32(digits) * step;
+            digits = "";
+        };
+        i = i + 1;
+    };
+    val unterminated = (digits != "");
+    if ((bad || unterminated)) return -1 else return total;
+}
+
+// The refusal MESSAGE is a function of its own, and the parser asserts on it.
+// `assert` is the halt — a typed reader is called from an emitted factory, which
+// is not a `#[@result]` context, and a wrong configuration value has to stop the
+// program rather than be carried into a request as a silent zero. Splitting the
+// message out is what lets a test read it without the halt taking the test with
+// it.
+
+pub fn durationProblem(raw: string, unit: string, key: string) -> string {
+    val v: string = raw.trim();
+    val forms = " — accepted: 30, 30s, 500ms, 2m, 1h, 1d, PT30S, PT1H30M";
+    if (v == "") return "" else if (v.startsWith("PT")) {
+        if (isoDurationMillis(v) < 0) return "rakun config: `" + key + "` is `" + raw + "`, which is not a duration" + forms else return "";
+    } else {
+        val digits: string = splitDigits(v);
+        val suffix: string = sub(v, digits.length(), v.length()).trim();
+        if (digits == "") return "rakun config: `" + key + "` is `" + raw + "`, which is not a duration" + forms else if (suffix == "") return "" else if (durationSuffixMillis(suffix) < 0) return "rakun config: `" + key + "` is `" + raw + "`, which is not a duration" + forms else return "";
+    };
+}
+
+pub fn parseDuration(raw: string, unit: string, key: string) -> Duration {
+    val problem: string = durationProblem(raw, unit, key);
+    assert problem == "", problem;
+    val v: string = raw.trim();
+    if (v == "") return Duration(millis: 0) else if (v.startsWith("PT")) return Duration(
+        millis: isoDurationMillis(v)
+    ) else {
+        val digits: string = splitDigits(v);
+        val suffix: string = sub(v, digits.length(), v.length()).trim();
+        if (suffix == "") return Duration(millis: toI32(digits) * durationUnitMillis(unit)) else return Duration(
+            millis: toI32(digits) * durationSuffixMillis(suffix),
+        );
+    };
+}
+
+fn sizeUnitBytes(unit: string) -> i32 {
+    val u: string = unit.toLower();
+    if (u == "bytes") return 1 else if (u == "kilobytes") return 1024 else if (u == "megabytes") return 1048576 else if (u == "gigabytes") return 1073741824 else if (u == "terabytes") return 1099511627776 else return 1;
+}
+
+fn sizeSuffixBytes(suffix: string) -> i32 {
+    val u: string = suffix.toUpper();
+    if (u == "B") return 1 else if (u == "KB") return 1024 else if (u == "MB") return 1048576 else if (u == "GB") return 1073741824 else if (u == "TB") return 1099511627776 else return -1;
+}
+
+pub fn dataSizeProblem(raw: string, unit: string, key: string) -> string {
+    val v: string = raw.trim();
+    val forms = " — accepted: 10, 10B, 10KB, 10MB, 10GB, 10TB";
+    if (v == "") return "" else {
+        val digits: string = splitDigits(v);
+        val suffix: string = sub(v, digits.length(), v.length()).trim();
+        if (digits == "") return "rakun config: `" + key + "` is `" + raw + "`, which is not a data size" + forms else if (suffix == "") return "" else if (sizeSuffixBytes(suffix) < 0) return "rakun config: `" + key + "` is `" + raw + "`, which is not a data size" + forms else return "";
+    };
+}
+
+pub fn parseDataSize(raw: string, unit: string, key: string) -> DataSize {
+    val problem: string = dataSizeProblem(raw, unit, key);
+    assert problem == "", problem;
+    val v: string = raw.trim();
+    if (v == "") return DataSize(bytes: 0) else {
+        val digits: string = splitDigits(v);
+        val suffix: string = sub(v, digits.length(), v.length()).trim();
+        if (suffix == "") return DataSize(bytes: toI32(digits) * sizeUnitBytes(unit)) else return DataSize(
+            bytes: toI32(digits) * sizeSuffixBytes(suffix),
+        );
+    };
+}
+
+// ── the typed readers ───────────────────────────────────────────────────────
+// Front 04 owns `rkProp`/`rkPropInt`; these are the rest, and they carry ROW 8 —
+// the declared default — as their second argument, because a declared field
+// default is not applied at a call site yet (the front's first language-gap
+// row). `rkValue` is the string reader that also resolves `${random.*}` at
+// REFERENCE time.
+//
+// RELAXED BINDING lives here rather than in the emitter: a reader tries the
+// written key, then the kebab-case spelling, then the camelCase one, then the
+// underscored upper-case one, so `remoteAddress` binds from `remote-address`,
+// from `remoteAddress` and from `REMOTE_ADDRESS` without the caller knowing
+// which spelling a file used.
+
+pub fn kebabOf(name: string) -> string {
+    var out = "";
+    var i = 0;
+    loop (i < name.length()) {
+        val c = charOf(name, i);
+        val u: string = c.toUpper();
+        val lower: string = c.toLower();
+        if ((c == u && c != lower)) out = out + "-" + lower else out = out + c;
+        i = i + 1;
+    };
+    return out;
+}
+
+fn camelOf(kebab: string) -> string {
+    var out = "";
+    var up = false;
+    var i = 0;
+    loop (i < kebab.length()) {
+        val c = charOf(kebab, i);
+        if (c == "-") up = true else {
+            if (up) out = out + c.toUpper() else out = out + c;
+            up = false;
+        };
+        i = i + 1;
+    };
+    return out;
+}
+
+pub fn rawValue(key: string) -> string {
+    val direct: string = rkProp(key);
+    if (direct != "") return direct else {
+        val kebab: string = kebabOf(key);
+        val viaKebab: string = rkProp(kebab);
+        if (viaKebab != "") return viaKebab else {
+            val camel: string = camelOf(key);
+            val viaCamel: string = rkProp(camel);
+            if (viaCamel != "") return viaCamel else return rkProp(kebab.replaceAll("-", "_").replaceAll(".", "_").toUpper());
+        };
+    };
+}
+
+pub fn rkValue(key: string) -> string {
+    return resolveRandom(rawValue(key));
+}
+
+pub fn rkValueOr(key: string, fallback: string) -> string {
+    val v: string = rkValue(key);
+    if (v == "") return fallback else return v;
+}
+
+pub fn boolProblem(raw: string, key: string) -> string {
+    val v: string = raw.trim().toLower();
+    val known = (v == "" || v == "true" || v == "yes" || v == "on" || v == "1" || v == "false" || v == "no" || v == "off" || v == "0");
+    if (known) return "" else return "rakun config: `" + key + "` is `" + raw + "`, which is not a boolean — accepted: true, false, yes, no, on, off, 1, 0";
+}
+
+pub fn rkPropBool(key: string, fallback: bool) -> bool {
+    val raw: string = rkValue(key);
+    val problem: string = boolProblem(raw, key);
+    assert problem == "", problem;
+    val v: string = raw.trim().toLower();
+    val yes = (v == "true" || v == "yes" || v == "on" || v == "1");
+    if (v == "") return fallback else return yes;
+}
+
+pub fn rkPropIntOr(key: string, fallback: i32) -> i32 {
+    val v: string = rkValue(key).trim();
+    if (v == "") return fallback else {
+        val digits: string = if (charOf(v, 0) == "-") sub(v, 1, v.length()) else v;
+        assert splitDigits(digits) == digits, "rakun config: `" + key + "` is `" + v + "`, which is not an integer";
+        return toI32(v);
+    };
+}
+
+// `f64` has no integer literal either, so the fraction is accumulated as a whole
+// number and divided by a power of ten built the same way.
+pub fn rkPropFloat(key: string, fallback: f64) -> f64 {
+    val v: string = rkValue(key).trim();
+    if (v == "") return fallback else {
+        val neg = v.startsWith("-");
+        val body: string = if (neg) sub(v, 1, v.length()) else v;
+        val dot = body.indexOf(".");
+        val whole: string = if (dot < 0) body else sub(body, 0, dot);
+        val frac: string = if (dot < 0) "" else sub(body, dot + 1, body.length());
+        val wellFormed = (splitDigits(whole) == whole && splitDigits(frac) == frac);
+        assert ((wellFormed && whole != "")), "rakun config: `" + key + "` is `" + v + "`, which is not a number";
+        var acc = 0.0;
+        var i = 0;
+        loop (i < whole.length()) {
+            acc = acc * 10.0 + digitFloat(charOf(whole, i));
+            i = i + 1;
+        };
+        var scale = 1.0;
+        var j = 0;
+        loop (j < frac.length()) {
+            acc = acc * 10.0 + digitFloat(charOf(frac, j));
+            scale = scale * 10.0;
+            j = j + 1;
+        };
+        val magnitude = acc / scale;
+        if (neg) return 0.0 - magnitude else return magnitude;
+    };
+}
+
+fn digitFloat(c: string) -> f64 {
+    val n = "0123456789".indexOf(c);
+    var out = 0.0;
+    var i = 0;
+    loop (i < n) {
+        out = out + 1.0;
+        i = i + 1;
+    };
+    return out;
+}
+
+// A list binds from a comma-separated scalar OR from the indexed keys a JSON or
+// YAML sequence flattens to (`a[0]`, `a[1]`, …), whichever the file used.
+pub fn rkPropList(key: string) -> string[] {
+    var out: string[] = [];
+    var i = 0;
+    var run = true;
+    loop (run) {
+        val v: string = rkValue(key + "[" + i + "]");
+        if (v == "") run = false else {
+            out.push(v);
+            i = i + 1;
+        };
+    };
+    if (out.length > 0) return out else {
+        val scalar: string = rkValue(key);
+        if (scalar == "") return out else {
+            loop (scalar.split(",")) { part ->
+                val item: string = part;
+                out.push(item.trim());
+            };
+            return out;
+        };
+    };
+}
+
+pub fn rkPropDuration(key: string, unit: string) -> Duration {
+    return parseDuration(rkValue(key), unit, key);
+}
+
+pub fn rkPropSize(key: string, unit: string) -> DataSize {
+    return parseDataSize(rkValue(key), unit, key);
 }

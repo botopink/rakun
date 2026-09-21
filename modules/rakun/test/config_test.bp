@@ -17,6 +17,9 @@ import {Entry, Doc};
 import {parseProperties, parseJson, parseYaml, readTree, readDocument};
 import {entryAt, entryHas, rkConfigApply, toI32, sub, charOf};
 import {rkConfigLoadFrom, cliEntries, envKey, envEntries, cloudPlatform};
+import {rkValue, rkPropBool, rkPropIntOr, rkPropFloat, rkPropList, rkPropDuration, rkPropSize};
+import {parseDuration, parseDataSize, Duration, DataSize, kebabOf};
+import {durationProblem, dataSizeProblem, boolProblem};
 import {matches, active, isActive} from "profiles";
 
 // Every entry of every document of a parse, flattened — the shape an ordering
@@ -384,4 +387,145 @@ test "rakun config: a group that refers to itself fails the boot naming the cycl
     val e = loadAt("file:test/fixtures/groupcycle/", noArgs());
     assert e != "";
     assert e.contains("rakun.profiles.group") == true;
+}
+
+// ── step 4: placeholders and random values ──────────────────────────────────
+
+test "rakun config: ${key} resolves from another key, recursively" {
+    val e = loadAt("file:test/fixtures/placeholders/", noArgs());
+    assert e == "";
+    assert rkProp("greet") == "hello rakun";
+    assert rkProp("nested") == "hello rakun!";
+}
+
+test "rakun config: ${missing:fallback} resolves to the default" {
+    val e = loadAt("file:test/fixtures/placeholders/", noArgs());
+    assert e == "";
+    assert rkProp("withdefault") == "fallback";
+}
+
+test "rakun config: ${missing} with no default fails the boot naming both keys" {
+    val e = loadAt("file:test/fixtures/phmissing/", noArgs());
+    assert e != "";
+    assert e.contains("nowhere.at.all") == true;
+    assert e.contains("needs") == true;
+}
+
+test "rakun config: a placeholder cycle fails the boot naming the chain" {
+    val e = loadAt("file:test/fixtures/phcycle/", noArgs());
+    assert e != "";
+    assert e.contains("cycle") == true;
+    assert e.contains("a") == true;
+    assert e.contains("b") == true;
+}
+
+test "rakun config: ${random.uuid} is a v4 UUID and differs between references" {
+    val e = loadAt("file:test/fixtures/random/", noArgs());
+    assert e == "";
+    val one: string = rkValue("r.uuid");
+    val two: string = rkValue("r.uuid");
+    assert one.length() == 36;
+    assert one != two;
+    assert charOf(one, 8) == "-";
+    assert charOf(one, 13) == "-";
+    assert charOf(one, 14) == "4";
+    assert charOf(one, 18) == "-";
+    assert "89ab".contains(charOf(one, 19)) == true;
+    assert charOf(one, 23) == "-";
+    // `${…}` interpolates inside a botopink string literal, so the literal
+    // placeholder text has to be built rather than written.
+    assert rkProp("r.uuid") == "$" + "{random.uuid}";
+}
+
+test "rakun config: ${random.int[lo,hi]} stays in range and is not one value" {
+    val e = loadAt("file:test/fixtures/random/", noArgs());
+    assert e == "";
+    var distinct: string[] = [];
+    var inRange = true;
+    loop (0..1000) { k ->
+        val drawn: i32 = toI32(rkValue("r.range"));
+        if (drawn < 1024) inRange = false;
+        if (drawn > 65536) inRange = false;
+        if (distinct.length < 2) {
+            if (distinct.indexOf("" + drawn) < 0) distinct.push("" + drawn);
+        };
+    };
+    assert inRange == true;
+    assert distinct.length == 2;
+    assert rkValue("r.value").length() == 32;
+}
+
+// ── step 8: Duration and DataSize ───────────────────────────────────────────
+
+test "rakun config: 30, 30s and PT30S are all 30000 ms under seconds" {
+    assert parseDuration("30", "seconds", "k").millis == 30000;
+    assert parseDuration("30s", "seconds", "k").millis == 30000;
+    assert parseDuration("PT30S", "seconds", "k").millis == 30000;
+}
+
+test "rakun config: a suffixed duration parses without a unit annotation" {
+    assert parseDuration("500ms", "", "k").millis == 500;
+    assert parseDuration("2m", "", "k").millis == 120000;
+    assert parseDuration("1h", "", "k").millis == 3600000;
+    assert parseDuration("PT1H30M", "", "k").millis == 5400000;
+}
+
+test "rakun config: data sizes scale by their suffix or the unit default" {
+    assert parseDataSize("10", "megabytes", "k").bytes == 10485760;
+    assert parseDataSize("10MB", "bytes", "k").bytes == 10485760;
+    assert parseDataSize("10KB", "bytes", "k").bytes == 10240;
+    assert parseDataSize("10", "bytes", "k").bytes == 10;
+    assert parseDataSize("10GB", "bytes", "k").bytes == 10737418240;
+}
+
+test "rakun config: an unparsable typed value refuses rather than answering zero" {
+    val d: string = durationProblem("30x", "seconds", "my.key");
+    assert d != "";
+    assert d.contains("my.key") == true;
+    assert d.contains("30x") == true;
+    assert d.contains("PT1H30M") == true;
+    val s: string = dataSizeProblem("10PB", "bytes", "size.key");
+    assert s != "";
+    assert s.contains("size.key") == true;
+    assert s.contains("10PB") == true;
+    assert s.contains("10GB") == true;
+    val b: string = boolProblem("maybe", "bool.key");
+    assert b != "";
+    assert b.contains("bool.key") == true;
+    assert b.contains("maybe") == true;
+    assert durationProblem("30s", "", "k") == "";
+    assert dataSizeProblem("10MB", "", "k") == "";
+    assert boolProblem("yes", "k") == "";
+}
+
+// ── the typed readers ───────────────────────────────────────────────────────
+
+test "rakun config: the typed readers coerce, and a declared default fills the gap" {
+    val e = loadAt("file:test/fixtures/typed/", noArgs());
+    assert e == "";
+    assert rkPropBool("my.service.enabled", false) == true;
+    assert rkPropBool("my.service.absent", true) == true;
+    assert rkValue("my.service.remote-address") == "192.168.1.1";
+    assert rkPropIntOr("my.service.retries", 3) == 7;
+    assert rkPropIntOr("my.service.absent", 3) == 3;
+    assert rkPropDuration("my.service.session-timeout", "seconds").millis == 30000;
+    assert rkPropSize("my.service.buffer-size", "bytes").bytes == 10485760;
+    assert rkPropList("my.service.hosts").join(",") == "a,b";
+}
+
+test "rakun config: relaxed binding reaches the kebab, camel and screaming spellings" {
+    val _a = rkSetProp("relaxed.remote-address", "kebab");
+    assert rkValue("relaxed.remoteAddress") == "kebab";
+    val _b = rkSetProp("RELAXED_TWO_REMOTE_ADDRESS", "screaming");
+    assert rkValue("relaxed.two.remoteAddress") == "screaming";
+    assert kebabOf("remoteAddress") == "remote-address";
+}
+
+test "rakun config: a float reader parses a fraction" {
+    val e = loadAt("file:test/fixtures/typed/", noArgs());
+    assert e == "";
+    val got = rkPropFloat("my.service.ratio", 0.0);
+    assert got > 2.49;
+    assert got < 2.51;
+    assert rkPropFloat("my.service.absent", 1.25) == 1.25;
 }

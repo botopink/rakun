@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **Placeholders, random values and the typed readers** (front 05, steps 4 and
+  8). `${key}` and `${key:default}` resolve at load time, recursively; an
+  unresolvable reference with no default and a reference cycle each refuse the
+  boot naming the keys. `${random.value|int|long|uuid|int(n)|int[lo,hi]}`
+  resolves at REFERENCE time through `rkValue`, so two reads answer differently
+  and nothing is cached — asserted with a thousand draws inside the range and a
+  v4 UUID whose version and variant nibbles are checked. `Duration` and
+  `DataSize` parse the Spring forms including ISO-8601, and an unparsable value
+  halts naming the key, the value and the accepted forms. `rkPropBool`,
+  `rkPropIntOr`, `rkPropFloat`, `rkPropList`, `rkPropDuration` and `rkPropSize`
+  carry the declared default as their second argument (row 8) and do relaxed
+  binding in the reader, so `remoteAddress` binds from `remote-address`,
+  `remoteAddress` or `REMOTE_ADDRESS`.
+
 - **Configuration resolves, in order, with profiles** (front 05, steps 2, 3, 5
   and 6). `rkConfigLoad()` merges the eight sources — command line,
   `RAKUN_APPLICATION_JSON`, `RAKUN_*` environment variables, profile documents,
