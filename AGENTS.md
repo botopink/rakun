@@ -1098,16 +1098,18 @@ each of them cost a red:
   name for an IMPORTER.** A parameter named `raw` in `jsonString(raw: string)`
   made a test importing `pub fn raw` fail with `expected Node, got bool`. The
   parameters are `plain` and `text` now.
-- **`std/querystring` does not compile on the erlang row.** The emitted
-  `std/querystring.erl` reds with `function slice/3 undefined` at
-  `stripPrefix`, so every cell reaching it answers `{error, undef}`.
-  `splitQuery` / `encodeQuery` are here instead, over front 62's
-  `percentEncode` / `percentDecode` — the percent codec is NOT written a second
-  time. Two bodies to delete when std is fixed.
-- **`std/time` reached from a `test/` file is `undef`**, and reached through a
-  `pub fn` in `src/` it works — front 62's measurement, confirmed. `nowMs()` and
-  `sinceUnder()` are that `pub fn`, and they are two functions rather than one
-  `measure(body)` because the body being measured is an AWAIT.
+- **`std`'s `querystring` does LESS than `splitQuery` / `encodeQuery`, and that
+  — not loading — is why the two bodies are still here.** `querystring.parse`
+  does not percent-decode (`a=%20b` reads back as the literal `%20b`) and
+  splits a chunk on EVERY `=`, losing the `=c` of `a=b=c`; `querystring.stringify`
+  does not percent-encode, so `#("a b", "c;d")` serialises as `a b=c;d`. std
+  says so itself — "the call site should pre-escape". `route.query` is a decoded
+  dict and the form grammar cuts at the first `=`, so both differences matter.
+  Swapping both bodies for the std calls leaves every OTHER cell in this
+  repository GREEN, which is why the cell `splitQuery / encodeQuery
+  percent-code, which std's querystring does not` exists: it reds on all three
+  lines when the swap is made, measured. The percent codec is NOT written a
+  second time — `percentEncode` / `percentDecode` are front 62's.
 
 ### Why this front ships BOTH host files where front 05 shipped none
 
@@ -1209,10 +1211,14 @@ than silently corrected. Fronts 10 and 18 must pass their own `maxAge`;
 acceptance line, and it belongs to the front that owns sessions.
 
 **Percent encoding is ASCII, and says so.** There is no byte type (front 01
-recorded it), `std`'s `unicode` module is `undef` on the erlang row from here,
-and `charCodeAt` answers a UTF-16 code unit on node against a codepoint on the
-BEAM: three reasons the two rows cannot be made to agree about a non-ASCII
-octet. A CONTROL character percent-encodes — that is how "a `Set-Cookie` line
+recorded it) and `charCodeAt` answers a UTF-16 code unit on node against a
+codepoint on the BEAM: two reasons the two rows cannot be made to agree about a
+non-ASCII octet. (A third reason used to be listed — `std`'s `unicode` was
+unreachable from here — and it is gone: `unicode.firstCodepoint` from a `test/`
+file is green on both rows as of `4fe1747e`. `unicode.codepoints` would make the
+two rows agree about a codepoint; widening `percentEncode` past ASCII is a
+behaviour change and belongs to the front that owns the cookie grammar, not to a
+cleanup.) A CONTROL character percent-encodes — that is how "a `Set-Cookie` line
 cannot hold a newline" is kept true — and a character ABOVE printable ASCII
 makes `serializeCookie` raise, naming the cookie and saying to encode the value
 first. `percentDecode` decodes only into the printable range: a decoder that can
@@ -1368,16 +1374,22 @@ members, and a member exercising a layout or a server action needs fronts 23 and
   `233 / 16` is `14.5625` on the node row and `14` on the BEAM. Subtract the
   remainder first — `idiv(a, b)` is `(a - a % b) / b` — and the quotient is
   exact on both. Measured while writing `hexByte`.
-- **A `from "std"` module imported by a `test/` file is `undef` on the erlang
-  row; imported by a `src/` module it works.** `std/crypto`, `std/base64`,
-  `std/time` and `std/unicode` each answer `{error, undef}` when a test file
-  imports them directly, and each answers correctly when the same call is
-  reached through a `pub fn` in `src/`. The emitted module is
-  `.botopinkbuild/test-out/std/<name>.erl` with the atom `std@<name>`; a std
-  module the LIBRARY's own sources pull in (`std@dict`, `std@fs`) is loaded and
-  one only a test names is not. So `request_context.bp` imports `std/crypto`
-  and the test reaches it through `draftSign`. `std/asserts` is the exception
-  that proves nothing: the test harness pulls it in itself.
+- **A `from "std"` module imported DIRECTLY by a `test/` file works on both
+  rows.** It did not once — the loader the emitted escript runs was only emitted
+  when `imported_fns` / `imported_types` / a type module were present, and a
+  `from "std"` import fills none of those, so the call was remote into a module
+  nobody loaded and every cell answered `{error, undef}`. The compiler closed
+  that (with a prelude-defaults guard and an escript loader that no longer skips
+  a refused module in silence). Re-measured here on `4fe1747e` with one test file
+  per module, each carrying an arithmetic control cell — `querystring`, `time`,
+  `unicode`, `crypto` and `base64` are **2/2 green on commonJS and 2/2 green on
+  erlang**, all five. So a test file may name a std module itself; nothing in
+  this repository has to be routed through a `src/` `pub fn` for loading
+  reasons. The two exceptions that are NOT about loading and still hold:
+  `std`'s `process` in a test file loses every cell in that FILE on commonJS
+  (the run exits 1 and the file contributes no `N passed, M failed` line at
+  all), and `std`'s `querystring` is weaker than `ssr.bp`'s own query codec —
+  see the note above it.
 - **A non-ASCII string LITERAL raises on the erlang row.** `"caf\u00e9".length()`
   is `{badarg, <<...>>}` — before any of this front's code runs. So the positive
   case of the non-ASCII cookie refusal is not expressible as a cell at all; the

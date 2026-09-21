@@ -20,6 +20,60 @@
 > (`{badkey,param}` / `{badkey,query}`), which AGENTS.md § Blocked already
 > records.
 
+- **The `std` substitutes, measured and settled** (front 74 follow-up).
+  `modules/rakun/src/ssr.bp`, `modules/rakun/test/ssr_test.bp`,
+  `modules/rakun/src/events.bp`, `modules/rakun-web/src/filter.bp`, `AGENTS.md`.
+
+  Three compiler defects closed in `fecec6b4` made a `from "std"` module
+  reachable from a `test/` file on the erlang row: a prelude-defaults guard on
+  `comptime_module != null`, an escript sibling loader that ended its case in
+  `_ -> ok` and so skipped a module `erlc` had refused in SILENCE, and — the one
+  that bit rakun — the loader being emitted only when `imported_fns` /
+  `imported_types` / a type module were present, which a `from "std"` import
+  fills none of. rakun had written the rule down four times and built two
+  substitutes around it.
+
+  Re-measured on `4fe1747e` with one throwaway test file per module, each
+  carrying an arithmetic control cell, on BOTH rows:
+
+  | std module      | commonJS | erlang |
+  | --------------- | -------- | ------ |
+  | `querystring`   | 2/2      | 2/2    |
+  | `time`          | 2/2      | 2/2    |
+  | `unicode`       | 2/2      | 2/2    |
+  | `crypto`        | 2/2      | 2/2    |
+  | `base64`        | 2/2      | 2/2    |
+
+  All five. So: `ssr.bp`'s `nowMs()` / `sinceUnder()` are DELETED and the one
+  timing cell in `ssr_test.bp` calls `time.monotonicMillis()` itself — still two
+  calls rather than `time.measureMillis(body)`, because the body being measured
+  is an AWAIT and a `#[@future]` body may not await inside a closure. The dead
+  rule is deleted from `AGENTS.md` and the clauses that leaned on it in
+  `events.bp` and `filter.bp` are gone with it; `filter.bp`'s `rkFreshId` keeps
+  its real reason (a correlation handle is not a token).
+
+  **`splitQuery` / `encodeQuery` STAY, for a reason that is not loading.**
+  `AGENTS.md` said they were "two bodies to delete when std is fixed"; std is
+  fixed and the sentence was wrong, because std's `querystring` does LESS.
+  Measured directly: `querystring.parse("a=%20b")` reads back the literal
+  `%20b` — it does not percent-decode, and `route.query` is a decoded dict;
+  `querystring.parse("a=b=c")` splits on EVERY `=` and loses the `=c`, where the
+  form grammar cuts at the first; and `querystring.stringify([#("a b", "c;d")])`
+  is `a b=c;d`, a space and a `;` straight into a URL. std says so itself — "the
+  call site should pre-escape". Swapping both bodies for the std calls left
+  every other cell in the repository GREEN on both rows, which is the reason the
+  difference is now an assertion and not a comment: the new cell `splitQuery /
+  encodeQuery percent-code, which std's querystring does not` reds on all three
+  lines under that swap, verified.
+
+  One cell added, so `modules/rakun` is 387/0 → **388/0** on commonJS and
+  385/2 → **386/2** on erlang, the two reds still front 04's `server_test.bp:74,80`.
+  `modules/rakun-web` 104/0 and `modules/rakun-validation` 54/0 on both rows,
+  unmoved. The timing cell was planted twice to prove it can fail: an
+  always-false budget reds the erlang row only and an always-true one reds the
+  commonJS row only — because the cell asserts `fast == concurrentRow()`, so
+  each row pins one side of the clock.
+
 - **`absolutePath` back onto `std/path`** (front 74 follow-up).
   `modules/rakun/src/ssl_bundle.bp`, `modules/rakun/test/ssl_bundle_test.bp`.
 
@@ -419,7 +473,9 @@
   unwrapped when the array came off a record field or the function is generic;
   and **`std/querystring` does not compile on the erlang row** (`function
   slice/3 undefined` at `stripPrefix`), so `splitQuery` / `encodeQuery` are here
-  over front 62's percent codec.
+  over front 62's percent codec. (The loading half of that last one was fixed in
+  `4fe1747e`; the two bodies stay for a different, measured reason — see the
+  std-substitutes entry at the top of Unreleased.)
 
   The gate gained stage 1b — front 23's own three greps: no `renderToString` in
   `ssr.bp`, no module of onze reachable from `modules/rakun/src/`, and no void
@@ -807,7 +863,8 @@
   is float division on commonJS and integer division on erlang** (`233 / 16` is
   `14.5625` against `14`), so every quotient here goes through
   `idiv(a, b) = (a - a % b) / b`; **`std`'s `unicode` module is `undef` on the
-  erlang row from rakun**, so no UTF-8 round trip is available; and **a
+  erlang row from rakun** — since fixed in `4fe1747e`, though the byte type and
+  the `charCodeAt` disagreement still rule out a UTF-8 round trip; and **a
   non-ASCII string literal raises `{badarg, …}` on the erlang row**, so the
   positive case of the non-ASCII cookie refusal is not expressible as a cell and
   the guard, its text and the negative case are asserted instead.
@@ -849,7 +906,9 @@
   module imported by a `test/` file is `undef` on the erlang row**, while the
   same call reached through a `pub fn` in `src/` works. `std/crypto`,
   `std/base64`, `std/time` and `std/unicode` all behave this way; `std@dict` and
-  `std@fs`, which rakun's own sources pull in, do not. Measured:
+  `std@fs`, which rakun's own sources pull in, do not. (Fixed in `4fe1747e` —
+  all four re-measured green from a test file on both rows; see the
+  std-substitutes entry at the top of Unreleased.) Measured:
   `botopink test` 187/187; `botopink test --target erlang` 178 passing / 9
   failing, the same nine that are not this front's.
 

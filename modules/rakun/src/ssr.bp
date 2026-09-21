@@ -40,7 +40,7 @@
 ////   This is front 22's measurement, and it is what the four markers already
 ////   emit.
 
-import {dict, time} from "std";
+import {dict} from "std";
 import {Response} from "http";
 import {rkProp} from "runtime";
 // `toI32` is front 05's `parseInt(v, 10)` rule, reached through a `pub fn` in
@@ -909,14 +909,29 @@ pub fn registerBoundary<El>(kind: string, pattern: string, render: fn(props: Lay
 // `Array<fn() -> @Future<El>>` — unstarted THUNKS — and gathers them in ONE
 // await. The concurrency comes from spawned processes.
 
-// `std/querystring` DOES NOT COMPILE on the erlang row: the emitted
-// `std/querystring.erl` reds with `function slice/3 undefined` at
-// `stripPrefix`, so every cell reaching it answers `{error, undef}`. Measured
-// here, on the current binary; it is std's defect and not this front's, and it
-// is why the two functions below exist. When it is fixed they are two bodies to
-// delete. The percent codec is NOT written a second time — `percentEncode` /
-// `percentDecode` are front 62's, and they already encode everything outside
-// the unreserved set, which is exactly what a query component needs.
+// `std/querystring` COMPILES AND RUNS on both rows now — the compiler fixed the
+// three defects behind the old `{error, undef}` reading and `querystring.parse`
+// from a `test/` file is green on node and on the BEAM as of `4fe1747e`,
+// measured before this line was written. The two functions below survive
+// anyway, for a reason that has nothing to do with loading: std's
+// `querystring` does LESS than they do, and both differences are measured.
+//
+//   * `querystring.parse` DOES NOT percent-decode — `a=%20b` reads back as the
+//     literal `%20b` — and `querystring.stringify` does not percent-encode:
+//     `#("a b", "c;d")` serialises as `a b=c;d`. std says so itself
+//     (`libs/std/src/querystring.bp`: "the call site should pre-escape").
+//     `route.query` is a decoded dict, so the decoding has to happen here.
+//   * `querystring.parse` splits a chunk on EVERY `=` and keeps the second
+//     field, so `a=b=c` loses the `=c`. `splitQuery` cuts at the FIRST `=` and
+//     keeps the rest of the chunk, which is what the form grammar says.
+//
+// Swapping both bodies for the std calls leaves every OTHER cell in this
+// repository GREEN, which is why `ssr_test.bp`'s cell "splitQuery /
+// encodeQuery percent-code, which std's querystring does not" exists: the
+// difference is pinned by an assertion rather than by this comment alone. The percent codec
+// is NOT written a second time — `percentEncode` / `percentDecode` are front
+// 62's, and they already encode everything outside the unreserved set, which is
+// exactly what a query component needs.
 
 pub fn splitQuery(query: string) -> Array<#(string, string)> {
     var out: Array<#(string, string)> = [];
@@ -989,20 +1004,6 @@ pub fn searchParam(route: PageContext, name: string) -> string {
 #[@future]
 pub fn renderAll<T>(thunks: Array<fn() -> @Future<T>>) -> @Future<Array<T>> {
     return await rkSsrAll(thunks);
-}
-
-// The one timing assertion this front makes reaches the clock through these two
-// functions, because `std/time` imported by a `test/` file is `undef` on the
-// erlang row and works when the same call is reached through a `pub fn` in
-// `src/`. They are two functions rather than one `measure(body)` because the
-// body being measured is an AWAIT, and a `#[@future]` body may not await inside
-// a closure.
-pub fn nowMs() -> i64 {
-    return time.monotonicMillis();
-}
-
-pub fn sinceUnder(start: i64, budgetMs: i32) -> bool {
-    return (time.monotonicMillis() - start) < budgetMs;
 }
 
 pub fn settledOrder() -> string {

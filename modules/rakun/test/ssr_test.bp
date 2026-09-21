@@ -17,6 +17,7 @@
 
 import {asserts} from "std";
 import {dict} from "std";
+import {time} from "std";
 import {
     LayoutProps,
     PageContext,
@@ -76,7 +77,6 @@ import {
     holeMarker,
     markupAll,
     nextHoleOrdinal,
-    nowMs,
     render,
     renderAll,
     bodyOf,
@@ -85,8 +85,9 @@ import {
     registerBoundary,
     renderNode,
     searchParam,
+    splitQuery,
+    encodeQuery,
     settledOrder,
-    sinceUnder,
     streamChunks,
     withSink,
     renderedPage,
@@ -575,9 +576,14 @@ test "rakun ssr: sibling loaders are unstarted thunks gathered in ONE await" {
     var thunks: Array<fn() -> @Future<Node>> = [];
     thunks.push({ -> slowLeaf("one", 50) });
     thunks.push({ -> slowLeaf("two", 50) });
-    val start = nowMs();
+    // The clock is `std/time` reached DIRECTLY from this test file — measured
+    // green on both rows on `4fe1747e`, which is why `ssr.bp`'s `nowMs` /
+    // `sinceUnder` wrappers are gone. It is two calls rather than one
+    // `time.measureMillis(body)` because the body being measured is an AWAIT,
+    // and a `#[@future]` body may not await inside a closure.
+    val start = time.monotonicMillis();
     val resolved = await renderAll(thunks);
-    val fast = sinceUnder(start, 100);
+    val fast = (time.monotonicMillis() - start) < 100;
     assert resolved.length == 2;
     val v: ElementView<Node> = view();
     assert markupAll(v, resolved).join("") == "<one></one><two></two>";
@@ -712,4 +718,32 @@ pub fn holePayload(ids: string[]) -> Payload {
         kinds: "",
         slots: "",
     );
+}
+
+// A query string rendered pair-by-pair, so the assertion below reads the values
+// without `.at(i).unwrapOr(...)` — that shape reads the element back UNWRAPPED
+// here and reds with `{case_clause, ...}` on the erlang row.
+pub fn pairText(pairs: Array<#(string, string)>) -> string {
+    var out: string[] = [];
+    loop (pairs) { p ->
+        out.push(p._0 + "|" + p._1);
+    };
+    return out.join(",");
+}
+
+// WHY `ssr.bp` KEEPS ITS OWN QUERY CODEC. `std/querystring` loads and runs on
+// both rows now, so the reason front 62 wrote `splitQuery` / `encodeQuery` is
+// gone — but std's pair does LESS, and this cell is the difference. Swapping
+// both bodies for `querystring.parse` / `querystring.stringify` leaves every
+// OTHER cell in this repository green; this one reds on all three lines.
+test "rakun ssr: splitQuery / encodeQuery percent-code, which std's querystring does not" {
+    // std's `parse` hands back the literal `%20b`; `route.query` is a decoded
+    // dict, so the decoding happens in `splitQuery`.
+    assert pairText(splitQuery("a=%20b")) == "a| b";
+    // std's `parse` splits on EVERY `=` and keeps the second field, losing the
+    // `=c`. `splitQuery` cuts at the FIRST `=`.
+    assert pairText(splitQuery("a=b=c")) == "a|b=c";
+    // std's `stringify` would write `a b=c;d` — a space and a `;` straight into
+    // a URL.
+    assert encodeQuery([#("a b", "c;d")]) == "a%20b=c%3Bd";
 }
