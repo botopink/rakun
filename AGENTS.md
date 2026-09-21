@@ -2473,9 +2473,13 @@ exactly two exceptions:
   first spelling kept — the CORS entry adds `Origin`, a future compression entry
   adds `Accept-Encoding`, and both must survive.
 
-`withHeaders(res, flat)` takes a FLAT `["name", "value", "name", "value"]` array
-rather than the spec's `#(string, string)[]`, and an odd length is refused. Same
-replace rule between its own entries.
+`withHeaders(res, pairs)` takes the spec's `#(string, string)[]` — MEASURED, not
+assumed: a tuple-array parameter, an array literal of `#("X-A", "1")` pairs at
+the call site, and `.0` / `.1` field reads all compile and answer on BOTH rows
+against `2e6bb4ac`. It started as a flat `["name", "value", …]` array with an
+odd length refused, and the pair type is strictly better because it makes "a
+name with no value" unrepresentable rather than refusable. Same replace rule
+between its own entries.
 
 **The BEAM half mirrors every write into `rakun_runtime:set_reply_header/2`** so
 the line reaches the socket, guarded by `function_exported/3`. The node half does

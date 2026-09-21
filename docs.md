@@ -1136,7 +1136,7 @@ and never reaches the wire: the chain reads it as "continue".
 
 ```bp
 val res = withHeader(Response.ok("{}"), "Content-Type", "application/json");
-val two = withHeaders(res, ["X-A", "1", "X-B", "2"]);
+val two = withHeaders(res, [#("X-A", "1"), #("X-B", "2")]);
 ```
 
 `withHeader` returns the `Response` it was given and **replaces by name**,
