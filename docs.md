@@ -755,6 +755,29 @@ are front 07's graceful shutdown, which calls `shutdown()` after the drain. A
 failed boot never reaches it: the boot halts, and a halt is a non-zero process
 status on both hosts.
 
+### `#[imports]`
+
+```bp
+#[configuration]
+#[managed]
+#[imports("Wallet")]
+pub type WalletConfig {
+    #[bean]
+    pub fn wallet(self: Self) -> Wallet {
+        return Wallet(owner: "treasury");
+    }
+}
+```
+
+Spring's `@Import`: a bean is registered for each named type, so a configuration
+record in a module the application does not otherwise reference is still wired.
+Each named type must already have a factory — from a stereotype, a `#[bean]`
+method or a `#[provides]` function — and a name with none does not compile,
+naming both the type and the configuration that asked for it.
+
+Spring's `@ComponentScan(basePackages=…)` has no analogue and needs none: an
+additional scan root in botopink is a `pub mod` line.
+
 ### Qualifiers, primary and lazy
 
 `#[qualifier("name")]` distinguishes two beans of one type, `#[primary]` marks

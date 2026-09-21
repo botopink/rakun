@@ -92,8 +92,26 @@ rakun/
 │   │   │   ├── sidecars/rakun_request_context.erl ← the frame on the BEAM: ONE
 │   │   │   │                    process-dictionary key plus an ETS area that
 │   │   │   │                    outlives it, for work that runs after the response
+│   │   │   ├── context.bp     ← THE CONTAINER'S DOORS (§ The container's doors):
+│   │   │   │                    the bean registry, `Context`, `#[managed]`,
+│   │   │   │                    `#[provides]`, `#[qualifier]`/`#[primary]`/
+│   │   │   │                    `#[lazy]`/`#[scope]`/`#[imports]`, the eager pass
+│   │   │   │                    and `bootSequence()`
+│   │   │   ├── events.bp      ← one `Event(name, source, payload,
+│   │   │   │                    timestampMillis)` record, the listener table and
+│   │   │   │                    `#[eventListener]`; the eight boot event NAMES
+│   │   │   ├── lifecycle.bp   ← `#[postConstruct]`/`#[preDestroy]` (placement
+│   │   │   │                    only), the two passes, `#[exitCode]`,
+│   │   │   │                    `shutdown()` and the process status
+│   │   │   ├── context.mjs    ← the four tables, node half: bean factories,
+│   │   │   │                    lifecycle thunks, listener closures, exit-code
+│   │   │   │                    generators. Knows no record grammar
+│   │   │   ├── sidecars/rakun_context.erl ← the same four on the BEAM, in ETS
+│   │   │   │                    behind a dedicated owner process
 │   │   │   ├── bootstrap.bp   ← `Rakun` (concrete type): `Rakun.run(app)` starts `rkServe`
-│   │   │   └── rakun.d.bp     ← declaration-only: the `Context` IoC behavior (future)
+│   │   │   └── rakun.d.bp     ← the declaration module. EMPTY since front 06: it
+│   │   │                        carried a declaration-only `behavior Context`,
+│   │   │                        which the concrete `context.bp` one replaced
 │   │   └── test/
 │   │       ├── di_test.bp     ← placement + component scan
 │   │       ├── router_test.bp ← DI chain + router dispatch (200 / 404) end to end
@@ -119,6 +137,12 @@ rakun/
 │   │       ├── overlapping_routes_test.bp ← two controllers sharing a path prefix both
 │   │       │                     register; dispatch matches the FULL path; a leaf (no-dep)
 │   │       │                     #[service] resolves through the DI chain
+│   │       ├── context_test.bp ← the bean registry, `Context`, the parent/child
+│   │       │                     chain, qualifiers, scopes, lifecycle, the eager
+│   │       │                     pass and shutdown. The SAME assertions on both
+│   │       │                     rows
+│   │       ├── events_test.bp ← listener dispatch, ordering, the boot sequence
+│   │       │                     asserted as a WHOLE, and the failure path
 │   │       └── erlang_runtime_test.bp ← the host cells named DIRECTLY (no decorator):
 │   │                             scan order · singleton/build count · the parseInt rule ·
 │   │                             route order · the `Response` round-trip shape. The same
@@ -130,8 +154,11 @@ rakun/
 │                        { "rakun": { "workspace": true } }) + a two-comment `src/root.bp`;
 │                        contents land per front
 ├── examples/
-│   └── rakun/         ← member `rakun-example` (an application: entry main.bp, target commonJS,
-│                        depends on `rakun` via { "workspace": true }); the sixty-second app
+│   ├── rakun/         ← member `rakun-example` (an application: entry main.bp, target commonJS,
+│   │                    depends on `rakun` via { "workspace": true }); the sixty-second app
+│   └── rakun-container/ ← member `rakun-container-example`: front 06's surface reached
+│                        through `from "rakun"`, which is the CONSUMER proof that
+│                        `Context` resolves to one declaration and not two
 └── scripts/git-hooks/ ← the pre-commit gate (§ Local gate): `botopink test` per module member,
                          `botopink build` per example
 ```
@@ -148,7 +175,17 @@ behavior) is **not** in the tree: it is wired through the core's `botopink.json`
 library member lists every module a consumer may import, or it `ships nothing`.
 `.d.bp` modules are not resolved by `mod` paths (the resolver follows only
 `<name>.bp` / `<name>/mod.bp`), mirroring how `libs/std` keeps its ambient `.d.bp`
-out of `root.bp`. rakun declares **no dependencies**: the HTTP transport
+out of `root.bp`. Since front 06 that declaration module declares NOTHING — its
+`behavior Context` was replaced by the concrete `pub type Context` in
+`context.bp`, and leaving the stub would have put two `Context` declarations into
+every consumer's namespace. It keeps its place in `files`, as the library's
+declaration module for the next boundary interface that needs one.
+
+Front 06 appended `pub mod events; pub mod lifecycle; pub mod context;` to the
+tree and the matching entries to `files`, in that order and reordering nothing:
+`context` imports both siblings (the boot sequence publishes the eight events and
+runs the post pass), and the `files` ORDER is a dependency order a consumer's
+build reads literally. rakun declares **no dependencies**: the HTTP transport
 `Rakun.run` starts is `serve` in its own `runtime.mjs` (bound as `rkServe`), so a
 consumer declares only `rakun`. (It used to name a `server` library that exists in
 no repository — `botopink check` failed with `LibNotFound` before reading rakun's
@@ -1463,6 +1500,49 @@ own counter instead.
 and the type has to resolve at the USE site: a module importing `Context` and not
 `Event` is `unknown type 'Event'`, reported at an unrelated line. Every consumer
 of `Context` imports both.
+
+### `#[imports]`, and the scan root that needs no analogue
+
+`#[imports("DatabaseConfig,SecurityConfig")]` on a `#[configuration]` type
+registers a bean for each named type, so a configuration record in a module the
+application does not otherwise reference is still wired. This is Spring's
+`@Import`. Each named type must already have a `__rkMake_<Type>()` — from a
+stereotype, a `#[configuration]`'s `#[bean]`, or a `#[provides]` — and a name
+with none is `unbound variable '__rkMake_<Name>'` at the import site, which names
+both the type and the configuration that asked for it.
+
+Spring's `@ComponentScan(basePackages=…)` has NO analogue here and needs none: an
+additional scan root in botopink is a `pub mod` line, because module resolution
+is already explicit. The front says that rather than inventing a `basePackages`.
+
+### What front 23 consumes from this front
+
+Front 23 (the SSR pipeline) and everything behind it waits on this front. This is
+the surface it may rely on; none of it changes without a note here.
+
+| What | Where | Shape |
+|---|---|---|
+| The root context | `context.__rkMake_Context()` | `Context`, a singleton, exempt from the cycle guard and absent from its own `beanNames()` |
+| Per-render resolution | `ctx.resolve(typeName)` / `ctx.resolveNamed(typeName, qualifier)` | `?T` from an ANNOTATED binding — `val x: ?Foo = ctx.resolve("Foo")`; the string is unchecked against `T` |
+| The per-request child | `ctx.child(name)` → `rkRegisterBeanAt(path, …)` | a bean is visible from a path when registered at it or an ancestor, nearest wins; `""` is the root |
+| Request scope | `rkRequestScoped(key, build)` · `rkRequestScopeEnd()` | the process dictionary on the BEAM, an explicit bracket on node. Front 62 owns the ACCESSORS; this is the storage |
+| Publishing | `ctx.publish(ev)` · `events.publishEvent(ev)` · `events.event(name, source, payload)` | answers how many listeners ran; a listener that raises is recorded, not propagated |
+| The boot | `context.bootSequence()` from `main` | 8 on a clean boot; publishes `ApplicationFailed` and halts on a failed one |
+| Shutdown | `lifecycle.shutdown()` | front 07 calls it AFTER the drain; answers the process status |
+| The bean list | `context.rkBeanNames()` / `ctx.beanNames()` | registration order, one entry per type — front 11's `beans` endpoint |
+
+The three wire records are stable and are the only thing either host sees:
+
+```text
+bean      path|type|qualifier|scope|primary|lazy|owner     ("" path = root, 1/0 flags)
+hook      owner|method|phase|order                         (phase is "post" or "pre")
+listener  event|owner
+```
+
+`events.bootEventNames()` and `events.bootEventPayloads()` are the eight boot
+events, index-aligned; `events.applicationFailedEvent()` is the ninth name.
+Neither list is a literal anywhere else, so a front that wants to observe the
+boot reads them rather than spelling them.
 
 ### A type NAME is node-global on the erlang row
 

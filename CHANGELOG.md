@@ -20,6 +20,36 @@
 > (`{badkey,param}` / `{badkey,query}`), which AGENTS.md § Blocked already
 > records.
 
+- **`#[imports]`, the retired stub and the consumer proof** (front 06, step 9 and
+  the Mechanism's last marker).
+
+  `#[imports("A,B")]` on a `#[configuration]` registers a bean per named type —
+  Spring's `@Import`. Spring's `@ComponentScan(basePackages=…)` has NO analogue
+  and needs none: an additional scan root in botopink is a `pub mod` line,
+  because module resolution is already explicit.
+
+  `src/rakun.d.bp`'s declaration-only `behavior Context` is GONE and its docblock
+  says where the concrete one lives. The file is loaded for consumers through
+  `botopink.json`'s `files`, so leaving the stub would have put two `Context`
+  declarations into every consumer's namespace; it keeps its place in the list as
+  the library's declaration module, now declaring nothing.
+
+  **The consumer half is proved by a build, not by a claim.**
+  `examples/rakun-container/` is a new workspace member that reaches the whole
+  front through `from "rakun"` — `#[managed]`, `#[provides]` with two qualifiers
+  and a `#[primary]`, `#[postConstruct]`/`#[preDestroy]`, `#[eventListener]`,
+  `ctx.resolve`/`ctx.resolveNamed`/`ctx.publish` from a controller, `#[exitCode]`
+  and `bootSequence()` in `main`. It builds in the examples gate, which is what
+  "resolves to the concrete record with no ambiguity diagnostic" means in
+  practice.
+
+  **What front 23 consumes** is written down in `AGENTS.md` § What front 23
+  consumes from this front — the entry points, the three wire records
+  (`path|type|qualifier|scope|primary|lazy|owner`, `owner|method|phase|order`,
+  `event|owner`) and the boot-event name list — because the front's own
+  `contracts.md` lives in the meta repository and is not this worktree's to
+  write.
+
 - **Shutdown, the pre-destroy pass and `#[exitCode]`** (front 06, step 8).
   `lifecycle.shutdown()` runs the pre pass in reverse registration order and
   answers the process status — the highest value any `#[exitCode]` generator

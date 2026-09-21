@@ -8,12 +8,13 @@
 //// LOAD, before the first test block — which is why nothing in this file calls
 //// `rkBeanReset()`: it would wipe the registrations the file is about.
 
-import {service, repository, restController, route, getMapping} from "decorators";
+import {service, repository, restController, route, getMapping, configuration, bean} from "decorators";
 import {rkScan, rkSingleton, rkEnter, rkDone, rkRegisterRoute, rkBuildCount, rkScannedNames, rkSetProp, rkProp} from "runtime";
 import {Request, Response} from "http";
 import {
     managed,
     provides,
+    imports,
     qualifier,
     primary,
     lazy,
@@ -823,4 +824,34 @@ test "rakun shutdown: a #[preDestroy] that raises is logged and the rest still r
     val status = shutdown();
     assert rkCtxNotes() == "Third\nFirst";
     assert status == 4;
+}
+
+// ── `#[imports]`: Spring's @Import ──────────────────────────────────────────
+
+pub type Wallet(
+    owner: string,
+)
+
+// `#[configuration]` emits `__rkMake_Wallet()` for the `#[bean]` method, which
+// makes `Wallet` injectable by TYPE. `#[imports]` is what additionally puts it
+// in the registry, so `ctx.resolve("Wallet")` finds it.
+#[configuration]
+#[managed]
+#[imports("Wallet")]
+pub type WalletConfig {
+    #[bean]
+    pub fn wallet(self: Self) -> Wallet {
+        return Wallet(owner: "treasury");
+    }
+}
+
+test "rakun context: #[imports] registers a bean for each named type" {
+    val ctx: Context = __rkMake_Context();
+    assert ctx.has("Wallet");
+    val w: ?Wallet = ctx.resolve("Wallet");
+    var owner = "";
+    if (w != null) owner = w.owner;
+    assert owner == "treasury";
+    // The owner recorded is the configuration that asked for it, not the type.
+    assert chooseBean("", "Wallet") == "|Wallet||singleton|0|0|WalletConfig";
 }

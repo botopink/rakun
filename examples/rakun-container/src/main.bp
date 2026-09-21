@@ -1,0 +1,170 @@
+// rakun example — the container's doors, from a CONSUMER's side.
+//
+// Everything here is reached through `from "rakun"`, which is what makes this
+// example the proof front 06's step 9 asks for: `Context` resolves to the
+// concrete record with no ambiguity diagnostic, because the declaration-only
+// `behavior Context` that `rakun.d.bp` used to carry is gone. Two declarations
+// of one name in a consumer's namespace is exactly what that step removed.
+//
+// It shows, in order: `#[managed]` stacking under a stereotype, `#[provides]`
+// with two qualifiers and a `#[primary]`, `#[postConstruct]`/`#[preDestroy]`,
+// an `#[eventListener]`, programmatic `ctx.resolve` and `ctx.publish` from a
+// controller, an `#[exitCode]` generator, and `bootSequence()` in `main`.
+//
+// Build it with `botopink build` from this directory. `botopink run` starts the
+// server; the boot sequence runs first, so a missing bean or a dependency cycle
+// fails HERE rather than on the first request:
+//
+//   curl localhost:8080/api/orders/count    → 200  3
+//   curl localhost:8080/api/orders/clock    → 200  <now@fixed>
+//   curl -X POST -d 'o-9' localhost:8080/api/orders/   → 201  accepted
+
+import {Rakun, App, Request, Response} from "rakun";
+import {service, repository, restController, route, getMapping, postMapping} from "rakun";
+import {rkScan, rkSingleton, rkEnter, rkDone, rkRegisterRoute} from "rakun";
+
+// Front 06's surface. `#[managed]`'s emitted lines call `rkRegisterBean`,
+// `rkRegisterLifecycle` and `rkRegisterListener` HERE, at the application site,
+// the same way a `#[service]`'s emitted factory calls `rkSingleton` — so the
+// consumer imports them by name beside the markers.
+import {Context, Event, event, __rkMake_Context} from "rakun";
+import {managed, provides, qualifier, primary} from "rakun";
+import {postConstruct, preDestroy, eventListener, exitCode} from "rakun";
+import {rkRegisterBean, rkRegisterLifecycle, rkRegisterListener, rkRegisterExitCode} from "rakun";
+import {bootSequence} from "rakun";
+
+// ---- two beans of one type, told apart by a qualifier ----
+
+pub type Clock(
+    zone: string,
+) {
+    pub fn stamp(self: Self) -> string {
+        return "<now@" + self.zone + ">";
+    }
+}
+
+// `#[primary]` is what makes this one own `__rkMake_Clock()`, so an unqualified
+// `clock: Clock` field gets it and `ctx.resolve("Clock")` answers the same
+// instance. Drop it and both providers stay reachable by qualifier while an
+// unqualified resolve refuses to guess.
+#[provides]
+#[qualifier("system")]
+#[primary]
+pub fn systemClock() -> Clock {
+    return Clock(zone: "UTC");
+}
+
+#[provides]
+#[qualifier("fixed")]
+pub fn fixedClock() -> Clock {
+    return Clock(zone: "fixed");
+}
+
+// ---- a component with lifecycle work ----
+
+#[repository]
+#[managed]
+pub type OrderRepository {
+    pub fn ids(self: Self) -> string[] {
+        return ["o-1", "o-2", "o-3"];
+    }
+}
+
+#[service]
+#[managed]
+pub type OrderCache(
+    repo: OrderRepository,
+    // Unqualified, so the #[primary] Clock wins.
+    clock: Clock,
+) {
+    #[postConstruct]
+    pub fn warm(self: Self) {
+        val n = self.repo.ids().length;
+        @print("order cache warmed with " + n.toString() + " entries at " + self.clock.stamp());
+    }
+
+    #[preDestroy]
+    pub fn close(self: Self) {
+        @print("order cache released");
+    }
+
+    pub fn size(self: Self) -> i32 {
+        return self.repo.ids().length;
+    }
+}
+
+// ---- a listener ----
+
+#[service]
+#[managed]
+pub type AuditListener {
+    #[eventListener("ApplicationReady")]
+    pub fn onReady(self: Self, ev: Event) {
+        @print("ready at " + ev.source);
+    }
+
+    #[eventListener("OrderPlaced")]
+    pub fn onOrderPlaced(self: Self, ev: Event) {
+        @print("order placed: " + ev.payload);
+    }
+}
+
+// ---- programmatic resolution and publishing ----
+
+#[restController]
+#[route("/api/orders")]
+pub type OrderController(
+    // `Context` is injectable by type; front 06 emits its factory.
+    ctx: Context,
+) {
+    #[getMapping("/count")]
+    pub fn count(self: Self, req: Request) -> Response {
+        // The type comes from the ANNOTATED BINDING: explicit generic arguments
+        // do not parse at a call site and there is no `@typeName<T>()`, so the
+        // registry key travels as a string that nothing checks against `T`.
+        // With either, this would read `self.ctx.resolve<OrderCache>()`.
+        val cache: ?OrderCache = self.ctx.resolve("OrderCache");
+        var body = "no cache";
+        if (cache != null) body = cache.size().toString();
+        return Response.ok(body);
+    }
+
+    #[postMapping("/")]
+    pub fn place(self: Self, req: Request) -> Response {
+        // `Event(name: …, timestampMillis: 0)` does not compile: an integer
+        // literal is `i32` and an `i64` field takes no value. `event(…)` stamps
+        // the clock itself.
+        val _p = self.ctx.publish(event("OrderPlaced", "OrderController", req.body()));
+        return Response.created("accepted");
+    }
+
+    #[getMapping("/clock")]
+    pub fn clock(self: Self, req: Request) -> Response {
+        val fixed: ?Clock = self.ctx.resolveNamed("Clock", "fixed");
+        var body = "unavailable";
+        if (fixed != null) body = fixed.stamp();
+        return Response.ok(body);
+    }
+}
+
+// ---- the process status ----
+
+#[exitCode]
+pub fn drainExitCode() -> i32 {
+    return 0;
+}
+
+// ---- bootstrap ----
+
+fn main() {
+    // Publishes ApplicationStarting → ApplicationEnvironmentPrepared →
+    // ApplicationContextInitialized → ApplicationPrepared, constructs every
+    // registered bean and runs every #[postConstruct] (eager by default), then
+    // publishes ApplicationStarted → AvailabilityChanged(LivenessCorrect) →
+    // ApplicationReady → AvailabilityChanged(ReadinessAcceptingTraffic).
+    //
+    // It is called here and not inside `Rakun.run` because `src/bootstrap.bp` is
+    // frozen for this milestone.
+    val _boot = bootSequence();
+    Rakun.run(App(port: 8080, basePath: "/api"));
+}

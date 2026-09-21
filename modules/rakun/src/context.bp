@@ -835,6 +835,28 @@ pub fn lazy(comptime decl: @Decl) {
     if (decl.kind == DeclKind.Field) decl.fail("#[lazy] must annotate a type or a #[provides] function, not a field");
 }
 
+// `#[imports("DatabaseConfig,SecurityConfig")]` on a `#[configuration]` type
+// registers a bean for each NAMED type, so a configuration record in a module
+// the application does not otherwise reference is still wired. This is Spring's
+// `@Import`.
+//
+// "Additional scan roots" has no analogue and needs none: module resolution in
+// botopink is already explicit, and an extra root is a `pub mod` line. The front
+// says that rather than inventing a `basePackages`.
+//
+// Each named type must already have a `__rkMake_<Type>()` — from a stereotype,
+// from a `#[configuration]`'s `#[bean]`, or from a `#[provides]`. A name that
+// has none is `unbound variable '__rkMake_<Name>'` at the import site, which
+// names the type and the configuration that asked for it.
+pub fn imports(comptime decl: @Decl, names: string) {
+    names.split(",").forEach({ raw ->
+        val name = raw.replaceAll(" ", "");
+        if (name != "") @emit("val __rkImp_" + decl.name + "_" + name + " = rkRegisterBean(\"" + name + "\", \"\", \"singleton\", false, false, \"" + decl.name + "\", { -> __rkMake_" + name + "() });");
+    });
+    if (decl.kind != DeclKind.Type) decl.fail("#[imports] must annotate a type (a #[configuration])");
+    if (decl.variants.length > 0) decl.fail("#[imports] must annotate a type with fields, not an enum");
+}
+
 pub fn scope(comptime decl: @Decl, name: string) {
     if (decl.kind == DeclKind.Field) decl.fail("#[scope] must annotate a type or a #[provides] function, not a field");
 }
