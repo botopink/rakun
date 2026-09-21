@@ -12,11 +12,12 @@ to a sibling or to the umbrella is a located error.
 
 ## Members today
 
-Fourteen members exist. The thirteen scaffolds are **kept under their names** by the reconciliation
+Fourteen members exist. The eleven remaining scaffolds are **kept under their names** by the reconciliation
 table of `03-rakun/modules.md` § Verdicts (no rename applied to a scaffold); each is a two-comment
 `src/root.bp` until its front lands, and its manifest lists `files: ["root.bp"]` so it ships one module
-rather than nothing. `targets` follows `03-rakun/modules.md` § Targets. Two members hold real code
-today: the core (`rakun`, fronts 04 · 05 · 06 · 62 · 72 · 74) and `rakun-validation` (front 14).
+rather than nothing. `targets` follows `03-rakun/modules.md` § Targets. Three members hold real code
+today: the core (`rakun`, fronts 04 · 05 · 06 · 62 · 72 · 74), `rakun-validation` (front 14) and
+`rakun-web` (front 07).
 
 | Member | `files` | `targets` | Spring Boot 4 | Front(s) | State |
 |---|---|---|---|---|---|
@@ -33,7 +34,14 @@ today: the core (`rakun`, fronts 04 · 05 · 06 · 62 · 72 · 74) and `rakun-va
 | [rakun-session](./rakun-session/) | root | erlang | `spring-session-jdbc` / `-data-redis` | 18 | scaffold |
 | [rakun-test](./rakun-test/) | root | commonJS, erlang | `-test` | 19 | scaffold |
 | [rakun-validation](./rakun-validation/) | root · report · table · messages · spi · constraints · binding · boot · decorators | commonJS, erlang | `-validation` | 14 | real code, 54 tests |
-| [rakun-web](./rakun-web/) | root | erlang | `-webmvc` (websocket is `rakun-websocket`) | 07 · 65 · 82 | scaffold |
+| [rakun-web](./rakun-web/) | root · filter · error · middleware · cors · convention | erlang | `-webmvc` (websocket is `rakun-websocket`) | 07 · 65 · 82 | real code, 83 tests |
+
+`modules/rakun-web/` stopped being a scaffold with front 07: it carries the filter chain, CORS and
+RFC 9457 problem details, two host files (`src/chain.mjs`, `src/sidecars/rakun_chain.erl`) and four
+test files — see `repository/rakun/AGENTS.md` § The filter chain. `modules/rakun-validation/` stopped
+being one with front 14: the constraint decorators, `#[validated]`, the violation report, two host
+files (`src/validation_host.mjs`, `src/sidecars/rakun_validation.erl`) and seven test files — see
+`repository/rakun/AGENTS.md` § Validation, and the section below.
 
 ### `rakun-validation` — the one `both — boundary` member (front 14)
 
@@ -104,10 +112,19 @@ Twenty-seven members in all when every front has landed, plus `starters/`. `raku
 ```bp
 import {service, restController, route, getMapping} from "rakun";
 import {Rakun, App, Request, Response} from "rakun";
+import {filter, order, Chain, WebRequest} from "rakun-web";
+import {validated, notBlank, email} from "rakun-validation";
 // later, per front:
 import {cacheable} from "rakun-cache";
 import {secured} from "rakun-security";
 ```
+
+> **`validated` comes from `rakun-validation`, never from `rakun`, and never
+> both.** The core carries a *placement-only* `#[validated]` of its own
+> (`modules/rakun/src/config.bp`, front 05): it checks placement and **emits
+> nothing**, so importing that one leaves `validate<TypeName>` undefined and the
+> failure lands at the call site as an unbound variable rather than at the
+> annotation. Importing both names into one module is a duplicate binding.
 
 ## Member structure
 
@@ -163,7 +180,7 @@ rakun-<name>/
 | `@RabbitListener` / `@KafkaListener` | `#[rabbitListener]` / `#[kafkaListener]` (rakun-messaging) |
 | `@PreAuthorize` | `#[preAuthorize]` (rakun-security) |
 | `@CrossOrigin` | `#[crossOrigin]` (rakun-web) |
-| `@Valid` | `#[valid]` (rakun-validation) |
+| `@Valid` / `@NotBlank` / `@Size` / `@Email` … | `#[validated]` + the constraint markers (rakun-validation) — an explicit `validate<TypeName>(v)` call, not a parameter hook |
 | Actuator endpoints | `/actuator/*` (rakun-actuator) |
 | `RestClient` / `WebClient` | `RestClient` / `WebClient` (rakun-client) |
 

@@ -109,8 +109,102 @@
   `constraints_test` 14, `parity_test` 3, `report_test` 7, `spi_test` 8,
   `table_test` 6. `modules/rakun` is untouched and unchanged at 346/0 on commonJS
   and 344 passing / 2 failing on erlang, the two reds being front 04's own
-  `server_test.bp:74,80`.
+  `server_test.bp:74,80`; re-measured after merging front 07, `modules/rakun-web`
+  is likewise unchanged at 83/0 on both rows.
 
+  **One name needs care at the import line.** `validated` now exists twice in the
+  workspace: here, where it emits, and in `modules/rakun/src/config.bp` (front
+  05), where it is placement-only and emits nothing. Importing that one leaves
+  `validate<TypeName>` undefined and the failure lands at the CALL SITE as an
+  unbound variable rather than at the annotation; importing both into one module
+  is a duplicate binding. The rule is written where an application author reads
+  — `docs.md` § Validation (first paragraph of the section), `modules/README.md`
+  § Consuming a member, and the docblocks of `src/root.bp` and
+  `src/decorators.bp` — not only in a test header. Front 05's marker is left
+  alone; whether it should be deleted now that this front has landed is front
+  05's call.
+
+- **The filter chain, CORS and RFC 9457 problem details** (front 07).
+  `modules/rakun-web/` stops being a two-comment scaffold: it now carries one
+  ordered chain between the socket and the route handler, two entry points into
+  it, and the error shape everything above it produces. **83 cells, green on
+  both rows** (`botopink test` on the member's own erlang target and
+  `botopink test --target commonJS`), where the member had no `test/` directory
+  at all before. `modules/rakun` is untouched by this front: with front 72 also
+  in the tree it reads 346/346 commonJS and 344 passing / 2 failing erlang, the
+  two reds still front 04's `server_test.bp:74,80`. (Front 07 was written
+  against the pre-72 core, 302/300 with the same two reds.)
+
+  **One chain, two entry points.** `#[filter]` on a component registers one
+  entry ordered by `#[order]`; `#[middleware]` on a `pub fn` registers exactly
+  one entry at `−50`. Two pipelines would mean two orderings and a CORS header
+  set in one and overwritten in the other, so there is one list and the order
+  band says who sits where. `middleware_test.bp` writes the SAME redirect both
+  ways and asserts the two responses agree field for field. Ordering is asserted
+  as a WHOLE string — `a>|b>|c>|handler:/x|<c|<b|<a` — rather than filter by
+  filter, so a reordering cannot hide.
+
+  **The chain's request value is a record, not `Request`, and that is a
+  measurement.** A method on a host-supplied `behavior` does not dispatch on the
+  erlang row — `req.header("origin")` lowers to a map field read of `header`
+  followed by a call, which is the defect keeping `server_test.bp:74,80` red in
+  the core. A chain that cannot read a header cannot do CORS, so the chain
+  carries `WebRequest`, built from the same scalars the dispatcher already has
+  and reading through front 62's wire grammar. `path` never changes; `target` is
+  what the router is asked about, and `Next.rewrite` is the only thing that
+  moves it.
+
+  **`#[order]` takes a STRING because `#[order(-100)]` does not parse.**
+  `#[mark(-20)]` is `error: this token cannot appear here … unexpected 20` on
+  both targets while `#[mark(20)]` compiles — measured against compiler
+  `2e6bb4ac` with a two-file program. Every order in the band below zero is
+  unwritable as an integer, so the argument is quoted and parsed with front 05's
+  `toI32`. When the parser accepts the minus sign the signature becomes
+  `n: i32` and the emitted `toI32(` wrapper is deleted; nothing else moves. This
+  is the one place the front's surface differs from its spec for a compiler
+  reason rather than a design one.
+
+  **`withHeader` replaces by name, and says so twice.** `Response` is frozen at
+  `(status, body)`, so `withHeader(res, name, value)` writes through a
+  per-request accumulator and returns the same `Response`. Case-insensitive, and
+  two exceptions: `Set-Cookie` is a boot-time REFUSAL naming front 62's list API
+  (a replace would set one cookie and drop the rest), and `Vary` is unioned so
+  the CORS entry's `Origin` and a future compression entry's `Accept-Encoding`
+  both survive. The BEAM half mirrors every write into front 04's
+  `set_reply_header/2` so the line reaches the socket; the node half does not,
+  because `runtime.mjs` is frozen and this front does not unfreeze it.
+
+  **CORS denies until told otherwise.** No origin is allowed until one is named;
+  the wildcard together with `allowCredentials` fails at BOOT naming the
+  combination, with no property that downgrades it; and a preflight for a path
+  with no route answers 404 rather than a permissive 204. The allow-origin
+  header ECHOES the request origin and never answers `*`, and `Vary: Origin` is
+  set on every response the policy looked at, allowed or not. A preflight from a
+  disallowed origin answers 403 — the spec does not pin that case, and 204 with
+  no allow-origin reads to a browser exactly like a misconfiguration.
+
+  **A problem detail never carries a reason.** botopink has no typed raise, so
+  the raise and the catch are both host cells and the tag is a STRING. A tagged
+  raise with a matching `#[exceptionHandler]` answers that advice's
+  `ProblemDetail` as `application/problem+json`; anything else answers 500,
+  `about:blank`, and a correlation DIGEST, with the full reason in the log under
+  that digest. A cell reads the digest out of the body and asserts the same
+  string is in the log line. A handler's own `Response` with a body is never
+  rewritten, `rakun.web.problemdetails.enabled` or not.
+
+  **A refusal text may carry no double quote, and that cost a red.** On the
+  erlang row `asserts.throwsWith` reads the `~p` RENDERING of the raised binary,
+  in which a `"` is escaped to `\"`; on commonJS it reads the raw message. One
+  needle cannot match both rows if either side carries a quote — measured both
+  ways with a three-cell probe. Every refusal in this member is written around
+  it, the way front 62's are written around the em dash.
+
+  **Five of the spec's ten steps are NOT in, and none is stubbed:** static error
+  pages (5), content negotiation (6), `WebCustomizer` (7), API versioning (8) and
+  compression (9) are work with no blocker; graceful shutdown (10) is BLOCKED,
+  and not on front 76 — step 2 of its sequence closes the listening socket, and
+  that socket lives in `rakun_runtime.erl` under `modules/rakun/`, which front 07
+  does not own. `AGENTS.md` § What front 07 did NOT reach carries the table.
 - **Auto-configuration: conditional registration, ordered, with a report**
   (front 72). `src/autoconfig.bp`, `src/conditions.bp`, `src/condition_report.bp`,
   `src/autoconfig_registry.bp`, `src/autoconfig.mjs`,

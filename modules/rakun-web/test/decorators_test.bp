@@ -1,0 +1,186 @@
+//// rakun-web — the four markers and what they emit.
+////
+//// Separate from `middleware_test.bp` for a mechanical reason, not a tidy one.
+//// An `@emit`ted module-load `val` lands at the END of the emitted module,
+//// after every hand-written module-level `val`, so a registration cannot be
+//// snapshotted in a file that also REBUILDS the chain — and the ordering cells
+//// next door reset it in almost every test. `botopink test` runs each test FILE
+//// in its own process (front 04 measured it and front 22's markers test relies
+//// on it), so the two concerns live in two files and neither sees the other's
+//// table. Nothing here resets the chain, the advice table or the CORS
+//// mappings.
+////
+//// WRONG PLACEMENT IS NOT EXPRESSIBLE HERE. `#[filter]` on a function, or
+//// `#[exceptionHandler]` on a type, is a COMPILE failure; a file that contained
+//// one would not compile, so there would be no cell to run. A clean compile of
+//// this file is the placement assertion, exactly as `modules/rakun/test/
+//// di_test.bp` records for the stereotypes, and the rejection itself is covered
+//// generically by the compiler's own annotation-processor suite.
+////
+//// Every assertion runs on BOTH rows.
+
+import {Response} from "rakun";
+import {rkScan, rkSingleton, rkEnter, rkDone, rkProp, rkPropInt, toI32} from "rakun";
+import {rkScannedNames} from "rakun";
+import {Chain, WebRequest, runChain, chainNames, chainOrders, chainOrdering} from "filter";
+import {registerFilter, headerValue, rkChainSetTerminal, rkTrace, rkTraceLog, rkTraceReset} from "filter";
+import {Next, registerMiddleware, gateByMatcher, skip, middlewareOwner, middlewareMatcher} from "filter";
+import {middlewareEntryName} from "filter";
+import {registerCorsMapping, corsMappingRows, mappingFor, policyFor} from "cors";
+import {ProblemDetail, problemFor, registerAdvice, adviceTags, renderProblem} from "error";
+import {filter, order, middleware, matcher, crossOrigin, controllerAdvice, exceptionHandler} from "convention";
+
+// ── `#[filter]` ─────────────────────────────────────────────────────────────
+
+#[filter]
+#[order("-20")]
+pub type TraceFilter {
+    pub fn handle(self: Self, req: WebRequest, chain: Chain) -> Response {
+        val _in = rkTrace("TraceFilter>");
+        val res: Response = chain.next(req);
+        val _out = rkTrace("<TraceFilter");
+        return res;
+    }
+}
+
+// A second filter with the DEFAULT order, to prove `#[order]` is what moves an
+// entry and that a filter without one lands at 0.
+#[filter]
+pub type PlainFilter {
+    pub fn handle(self: Self, req: WebRequest, chain: Chain) -> Response {
+        val _in = rkTrace("PlainFilter>");
+        val res: Response = chain.next(req);
+        val _out = rkTrace("<PlainFilter");
+        return res;
+    }
+}
+
+// ── `#[middleware]` ─────────────────────────────────────────────────────────
+
+#[middleware]
+#[matcher("/dashboard/:path*")]
+pub fn appMiddleware(req: WebRequest, chain: Chain) -> Response {
+    val token: string = req.header("authorization");
+    return if (token == "") Next.redirect("/login") else chain.next(req);
+}
+
+// ── `#[crossOrigin]` ────────────────────────────────────────────────────────
+//
+// The decorator reads the `#[route]` prefix off the same type, which is why the
+// marker is stacked on a controller-shaped declaration. Nothing here is a
+// `#[restController]`: this file asserts what `#[crossOrigin]` registers, and a
+// route registration would put a second front's table in the way.
+
+#[crossOrigin("https://a.test", "GET,POST")]
+#[route("/api")]
+pub type ApiController {
+    pub fn list(self: Self) -> string {
+        return "ok";
+    }
+}
+
+// ── `#[controllerAdvice]` ───────────────────────────────────────────────────
+
+#[controllerAdvice]
+pub type OrderAdvice {
+    #[exceptionHandler("order.not-found")]
+    pub fn notFound(self: Self, detail: string) -> ProblemDetail {
+        return ProblemDetail(
+            typeUri: "https://example.com/problems/order-not-found",
+            title: "Order not found",
+            status: 404,
+            detail: detail,
+            instance: "/api/orders",
+        );
+    }
+
+    #[exceptionHandler("order.declined")]
+    pub fn declined(self: Self, detail: string) -> ProblemDetail {
+        return problemFor(402, detail, "/api/orders");
+    }
+}
+
+// `#[route]` has to exist for `#[crossOrigin]` to read; rakun's own marker is
+// imported rather than redeclared.
+import {route} from "rakun";
+
+// ── the cells ───────────────────────────────────────────────────────────────
+
+test "rakun-web markers: #[filter] registers one entry per component, ordered by #[order]" {
+    assert chainNames().contains("TraceFilter");
+    assert chainNames().contains("PlainFilter");
+    assert chainOrders().join(",").contains("-20");
+    // `-20` sorts before the default `0`, whatever order the two declarations
+    // happened to run in.
+    assert chainOrdering().indexOf("TraceFilter") < chainOrdering().indexOf("PlainFilter");
+}
+
+test "rakun-web markers: a #[filter] component is also a scanned singleton" {
+    assert rkScannedNames().contains("TraceFilter");
+    assert rkScannedNames().contains("PlainFilter");
+    assert rkScannedNames().contains("OrderAdvice");
+}
+
+test "rakun-web markers: #[middleware] registers one entry at -50 with its matcher" {
+    assert chainNames().contains(middlewareEntryName());
+    assert middlewareOwner() == "appMiddleware";
+    assert middlewareMatcher() == "/dashboard/:path*";
+    // The whole chain, as one string: the middleware sits between the `-20`
+    // filter and the default-order one.
+    assert chainOrdering() == "middleware>TraceFilter>PlainFilter";
+}
+
+test "rakun-web markers: the registered chain runs in band order and the matcher gates the middleware" {
+    val _t = rkTraceReset();
+    val _s = rkChainSetTerminal({ method, path, headersWire, queryWire, body ->
+        val _h = rkTrace("handler:" + path);
+        Response.ok("handled " + path);
+    });
+    val outside: Response = runChain("GET", "/public", "", "", "");
+    assert outside.status == 200;
+    assert rkTraceLog() == "TraceFilter>|PlainFilter>|handler:/public|<PlainFilter|<TraceFilter";
+}
+
+test "rakun-web markers: the middleware body runs on a matching path and redirects" {
+    val _t = rkTraceReset();
+    val _s = rkChainSetTerminal({ method, path, headersWire, queryWire, body ->
+        val _h = rkTrace("handler:" + path);
+        Response.ok("handled " + path);
+    });
+    val gated: Response = runChain("GET", "/dashboard/settings", "", "", "");
+    assert gated.status == 307;
+    assert headerValue("Location") == "/login";
+    // The handler never ran, and neither did the two filters below the
+    // middleware in the band.
+    assert rkTraceLog() == "";
+}
+
+test "rakun-web markers: an authorized request passes the middleware and reaches the handler" {
+    val _t = rkTraceReset();
+    val _s = rkChainSetTerminal({ method, path, headersWire, queryWire, body ->
+        val _h = rkTrace("handler:" + path);
+        Response.ok("handled " + path);
+    });
+    val res: Response = runChain("GET", "/dashboard/settings", "authorization\tBearer x", "", "");
+    assert res.status == 200;
+    assert rkTraceLog() == "TraceFilter>|PlainFilter>|handler:/dashboard/settings|<PlainFilter|<TraceFilter";
+}
+
+test "rakun-web markers: #[crossOrigin] registers a mapping keyed by the #[route] prefix" {
+    assert corsMappingRows().length == 1;
+    assert mappingFor("/api/orders") == "/api\thttps://a.test\tGET,POST";
+    assert mappingFor("/other") == "";
+    assert policyFor("/api/orders").allowedOrigins.join(",") == "https://a.test";
+    assert policyFor("/api/orders").allowedMethods.join(",") == "GET,POST";
+}
+
+test "rakun-web markers: #[controllerAdvice] wires one handler per #[exceptionHandler] tag" {
+    assert adviceTags().join(",") == "order.not-found,order.declined";
+    val found: Response = renderProblem("order.not-found", "no order 42", "/api/orders/42");
+    assert found.status == 404;
+    assert found.body.contains("https://example.com/problems/order-not-found");
+    assert found.body.contains("no order 42");
+    val declined: Response = renderProblem("order.declined", "card declined", "/api/orders/42");
+    assert declined.status == 402;
+    assert declined.body.contains("card declined");
+}

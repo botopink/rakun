@@ -70,6 +70,18 @@ sidecar naming rule and what is still blocked.
 - **Bootstrap** — `Rakun.run(App(port: 8080, basePath: "/api"))` reads the host
   router and starts the node `http` server (`rkServe`), dispatching every live
   request to the handler.
+- **The filter chain** — a separate member, `from "rakun-web"`: one ordered list
+  of entries between the socket and the route handler, with `#[filter]` and
+  `#[middleware]` as its two entry points, `Next` for redirect/rewrite, CORS with
+  deny-all defaults, and RFC 9457 problem details. See § The filter chain below.
+- **Validation** — a separate member, `from "rakun-validation"`, and the only one
+  that compiles for **both** rows: `#[validated]` on a record emits
+  `validate<TypeName>` and `constraintsOf<TypeName>` from string comparisons,
+  length checks and regex matches alone, so the server and the browser run the
+  SAME predicate rather than two that are meant to agree. Thirteen constraint
+  markers, an SPI for application constraints, message templates resolved from
+  configuration, typed coercion of `Request`'s strings, and an RFC 9457 report.
+  See § Validation below.
 
 ## Spring → rakun mapping
 
@@ -84,6 +96,7 @@ sidecar naming rule and what is still blocked.
 | `SpringApplication.run(App.class)` | `Rakun.run(App(port: 8080, basePath: "/api"))` |
 | `ApplicationContext` | `Context` (`ctx.resolve<T>()`) — future, declaration-only |
 | `ResponseEntity` | `Response` (`Response.ok(...)`, `Response.json(...)`) |
+| `@Valid` / `@NotBlank` / `@Size` / `@Email` … | `#[validated]` + the constraint markers (`rakun-validation`) — an explicit `validate<TypeName>(v)` call, not a parameter hook |
 
 The decorators (`service`, `restController`, `route`, `getMapping`, …) are
 symbols **exported by rakun** — import them at the call site before applying them
@@ -1068,6 +1081,273 @@ unsatisfiable, and are refused at compile time.
 Because the stereotypes' `__rkMake_<Type>()` is frozen for this milestone, a
 profile-gated component is reached through the emitted `__rkAutoGated_<Type>()`
 when you want the refusal rather than the value.
+
+## The filter chain (`from "rakun-web"`)
+
+`modules/rakun-web/` is a separate member. Depend on it with
+`{ "rakun-web": { "workspace": true } }` inside the workspace, and call
+`bootWeb()` once at startup — that installs the built-in entries, validates the
+CORS policy and hands the runner to the host, so front 04's dispatcher finds it.
+
+### One chain, two entry points
+
+```bp
+import {filter, order, Chain, WebRequest} from "rakun-web";
+import {Response, rkScan, rkSingleton, rkEnter, rkDone, toI32} from "rakun";
+import {registerFilter} from "rakun-web";
+
+#[filter]
+#[order("-10")]
+pub type TimingFilter {
+    pub fn handle(self: Self, req: WebRequest, chain: Chain) -> Response {
+        return chain.next(req);
+    }
+}
+```
+
+```bp
+// middleware.bp, at the project root
+import {middleware, matcher, Next, Chain, WebRequest} from "rakun-web";
+import {registerMiddleware, gateByMatcher, skip} from "rakun-web";
+
+#[middleware]
+#[matcher("/dashboard/:path*")]
+pub fn appMiddleware(req: WebRequest, chain: Chain) -> Response {
+    val token = req.header("authorization");
+    return if (token == "") Next.redirect("/login") else chain.next(req);
+}
+```
+
+A filter that does not call `chain.next(req)` short-circuits, which is how a
+security filter answers 401 without the handler ever running. A filter that
+calls it may read what came back and answer something else.
+
+**`#[order]` takes a string.** `#[order(-100)]` does not parse — a negative
+integer literal in a decorator argument is a parse error on both targets — so the
+number is quoted and parsed with `toI32`. See `AGENTS.md` § Language notes.
+
+### The order band
+
+`−400` request id · `−300` security · `−250` URL rules · `−200` CORS ·
+`−150` API version · `−100` problem-detail boundary · `−50` `middleware.bp` ·
+`0` application filters · `+100` metrics · `+200` compression ·
+`+300` server identification. `orderBand()` answers the whole table.
+
+### `Next`
+
+`Next.pass()` continues the chain, `Next.redirect(url)` answers 307 with
+`Location`, `Next.permanentRedirect(url)` answers 308, and `Next.rewrite(path)`
+re-targets the route table while `req.path` keeps the URL the client asked for.
+`pass()` and `rewrite()` answer status **0**, which is not a valid HTTP status
+and never reaches the wire: the chain reads it as "continue".
+
+### Response headers
+
+```bp
+val res = withHeader(Response.ok("{}"), "Content-Type", "application/json");
+val two = withHeaders(res, [#("X-A", "1"), #("X-B", "2")]);
+```
+
+`withHeader` returns the `Response` it was given and **replaces by name**,
+case-insensitively. Two names are special: `Set-Cookie` is refused (queue cookies
+with front 62's `cookies().set` and hand `endRequest()`'s blob to
+`writeCookies`), and `Vary` is unioned rather than replaced.
+
+### CORS
+
+```bp
+#[provides]
+pub fn corsPolicy() -> CorsPolicy {
+    return corsPolicy(["https://example.com"], ["GET", "POST"], [], [], false, 600);
+}
+```
+
+or, per controller:
+
+```bp
+#[crossOrigin("https://example.com", "GET,POST")]
+#[route("/api")]
+#[restController]
+pub type ApiController { }
+```
+
+With no policy nothing is allowed and no CORS header is ever set. The wildcard
+together with `allowCredentials: true` fails at boot. A preflight for a path with
+no route answers 404.
+
+### Problem details
+
+```bp
+#[controllerAdvice]
+pub type OrderAdvice {
+    #[exceptionHandler("order.not-found")]
+    pub fn notFound(self: Self, detail: string) -> ProblemDetail {
+        return ProblemDetail(
+            typeUri: "https://example.com/problems/not-found",
+            title: "Order not found",
+            status: 404,
+            detail: detail,
+            instance: "/api/orders",
+        );
+    }
+}
+
+// in a handler:
+val _ = raiseProblem("order.not-found", "no order 42");
+```
+
+The tag is a **string**, not a type name: botopink has no typed raise and
+`try … catch` works over `@Result` alone. A raise nothing handles answers 500
+with `about:blank` and a correlation digest; the reason goes to the log under
+that digest and never into the body.
+
+## Validation (`from "rakun-validation"`)
+
+`modules/rakun-validation/` is a separate member. Depend on it with
+`{ "rakun-validation": { "workspace": true } }` inside the workspace.
+
+> **Import `validated` from `rakun-validation`, never from `rakun`, and never
+> both.** The core carries a *placement-only* `#[validated]` of its own
+> (`modules/rakun/src/config.bp`, front 05): it checks that the marker sits on a
+> record-shaped `type` and **emits nothing**. Importing that one instead of this
+> one leaves `validate<TypeName>` undefined, and the failure lands at the call
+> site as an unbound variable rather than at the annotation. Importing BOTH into
+> one module is a duplicate binding. One import line, from
+> `"rakun-validation"`.
+
+### The record, and the two functions it gets
+
+```bp
+import {validated, notBlank, sizeBetween, email, minValue, maxValue, pattern} from "rakun-validation";
+import {ValidationReport, Violation} from "rakun-validation";
+import {constraintTableJson} from "rakun-validation";
+import {vNotBlank, vSizeBetween, vEmail, vMinValueI32, vMaxValueI32, vPattern} from "rakun-validation";
+
+#[validated]
+pub type CreateUserRequest(
+    #[notBlank]
+    #[sizeBetween(2, 50)]
+    name: string,
+
+    #[notBlank]
+    #[email]
+    email: string,
+
+    #[minValue(18)]
+    #[maxValue(120)]
+    age: i32,
+)
+```
+
+`#[validated]` splices two functions into **this** module:
+
+```
+pub fn validateCreateUserRequest(v: CreateUserRequest) -> ValidationReport
+pub fn constraintsOfCreateUserRequest() -> string
+```
+
+The emission runs at the application site, so the application imports the names
+the emitted bodies reference — the same rule `#[service]` lives by. `ValidationReport`
+and `Violation` are imported **even where the application never spells them**: on the
+erlang row a record method's owner module is resolved only when the type is
+imported into the calling module, and without it `report.isValid()` lowers to an
+unqualified call the BEAM compiler refuses.
+
+Every constraint on a field runs; the first failure does not stop the second,
+which is what makes a three-field form report three errors:
+
+```bp
+val report = validateCreateUserRequest(CreateUserRequest(name: "", email: "nope", age: 7));
+if (report.isValid() == false) return Response.withStatus(400, report.toProblemDetail());
+```
+
+### The constraint set
+
+| Marker | Applies to | Holds when |
+|---|---|---|
+| `#[notNull]` | a field whose type can be null | the value is not `null` |
+| `#[notBlank]` | `string` | trimmed length > 0 |
+| `#[notEmpty]` | `string`, `Array<T>` | length > 0 |
+| `#[sizeBetween(min, max)]` | `string`, `Array<T>` | `min <= length <= max`, inclusive |
+| `#[minValue(n)]` / `#[maxValue(n)]` | `i32`, `f64` | numeric bound, inclusive |
+| `#[positive]` / `#[positiveOrZero]` | `i32`, `i64`, `f64` | sign |
+| `#[email]` | `string` | the address grammar |
+| `#[pattern(regex)]` | `string` | `std/regex` matches |
+| `#[pastDate]` / `#[futureDate]` | `i64` epoch millis | strictly before / after the clock |
+| `#[constraint(name)]` | `string` | the registered constraint answers `""` |
+
+There is **no `#[future]`**: that name collides with the effect marker
+`#[@future]`. `#[sizeBetween]` names both bounds because a declared parameter
+default is never applied at a call site.
+
+A marker on a field whose type it cannot check is a **located compile error**,
+not a row that quietly always holds — `#[notBlank]` on an `i32` refuses, it does
+not pass.
+
+### Typed coercion of `Request`'s strings
+
+`Request.param`/`query`/`header`/`body` all answer `string`, and `""` when
+absent. The binders make the distinction and record a violation instead of
+yielding a zero. Bind everything, then ask once:
+
+```bp
+import {bindInt, bindRequired, bindingReport} from "rakun-validation";
+
+val name = bindRequired("name", req.query("name"));
+val age = bindInt("age", req.query("age"));
+val bound = bindingReport();          // every violation, and the accumulator is now empty
+if (bound.isValid() == false) return Response.withStatus(400, bound.toProblemDetail());
+```
+
+`bindInt("age", "12x")` answers `0` **and** records a `typeMismatch` naming
+`age`, so the zero can never be mistaken for a value the caller meant. The
+accumulator is request-scoped: on the BEAM it is the serving process's
+dictionary, so two concurrent requests cannot see each other's violations.
+
+### An application constraint
+
+```bp
+import {Constraint, registerConstraint} from "rakun-validation";
+
+pub type CpfConstraint {
+    pub fn code(self: Self) -> string { return "cpf"; }
+    pub fn check(self: Self, field: string, value: string) -> string {
+        if (value.length() == 11) return "" else return "{field} must be a CPF, got \"{value}\"";
+    }
+}
+
+val __cpf = CpfConstraint();
+val __cpfRegistration = registerConstraint("cpf", __cpf.code(), { f, v -> __cpf.check(f, v) });
+```
+
+Reach it from a field with `#[constraint("cpf")]`. `check` answers `""` when the
+value is acceptable and otherwise a message TEMPLATE — `{field}` and `{value}`
+are substituted by the reporter. A name nothing is registered under is a
+**violation** coded `unknownConstraint` naming what IS registered, at the first
+validation call; it is never a pass.
+
+Message templates resolve `rakun.validation.messages.<locale>.<code>` →
+`rakun.validation.messages.<code>` → the built-in default, over front 05's
+property table; the locale is `rakun.validation.locale`. A template naming a
+placeholder the constraint does not have is left as written, because a visible
+`{limit}` in an error message is a bug report and an empty string is not.
+
+### Configuration that refuses to boot
+
+```bp
+#[validated]
+#[configurationProperties("app.billing")]
+pub type BillingConfig(
+    #[notBlank] endpoint: string,
+    #[minValue(1)] #[maxValue(10)] retryLimit: i32,
+)
+```
+
+`refuseInvalidConfig("BillingConfig", "app.billing", validateBillingConfig(cfg))`
+halts with one line per violation, each naming its **property key**
+(`app.billing.retryLimit: must be at most 10 (maxValue)`) rather than its field
+name — the operator reads `application.yaml`, not the record. There is no flag
+that turns the refusal into a warning.
 
 ## Loading notes
 

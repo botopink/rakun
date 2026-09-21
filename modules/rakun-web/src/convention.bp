@@ -1,0 +1,193 @@
+//// rakun-web — the two entry points, as comptime decorators, and the boot.
+////
+//// `#[filter]` and `#[middleware]` are not two mechanisms. They are two
+//// REGISTRATIONS into the one chain of `filter.bp`, at two default orders:
+////
+//// | Entry point | Registers as | Default order | Suits |
+//// |---|---|---|---|
+//// | `#[filter]` on a component | one entry per component, ordered by `#[order(N)]` | `0` | reusable concerns: CORS, compression, metrics, security |
+//// | `#[middleware]` on `pub fn middleware` in `middleware.bp` | one entry | `−50` | the application's own request gate: auth redirects, rewrites, locale |
+////
+//// Both receive `(req, chain)`, both may short-circuit, and both see the
+//// response. The same redirect can be written either way, which is the honest
+//// way to make the claim checkable — `test/middleware_test.bp` writes it twice.
+////
+//// DECORATOR-BODY CONSTRAINTS (rakun's `AGENTS.md`): a decorator body cannot
+//// call a sibling function — each is lowered alone into the eval script — so
+//// the per-field injection rule and the factory builder are inlined in every
+//// marker here exactly as `decorators.bp` inlines them in every stereotype. The
+//// `@emit`s run BEFORE the placement `fail`, and a failed outcome discards the
+//// contributions, so only correctly placed declarations wire up.
+
+import {Response} from "rakun";
+import {rkProp, toI32} from "rakun";
+import {WebRequest, Chain, withHeader, registerFilter, runChain} from "filter";
+import {orderRequestId, orderCors, orderProblem, rkFreshId, rkChainSetRunner} from "filter";
+import {corsEntry, globalPolicy, validatePolicy} from "cors";
+import {errorEntry} from "error";
+
+// ── the markers ─────────────────────────────────────────────────────────────
+
+// `#[filter]` is a TYPE-level decorator: a method `@Decl` carries no owner
+// (front 06's gap table), so a marker that wired itself could not find the type
+// it belongs to. It contributes the component wiring a stereotype does — scan
+// plus a singleton factory — and then one chain entry calling `handle`.
+pub fn filter(comptime decl: @Decl) {
+    @emit("val __rkScan_" + decl.name + " = rkScan(\"" + decl.name + "\");");
+    var args: Array<string> = [];
+    decl.fields.forEach({ f ->
+        var valKey = "";
+        f.annotations.forEach({ a -> if (a.name == "value") valKey = a.args.join("") });
+        val expr = if (valKey != "") {
+            if (f.typeName == "i32") "rkPropInt(" + valKey + ")" else "rkProp(" + valKey + ")";
+        } else "__rkMake_" + f.typeName + "()";
+        args.push(f.name + ": " + expr);
+    });
+    @emit("pub fn __rkMake_" + decl.name + "() -> " + decl.name + " { return rkSingleton(\"" + decl.name + "\", { -> val _e = rkEnter(\"" + decl.name + "\"); val v = " + decl.name + "(" + args.join(
+            ", "
+        ) + "); val _d = rkDone(\"" + decl.name + "\"); v }); }");
+    var ord = "\"0\"";
+    decl.annotations.forEach({ a -> if (a.name == "order") ord = a.args.join("") });
+    @emit("val __rkFilter_" + decl.name + " = registerFilter(\"" + decl.name + "\", toI32(" + ord + "), { req, chain -> __rkMake_" + decl.name + "().handle(req, chain) });");
+    if (decl.kind != DeclKind.Type) decl.fail("#[filter] must annotate a type");
+    if (decl.variants.length > 0) decl.fail("#[filter] must annotate a type with fields, not an enum");
+}
+
+// `#[order("-100")]` is read off `decl.annotations` by `#[filter]`; on its own
+// it is a placement check, the same split `#[route]` and `#[restController]`
+// use. A marker that emitted its own line could not see the entry it belongs
+// to.
+//
+// THE ARGUMENT IS A STRING AND THAT IS NOT A STYLE CHOICE. The spec writes
+// `#[order(-100)]` and that spelling DOES NOT PARSE: a negative integer literal
+// in a decorator argument is `error: this token cannot appear here ... unexpected
+// `100``, on both targets, measured against compiler 2e6bb4ac with the smallest
+// program there is (`#[mark(20)]` compiles, `#[mark(-20)]` does not). Every
+// order in the band below zero is therefore unwritable as an integer. The
+// string is quoted and parsed with front 05's `toI32`, whose rule — a LEADING
+// integer wins — is the one `#[value]` already uses, and the emitted line is
+// `toI32("-100")`. When the parser accepts the minus sign the signature becomes
+// `n: i32` and the emitted `toI32(` wrapper is deleted; nothing else moves.
+pub fn order(comptime decl: @Decl, n: string) {
+    if (decl.kind == DeclKind.Field) decl.fail("#[order] must annotate a type or a function, not a field");
+}
+
+// `#[middleware]` on `pub fn middleware(req, chain)`. The matcher is read off
+// the stacked `#[matcher(...)]`; with none the entry runs on every request,
+// which is Next's own default.
+pub fn middleware(comptime decl: @Decl) {
+    var pattern = "\"\"";
+    decl.annotations.forEach({ a -> if (a.name == "matcher") pattern = a.args.join("") });
+    @emit("val __rkMiddleware_" + decl.name + " = registerMiddleware(\"" + decl.name + "\", " + pattern + ", { req, chain -> if (gateByMatcher(req, " + pattern + ")) " + decl.name + "(req, chain) else skip() });");
+    if (decl.kind != DeclKind.Fn) decl.fail("#[middleware] must annotate a function");
+}
+
+pub fn matcher(comptime decl: @Decl, pattern: string) {
+    if (decl.kind != DeclKind.Fn) decl.fail("#[matcher] must annotate the #[middleware] function");
+}
+
+// `#[crossOrigin("https://example.com", "GET,POST")]` — comma-joined strings
+// rather than array arguments, because a decorator argument is a raw lexeme
+// typed by the signature and an array literal there is unverified. The mapping
+// is keyed by the controller's `#[route]` prefix, so the override applies to
+// that controller's routes and to nothing else.
+pub fn crossOrigin(comptime decl: @Decl, origins: string, methods: string) {
+    var prefix = "";
+    decl.annotations.forEach({ a -> if (a.name == "route") prefix = a.args.join("") });
+    @emit("val __rkCors_" + decl.name + " = registerCorsMapping(" + prefix + ", \"" + origins + "\", \"" + methods + "\");");
+    if (decl.kind != DeclKind.Type) decl.fail("#[crossOrigin] must annotate a controller type");
+    if (prefix == "") decl.fail("#[crossOrigin] needs a #[route] prefix on the same type - a CORS mapping is keyed by the paths it covers, and a controller with no prefix covers none of them");
+}
+
+// `#[controllerAdvice]` is a TYPE-level decorator and `#[exceptionHandler]` a
+// method-level placement marker, because a method `@Decl` carries no owner. The
+// advice does the wiring: it walks its own methods and registers one handler
+// per tag.
+pub fn controllerAdvice(comptime decl: @Decl) {
+    @emit("val __rkScan_" + decl.name + " = rkScan(\"" + decl.name + "\");");
+    var aargs: Array<string> = [];
+    decl.fields.forEach({ f ->
+        var valKey = "";
+        f.annotations.forEach({ a -> if (a.name == "value") valKey = a.args.join("") });
+        val expr = if (valKey != "") {
+            if (f.typeName == "i32") "rkPropInt(" + valKey + ")" else "rkProp(" + valKey + ")";
+        } else "__rkMake_" + f.typeName + "()";
+        aargs.push(f.name + ": " + expr);
+    });
+    @emit("pub fn __rkMake_" + decl.name + "() -> " + decl.name + " { return rkSingleton(\"" + decl.name + "\", { -> val _e = rkEnter(\"" + decl.name + "\"); val v = " + decl.name + "(" + aargs.join(
+            ", "
+        ) + "); val _d = rkDone(\"" + decl.name + "\"); v }); }");
+    decl.methods.forEach({ m ->
+        m.annotations.forEach({ a ->
+            if (a.name == "exceptionHandler") @emit("val __rkAdvice_" + decl.name + "_" + m.name + " = registerAdvice(" + a.args.join(
+                    ""
+                ) + ", \"" + decl.name + "." + m.name + "\", { detail -> __rkMake_" + decl.name + "()." + m.name + "(detail) });");
+        });
+    });
+    if (decl.kind != DeclKind.Type) decl.fail("#[controllerAdvice] must annotate a type");
+    if (decl.variants.length > 0) decl.fail("#[controllerAdvice] must annotate a type with fields, not an enum");
+}
+
+// The tag is a STRING, not a type name. botopink has no typed raise and no
+// user-visible catch of one, so there is nothing for a type to key on; the
+// front's first language-gap row says so rather than pretending otherwise.
+pub fn exceptionHandler(comptime decl: @Decl, tag: string) {
+    if (decl.kind != DeclKind.Method) decl.fail("#[exceptionHandler] must annotate a method of a #[controllerAdvice] type");
+}
+
+// ── the built-in entries ────────────────────────────────────────────────────
+
+pub fn requestIdHeader() -> string {
+    return "X-Request-Id";
+}
+
+// Order −400: the first thing in the chain, so every later entry and every log
+// line can name the same request. An incoming id is HONOURED — a proxy that
+// already correlated the request is the authority — and the id is echoed on the
+// response whichever way it was obtained.
+pub fn requestIdEntry(req: WebRequest, chain: Chain) -> Response {
+    val incoming: string = req.header("x-request-id");
+    val id: string = if (incoming != "") incoming else rkFreshId();
+    val res: Response = chain.next(req);
+    return withHeader(res, requestIdHeader(), id);
+}
+
+// ── the boot ────────────────────────────────────────────────────────────────
+//
+// The built-ins are installed by a CALL rather than by a module-level `val`, so
+// a test can reset the chain and rebuild it, and so an application says when
+// its web layer starts. `bootWeb()` also validates the global CORS policy —
+// `*` with credentials fails HERE, at boot, not on the first cross-origin
+// request — and hands the runner to the host so front 04's `dispatch_http/5`
+// finds it.
+
+pub fn installBuiltins() -> i32 {
+    val _r = registerFilter("request-id", orderRequestId(), { req, chain -> requestIdEntry(req, chain) });
+    val _c = registerFilter("cors", orderCors(), { req, chain -> corsEntry(req, chain) });
+    val _e = registerFilter("problem", orderProblem(), { req, chain -> errorEntry(req, chain) });
+    return 3;
+}
+
+pub fn bootWeb() -> i32 {
+    val _v = validatePolicy(globalPolicy());
+    val _b = installBuiltins();
+    return rkChainSetRunner({ method, path, headersWire, queryWire, body ->
+        runChain(method, path, headersWire, queryWire, body);
+    });
+}
+
+// `rakun.web.error-path` is where the static error pages live when front 07's
+// step 5 lands. The resolution ORDER is fixed here so the two halves cannot
+// disagree about it later: `<error-path>/404.html`, then `<…>/4xx.html`, then
+// `<…>/5xx.html`.
+pub fn errorPath() -> string {
+    val configured: string = rkProp("rakun.web.error-path");
+    if (configured != "") return configured;
+    return "error";
+}
+
+pub fn errorPageCandidates(status: i32) -> string[] {
+    val base: string = errorPath();
+    val family: string = if (status >= 500) "5xx" else "4xx";
+    return [base + "/" + status.toString() + ".html", base + "/" + family + ".html"];
+}

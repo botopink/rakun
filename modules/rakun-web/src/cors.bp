@@ -1,0 +1,268 @@
+//// rakun-web — CORS, at order −200 in the chain's band.
+////
+//// THE DEFAULTS ARE THE RESTRICTIVE ONES. No origin is allowed until one is
+//// named; `*` together with `allowCredentials: true` is REJECTED at boot rather
+//// than silently downgraded, because a downgrade is a security decision made on
+//// the application's behalf without telling it; and a preflight for a route
+//// that does not exist answers 404, not a permissive 204. There is no property
+//// that relaxes any of the three (decision 67).
+////
+//// `Access-Control-Allow-Origin` ECHOES the request's origin and never answers
+//// `*` for an allowed one: a response that varies by origin must say so, and
+//// `Vary: Origin` is set on every response the policy looked at — which is what
+//// keeps a shared cache from serving one origin's response to another.
+////
+//// A POLICY IS EITHER GLOBAL OR PER CONTROLLER. The global one is a `#[provides]`d
+//// `CorsPolicy` read out of front 06's container; a per-controller one is
+//// `#[crossOrigin("https://example.com", "GET,POST")]`, comma-joined because a
+//// decorator argument is a raw lexeme typed by the signature and an array
+//// literal in that position is unverified (the front's third language-gap row).
+//// The most specific mapping wins, by longest matching path prefix.
+
+import {Response} from "rakun";
+import {rkResolve, rkHasBean} from "rakun";
+import {rkProp, rkRoutePaths} from "rakun";
+import {WebRequest, Chain, withHeader, splitTokens} from "filter";
+import {routeMatches, routeRowPath, sentinelStatus} from "filter";
+
+// ── the host cells ──────────────────────────────────────────────────────────
+
+#[@External.Node("./chain.mjs", "corsRegister"),
+  @External.Erlang("rakun_chain", "cors_register")]
+pub declare fn rkCorsRegister(prefix: string, origins: string, methods: string) -> i32;
+
+#[@External.Node("./chain.mjs", "corsRowsWire"),
+  @External.Erlang("rakun_chain", "cors_rows")]
+pub declare fn rkCorsRows() -> string;
+
+#[@External.Node("./chain.mjs", "corsReset"),
+  @External.Erlang("rakun_chain", "cors_reset")]
+pub declare fn rkCorsReset() -> i32;
+
+// ── the policy ──────────────────────────────────────────────────────────────
+
+pub type CorsPolicy(
+    allowedOrigins: string[],
+    allowedMethods: string[],
+    allowedHeaders: string[],
+    exposedHeaders: string[],
+    allowCredentials: bool,
+    maxAgeSeconds: i32,
+)
+
+// The deny-all default. With no policy provided, no CORS header is ever set and
+// a cross-origin request simply gets no permission — the browser refuses it,
+// which is the correct outcome for an API that never opted in.
+pub fn denyAll() -> CorsPolicy {
+    return CorsPolicy(
+        allowedOrigins: [],
+        allowedMethods: [],
+        allowedHeaders: [],
+        exposedHeaders: [],
+        allowCredentials: false,
+        maxAgeSeconds: 0,
+    );
+}
+
+pub fn credentialsWildcardProblem() -> string {
+    return "rakun-web: a CorsPolicy whose allowedOrigins is the wildcard and "
+        + "whose allowCredentials is true is refused - the pair means send "
+        + "cookies to any site that asks, the browser would reject it anyway, "
+        + "and downgrading the wildcard silently would be a security decision "
+        + "taken on the application's behalf. Name the origins.";
+}
+
+// Called by every constructor of a live policy, so an application cannot reach
+// the chain with a policy that was never checked.
+pub fn validatePolicy(p: CorsPolicy) -> i32 {
+    if (p.allowCredentials && (p.allowedOrigins.indexOf("*") >= 0)) {
+        @panic(credentialsWildcardProblem());
+    };
+    return 0;
+}
+
+pub fn corsPolicy(
+    allowedOrigins: string[],
+    allowedMethods: string[],
+    allowedHeaders: string[],
+    exposedHeaders: string[],
+    allowCredentials: bool,
+    maxAgeSeconds: i32,
+) -> CorsPolicy {
+    val p: CorsPolicy = CorsPolicy(
+        allowedOrigins: allowedOrigins,
+        allowedMethods: allowedMethods,
+        allowedHeaders: allowedHeaders,
+        exposedHeaders: exposedHeaders,
+        allowCredentials: allowCredentials,
+        maxAgeSeconds: maxAgeSeconds,
+    );
+    val _v = validatePolicy(p);
+    return p;
+}
+
+pub fn allowsOrigin(p: CorsPolicy, origin: string) -> bool {
+    if (origin == "") return false;
+    if (p.allowedOrigins.indexOf("*") >= 0) return true;
+    return p.allowedOrigins.indexOf(origin) >= 0;
+}
+
+pub fn allowsMethod(p: CorsPolicy, method: string) -> bool {
+    if (p.allowedMethods.length == 0) return false;
+    if (p.allowedMethods.indexOf("*") >= 0) return true;
+    return p.allowedMethods.indexOf(method.toUpper()) >= 0;
+}
+
+// ── the per-controller mappings ─────────────────────────────────────────────
+//
+// `#[crossOrigin]` registers `prefix \t origins \t methods`. A mapping carries
+// only the two lists the decorator can spell; everything else comes from the
+// global policy, so an override narrows a controller rather than resetting it.
+
+pub fn registerCorsMapping(prefix: string, origins: string, methods: string) -> i32 {
+    if (prefix == "") @panic("rakun-web: #[crossOrigin] needs the controller's #[route] prefix");
+    return rkCorsRegister(prefix, origins, methods);
+}
+
+pub fn corsMappingRows() -> string[] {
+    val wire: string = rkCorsRows();
+    if (wire == "") return [];
+    return wire.split("\n");
+}
+
+pub fn resetCorsMappings() -> i32 {
+    return rkCorsReset();
+}
+
+fn fieldAt(row: string, index: i32) -> string {
+    return row.split("\t").at(index).unwrapOr("");
+}
+
+// The longest matching prefix wins; ties go to the FIRST registration, which is
+// declaration order, the same rule the router already uses.
+pub fn mappingFor(path: string) -> string {
+    var best = "";
+    var bestLen = -1;
+    loop (corsMappingRows()) { row ->
+        val prefix: string = fieldAt(row, 0);
+        val hit = ((prefix != "") && path.startsWith(prefix));
+        if (hit && (prefix.length() > bestLen)) {
+            bestLen = prefix.length();
+            best = row;
+        };
+    };
+    return best;
+}
+
+// ── policy resolution ───────────────────────────────────────────────────────
+//
+// The global policy is a bean, resolved by TYPE NAME because there is no
+// `@typeName<T>()`: the string and the annotated binding are paired by hand,
+// which is front 06's own recorded gap and not a new one.
+
+pub fn globalPolicy() -> CorsPolicy {
+    if (rkHasBean("CorsPolicy") == false) return denyAll();
+    val found: ?CorsPolicy = rkResolve("CorsPolicy");
+    return found.unwrapOr(denyAll());
+}
+
+pub fn policyFor(path: string) -> CorsPolicy {
+    val base: CorsPolicy = globalPolicy();
+    val row: string = mappingFor(path);
+    if (row == "") return base;
+    val origins: string[] = splitTokens(fieldAt(row, 1));
+    val methods: string[] = splitTokens(fieldAt(row, 2));
+    return corsPolicy(
+        origins,
+        if (methods.length > 0) methods else base.allowedMethods,
+        base.allowedHeaders,
+        base.exposedHeaders,
+        base.allowCredentials,
+        base.maxAgeSeconds,
+    );
+}
+
+// ── the route check the preflight owes ──────────────────────────────────────
+//
+// A preflight for a path with no route answers 404. Front 04's `rkRoutePaths()`
+// answers `"GET /api/users, POST /api/x"` in registration order, with `:name`
+// segments in the authored spelling — enough to answer "does any verb serve
+// this path" without a second route table.
+
+pub fn routeExists(path: string) -> bool {
+    val wire: string = rkRoutePaths();
+    if (wire == "") return false;
+    var found = false;
+    loop (wire.split(",")) { row ->
+        val pattern: string = routeRowPath(row.trim());
+        if ((pattern != "") && routeMatches(pattern, path)) found = true;
+    };
+    return found;
+}
+
+// ── the entry ───────────────────────────────────────────────────────────────
+
+pub fn isPreflight(req: WebRequest) -> bool {
+    if (req.method.toUpper() != "OPTIONS") return false;
+    return req.hasHeader("access-control-request-method");
+}
+
+pub fn maxAgeHeader(p: CorsPolicy) -> string {
+    return p.maxAgeSeconds.toString();
+}
+
+// Every response the policy LOOKED AT carries `Vary: Origin`, allowed or not:
+// the response depends on the origin either way, and a cache that does not know
+// it would serve one origin's answer to another.
+fn markVary(res: Response) -> Response {
+    return withHeader(res, "Vary", "Origin");
+}
+
+fn allowHeaders(res: Response, p: CorsPolicy, origin: string) -> Response {
+    val a: Response = withHeader(res, "Access-Control-Allow-Origin", origin);
+    val b: Response = if (p.allowCredentials) withHeader(a, "Access-Control-Allow-Credentials", "true") else a;
+    if (p.exposedHeaders.length == 0) return b;
+    return withHeader(b, "Access-Control-Expose-Headers", p.exposedHeaders.join(", "));
+}
+
+pub fn preflightResponse(p: CorsPolicy, origin: string) -> Response {
+    val base: Response = markVary(Response(status: 204, body: ""));
+    val withOrigin: Response = allowHeaders(base, p, origin);
+    val methods: Response = withHeader(
+        withOrigin,
+        "Access-Control-Allow-Methods",
+        p.allowedMethods.join(", "),
+    );
+    val headers: Response = if (p.allowedHeaders.length > 0) withHeader(methods, "Access-Control-Allow-Headers", p.allowedHeaders.join(", ")) else methods;
+    if (p.maxAgeSeconds <= 0) return headers;
+    return withHeader(headers, "Access-Control-Max-Age", maxAgeHeader(p));
+}
+
+// A preflight from an origin the policy does not allow is REFUSED, not answered
+// with a bare 204: 204 with no `Access-Control-Allow-Origin` reads to a browser
+// exactly like a misconfiguration, and a 403 says which side said no. The
+// simple-request path is different on purpose — there the handler still runs
+// and the browser is the one that drops the response.
+pub fn corsEntry(req: WebRequest, chain: Chain) -> Response {
+    val origin: string = req.header("origin");
+    if (origin == "") return chain.next(req);
+    val p: CorsPolicy = policyFor(req.target);
+    if (isPreflight(req)) {
+        if (routeExists(req.target) == false) return Response.notFound();
+        if (allowsOrigin(p, origin) == false) return markVary(Response(status: 403, body: ""));
+        val asked: string = req.header("access-control-request-method");
+        if (allowsMethod(p, asked) == false) return markVary(Response(status: 403, body: ""));
+        return preflightResponse(p, origin);
+    };
+    val res: Response = chain.next(req);
+    if (res.status == sentinelStatus()) return res;
+    if (allowsOrigin(p, origin) == false) return markVary(res);
+    return allowHeaders(markVary(res), p, origin);
+}
+
+// The property front 05's table can set to turn the entry off entirely. It is
+// not a weakening switch: with no policy provided the entry already sets
+// nothing, and this only spares the chain a walk it cannot use.
+pub fn corsEnabled() -> bool {
+    return rkProp("rakun.web.cors.enabled") != "false";
+}
