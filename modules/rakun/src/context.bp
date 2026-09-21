@@ -34,7 +34,7 @@
 //// call a sibling function. When `decorators.bp` unfreezes, this body folds
 //// into the six stereotypes and the extra line goes away.
 
-import {rkSingleton} from "runtime";
+import {rkSingleton, rkProp} from "runtime";
 import {Event, event, publishEvent, bootEventNames, bootEventPayloads, applicationFailedEvent} from "events";
 import {postConstructFailure, postConstructProblem} from "lifecycle";
 
@@ -531,6 +531,14 @@ pub fn __rkMake_Context() -> Context {
 // turns a missing property or a dependency cycle into a boot failure with front
 // 04's diagnostics instead of a 500 on the first request that touches it.
 
+// Spring's `spring.main.lazy-initialization` is an opt-in because Spring is
+// EAGER. rakun is the other way round — `rkSingleton` takes a thunk, so nothing
+// is constructed until something resolves it — so what this front adds is the
+// eagerness, and the key TURNS IT OFF again.
+pub fn lazyInitialization() -> bool {
+    return rkProp("rakun.main.lazy-initialization") == "true";
+}
+
 pub fn bootFailedProblem(reason: string) -> string {
     return "rakun: the application failed to start - " + reason;
 }
@@ -577,9 +585,13 @@ pub fn bootSequenceFor(source: string) -> i32 {
     val _b = publishBoot(1, source);
     val _c = publishBoot(2, source);
     val _d = publishBoot(3, source);
-    val built = eagerInit();
+    val lazily = lazyInitialization();
+    val built = if (lazily) "" else eagerInit();
     if (built != "") return bootFailure(source, built, 4) else {
-        val warmed = postConstructFailure();
+        // The `#[postConstruct]` pass is skipped with the eager one, and for the
+        // same reason: a hook runs ON an instance, so running it would construct
+        // the very bean `lazy-initialization=true` asked not to construct.
+        val warmed = if (lazily) "" else postConstructFailure();
         if (warmed != "") return bootFailure(source, postConstructProblem(warmed), 4) else {
             val _e = publishBoot(4, source);
             val _f = publishBoot(5, source);

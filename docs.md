@@ -713,6 +713,26 @@ Front 62 owns the per-request accessors (`cookies()`, `headers()`, `after()`,
 per-request memoization). Front 06 ships the scope kind and its storage and
 defines no accessor.
 
+### Eager initialization
+
+With defaults, `context.bootSequence()` constructs every registered singleton
+bean and runs every `#[postConstruct]` before it returns, so a dependency cycle
+or a configuration reader that halts fails the BOOT rather than the first request
+that happens to touch it.
+
+```properties
+rakun.main.lazy-initialization=true
+```
+
+turns it off — the `#[postConstruct]` pass with it, because a hook runs on an
+instance. `#[lazy]` on one component excludes only that one. A `prototype` or
+`request` bean is never eagerly built: it has no instance to warm.
+
+A missing `#[value]` key is **not** a boot failure. `rkProp` answers `""` for an
+absent key and `rkPropInt` answers `0`, by design and on both rows, so a missing
+key is a default rather than an error — at boot or at any other time. Use front
+05's typed configuration readers when a key is required.
+
 ### Qualifiers, primary and lazy
 
 `#[qualifier("name")]` distinguishes two beans of one type, `#[primary]` marks

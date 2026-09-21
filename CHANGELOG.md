@@ -20,6 +20,26 @@
 > (`{badkey,param}` / `{badkey,query}`), which AGENTS.md § Blocked already
 > records.
 
+- **Eager initialization, and `rakun.main.lazy-initialization`** (front 06,
+  step 7). `rkSingleton` takes a thunk, so rakun was already lazy and what was
+  missing is the EAGERNESS: `bootSequence()` constructs every non-`#[lazy]`
+  singleton of the ROOT registry and runs the `#[postConstruct]` pass before it
+  returns, and the key turns both off — the pass with the construction, because a
+  hook runs ON an instance. Five new assertions on both rows, including a real
+  two-type cycle reported through front 04's guard.
+
+  **"A component whose `#[value]` key is missing fails the boot" cannot
+  happen**, and the acceptance is answered rather than skipped. `rkProp` answers
+  `""` for an absent key and `rkPropInt` answers `0` — front 04's rule, on both
+  rows, in the FROZEN `runtime.mjs` — so a missing `#[value]` key is not an error
+  at boot, at the first request, or ever. What the eager pass does turn into a
+  boot failure is a construction that RAISES, and that is what the two new cells
+  assert.
+
+  The cycle diagnostic is worded differently on the two rows (`rakun dependency
+  cycle: component 'X' …` on node, `{rakun_cycle, X}` on the BEAM), so the
+  assertion is on what both carry: the component name and the word `cycle`.
+
 - **Scopes: `singleton`, `prototype` and `request`** (front 06, step 6).
   `#[scope("prototype")]` and `#[scope("request")]` change what `#[managed]`
   registers: a FRESH `__rkNew_<Type>()` it emits itself (same per-field injection

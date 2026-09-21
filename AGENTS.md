@@ -1369,6 +1369,35 @@ tells `LivenessState` from `ReadinessState`. A listener registered per NAME is
 therefore registered twice and fires twice per publish;
 `test/events_test.bp`'s expected log shows that rather than papering over it.
 
+### Eager initialization is the deliverable; lazy is already the default
+
+Spring's `spring.main.lazy-initialization` is an opt-in because Spring is EAGER.
+rakun is the other way round: `rkSingleton` takes a thunk, so nothing is
+constructed until something resolves it and an unresolved component is never
+built at all. What this front adds is the EAGERNESS, and
+`rakun.main.lazy-initialization=true` turns it off again — the
+`#[postConstruct]` pass with it, because a hook runs ON an instance and running
+it would construct the very bean the key asked not to construct.
+
+`eagerInit()` walks the ROOT registry only: a child registry is opened per
+request and has no boot, so walking the ancestors would build a request-scoped
+bean at startup. It skips `#[lazy]` and skips anything that is not a singleton —
+a bean built afresh per resolve has no instance to warm.
+
+**"A component whose `#[value]` key is missing fails the boot" cannot happen.**
+`rkProp` answers `""` for an absent key and `rkPropInt` answers `0`, by front
+04's rule, on both rows, in `runtime.mjs`, which is FROZEN. A missing `#[value]`
+key is not an error at boot, at the first request, or ever. What the eager pass
+does turn into a boot failure is a construction that RAISES — a cycle through
+front 04's guard, or a typed configuration reader that halts — and both are
+asserted.
+
+**The cycle diagnostic is worded differently on the two rows.** node raises the
+sentence `rakun dependency cycle: component 'X' depends (transitively) on
+itself`; the BEAM raises the term `{rakun_cycle, X}`. Both carry the component
+name and the word `cycle`, and that is what the assertion is on. A test matching
+either sentence would be a one-row test.
+
 ### Scopes, and the refusal reflection can actually reach
 
 `Singleton` registers `{ -> __rkMake_<Type>() }`, the stereotype's cached

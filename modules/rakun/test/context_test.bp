@@ -9,7 +9,7 @@
 //// `rkBeanReset()`: it would wipe the registrations the file is about.
 
 import {service, repository, restController, route, getMapping} from "decorators";
-import {rkScan, rkSingleton, rkEnter, rkDone, rkRegisterRoute, rkBuildCount, rkScannedNames} from "runtime";
+import {rkScan, rkSingleton, rkEnter, rkDone, rkRegisterRoute, rkBuildCount, rkScannedNames, rkSetProp, rkProp} from "runtime";
 import {Request, Response} from "http";
 import {
     managed,
@@ -51,6 +51,8 @@ import {
     rkRequestScopeEnd,
     eagerInit,
     eagerInitIn,
+    bootSequence,
+    lazyInitialization,
 } from "context";
 import {Event, event, publishEvent} from "events";
 import {
@@ -670,4 +672,90 @@ test "rakun scope: a non-singleton bean is not constructed by the eager pass" {
     // instance to warm.
     assert rkCtxCount("ticket") == 0;
     assert rkCtxCount("basket") == 0;
+}
+
+// ── step 7: eager initialization and lazy ───────────────────────────────────
+//
+// Every bean these blocks register sits at a CHILD path, except the one the
+// boot-sequence block needs: the root registry is shared with every other test
+// file on the erlang row, and a bean registered here is built by every later
+// eager pass there.
+
+#[service]
+pub type CycleA(
+    b: CycleB,
+) {
+    pub fn tag(self: Self) -> string {
+        return "a";
+    }
+}
+
+#[service]
+pub type CycleB(
+    a: CycleA,
+) {
+    pub fn tag(self: Self) -> string {
+        return "b";
+    }
+}
+
+test "rakun eager: a registered bean is constructed by the pass" {
+    val _n = rkCtxNoteReset();
+    val _b = rkRegisterBeanAt("/eager", "EagerCounted", "", "singleton", false, false, "eagerOwner", { -> rkCtxBump("eagerBuilt") });
+    assert eagerInitIn("/eager") == "";
+    assert rkCtxCount("eagerBuilt") == 1;
+}
+
+test "rakun eager: #[lazy] excludes only the bean that carries it" {
+    val _n = rkCtxNoteReset();
+    val _a = rkRegisterBeanAt("/lazybean", "EagerOne", "", "singleton", false, false, "eagerOwner", { -> rkCtxBump("lz1") });
+    val _b = rkRegisterBeanAt("/lazybean", "LazyOne", "", "singleton", false, true, "lazyOwner", { -> rkCtxBump("lz2") });
+    assert eagerInitIn("/lazybean") == "";
+    assert rkCtxCount("lz1") == 1;
+    assert rkCtxCount("lz2") == 0;
+}
+
+test "rakun eager: a cyclic graph fails the boot through front 04's cycle guard" {
+    val _c = rkRegisterBeanAt("/cycle", "CycleA", "", "singleton", false, false, "cycleOwner", { -> __rkMake_CycleA() });
+    val reason = eagerInitIn("/cycle");
+    // The two rows word it differently — node raises a sentence and the BEAM an
+    // `{rakun_cycle, Name}` term — so the assertion is on what both carry: the
+    // bean the pass was building, and the word `cycle`.
+    assert reason.startsWith("CycleA: ");
+    assert reason.contains("cycle");
+    assert reason.contains("CycleA");
+}
+
+test "rakun eager: rakun.main.lazy-initialization=true constructs nothing at boot" {
+    val _b = rkRegisterBean("BootCounted", "", "singleton", false, false, "bootOwner", { -> rkCtxBump("bootBuilt") });
+    val _z = rkLifecycleReset();
+    val _n = rkCtxNoteReset();
+    val _p = rkSetProp("rakun.main.lazy-initialization", "true");
+    assert lazyInitialization();
+    val published = bootSequence();
+    // The events still publish: a lazily initialized application still starts.
+    assert published == 8;
+    assert rkCtxCount("bootBuilt") == 0;
+    val _q = rkSetProp("rakun.main.lazy-initialization", "false");
+    assert !lazyInitialization();
+    val _n2 = rkCtxNoteReset();
+    val again = bootSequence();
+    assert again == 8;
+    assert rkCtxCount("bootBuilt") == 1;
+}
+
+// The front's step 7 asks for "a component whose #[value] key is missing fails
+// the boot, not the first request". It cannot: `rkProp` answers `""` for an
+// absent key and `rkPropInt` answers `0`, by front 04's rule, on both rows and
+// in `runtime.mjs`, which is FROZEN. A missing `#[value]` key is not an error at
+// boot, at the first request, or ever. What the eager pass does turn into a boot
+// failure is a construction that RAISES, which is the assertion below and the
+// cycle one above.
+test "rakun eager: a missing #[value] key is a default, not a failure - by design" {
+    assert rkProp("rakun.no.such.key") == "";
+    val _n = rkCtxNoteReset();
+    val _b = rkRegisterBeanAt("/raises", "RaisingBean", "", "singleton", false, false, "raisingOwner", { -> @panic("construction failed") });
+    val reason = eagerInitIn("/raises");
+    assert reason.startsWith("RaisingBean: ");
+    assert reason.contains("construction failed");
 }
