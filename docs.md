@@ -211,6 +211,13 @@ halves (`file_router.mjs`, `sidecars/rakun_file_router.erl`) hold only the
 lines and the render functions and know nothing about the format. Read a bound
 parameter with `paramOf(match, name)`.
 
+`scanAppDir(root, appDir)` is the other half: it walks the real tree, skips
+`_`-prefixed folders, discovers a project-root `middleware.bp`, and refuses a
+segment that holds both `page.bp` and `route.bp`, two root layouts meeting at
+one URL, a registered segment with no directory and a directory that registered
+nothing. `appDirOf()` reads `onze.appDir` (front 05) and defaults to `app`, so
+moving between `app/` and `src/app/` is one config line.
+
 ## Loading notes
 
 Unlike `libs/std`, this package is **not** `@embedFile`'d into a `prelude.zig`

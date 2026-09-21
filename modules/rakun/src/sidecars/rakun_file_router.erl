@@ -31,12 +31,14 @@
 
 -export([register_page/2, register_layout/2, register_template/2,
          register_default/2, register_handler/2,
+         register_source/2, sources/0,
          table/0, count/0, has_render/1, render/2, reset/0]).
 
 %% reachable for a test or a later front
 -export([ensure/0, owner/1]).
 
 -define(TAB, rakun_app_routes).     %% ordered_set: {Seq, Record, Fun}
+-define(SRC, rakun_app_sources).    %% ordered_set: {Seq, Line}
 -define(SEQ, rakun_app_routes_seq). %% set:         {seq, Integer}
 -define(OWNER, rakun_app_routes_owner).
 
@@ -71,6 +73,7 @@ owner(Caller) ->
         true ->
             Common = [named_table, public, {read_concurrency, true}],
             _ = ets:new(?TAB, [ordered_set | Common]),
+            _ = ets:new(?SRC, [ordered_set | Common]),
             _ = ets:new(?SEQ, [set | Common]),
             Caller ! {?OWNER, ready},
             owner_loop();
@@ -103,6 +106,21 @@ add(Record, Fun) ->
     Seq = next_seq(),
     true = ets:insert(?TAB, {Seq, Record, Fun}),
     ets:info(?TAB, size).
+
+%% Where each registration was WRITTEN: `seg|fnName`, one per line. The wire
+%% record carries the URL pattern, not the app-relative directory, and the scan
+%% has to check the DIRECTORY the marker was given against the real tree and
+%% name the function that got it wrong.
+register_source(Seg, FnName) ->
+    ensure(),
+    Seq = next_seq(),
+    Line = <<(to_bin(Seg))/binary, "|", (to_bin(FnName))/binary>>,
+    true = ets:insert(?SRC, {Seq, Line}),
+    ets:info(?SRC, size).
+
+sources() ->
+    ensure(),
+    join([L || {_Seq, L} <- ets:tab2list(?SRC)]).
 
 %% The table, in registration order, `\n`-separated — exactly the blob
 %% `parseTable` reads.
@@ -147,5 +165,6 @@ render(Record, Fallback) ->
 reset() ->
     ensure(),
     true = ets:delete_all_objects(?TAB),
+    true = ets:delete_all_objects(?SRC),
     true = ets:insert(?SEQ, {seq, 0}),
     0.

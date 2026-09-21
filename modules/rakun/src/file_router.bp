@@ -41,8 +41,9 @@
 ////     decorator body cannot call a sibling function — so the four markers below
 ////     are comment-free and inline their segment walk instead of sharing one.
 
-import {dict} from "std";
+import {dict, fs} from "std";
 import {Request} from "http";
+import {rkProp} from "runtime";
 
 // ── character helpers ───────────────────────────────────────────────────────
 // `config.bp` has the same two; a decorator body cannot call a sibling and a
@@ -616,6 +617,19 @@ pub declare fn rkAppRender<F>(record: string, fallback: F) -> F;
   @External.Erlang("rakun_file_router", "reset")]
 pub declare fn rkAppReset() -> i32;
 
+// Where each registration was WRITTEN. The wire record carries the URL pattern,
+// not the app-relative directory, and the scan has to check the DIRECTORY the
+// marker was given against the real tree and name the function that got it
+// wrong. So the raw pair is kept beside the table rather than squeezed into a
+// fifth field of a four-field record.
+#[@External.Node("./file_router.mjs", "registerSource"),
+  @External.Erlang("rakun_file_router", "register_source")]
+pub declare fn rkAppRegisterSource(seg: string, fnName: string) -> i32;
+
+#[@External.Node("./file_router.mjs", "sources"),
+  @External.Erlang("rakun_file_router", "sources")]
+pub declare fn rkAppSources() -> string;
+
 // The one place a `kind`, a segment and a verb become a wire record. It HALTS
 // on a segment that may not be registered — a `_`-prefixed folder, an empty
 // segment, a `|` or a newline — which is the right moment for that refusal: the
@@ -705,6 +719,7 @@ pub fn ctxRest(route: PageContext) -> string[] {
 
 pub fn page(comptime decl: @Decl, seg: string) {
     @emit("val __rkPage_" + decl.name + " = rkAppPage(\"" + seg + "\", { route -> " + decl.name + "(route) });");
+    @emit("val __rkSrc_" + decl.name + " = rkAppRegisterSource(\"" + seg + "\", \"" + decl.name + "\");");
     var lets: Array<string> = [];
     var sigs: Array<string> = [];
     var fields: Array<string> = [];
@@ -728,6 +743,7 @@ pub fn page(comptime decl: @Decl, seg: string) {
 
 pub fn layout(comptime decl: @Decl, seg: string) {
     @emit("val __rkLayout_" + decl.name + " = rkAppLayout(\"" + seg + "\", { props -> " + decl.name + "(props) });");
+    @emit("val __rkSrc_" + decl.name + " = rkAppRegisterSource(\"" + seg + "\", \"" + decl.name + "\");");
     if (decl.kind != DeclKind.Fn) decl.fail("#[layout] must annotate a function");
     if (decl.returnType == "") decl.fail("#[layout] must annotate a fn(props: LayoutProps) -> Element");
     if (decl.returnType == "Future") decl.fail("#[layout] must annotate a fn(props: LayoutProps) -> Element — a layout is synchronous, only a page is a @Future");
@@ -735,6 +751,7 @@ pub fn layout(comptime decl: @Decl, seg: string) {
 
 pub fn template(comptime decl: @Decl, seg: string) {
     @emit("val __rkTemplate_" + decl.name + " = rkAppTemplate(\"" + seg + "\", { props -> " + decl.name + "(props) });");
+    @emit("val __rkSrc_" + decl.name + " = rkAppRegisterSource(\"" + seg + "\", \"" + decl.name + "\");");
     if (decl.kind != DeclKind.Fn) decl.fail("#[template] must annotate a function");
     if (decl.returnType == "") decl.fail("#[template] must annotate a fn(props: LayoutProps) -> Element");
     if (decl.returnType == "Future") decl.fail("#[template] must annotate a fn(props: LayoutProps) -> Element — a template is synchronous, only a page is a @Future");
@@ -742,7 +759,291 @@ pub fn template(comptime decl: @Decl, seg: string) {
 
 pub fn defaultView(comptime decl: @Decl, seg: string) {
     @emit("val __rkDefault_" + decl.name + " = rkAppDefault(\"" + seg + "\", { props -> " + decl.name + "(props) });");
+    @emit("val __rkSrc_" + decl.name + " = rkAppRegisterSource(\"" + seg + "\", \"" + decl.name + "\");");
     if (decl.kind != DeclKind.Fn) decl.fail("#[defaultView] must annotate a function");
     if (decl.returnType == "") decl.fail("#[defaultView] must annotate a fn(props: LayoutProps) -> Element");
     if (decl.returnType == "Future") decl.fail("#[defaultView] must annotate a fn(props: LayoutProps) -> Element — a default view is synchronous, only a page is a @Future");
+}
+
+// ── step 5: the scan ────────────────────────────────────────────────────────
+//
+// The scan is the half that keeps the decorator argument HONEST. It reads
+// `appDir` from front 05's property table, walks the real tree, and fails
+// loudly rather than serving something surprising.
+//
+// IT IS WRITTEN IN BOTOPINK, over `std`'s `fs`, and not in the two host files
+// the front's text puts it in. Two reasons, both front 05's. A scan written
+// twice can disagree twice, and the whole point of this front is that the two
+// sides cannot disagree; and an erlang-only cell cannot be asserted from a
+// `.bp` test at all, so the acceptance list below would have had to be taken on
+// trust. `fs.list`, `fs.exists` and `fs.stat` each carry both host forms, so one
+// implementation answers identically on both rows — which is the only claim
+// worth making about a port.
+//
+// The REFUSALS are strings rather than a halt, for the reason `durationProblem`
+// is a function of its own: the CLI (front 50) prints them and stops, a server
+// boot check prints them and stops, and a test reads them without the halt
+// taking the test down.
+
+pub fn noStrings() -> string[] {
+    var out: string[] = [];
+    return out;
+}
+
+// The eight convention filenames, in the order their kind letters are listed.
+pub fn conventionFiles() -> string[] {
+    return [
+        "layout.bp",
+        "template.bp",
+        "page.bp",
+        "default.bp",
+        "route.bp",
+        "loading.bp",
+        "error.bp",
+        "not-found.bp",
+    ];
+}
+
+pub fn conventionKind(file: string) -> string {
+    if (file == "layout.bp") return "L" else if (file == "template.bp") return "T" else if (file == "page.bp") return "P" else if (file == "default.bp") return "D" else if (file == "route.bp") return "R" else if (file == "loading.bp") return "S" else if (file == "error.bp") return "E" else if (file == "not-found.bp") return "N" else return "";
+}
+
+// `appDir` is CONFIGURATION, not a literal (front 05): `app` or `src/app`, so
+// moving the tree between the two layouts changes one config line and no source.
+pub fn appDirOf() -> string {
+    val configured = rkProp("onze.appDir");
+    if (configured == "") return "app" else return configured;
+}
+
+// A name is a directory when listing it succeeds. `fs.stat` would say so more
+// directly, but its `FileStat` carries an `i64` field and an integer literal is
+// `i32` with no widening, so a fallback value for the `catch` cannot be written.
+pub fn isDir(path: string) -> bool {
+    return fs.list(path).isOk();
+}
+
+pub fn childDirs(path: string) -> string[] {
+    val names = try fs.list(path) catch noStrings();
+    var out: string[] = [];
+    loop (names) { n ->
+        if (isDir(path + "/" + n)) {
+            out.push(n);
+        };
+    };
+    return out;
+}
+
+// Every app-relative directory under `base`, depth first, with `_`-prefixed
+// folders SKIPPED — nothing inside one is registered even if it holds a
+// `page.bp`. The root itself is not in the list; `scanAppDir` adds it as `""`.
+pub fn walkSegments(base: string, seg: string) -> string[] {
+    val here = if (seg == "") base else base + "/" + seg;
+    var out: string[] = [];
+    loop (childDirs(here)) { name ->
+        if (name.startsWith("_").negate()) {
+            val child = if (seg == "") name else seg + "/" + name;
+            out.push(child);
+            loop (walkSegments(base, child)) { deeper ->
+                out.push(deeper);
+            };
+        };
+    };
+    return out;
+}
+
+pub fn conventionsIn(base: string, seg: string) -> string[] {
+    val dir = if (seg == "") base else base + "/" + seg;
+    var out: string[] = [];
+    loop (conventionFiles()) { f ->
+        if (fs.exists(dir + "/" + f)) {
+            out.push(f);
+        };
+    };
+    return out;
+}
+
+pub type ScanEntry(
+    seg: string,
+    pattern: string,
+    slot: string,
+    conventions: string[],
+)
+
+pub type ScanReport(
+    appDir: string,
+    entries: ScanEntry[],
+    middleware: string,
+    problems: string[],
+)
+
+// The table the tree implies, in walk order — the same records the markers
+// register, derived from the directories instead of from the arguments. The two
+// are compared by `registrationProblems`.
+pub fn scanTable(report: ScanReport) -> RouteEntry[] {
+    var out: RouteEntry[] = [];
+    loop (report.entries) { e ->
+        loop (e.conventions) { f ->
+            val kind = conventionKind(f);
+            val verb = if (kind == "R") "GET" else "";
+            out.push(RouteEntry(kind: kind, pattern: e.pattern, slot: e.slot, verb: verb));
+        };
+    };
+    return out;
+}
+
+pub fn scanAppDir(root: string, appDir: string) -> ScanReport {
+    val base = if (root == "") appDir else root + "/" + appDir;
+    var entries: ScanEntry[] = [];
+    var problems: string[] = [];
+    var segs: string[] = [""];
+    loop (walkSegments(base, "")) { s ->
+        segs.push(s);
+    };
+    loop (segs) { seg ->
+        val found = conventionsIn(base, seg);
+        if (found.length > 0) {
+            val problem = pathProblem(seg);
+            if (problem != "") {
+                problems.push(problem);
+            } else {
+                val parsed = parsePath(seg);
+                entries.push(
+                    ScanEntry(
+                        seg: seg,
+                        pattern: patternOf(parsed),
+                        slot: slotOf(parsed),
+                        conventions: found,
+                    ),
+                );
+            };
+        };
+    };
+    loop (conflictProblems(entries)) { p ->
+        problems.push(p);
+    };
+    val middlewarePath = if (root == "") "middleware.bp" else root + "/middleware.bp";
+    val middleware = if (fs.exists(middlewarePath)) middlewarePath else "";
+    return ScanReport(
+        appDir: appDir,
+        entries: entries,
+        middleware: middleware,
+        problems: problems,
+    );
+}
+
+// The top-level `(group)` a segment sits under, `""` when it sits under none.
+pub fn rootGroupOf(seg: string) -> string {
+    val parts = splitPath(seg);
+    if (parts.length == 0) return "" else {
+        val head = parts.at(0).unwrapOr("");
+        if (kindName(parseSegment(head).kind) == "Group") return head else return "";
+    };
+}
+
+pub fn hasConvention(e: ScanEntry, file: string) -> bool {
+    var found = false;
+    loop (e.conventions) { f ->
+        if (f == file) {
+            found = true;
+        };
+    };
+    return found;
+}
+
+// Two rules the tree can break on its own, both refused by name. The second is
+// § 5 Múltiplos Root Layouts: two route groups may each own a root layout, and
+// that is legal right up to the point where their subtrees claim one URL.
+pub fn conflictProblems(entries: ScanEntry[]) -> string[] {
+    var problems: string[] = [];
+    loop (entries) { e ->
+        if ((hasConvention(e, "page.bp") && hasConvention(e, "route.bp"))) {
+            problems.push(
+                "rakun routing: `" + e.seg + "` holds both page.bp and route.bp — a segment is a page or an endpoint, never both",
+            );
+        };
+    };
+    var keys: string[] = [];
+    var groups: string[] = [];
+    loop (entries) { e ->
+        if (hasConvention(e, "page.bp")) {
+            val key = e.pattern + "|" + e.slot;
+            val group = rootGroupOf(e.seg);
+            val prior = keys.indexOf(key);
+            if (prior >= 0) {
+                val priorGroup = groups.at(prior).unwrapOr("");
+                if (priorGroup != group) {
+                    problems.push(
+                        "rakun routing: `" + e.pattern + "` is claimed by both `" + priorGroup + "` and `" + group + "` — two root layouts whose subtrees match one URL",
+                    );
+                };
+            };
+            keys.push(key);
+            groups.push(group);
+        };
+    };
+    return problems;
+}
+
+// ── the registered side of the scan ─────────────────────────────────────────
+
+pub type SourceEntry(
+    seg: string,
+    fnName: string,
+)
+
+pub fn parseSources(wire: string) -> SourceEntry[] {
+    var out: SourceEntry[] = [];
+    if (wire == "") return out else {
+        loop (wire.split("\n")) { line ->
+            if (line != "") {
+                val f: string[] = line.split("|");
+                out.push(SourceEntry(seg: f.at(0).unwrapOr(""), fnName: f.at(1).unwrapOr("")));
+            };
+        };
+        return out;
+    };
+}
+
+pub fn appSources() -> SourceEntry[] {
+    return parseSources(rkAppSources());
+}
+
+// The check that keeps the decorator argument honest, in both directions: a
+// registered segment with no directory under `appDir`, and a directory holding a
+// convention file that registered nothing.
+pub fn registrationProblems(report: ScanReport, sources: SourceEntry[]) -> string[] {
+    var problems: string[] = [];
+    var known: string[] = [];
+    loop (report.entries) { e ->
+        known.push(e.seg);
+    };
+    loop (sources) { src ->
+        var found = false;
+        loop (known) { k ->
+            if (k == src.seg) {
+                found = true;
+            };
+        };
+        if (found.negate()) {
+            problems.push(
+                "rakun routing: `" + src.seg + "` was registered by `" + src.fnName + "` but there is no directory `" + report.appDir + "/" + src.seg + "`",
+            );
+        };
+    };
+    loop (report.entries) { e ->
+        var registered = false;
+        loop (sources) { src ->
+            if (src.seg == e.seg) {
+                registered = true;
+            };
+        };
+        if (registered.negate()) {
+            problems.push(
+                "rakun routing: `" + report.appDir + "/" + e.seg + "` holds " + e.conventions.join(
+                    ", "
+                ) + " but nothing registered it — the marker's argument is what puts a route in the table",
+            );
+        };
+    };
+    return problems;
 }

@@ -97,6 +97,10 @@ rakun/
 │   │       │                     the accessors they emit; no `rkAppReset()`, because
 │   │       │                     a module-load registration cannot be snapshotted in
 │   │       │                     its own module
+│   │       ├── file_router_scan_test.bp ← the scan over real fixture trees under
+│   │       │                     `test/fixtures/{routing,conflict-both,conflict-roots,
+│   │       │                     middleware}`: the conflicts, the `_` skip, `app` vs
+│   │       │                     `src/app`, the root `middleware.bp`
 │   │       ├── overlapping_routes_test.bp ← two controllers sharing a path prefix both
 │   │       │                     register; dispatch matches the FULL path; a leaf (no-dep)
 │   │       │                     #[service] resolves through the DI chain
@@ -538,6 +542,48 @@ components imports `rkScan` and `rkSingleton`.
 The accessors only exist under `botopink test`, never under `botopink check`:
 `check` skips decorator invocation and reports every `@emit`ted name as unbound.
 That is a known gotcha, not this front's.
+
+### The scan
+
+`scanAppDir(root, appDir) -> ScanReport` reads the real tree and answers the
+entries it implies, the project-root `middleware.bp` and the problems. It is
+BOTOPINK, over `std`'s `fs`, and not the two host files the front's text puts it
+in — for front 05's reasons, applied one level up: a scan written twice can
+disagree twice, and an erlang-only cell cannot be asserted from a `.bp` test at
+all, so every rule below would have been taken on trust. `fs.list`, `fs.exists`
+and `fs.stat` each carry both host forms, so one implementation answers on both
+rows and `test/file_router_scan_test.bp` proves it against real fixture trees.
+
+`appDir` is CONFIGURATION: `appDirOf()` is `rkProp("onze.appDir")` with `app` as
+the default, so moving a tree between `app/` and `src/app/` changes one config
+line and no source — asserted by scanning the same fixture under both layouts
+and comparing the tables.
+
+| Rule | Refusal |
+|---|---|
+| a segment holds `page.bp` and `route.bp` | ``rakun routing: `both` holds both page.bp and route.bp — a segment is a page or an endpoint, never both`` |
+| two root layouts' subtrees claim one URL | ``rakun routing: `/about` is claimed by both `(marketing)` and `(shop)` — two root layouts whose subtrees match one URL`` |
+| a registered segment with no directory | ``rakun routing: `blog/[id]` was registered by `typoPage` but there is no directory `app/blog/[id]``` |
+| a directory holding a convention file that registered nothing | ``rakun routing: `app/blog/[slug]` holds page.bp but nothing registered it — the marker's argument is what puts a route in the table`` |
+| a `_`-prefixed directory | skipped by `walkSegments`; nothing inside is registered, `page.bp` included |
+| a project-root `middleware.bp` | discovered as `report.middleware`, with no `pub mod` line naming it, and handed to front 07. A project with none scans clean and says nothing |
+
+A refusal is a STRING, not a halt, for the reason `durationProblem` is a
+function of its own: front 50's CLI prints it and stops, a boot check prints it
+and stops, and a test reads it without the halt taking the test down.
+
+`rkAppRegisterSource(seg, fnName)` is what makes the third row possible. The
+wire record carries the URL PATTERN, not the app-relative directory, so the raw
+pair each marker was written with is kept beside the table — `rkAppSources()`
+answers `seg|fnName` lines — rather than squeezed into a fifth field of a
+four-field record.
+
+**A directory walk is rakun's, not std's.** The front's text says front 01
+closes it; `libs/std` has no `walk` today, so `childDirs` / `walkSegments` are
+here, over `fs.list`. A name is a directory when listing it succeeds:
+`fs.stat` would say so more directly, but its `FileStat` carries an `i64` field
+and an integer literal is `i32` with no widening, so the `catch` value of a
+`try fs.stat(…)` cannot be written at all.
 
 ## Externalized configuration
 

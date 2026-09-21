@@ -1,0 +1,181 @@
+//// rakun — the scan: the half that keeps the decorator argument honest.
+////
+//// The front's text puts this in the two host files. It is botopink instead, on
+//// `std`'s `fs`, for front 05's reasons: a scan written twice can disagree
+//// twice, and an erlang-only cell cannot be asserted from a `.bp` test at all,
+//// so every acceptance below would have had to be taken on trust. `fs.list`,
+//// `fs.exists` and `fs.stat` each carry both host forms, so these assertions run
+//// on BOTH rows.
+////
+//// The fixtures under `test/fixtures/` are real directories holding real
+//// (contentless) convention files: the scan looks at a file's NAME, never at
+//// what is in it, so a tree is the honest way to test a tree.
+
+import {
+    scanAppDir,
+    scanTable,
+    walkSegments,
+    conventionsIn,
+    conventionKind,
+    appDirOf,
+    registrationProblems,
+    parseSources,
+    SourceEntry,
+    ScanEntry,
+    RouteEntry,
+    writeTable,
+    isDir,
+} from "file_router";
+import {rkSetProp} from "runtime";
+
+fn patterns(entries: RouteEntry[]) -> string[] {
+    var out: string[] = [];
+    loop (entries) { e ->
+        out.push(e.kind + "|" + e.pattern + "|" + e.slot);
+    };
+    return out;
+}
+
+test "rakun routing: a clean tree scans with no problems" {
+    val report = scanAppDir("test/fixtures/routing", "app");
+    val noProblems: string[] = report.problems;
+    assert noProblems.length == 0;
+    assert report.appDir == "app";
+    val seen = patterns(scanTable(report));
+    assert seen.contains("L|/|");
+    assert seen.contains("P|/|");
+    assert seen.contains("L|/blog|");
+    assert seen.contains("P|/blog/[slug]|");
+    assert seen.contains("P|/about|");
+    assert seen.contains("L|/dashboard|");
+    assert seen.contains("P|/dashboard|team");
+    assert seen.contains("R|/api/posts|");
+}
+
+test "rakun routing: a `_`-prefixed directory is skipped, page.bp and all" {
+    val walked = walkSegments("test/fixtures/routing/app", "");
+    assert walked.contains("_drafts").negate();
+    assert walked.contains("blog");
+    assert walked.contains("blog/[slug]");
+    val report = scanAppDir("test/fixtures/routing", "app");
+    var sawDrafts = false;
+    loop (report.entries) { e ->
+        val seg: string = e.seg;
+        if (seg.contains("_drafts")) {
+            sawDrafts = true;
+        };
+    };
+    assert sawDrafts.negate();
+}
+
+test "rakun routing: app and src/app produce the same table" {
+    val flat = scanAppDir("test/fixtures/routing", "app");
+    val nested = scanAppDir("test/fixtures/routing", "src/app");
+    val nestedProblems: string[] = nested.problems;
+    assert nestedProblems.length == 0;
+    val a = patterns(scanTable(flat));
+    val b = patterns(scanTable(nested));
+    assert a.length == b.length;
+    loop (a) { line ->
+        assert b.contains(line);
+    };
+}
+
+test "rakun routing: a segment holding page.bp and route.bp is refused by name" {
+    val report = scanAppDir("test/fixtures/conflict-both", "app");
+    val problems: string[] = report.problems;
+    assert problems.length == 1;
+    val first: string = problems.at(0).unwrapOr("");
+    assert first.contains("both");
+    assert first.contains("page.bp");
+    assert first.contains("route.bp");
+}
+
+test "rakun routing: two root layouts meeting at one URL name the URL and both groups" {
+    val report = scanAppDir("test/fixtures/conflict-roots", "app");
+    val problems: string[] = report.problems;
+    assert problems.length == 1;
+    val first: string = problems.at(0).unwrapOr("");
+    assert first.contains("/about");
+    assert first.contains("(marketing)");
+    assert first.contains("(shop)");
+}
+
+test "rakun routing: a registered segment with no directory names the segment and the fn" {
+    val report = scanAppDir("test/fixtures/routing", "app");
+    val sources = [
+        SourceEntry(seg: "blog/[slug]", fnName: "blogPostPage"),
+        SourceEntry(seg: "blog/[id]", fnName: "typoPage"),
+    ];
+    val problems: string[] = registrationProblems(report, sources);
+    var missing = "";
+    loop (problems) { p ->
+        val text: string = p;
+        if (text.contains("typoPage")) {
+            missing = text;
+        };
+    };
+    assert missing != "";
+    assert missing.contains("blog/[id]");
+    assert missing.contains("app/blog/[id]");
+}
+
+test "rakun routing: a directory holding a convention file that registered nothing is refused" {
+    val report = scanAppDir("test/fixtures/routing", "app");
+    val none: SourceEntry[] = [];
+    val problems: string[] = registrationProblems(report, none);
+    assert problems.length == report.entries.length;
+    var sawBlog = false;
+    loop (problems) { p ->
+        val text: string = p;
+        if (text.contains("app/blog/[slug]")) {
+            sawBlog = true;
+        };
+    };
+    assert sawBlog;
+}
+
+test "rakun routing: a root middleware.bp is discovered by the same scan" {
+    val withOne = scanAppDir("test/fixtures/middleware", "app");
+    assert withOne.middleware == "test/fixtures/middleware/middleware.bp";
+    val oneProblems: string[] = withOne.problems;
+    assert oneProblems.length == 0;
+}
+
+test "rakun routing: a project with no root middleware.bp scans clean and says nothing" {
+    val report = scanAppDir("test/fixtures/routing", "app");
+    assert report.middleware == "";
+    val noProblems: string[] = report.problems;
+    assert noProblems.length == 0;
+}
+
+test "rakun routing: appDir is configuration, defaulting to app" {
+    assert appDirOf() == "app";
+    val _set = rkSetProp("onze.appDir", "src/app");
+    assert appDirOf() == "src/app";
+    val _back = rkSetProp("onze.appDir", "");
+    assert appDirOf() == "app";
+}
+
+test "rakun routing: the source wire round-trips" {
+    val parsed = parseSources("blog/[slug]|blogPostPage\nabout|aboutPage");
+    assert parsed.length == 2;
+    assert parsed.at(0).unwrapOr(SourceEntry(seg: "", fnName: "")).seg == "blog/[slug]";
+    assert parsed.at(1).unwrapOr(SourceEntry(seg: "", fnName: "")).fnName == "aboutPage";
+    assert parseSources("").length == 0;
+}
+
+test "rakun routing: the convention files map to the eight kind letters" {
+    assert conventionKind("layout.bp") == "L";
+    assert conventionKind("template.bp") == "T";
+    assert conventionKind("page.bp") == "P";
+    assert conventionKind("default.bp") == "D";
+    assert conventionKind("route.bp") == "R";
+    assert conventionKind("loading.bp") == "S";
+    assert conventionKind("error.bp") == "E";
+    assert conventionKind("not-found.bp") == "N";
+    assert conventionKind("main.bp") == "";
+    assert conventionsIn("test/fixtures/routing/app", "blog/[slug]").contains("page.bp");
+    assert isDir("test/fixtures/routing/app");
+    assert isDir("test/fixtures/routing/app/page.bp").negate();
+}

@@ -44,6 +44,22 @@ export function registerHandler(record, handle) {
   return add(record, handle);
 }
 
+// Where each registration was WRITTEN: `seg|fnName`, one per line. The wire
+// record carries the URL pattern, not the app-relative directory, and the scan
+// has to check the DIRECTORY the marker was given against the real tree and
+// name the function that got it wrong. So the raw pair is kept beside the
+// table rather than squeezed into it.
+const declared = [];
+
+export function registerSource(seg, fnName) {
+  declared.push(seg + "|" + fnName);
+  return declared.length;
+}
+
+export function sources() {
+  return declared.join("\n");
+}
+
 // The table, in registration order, `\n`-separated — exactly the blob
 // `parseTable` reads.
 export function table() {
@@ -76,5 +92,6 @@ export function render(record, fallback) {
 // own empties it first.
 export function reset() {
   entries.length = 0;
+  declared.length = 0;
   return 0;
 }

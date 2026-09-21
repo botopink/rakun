@@ -67,6 +67,30 @@
   `botopink test --target erlang` 121 passing / 2 failing, the same two front-04
   reds.
 
+- **The scan, in botopink, over real trees** (front 22, step 5).
+  `scanAppDir(root, appDir)` walks the directory tree under `appDir`, skipping
+  `_`-prefixed folders entirely, and answers the entries it implies, the
+  project-root `middleware.bp` (front 07's, discovered by this scan with no
+  `pub mod` line naming it) and the problems: a segment holding both `page.bp`
+  and `route.bp`, two root layouts whose subtrees claim one URL — named with the
+  URL and both groups — a registered segment with no directory, named with the
+  function that registered it, and a directory holding a convention file that
+  registered nothing. `appDirOf()` reads `onze.appDir` from front 05's table and
+  defaults to `app`; scanning the same fixture as `app` and as `src/app`
+  produces the same table, asserted. `rkAppRegisterSource(seg, fnName)` keeps
+  the raw pair each marker was written with beside the table, because the wire
+  record carries the URL pattern and the check needs the DIRECTORY.
+
+  The front's text puts the scan in the two host files. It is botopink instead,
+  for front 05's reasons one level up: a scan written twice can disagree twice,
+  and an erlang-only cell cannot be asserted from a `.bp` test, so every rule
+  above would have been taken on trust. The directory walk is rakun's rather
+  than std's — `libs/std` has no `walk` today — and a name is a directory when
+  `fs.list` succeeds, because `fs.stat`'s `FileStat` carries an `i64` field and
+  an integer literal is `i32` with no widening, so a `catch` value for it cannot
+  be written. Measured: `botopink test` 136/136; `botopink test --target erlang`
+  134 passing / 2 failing, the same two front-04 reds.
+
 - **The file-convention segment grammar** (front 22, step 1).
   `modules/rakun/src/file_router.bp` decodes a folder name into one of the seven
   `SegmentKind`s — static, `[dynamic]`, `[...catchAll]`, `[[...optionalCatchAll]]`,
