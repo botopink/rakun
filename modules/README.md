@@ -15,7 +15,8 @@ to a sibling or to the umbrella is a located error.
 Fourteen members exist. The thirteen scaffolds are **kept under their names** by the reconciliation
 table of `03-rakun/modules.md` § Verdicts (no rename applied to a scaffold); each is a two-comment
 `src/root.bp` until its front lands, and its manifest lists `files: ["root.bp"]` so it ships one module
-rather than nothing. `targets` follows `03-rakun/modules.md` § Targets.
+rather than nothing. `targets` follows `03-rakun/modules.md` § Targets. Two members hold real code
+today: the core (`rakun`, fronts 04 · 05 · 06 · 62 · 72 · 74) and `rakun-validation` (front 14).
 
 | Member | `files` | `targets` | Spring Boot 4 | Front(s) | State |
 |---|---|---|---|---|---|
@@ -31,8 +32,37 @@ rather than nothing. `targets` follows `03-rakun/modules.md` § Targets.
 | [rakun-security](./rakun-security/) | root | erlang | `-security`, `-oauth2-client`, `-saml2` | 10 · 79 | scaffold |
 | [rakun-session](./rakun-session/) | root | erlang | `spring-session-jdbc` / `-data-redis` | 18 | scaffold |
 | [rakun-test](./rakun-test/) | root | commonJS, erlang | `-test` | 19 | scaffold |
-| [rakun-validation](./rakun-validation/) | root | commonJS, erlang | `-validation` | 14 | scaffold |
+| [rakun-validation](./rakun-validation/) | root · report · table · messages · spi · constraints · binding · boot · decorators | commonJS, erlang | `-validation` | 14 | real code, 54 tests |
 | [rakun-web](./rakun-web/) | root | erlang | `-webmvc` (websocket is `rakun-websocket`) | 07 · 65 · 82 | scaffold |
+
+### `rakun-validation` — the one `both — boundary` member (front 14)
+
+Every other server module is erlang. This one is both, and the reason is the
+mechanism rather than the packaging: `#[validated]` emits a plain botopink
+function whose body is string comparisons, length checks and regex matches — no
+host cell in the predicate path — so ONE source compiles for erlang and for
+commonJS and the server and the client run the same predicate instead of two
+predicates that are supposed to agree. What is serialized is only the constraint
+table, and only for a consumer that is not botopink.
+
+Surface, reached with `import {…} from "rakun-validation"`:
+
+| What | Names |
+|---|---|
+| the report | `Violation`, `ValidationReport` (`isValid` · `merge` · `toJson` · `toProblemDetail` · `empty` · `of`), `jsonEscape` |
+| the decorators | `#[validated]`; `#[notNull]` `#[notBlank]` `#[notEmpty]` `#[sizeBetween(min, max)]` `#[minValue(n)]` `#[maxValue(n)]` `#[positive]` `#[positiveOrZero]` `#[email]` `#[pattern(regex)]` `#[pastDate]` `#[futureDate]` `#[constraint(name)]` |
+| what `#[validated]` emits | `validate<TypeName>(v) -> ValidationReport` and `constraintsOf<TypeName>() -> string` — **a contract front 05 calls by name**, not a convention |
+| the predicates the emission calls | `vNotNull` `vNotBlank` `vNotEmpty` `vNotEmptyList` `vSizeBetween` `vSizeBetweenList` `vMinValueI32` `vMaxValueI32` `vMinValueF64` `vMaxValueF64` `vPositiveI32` `vPositiveOrZeroI32` `vPositiveI64` `vPositiveOrZeroI64` `vPositiveF64` `vPositiveOrZeroF64` `vEmail` `vPattern` `vPastDate` `vFutureDate` `vConstraint` |
+| the table | `constraintTableJson`, `splitBlob`, `paramNames`, `renderParam` |
+| the SPI | `behavior Constraint`, `registerConstraint(name, code, check)`, `constraintRegistered`, `registeredConstraints`, `clearConstraints` |
+| messages | `templateFor`, `interpolate`, `message`, `arg`, `builtInTemplate`, `messagePrefix`, `localeKey` |
+| binding | `bindInt` `bindBool` `bindRequired` `bindEpochMillis` `bindingReport` `bindingCount` `bindingReset` `bindingIsolated` `isIntegerText` `parseI32` `parseI64` |
+| boot refusal | `propertyKey`, `violationLine`, `configProblem`, `refuseInvalidConfig` |
+
+An application also imports `ValidationReport` and `Violation` even where it
+never spells them: the erlang backend resolves a record method's owner module
+only when the type is imported into the calling module. `repository/rakun/AGENTS.md`
+§ Validation carries the measurement and the rest of the contract.
 
 Every scaffold's `dependencies` is `{ "rakun": { "workspace": true } }` only. The sibling edges of
 `03-rakun/modules.md` § The cut (`rakun-session → rakun-web, rakun-data`, `rakun-security → rakun-web,

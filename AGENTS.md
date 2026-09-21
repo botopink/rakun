@@ -182,9 +182,33 @@ rakun/
 │   │                             scan order · singleton/build count · the parseInt rule ·
 │   │                             route order · the `Response` round-trip shape. The same
 │   │                             assertions on BOTH rows — green on commonJS and on erlang
-│   └── rakun-<area>/  ← the thirteen scaffolds (actuator · cache · client · data · hateoas ·
-│                        logging · messaging · scheduling · security · session · test ·
-│                        validation · web): `botopink.json` (files [root.bp] · targets per
+│   ├── rakun-validation/  ← front 14. The one member whose target is `both — boundary`
+│   │   ├── botopink.json  name rakun-validation · targets [commonJS, erlang] · files:
+│   │   │                    root · report · table · messages · spi · constraints ·
+│   │   │                    binding · boot · decorators (dependency order) · depends on
+│   │   │                    `rakun` via { "workspace": true }
+│   │   ├── src/
+│   │   │   ├── report.bp      ← `Violation` · `ValidationReport` (isValid/merge/toJson/
+│   │   │   │                    toProblemDetail) · `jsonEscape`. NO IMPORTS AT ALL
+│   │   │   ├── table.bp       ← the constraint-table grammar (`<field>|<code>[|<arg>]*`)
+│   │   │   │                    and its JSON. Imports `report` and nothing else
+│   │   │   ├── messages.bp    ← template resolution (locale → global → built-in, over
+│   │   │   │                    front 05's `rkProp`) and `{name}` interpolation
+│   │   │   ├── spi.bp         ← `behavior Constraint` · `registerConstraint` ·
+│   │   │   │                    `vConstraint` (an unregistered name is a VIOLATION)
+│   │   │   ├── constraints.bp ← every predicate. Plain botopink, no host cell — this
+│   │   │   │                    file is why the module's target is `both`
+│   │   │   ├── binding.bp     ← `bindInt`/`bindBool`/`bindRequired`/`bindEpochMillis`
+│   │   │   │                    and the request-scoped accumulator `bindingReport()` drains
+│   │   │   ├── boot.bp        ← what a boot refusal reads like: property KEYS, not field names
+│   │   │   ├── decorators.bp  ← `#[validated]` + the thirteen constraint markers
+│   │   │   ├── validation_host.mjs   ← node half: the SPI registry + the accumulator
+│   │   │   └── sidecars/rakun_validation.erl ← BEAM half: ETS registry (owner process)
+│   │   │                    + the serving process's dictionary for the accumulator
+│   │   └── test/          ← report · constraints · parity · table · binding · spi · config
+│   └── rakun-<area>/  ← the twelve remaining scaffolds (actuator · cache · client · data ·
+│                        hateoas · logging · messaging · scheduling · security · session ·
+│                        test · web): `botopink.json` (files [root.bp] · targets per
 │                        `specs/1.0.10-beta/03-rakun/modules.md` § Targets · dependencies
 │                        { "rakun": { "workspace": true } }) + a two-comment `src/root.bp`;
 │                        contents land per front
@@ -2324,6 +2348,220 @@ rows.
 `reportStateOf(name)` / `reportReasonOf(name)` / `reportNames()` when it wants
 the same decision as structured members rather than as a block. There is one
 producer; a second renderer would be a second answer.
+
+## Validation — the `both — boundary` member (`rakun-validation`, front 14)
+
+`modules/rakun-validation/` is the only member of this workspace whose target is
+**both**. Every other server module is erlang. The reason is one paragraph long:
+
+> The milestone's rule is that three things cross the boundary — the serialized
+> payload, the route table, and the validation constraints ("the server enforces
+> / the client mirrors"). The usual way to do that is to ship a constraint
+> DESCRIPTION to the client and write a SECOND evaluator in the client's
+> language, which guarantees the two drift. This module does not. `#[validated]`
+> emits a plain botopink function whose body is string comparisons, length
+> checks and regex matches — no host cell, no `@External` anything — so ONE
+> source compiles for erlang and for commonJS and the two sides run the same
+> predicate. What is serialized is only the constraint table, and only for a
+> consumer that is not botopink.
+
+`test/parity_test.bp` is where that claim is held up: twenty inputs, one
+function, ONE expected digest carrying every violation's field, code and
+resolved message. A row that answered differently reds there rather than passing
+its own half of a two-test pair.
+
+### The naming contract with front 05
+
+`#[validated]` on a record-shaped `type` `@emit`s exactly two functions:
+
+```
+pub fn validate<TypeName>(v: <TypeName>) -> ValidationReport
+pub fn constraintsOf<TypeName>() -> string
+```
+
+The names are a contract, not a convention. Front 05's boot path builds
+`validate` + the type name from the type name it already has and calls it after
+binding and before the first component is constructed; it never has to know what
+constraints exist. If either side changes the spelling, the build breaks rather
+than a test.
+
+`modules/rakun/src/config.bp` already declares a **placement-only** `#[validated]`
+of its own (front 05, "until 14 lands this is placement only"). It is a different
+decorator: it checks placement and emits nothing. An application that wants the
+emission imports `validated` from `rakun-validation`, and **must not import both
+names into one module**. The call site front 05's comment calls `rkConfigValidate`
+does not exist in the tree; `modules/rakun/**` is not front 14's to edit, so
+`src/boot.bp` ships the other half of the seam — `configProblem` /
+`refuseInvalidConfig`, which render a refusal naming property KEYS rather than
+field names — and the core-side call is front 05's to add.
+
+### What an application must import
+
+The emission runs at the APPLICATION site, so the application imports the names
+it references — the same rule `#[service]` lives by:
+
+```bp
+import {validated, notBlank, sizeBetween, email, minValue, maxValue, pattern} from "rakun-validation";
+import {ValidationReport, Violation} from "rakun-validation";
+import {constraintTableJson} from "rakun-validation";
+import {vNotBlank, vSizeBetween, vEmail, vMinValueI32, vMaxValueI32, vPattern} from "rakun-validation";
+```
+
+`ValidationReport` and `Violation` are imported **even where the application never
+spells them**. The erlang backend resolves a record method's owner module only
+when the type is imported into the calling module; without it, `report.isValid()`
+lowers to an unqualified `isValid/1`, `erlc` refuses the module and the runner
+skips it silently. Measured — see § Language notes below.
+
+### The constraint set
+
+| Marker | Applies to | Holds when |
+|---|---|---|
+| `#[notNull]` | a field whose type can be null (reflects as `""`) | the value is not `null` |
+| `#[notBlank]` | `string` | trimmed length > 0 |
+| `#[notEmpty]` | `string`, `Array<T>` | length > 0 |
+| `#[sizeBetween(min, max)]` | `string`, `Array<T>` | `min <= length <= max`, both ends inclusive |
+| `#[minValue(n)]` / `#[maxValue(n)]` | `i32`, `f64` | numeric bound, inclusive |
+| `#[positive]` / `#[positiveOrZero]` | `i32`, `i64`, `f64` | sign |
+| `#[email]` | `string` | `^[^@ ]+@[^@ .]+([.][^@ .]+)+$` |
+| `#[pattern(regex)]` | `string` | `std/regex.matches` |
+| `#[pastDate]` / `#[futureDate]` | `i64` epoch millis | strictly before / after `std/time.nowMillis()` |
+| `#[constraint(name)]` | `string` | the registered constraint named `name` answers `""` |
+
+There is **no `#[future]`**: that name collides with the effect marker
+`#[@future]` (`repository/emilia/src/emilia.bp:62`). The temporal markers are
+`#[pastDate]` and `#[futureDate]`.
+
+`#[sizeBetween]` takes BOTH bounds because a declared parameter default is never
+applied at a call site; Spring's single `@Size(min = …)` with the other half
+optional has no botopink spelling, and pretending otherwise would produce a
+decorator that silently drops an argument.
+
+### Refusal beats a constraint that could never fail
+
+Decision 67, applied to a validator. The failure mode this module exists to
+design out is a validator that silently passes what it cannot check, so:
+
+- A marker on a field whose type it cannot check is a **located compile error**,
+  not a row that quietly always passes — `#[notBlank]` on an `i32`, `#[minValue]`
+  on a `string`, `#[pastDate]` on an `i32`, `#[notNull]` on a field that can
+  never be null, `#[sizeBetween(50, 2)]`, `#[pattern("")]`.
+- `#[constraint("cpf")]` with nothing registered under `cpf` produces a
+  violation coded `unknownConstraint` at the first validation call, with the
+  name and the registered list in the message. It never passes.
+- `bindInt("age", "12x")` answers `0` **and** records a `typeMismatch`, so the
+  zero can never be mistaken for a value the caller meant.
+- `refuseInvalidConfig` is an `assert`. There is no flag that turns it into a
+  warning.
+
+### The constraint table, and why it is a blob
+
+`constraintsOf<Name>()` is emitted as a CALL — `constraintTableJson("<Name>",
+"<blob>")` — rather than as a JSON string literal. A decorator body that wrote
+the JSON itself would be writing a string literal INTO source (two levels of
+escaping), and the grammar would live in a comptime body no test can call. The
+blob grammar is `<field>|<code>[|<arg>]*`, records separated by `;`, and an
+argument carrying `;`, `|` or `"` is refused by the marker that takes it — so
+the grammar has no escape and needs none. Front 72's condition blob is the same
+shape for the same reason.
+
+### The SPI, and the shape the language admits
+
+```bp
+pub behavior Constraint {
+    fn code(self: Self) -> string;
+    fn check(self: Self, field: string, value: string) -> string;  // "" when acceptable
+}
+
+pub fn registerConstraint(name: string, code: string, check: fn(field: string, value: string) -> string) -> i32
+```
+
+The front's spec writes `registerConstraint(name: string, c: Constraint)`. A
+record that `implement`s a behavior does **not** coerce to the behavior type
+anywhere — not as a call argument, not under a `val` type annotation, not as a
+return type (measured on both rows). So the registration passes the behavior's
+two methods instead: the type still `implement`s `Constraint`, so the compiler
+still checks the shape, and a closure is what crosses. An application writes:
+
+```bp
+pub type CpfConstraint {
+    pub fn code(self: Self) -> string { return "cpf"; }
+    pub fn check(self: Self, field: string, value: string) -> string { … }
+}
+
+val __cpf = CpfConstraint();
+val __cpfRegistration = registerConstraint("cpf", __cpf.code(), { f, v -> __cpf.check(f, v) });
+```
+
+### Why this member ships BOTH host files
+
+Two things it needs are not values: the SPI registry, which maps a name to a
+`Constraint` (no string table holds a closure), and the binding accumulator,
+which the `bind…` readers append to (records are immutable, so a binder record
+cannot accumulate as it goes). `src/validation_host.mjs` and
+`src/sidecars/rakun_validation.erl` are the two halves. Neither decides
+anything: every predicate, every template, every refusal text, the table and the
+report's JSON are botopink on both rows.
+
+The accumulator's SCOPE is the one place the rows differ, and it is the one
+place `bindingIsolated()` asks the host rather than answering itself: the BEAM
+half MEASURES it by spawning a child, pushing there, and comparing this
+process's count; the node half states it about a row whose dispatcher runs one
+request to completion before it reads the next — the same claim
+`request_context.mjs` makes about the request frame.
+
+### Language notes this module is written around
+
+Each measured against the pinned binary, not guessed.
+
+- **A record that `implement`s a behavior does not coerce to the behavior type.**
+  `fn greet(g: Greeter)` called with an `En` that implements `Greeter` is
+  `type mismatch: expected Greeter, got En` on both rows; so is
+  `val g: Greeter = En(…)` and `fn f() -> Greeter { return En(…); }`. The SPI is
+  written around it (above).
+- **An integer literal does not widen to `i64` in arithmetic.** `fn shrink(x:
+  i64) -> i64 { return x - 1000; }` is `type mismatch: expected i64, got i32` on
+  both rows, **with no line or column** — only the file. A COMPARISON widens
+  (`x > 0` is fine) and so does a call argument bound to an `i64` PARAMETER from
+  an `i64` VALUE; an `i32` literal passed where an `i64` is expected does not
+  (`vPastDate("a", 1)` reds, located). There is no `i64` literal spelling, so a
+  test that needs one builds it from the clock
+  (`time.nowMillis() - time.nowMillis()`). This is why `#[minValue]`/`#[maxValue]`
+  are REFUSED on an `i64` field rather than emitted as something that reds, and
+  why `parseI64` is the module's only host cell in the coercion path.
+- **A record method's owner module is resolved only when the type is imported.**
+  On erlang, calling a method on a value whose type is not imported into the
+  calling module emits an unqualified local call: `erlc` answers
+  `function doubled/1 undefined`, the runner prints NO summary for that module,
+  and the command exits 127. commonJS is green on the same source. Minimal
+  repro: a `Box` with a `doubled()` method in one module, a `make() -> Box` in a
+  second, `assert make().doubled() == 42` in a test that imports only `make`.
+- **A field's reflected `typeName`**: `string` / `i32` / `i64` / `f64` / `bool`
+  render as themselves; **`?string` and `string[]` both render as `""`**;
+  **`Array<string>` renders as `"Array"`**. Identical on both rows. (Front 05's
+  `#[configurationProperties]` reads an empty name as "a list", which is right
+  for `string[]` and wrong for `?T`, and does not handle the bare `"Array"` its
+  own comment says is empty — see § Blocked.)
+- **An annotation's `args` are RAW LEXEMES**, quotes included: `#[pattern("^a$")]`
+  reflects as `["\"^a$\""]`. They are the right text for the emitted CALL and
+  need `.replaceAll("\"", "")` for the blob — which is exact only because each
+  marker refuses an embedded quote in its own body.
+- **A `type` with an empty field list `()` is refused** (`type-empty-field-list`);
+  a `type X { … methods … }` with no field list at all is fine.
+- **`String.replaceAll` is LITERAL on both rows** (`binary:replace(…, [global])`
+  / native `replaceAll`), which is what makes `jsonEscape` safe escaping the
+  backslash first.
+- **A nested closure may write a `var` of the enclosing decorator body**, and may
+  `push` onto an `Array` declared there — `#[validated]`'s per-annotation walk is
+  two levels deep and accumulates both the emitted calls and the blob rows.
+
+### What front 07 and front 78 consume from this front
+
+`validate<TypeName>` by name (front 07's `ValidationFilter` runs a route's
+registered binder before the handler, which is the closest thing to Spring's
+`@Valid` parameter and belongs to that front's chain, not to this module's
+decorators) and `ValidationReport.toProblemDetail()`, so an application has ONE
+error shape and not a second one for validation.
 
 ## Design at a glance
 
