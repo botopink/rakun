@@ -759,6 +759,34 @@ first. `percentDecode` decodes only into the printable range: a decoder that can
 produce a control character is a decoder that can put a newline in a header, so
 `%0A` stays `%0A`, which is lossless and round-trips.
 
+### Draft mode and `connection()`
+
+`__rakun_draft` is a SIGNED cookie, `token + "." + signature`. `isEnabled()`
+recomputes the signature and compares it with `equalsConstantTime`, so a forged
+or truncated cookie is simply not enabled and the comparison is not a signing
+oracle — "constant time" here means no early exit and the same number of
+comparisons whatever the inputs are, which is as much as a language with no byte
+type can promise. An empty `rakun.draft.secret` makes `enable()` RAISE at the
+first call: an unsigned bypass cookie is a public preview of every unpublished
+draft on the site.
+
+**Two deviations from the front's text, both because front 01 has not landed.**
+`libs/std` has no `hmac`, no `clock` and no `encoding` module today, so the
+signature is `crypto.hmacSha256` (hex, not base64url) and the token is
+`crypto.randomBytes(16)` (hex too). Both carry an `@External.Node` and an
+`@External.Erlang` form and answer identically on the two rows, which is the
+property that matters; the encoding is wider on the wire and nothing else. When
+front 01 lands, `draftSign` is the one function to change.
+
+The draft cookie does NOT use `cookieDefaults()` — its `maxAge: 0` would delete
+the cookie on arrival. `draftAttrs()` gives it a day, because a preview bypass
+with no expiry is a permanent hole in the published site.
+
+`connection()` reads nothing and marks, which is its whole purpose: it is how a
+route says "I am dynamic" without pretending to need a header. `draftBypass()`
+is the one boolean front 60 reads to skip its prerendered entry, and it is the
+only coupling between the two fronts.
+
 ### Language notes this module is written around
 
 - **A `@panic` message must be pure ASCII.** `asserts.throwsWith` catches
@@ -772,10 +800,16 @@ produce a control character is a decoder that can put a newline in a header, so
   `233 / 16` is `14.5625` on the node row and `14` on the BEAM. Subtract the
   remainder first — `idiv(a, b)` is `(a - a % b) / b` — and the quotient is
   exact on both. Measured while writing `hexByte`.
-- **`std`'s `unicode` module is `undef` on the erlang row from rakun.**
-  `unicode.fromCodepoint` and `unicode.codepoints` both answer `{error, undef}`
-  under `botopink test --target erlang`, so neither can carry a UTF-8
-  round trip here. They work on the node row.
+- **A `from "std"` module imported by a `test/` file is `undef` on the erlang
+  row; imported by a `src/` module it works.** `std/crypto`, `std/base64`,
+  `std/time` and `std/unicode` each answer `{error, undef}` when a test file
+  imports them directly, and each answers correctly when the same call is
+  reached through a `pub fn` in `src/`. The emitted module is
+  `.botopinkbuild/test-out/std/<name>.erl` with the atom `std@<name>`; a std
+  module the LIBRARY's own sources pull in (`std@dict`, `std@fs`) is loaded and
+  one only a test names is not. So `request_context.bp` imports `std/crypto`
+  and the test reaches it through `draftSign`. `std/asserts` is the exception
+  that proves nothing: the test harness pulls it in itself.
 - **A non-ASCII string LITERAL raises on the erlang row.** `"caf\u00e9".length()`
   is `{badarg, <<...>>}` — before any of this front's code runs. So the positive
   case of the non-ASCII cookie refusal is not expressible as a cell at all; the

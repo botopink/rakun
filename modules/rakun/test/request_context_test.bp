@@ -13,6 +13,7 @@
 //// `@panic` does not unify with `void`.
 
 import {asserts} from "std";
+import {sub} from "config";
 import {
     RequestPhase,
     RequestScope,
@@ -59,7 +60,18 @@ import {
     nonAscii,
     cookieValueProblem,
     cookiePhaseProblem,
+    DraftMode,
+    draftMode,
+    draftBypass,
+    draftCookieName,
+    draftSecret,
+    draftSign,
+    draftVerify,
+    draftSecretProblem,
+    equalsConstantTime,
+    connection,
 } from "request_context";
+import {rkSetProp} from "runtime";
 
 fn scopeOf(id: string, phase: RequestPhase, path: string) -> RequestScope {
     return RequestScope(
@@ -505,4 +517,171 @@ test "rakun request: cookies() marks a render dynamic" {
 test "rakun request: the cookie refusal texts say what they mean" {
     assert cookieValueProblem("sid").contains("encode the value yourself");
     assert cookiePhaseProblem("render").contains("never from a render");
+}
+
+
+// ── step 4: draftMode() and connection() ────────────────────────────────────
+
+fn draftScope(phase: RequestPhase, cookieHeader: string) -> RequestScope {
+    return RequestScope(
+        id: "d-1",
+        phase: phase,
+        method: "GET",
+        path: "/blog/draft",
+        query: "",
+        headersWire: "cookie\t" + cookieHeader,
+        strict: false,
+    );
+}
+
+fn signedDraftCookie(secret: string, token: string) -> string {
+    return draftCookieName() + "=" + token + "." + draftSign(secret, token);
+}
+
+test "rakun request: a constant-time comparison answers the ordinary question" {
+    assert equalsConstantTime("abc", "abc") == true;
+    assert equalsConstantTime("abc", "abd") == false;
+    assert equalsConstantTime("abc", "ab") == false;
+    assert equalsConstantTime("", "") == true;
+    assert equalsConstantTime("a", "") == false;
+}
+
+test "rakun request: draft mode is off with no cookie and off for a forged one" {
+    val _s = rkSetProp("rakun.draft.secret", "top-secret");
+    val _e = beginRequest(draftScope(RequestPhase.Handler, ""));
+    val d: DraftMode = draftMode();
+    assert d.isEnabled() == false;
+    val _x = endRequest();
+
+    val _e2 = beginRequest(draftScope(RequestPhase.Handler, draftCookieName() + "=tok.deadbeef"));
+    val forged: DraftMode = draftMode();
+    assert forged.isEnabled() == false;
+    val _x2 = endRequest();
+}
+
+test "rakun request: draft mode is on only for a cookie this server issued" {
+    val _s = rkSetProp("rakun.draft.secret", "top-secret");
+    val _e = beginRequest(draftScope(RequestPhase.Handler, signedDraftCookie("top-secret", "abc123")));
+    val d: DraftMode = draftMode();
+    assert d.isEnabled() == true;
+    val _x = endRequest();
+
+    val _e2 = beginRequest(draftScope(RequestPhase.Handler, signedDraftCookie("another-secret", "abc123")));
+    val other: DraftMode = draftMode();
+    assert other.isEnabled() == false;
+    val _x2 = endRequest();
+}
+
+test "rakun request: a truncated draft signature answers false and does not raise" {
+    val _s = rkSetProp("rakun.draft.secret", "top-secret");
+    val full: string = draftSign("top-secret", "abc123");
+    val short: string = sub(full, 0, full.length() - 1);
+    val _e = beginRequest(draftScope(RequestPhase.Handler, draftCookieName() + "=abc123." + short));
+    val d: DraftMode = draftMode();
+    assert d.isEnabled() == false;
+    val _x = endRequest();
+
+    assert draftVerify("top-secret", "abc123.") == false;
+    assert draftVerify("top-secret", "abc123") == false;
+    assert draftVerify("top-secret", ".abc") == false;
+    assert draftVerify("", "abc123." + full) == false;
+}
+
+test "rakun request: enable with no secret raises, naming the property" {
+    val _s = rkSetProp("rakun.draft.secret", "");
+    val _e = beginRequest(draftScope(RequestPhase.Action, ""));
+    val d: DraftMode = draftMode();
+    try asserts.throwsWith({ ->
+        d.enable();
+        0;
+    }, "rakun.draft.secret");
+    assert draftSecret() == "";
+    val _x = endRequest();
+}
+
+test "rakun request: enable queues a signed cookie, marks dynamic and sets the bypass" {
+    val _s = rkSetProp("rakun.draft.secret", "top-secret");
+    val _e = beginRequest(draftScope(RequestPhase.Action, ""));
+    val d: DraftMode = draftMode();
+    val _n = d.enable();
+    assert isDynamic() == true;
+    assert dynamicReason() == "draftMode";
+    assert draftBypass() == true;
+    val blob: string = endRequest();
+    assert blob.startsWith(draftCookieName() + "=") == true;
+    assert blob.contains("; HttpOnly") == true;
+    assert blob.contains("; Secure") == true;
+    assert blob.contains("; SameSite=Lax") == true;
+    assert blob.contains("; Max-Age=86400") == true;
+}
+
+test "rakun request: the cookie enable issues verifies on the next request" {
+    val _s = rkSetProp("rakun.draft.secret", "top-secret");
+    val _e = beginRequest(draftScope(RequestPhase.Action, ""));
+    val d: DraftMode = draftMode();
+    val _n = d.enable();
+    val blob: string = endRequest();
+    val head: string = sub(blob, 0, blob.indexOf(";"));
+    val _e2 = beginRequest(draftScope(RequestPhase.Handler, head));
+    val next: DraftMode = draftMode();
+    assert next.isEnabled() == true;
+    val _x2 = endRequest();
+}
+
+test "rakun request: disable queues the deleting cookie and clears the bypass" {
+    val _s = rkSetProp("rakun.draft.secret", "top-secret");
+    val _e = beginRequest(draftScope(RequestPhase.Action, signedDraftCookie("top-secret", "abc123")));
+    val d: DraftMode = draftMode();
+    val _n = d.disable();
+    assert draftBypass() == false;
+    val blob: string = endRequest();
+    assert blob == draftCookieName() + "=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax";
+}
+
+test "rakun request: connection() marks and reads nothing" {
+    val _e = beginRequest(draftScope(RequestPhase.Render, ""));
+    assert isDynamic() == false;
+    val _c = connection();
+    assert isDynamic() == true;
+    assert dynamicReason() == "connection";
+    val _x = endRequest();
+}
+
+test "rakun request: dynamicReason names the first function to mark, not the last" {
+    val _e = beginRequest(draftScope(RequestPhase.Render, ""));
+    val _c = connection();
+    val h: Headers = headers();
+    val _g = h.get("cookie");
+    val jar: Cookies = cookies();
+    assert dynamicReason() == "connection";
+    val _x = endRequest();
+}
+
+test "rakun request: a render that touched none of them is not dynamic" {
+    val _e = beginRequest(draftScope(RequestPhase.Render, ""));
+    assert isDynamic() == false;
+    assert dynamicReason() == "";
+    val _x = endRequest();
+}
+
+test "rakun request: connection() in a strict frame raises" {
+    val _e = beginRequest(RequestScope(
+        id: "strict",
+        phase: RequestPhase.Render,
+        method: "GET",
+        path: "/about",
+        query: "",
+        headersWire: "",
+        strict: true,
+    ));
+    try asserts.throwsWith({ ->
+        connection();
+        0;
+    }, "while prerendering `/about`");
+    val _x = endRequest();
+}
+
+test "rakun request: the draft refusal text names the property" {
+    assert draftSecretProblem().contains("rakun.draft.secret");
+    assert draftSecretProblem().contains("unsigned bypass");
 }

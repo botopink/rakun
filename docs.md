@@ -306,6 +306,21 @@ cannot hold a newline) and never decodes back; a character above printable ASCII
 is refused, naming the cookie — encode it yourself, base64url being the usual
 answer.
 
+### `draftMode()` and `connection()`
+
+```bp
+import {draftMode, connection, isDynamic, dynamicReason, DraftMode} from "rakun";
+
+val draft: DraftMode = draftMode();
+if (draft.isEnabled()) { … } else { … };
+```
+
+`__rakun_draft` is a signed cookie; `enable()` needs `rakun.draft.secret` and
+raises without it rather than issuing an unsigned bypass. Enabling marks the
+request dynamic and sets the bypass flag front 60 reads. `connection()` marks
+and reads nothing — the way a route declares itself dynamic without pretending
+to need a header — and `dynamicReason()` names the first function that marked.
+
 ## Loading notes
 
 Unlike `libs/std`, this package is **not** `@embedFile`'d into a `prelude.zig`

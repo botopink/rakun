@@ -37,8 +37,9 @@
 //// a table and a counter; the phase rules, the wire grammars, the cookie
 //// serialization and every refusal message are botopink, compiled twice.
 
-import {rkPropInt} from "runtime";
+import {rkProp, rkPropInt} from "runtime";
 import {charOf, sub} from "config";
+import {crypto} from "std";
 
 // ── the five phases ─────────────────────────────────────────────────────────
 //
@@ -687,4 +688,134 @@ pub fn cookies() -> Cookies {
 pub fn cookieOf(c: Cookies, name: string, fallback: string) -> string {
     val found: ?string = c.get(name);
     return found.unwrapOr(fallback);
+}
+
+// ── draft mode ──────────────────────────────────────────────────────────────
+//
+// `__rakun_draft` is a SIGNED cookie: `token + "." + signature`. `isEnabled`
+// recomputes the signature and compares it in constant time, so a forged or
+// truncated cookie is simply not enabled and the comparison is not a signing
+// oracle. An empty `rakun.draft.secret` makes `enable()` raise at the first
+// call rather than issue an unsigned bypass — an unsigned bypass cookie is a
+// public preview of every unpublished draft on the site.
+//
+// TWO DEVIATIONS FROM THE FRONT'S TEXT, both because front 01's `hmac` and
+// `random` modules do not exist in `libs/std` today. The signature is
+// `crypto.hmacSha256`, which is HEX rather than base64url, and the token is
+// `crypto.randomBytes(16)`, which is hex too. Both carry an `@External.Node`
+// and an `@External.Erlang` form and both answer identically on the two rows,
+// which is the property that matters; the encoding is wider on the wire and
+// nothing else. When front 01 lands, `draftSign` is the one function to change.
+
+pub fn draftCookieName() -> string {
+    return "__rakun_draft";
+}
+
+pub fn draftSecret() -> string {
+    return rkProp("rakun.draft.secret");
+}
+
+pub fn draftSecretProblem() -> string {
+    return "rakun request: draft mode needs `rakun.draft.secret` - an unsigned bypass "
+        + "cookie is a public preview of every unpublished draft on the site, so enable() "
+        + "refuses rather than issuing one";
+}
+
+pub fn draftSign(secret: string, token: string) -> string {
+    return crypto.hmacSha256(secret, token);
+}
+
+// A day, not forever: a preview bypass with no expiry is a permanent hole in
+// the published site, and the frame cannot use `cookieDefaults()` here because
+// its `maxAge` of 0 would delete the cookie on arrival (see the defect note
+// above `cookieDefaults`).
+pub fn draftAttrs() -> CookieAttrs {
+    return CookieAttrs(
+        path: "/",
+        domain: "",
+        maxAge: 86400,
+        httpOnly: true,
+        secure: true,
+        sameSite: "Lax",
+    );
+}
+
+// Constant-time in the only sense a language with no byte type can promise: no
+// early exit and the same number of comparisons whatever the inputs are. A
+// length mismatch is folded into the accumulator rather than short-circuited,
+// for the same reason.
+pub fn equalsConstantTime(a: string, b: string) -> bool {
+    val la: i32 = a.length();
+    val lb: i32 = b.length();
+    val n: i32 = if (la > lb) la else lb;
+    var diff = 0;
+    var i = 0;
+    loop (i < n) {
+        val same = (charOf(a, i) == charOf(b, i));
+        val step: i32 = if (same) 0 else 1;
+        diff = diff + step;
+        i = i + 1;
+    };
+    val lengthPenalty: i32 = if (la == lb) 0 else 1;
+    return (diff + lengthPenalty) == 0;
+}
+
+pub fn draftVerify(secret: string, value: string) -> bool {
+    if (secret == "") return false;
+    val dot: i32 = value.indexOf(".");
+    if (dot <= 0) return false;
+    val token: string = sub(value, 0, dot);
+    val signature: string = sub(value, dot + 1, value.length());
+    if (signature == "") return false;
+    return equalsConstantTime(signature, draftSign(secret, token));
+}
+
+pub type DraftMode(
+    epoch: i64,
+) {
+    pub fn isEnabled(self: Self) -> bool {
+        val _c = checkEpoch(self.epoch, "draftMode");
+        return draftVerify(draftSecret(), cookieLookup(cookieHeader(), draftCookieName()));
+    }
+
+    pub fn enable(self: Self) -> i32 {
+        val _c = checkEpoch(self.epoch, "draftMode");
+        val _p = demandWritablePhase();
+        val secret: string = draftSecret();
+        if (secret == "") @panic(draftSecretProblem());
+        val token: string = crypto.randomBytes(16);
+        val value: string = token + "." + draftSign(secret, token);
+        val name: string = draftCookieName();
+        val _q = rkReqQueueCookie(name, serializeCookie(name, value, draftAttrs()));
+        val _b = rkReqPutSlot("draft", "1");
+        return markDynamic("draftMode");
+    }
+
+    pub fn disable(self: Self) -> i32 {
+        val _c = checkEpoch(self.epoch, "draftMode");
+        val _p = demandWritablePhase();
+        val name: string = draftCookieName();
+        val _q = rkReqQueueCookie(name, serializeCookie(name, "", cookieDefaults()));
+        val _b = rkReqPutSlot("draft", "");
+        return markDynamic("draftMode");
+    }
+}
+
+pub fn draftMode() -> DraftMode {
+    val _m = markIfRendering("draftMode");
+    return DraftMode(epoch: rkReqEpoch());
+}
+
+// The one coupling between this front and front 60, and it is one boolean:
+// draft mode instructs the prerenderer to bypass its entry for this request.
+pub fn draftBypass() -> bool {
+    val _d = demand("draftBypass()");
+    return rkReqSlot("draft") != "";
+}
+
+// `connection()` reads nothing and marks — that is its whole purpose. It is how
+// a route says "I am dynamic" without pretending to need a header.
+pub fn connection() -> i32 {
+    val _d = demand("connection()");
+    return markDynamic("connection");
 }

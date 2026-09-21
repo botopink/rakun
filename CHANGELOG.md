@@ -113,6 +113,37 @@
   none of this front's. Verified by checking this front's tree out at its step-2
   commit against the same binary: the same nine.
 
+- **`draftMode()`, `connection()` and the first-reason rule** (front 62, step
+  4). `__rakun_draft` is a signed cookie, `token + "." + signature`, verified
+  with `equalsConstantTime` — no early exit and the same comparison count
+  whatever the inputs — so a forged cookie, a cookie signed with another secret
+  and a signature one character short each answer false without raising. An
+  empty `rakun.draft.secret` makes `enable()` raise naming the property rather
+  than issue an unsigned bypass, which would be a public preview of every
+  unpublished draft on the site. `enable()` queues the cookie with `HttpOnly`,
+  `Secure` and `SameSite=Lax`, marks the request dynamic and sets the one
+  boolean front 60 reads; the cookie it issues verifies on the next request,
+  asserted end to end. `connection()` reads nothing and marks, which is its
+  whole purpose, and `dynamicReason()` names the FIRST function to mark, not
+  the last.
+
+  **Two deviations from the front's text, both because front 01 has not
+  landed**: `libs/std` has no `hmac`, `clock` or `encoding` module today, so the
+  signature is `crypto.hmacSha256` (hex, not base64url) and the token is
+  `crypto.randomBytes(16)`. Both carry both host forms and answer identically on
+  the two rows — the property that matters — and `draftSign` is the one function
+  to change when front 01 arrives. The draft cookie deliberately does not use
+  `cookieDefaults()`: its `maxAge: 0` would delete the cookie on arrival, so
+  `draftAttrs()` gives the bypass a day.
+
+  A fourth compiler shape recorded rather than worked around: **a `from "std"`
+  module imported by a `test/` file is `undef` on the erlang row**, while the
+  same call reached through a `pub fn` in `src/` works. `std/crypto`,
+  `std/base64`, `std/time` and `std/unicode` all behave this way; `std@dict` and
+  `std@fs`, which rakun's own sources pull in, do not. Measured:
+  `botopink test` 187/187; `botopink test --target erlang` 178 passing / 9
+  failing, the same nine that are not this front's.
+
 - **The route table crosses the boundary, and one matcher reads it on both
   rows** (front 22, steps 3 and 4). `RouteEntry(kind, pattern, slot, verb)`
   writes as `kind|pattern|slot|verb`, one record per line in registration order,
