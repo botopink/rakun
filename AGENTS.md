@@ -3020,21 +3020,19 @@ completed handshake.
 ### Language notes this module is written around
 
 - **A test file that imports `std`'s `process` loses EVERY cell in it on the
-  commonJS row, silently.** The emitted test module declares `const process = …`
-  at module scope, shadowing node's global, and the harness's own
-  `__bp_run_tests` reads `process.argv[2]` — so the file dies with
-  `TypeError: Cannot read properties of undefined (reading '2')` before any cell
-  runs, and `botopink test` reports NOTHING for it: not a failure, not a skip,
-  the cells just vanish from the count. Clean on erlang. Measured against
-  `2e6bb4ac` with a two-file package whose only content is
-  `import {process} from "std";` and one trivial assertion. A `src` module may
-  import it; a `test` module may not.
-- **`std`'s `path` is `{error, undef}` on the erlang row from rakun.** `path` is
-  botopink, emitted into an `std/` subdirectory, and it does not load here —
-  `path.isAbsolute` and `path.join` both answer `{error, undef}` while
-  `process.cwd()` beside them answers on both rows, because it is a `declare fn`
-  with two host forms rather than a botopink module. rakun uses `std/path`
-  nowhere else. `absolutePath` is three lines of string work instead.
+  commonJS row.** The emitted test module declares `const process = …` at module
+  scope, shadowing node's global, and the harness's own `__bp_run_tests` reads
+  `process.argv[2]` — so the file dies with `TypeError: Cannot read properties
+  of undefined (reading '2')` before any cell runs. The run EXITS 1, so a gate
+  catches it; what disappears is the COUNT LINE. The file contributes no
+  `N passed, M failed` at all, where the same file without the import prints
+  `1 passed, 0 failed`. Silent to the count, not to the exit code — which is the
+  property that lets it survive in a suite somebody reads by eye. Clean on
+  erlang. Measured against `2e6bb4ac` and again against `4fe1747e`, with a
+  two-file package whose only content is `import {process} from "std";` and one
+  trivial assertion. A `src` module may import it; a `test` module may not — and
+  the place the next reader will reach for it is `absolutePath`'s cell in
+  `test/ssl_bundle_test.bp`, where the comment says so.
 - **`fs.exists` disagrees about a character device.** `/dev/null` is `true` on
   node (`existsSync`) and `false` on the BEAM (`filelib:is_file/1`, which covers
   regular files and directories). A test needing "a path that exists" writes a

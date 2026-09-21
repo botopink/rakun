@@ -26,10 +26,11 @@
 
 // NOT `process`: a test file that imports `std`'s `process` shadows node's
 // global `process` in the emitted harness, whose own `__bp_run_tests` reads
-// `process.argv[2]` — the module dies before any cell runs and `botopink test`
-// reports NOTHING for the file, not even a failure. Measured against `2e6bb4ac`;
-// see `AGENTS.md` § Language notes. `absolutePath` is asserted through its own
-// shape instead.
+// `process.argv[2]`. The module dies before any cell runs; the run EXITS 1, so
+// a gate catches it, but the file contributes no `N passed, M failed` line at
+// all — the cells are short from the count and nothing says so. Measured
+// against `2e6bb4ac` and again against `4fe1747e`; see `AGENTS.md` § Language
+// notes. `absolutePath` is asserted through its own shape instead.
 import {asserts, fs} from "std";
 import {rkSetProp, rkProp, toI32};
 import {
@@ -437,9 +438,17 @@ test "rakun ssl: a file that is not there is refused, naming the absolute path s
     // A relative path is resolved against the working directory, so the answer
     // is absolute and still ends in what was asked for.
     val resolved: string = absolutePath("relative/x.pem");
-    assert resolved.indexOf("/") == 0;
     assert resolved.endsWith("relative/x.pem");
     assert resolved != "relative/x.pem";
+    // Idempotent: resolving an already-resolved path changes nothing. That is
+    // what `path.isAbsolute` buys, and it holds on a drive letter as well as on
+    // a leading slash — so the `windows-2022` commonJS row, which is
+    // `allow_fail: false`, reads this the same way ubuntu does. The obvious
+    // assertion here is that `resolved` starts with `process.cwd()`, and it is
+    // unavailable: a TEST file that imports `std`'s `process` loses every cell
+    // in it on the commonJS row (see the header of this file). Idempotence is
+    // the same property without the import.
+    assert absolutePath(resolved) == resolved;
     try asserts.throwsWith({ ->
         checkFile("one", "keystore.certificate", "certs/definitely-not-here.pem");
     }, "and nothing is there");

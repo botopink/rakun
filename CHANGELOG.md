@@ -20,6 +20,34 @@
 > (`{badkey,param}` / `{badkey,query}`), which AGENTS.md § Blocked already
 > records.
 
+- **`absolutePath` back onto `std/path`** (front 74 follow-up).
+  `modules/rakun/src/ssl_bundle.bp`, `modules/rakun/test/ssl_bundle_test.bp`.
+
+  Front 74 measured `std`'s `path` as `{error, undef}` on the erlang row and
+  wrote `absolutePath` as three lines of string work around it. The compiler
+  fixed `path` (with `querystring`, `queue`, `snapshots` and `url` — three
+  defects, 19 call sites) in `4fe1747e`, and the substitute turned out to carry
+  a defect of its own: it tested for a leading `/`, which is not what an
+  absolute path looks like on Windows, and
+  `.github/workflows/test.yml:50` runs `windows-2022` commonJS with
+  `allow_fail: false`. Two things broke there — a Windows absolute path was
+  treated as relative and prefixed with the working directory, so
+  `missingFileProblem` named the wrong path in the one refusal whose whole job
+  is to name the right one; and the cell asserting it read
+  `resolved.indexOf("/") == 0`, which a `C:\...` answer fails.
+
+  `path.isAbsolute` / `path.join` are used again, verified green on both rows
+  before the change was written. The assertion is now idempotence —
+  `absolutePath(absolutePath(p)) == absolutePath(p)` — which is the property
+  `isAbsolute` actually provides and holds on a drive letter as well as on a
+  leading slash. The obvious assertion, that the answer starts with
+  `process.cwd()`, stays unavailable: a TEST file that imports `std`'s `process`
+  still loses every cell in it on commonJS, and the comment in the cell says so
+  rather than leaving the next reader to find out.
+
+  Counts unchanged: `modules/rakun` 387/387 commonJS and 385 passing / 2 failing
+  erlang; `modules/rakun-web` 104/104 on both rows.
+
 - **TLS: named SSL bundles, one registry for five subsystems** (front 74).
   `modules/rakun/src/ssl_bundle.bp`, `src/ssl_bundle.mjs`,
   `src/sidecars/rakun_ssl.erl`, `modules/rakun-web/src/tls.bp`, and two suites
@@ -77,11 +105,13 @@
   contributions are produced and asserted, only the registration is missing); and
   PKCS#12.
 
-  Three compiler shapes measured on the way, each with the smallest program:
-  a test file that imports `std`'s `process` loses EVERY cell in it on commonJS,
-  silently and without a failure line; `std`'s `path` is `{error, undef}` on the
-  erlang row from rakun; and `fs.exists` answers `true` on node and `false` on
-  the BEAM for a character device such as `/dev/null`.
+  Three compiler shapes measured on the way, each with the smallest program.
+  A test file that imports `std`'s `process` loses EVERY cell in it on commonJS:
+  the run exits 1, but the file contributes no `N passed, M failed` line at all,
+  so a suite read by eye is short by a file and says nothing about it. `std`'s
+  `path` answered `{error, undef}` on the erlang row from rakun — since fixed in
+  `4fe1747e`, one of five std modules affected. And `fs.exists` answers `true` on
+  node and `false` on the BEAM for a character device such as `/dev/null`.
 
 - **Validation: `#[validated]`, one predicate for both rows, and the report**
   (front 14). `modules/rakun-validation/src/{report,table,messages,spi,constraints,binding,boot,decorators}.bp`,
