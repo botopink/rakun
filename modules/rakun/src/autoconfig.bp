@@ -1,0 +1,447 @@
+//// rakun — auto-configuration: `#[autoConfiguration]`, the apply pass, and the
+//// four calls an application makes.
+////
+//// WHAT THIS BUYS. Every stereotype in `decorators.bp` is unconditional: a type
+//// carrying one is registered, always, in every application, on every profile.
+//// That is what makes a framework module impossible to ship. `rakun-data`
+//// wanting to provide a default `DataSource` has exactly two options without
+//// this file — mark it `#[component]` and build it in every application that
+//// pulls the module in, including the ones that already declare their own and
+//// the ones that have no database at all; or do not mark it, and have every
+//// application write the wiring by hand. "Add the module, it configures itself"
+//// is the single promise that separates Spring Boot from Spring, and a
+//// conditional registration plus a report of what it decided is the whole of
+//// it.
+////
+//// ── THE FOUR STEPS, AND WHAT REPLACES EACH ─────────────────────────────────
+////
+//// Spring names every auto-configuration class in a
+//// `META-INF/…AutoConfiguration.imports` file, filters each by its
+//// `@Conditional*` annotations, orders the survivors with
+//// `@AutoConfigureBefore`/`After` and registers their `@Bean` methods,
+//// recording every decision.
+////
+//// 1. THE IMPORT FILE BECOMES COMPTIME. `#[autoConfiguration]` is a decorator,
+////    so the compiler hands this body the declaration it sits on, with its
+////    annotations already reflected, and the body emits the registration into
+////    the module. The set of auto-configurations is exactly the set of
+////    annotated types in the modules the build compiled — no file to forget to
+////    update, and a typo is a compile error rather than a silently-missing
+////    configuration.
+//// 2. THE CLASSPATH CHECK BECOMES A MANIFEST CHECK — `#[conditionalOnModule]`,
+////    answered by `autoconfig_registry.bp` off `botopink.json`'s
+////    `dependencies`.
+//// 3. ORDERING IS A REAL TOPOLOGICAL SORT, NOT A HOPE. `rkAutoApply` builds the
+////    edge set, sorts, and THEN evaluates. Evaluating in registration order
+////    would make `#[conditionalOnMissingBean]` answer differently depending on
+////    module load order, which is the class of bug that makes people distrust a
+////    framework.
+//// 4. THE REPORT IS A VALUE, NOT A LOG LINE. `rkAutoReport()` returns the whole
+////    decision table as a string; `condition_report.bp` renders it for
+////    `rakun.main.debug` and front 11 serves the same string at
+////    `/actuator/conditions`. One producer, two consumers.
+////
+//// ── WHERE THE APPLY PASS IS CALLED FROM ────────────────────────────────────
+////
+//// `bootstrap.bp` is frozen for the milestone, so `Rakun.run` cannot be taught
+//// to run the pass. The application calls it, once, before `Rakun.run`:
+////
+////     val _ = autoConfigure();
+////     Rakun.run(App(port: 8080, basePath: "/api"));
+////
+//// This is a narrowing and it is deliberate. The alternative — having the
+//// registration lazily apply on the first `rkAutoMatched` read — would make the
+//// result depend on which component happened to be resolved first, which is
+//// exactly the ordering bug step 3 exists to prevent. Until `bootstrap.bp`
+//// unfreezes the line is explicit, and the report says plainly when it was
+//// never called rather than printing an empty table.
+////
+//// Reached via `from "rakun"`; see ../AGENTS.md § The auto-configuration pass.
+
+import {rkScan, rkSingleton, rkEnter, rkDone, rkProp, rkPropInt} from "runtime";
+import {rkPropList} from "config";
+import {evaluateBlob, Verdict} from "conditions";
+import {rkAutoRegister, rkAutoProvides, rkAutoProvided, rkAutoNames, rkAutoCount, rkAutoConditions, rkAutoBefore, rkAutoAfter, rkAutoKnown, rkAutoDecide, rkAutoState, rkAutoReason, rkAutoSeal, rkAutoSealed, rkAutoOrder, rkAutoUnseal, rkAutoReset} from "autoconfig_registry";
+
+// ── the states ──────────────────────────────────────────────────────────────
+
+pub fn appliedState() -> string {
+    return "applied";
+}
+
+pub fn skippedState() -> string {
+    return "skipped";
+}
+
+pub fn excludedState() -> string {
+    return "excluded";
+}
+
+pub fn excludeKey() -> string {
+    return "rakun.autoconfigure.exclude";
+}
+
+// ── the refusals ────────────────────────────────────────────────────────────
+//
+// Each message is a function of its own, the shape front 06 and front 62 use:
+// a test reads the words without the halt taking the test down, and every raise
+// site spells the refusal once. Every one is pure ASCII — `asserts.throwsWith`
+// catches through `io_lib:format("~p:~p", ...)` on the erlang row, and `~p`
+// renders a binary holding a non-Latin-1 byte as a list of numbers, so a
+// refusal carrying an em dash matches no needle at all.
+
+pub fn neverAppliedProblem() -> string {
+    return "rakun: autoConfigure() was never called - add 'val _ = autoConfigure();' before Rakun.run, or nothing conditional in this build is wired";
+}
+
+pub fn gateProblem(name: string, reason: string) -> string {
+    val why = if (reason == "") "it was not applied" else reason;
+    return "rakun: the configuration '" + name + "' was not auto-configured (" + why + ") - the bean it provides may not be built";
+}
+
+pub fn cycleProblem(members: string[]) -> string {
+    return "rakun: the auto-configuration order is a cycle (" + members.join(" <-> ") + ") - #[autoConfigureBefore] and #[autoConfigureAfter] must describe an order, and these describe none";
+}
+
+pub fn unknownExclusionProblem(name: string, known: string[]) -> string {
+    val list = if (known.length == 0) "none is registered" else known.join(", ");
+    return "rakun: '" + name + "' is excluded from auto-configuration and no configuration of that name is registered - the registered names are: " + list;
+}
+
+// ── the lists ───────────────────────────────────────────────────────────────
+
+pub fn splitList(raw: string) -> string[] {
+    var out: string[] = [];
+    if (raw == "") {
+        return out;
+    };
+    loop (raw.split(",")) { n -> if (n.trim() != "") out.push(n.trim()); };
+    return out;
+}
+
+pub fn registeredList() -> string[] {
+    return splitList(rkAutoNames());
+}
+
+fn holdsName(xs: string[], name: string) -> bool {
+    var found = false;
+    loop (xs) { x -> if (x == name) found = true; };
+    return found;
+}
+
+// A `#[bean]` method is registered as `Type.method`; the owner is what precedes
+// the first `.`. A configuration's own name carries no `.` and owns nothing.
+pub fn ownerOf(name: string) -> string {
+    val parts = name.split(".");
+    if (parts.length < 2) {
+        return "";
+    };
+    return parts.at(0).unwrapOr("");
+}
+
+// ── the sort ────────────────────────────────────────────────────────────────
+//
+// Three sources of edges, one graph:
+//
+//   • `#[autoConfigureAfter("B")]` on `A` is `B -> A`;
+//   • `#[autoConfigureBefore("B")]` on `A` is `A -> B`;
+//   • a `#[bean]` method is always after the configuration that owns it, which
+//     is an edge nobody writes and everybody relies on.
+//
+// An edge naming an UNREGISTERED configuration is dropped, not refused: Spring's
+// `@AutoConfigureAfter` routinely names a class that is not present, and
+// refusing would make a module impossible to ship against an optional peer.
+//
+// The walk is Kahn's, with ties broken by REGISTRATION order, so the result is
+// stable across runs given the same inputs — the report's stability is a
+// property of the sort, not of a hash.
+
+pub type Edge(
+    earlier: string,
+    later: string,
+)
+
+// An ordering annotation names a CONFIGURATION, and a configuration's `#[bean]`
+// methods belong to it: "after RakunCoreAutoConfiguration" has to mean after its
+// beans too, or `#[conditionalOnMissingBean]` would see the owner applied and
+// the bean it provides still missing. So each named configuration expands to
+// itself plus every entry it owns, on both sides of the relation.
+
+fn expandedAfter(names: string[], n: string) -> string[] {
+    val named = splitList(rkAutoAfter(n));
+    var out: string[] = [];
+    loop (names) { x -> if (holdsName(named, x) || holdsName(named, ownerOf(x))) out.push(x); };
+    return out;
+}
+
+fn expandedBefore(names: string[], n: string) -> string[] {
+    val named = splitList(rkAutoBefore(n));
+    var out: string[] = [];
+    loop (names) { x -> if (holdsName(named, x) || holdsName(named, ownerOf(x))) out.push(x); };
+    return out;
+}
+
+pub fn edgesOf(names: string[]) -> Array<Edge> {
+    var out: Array<Edge> = [];
+    loop (names) { n ->
+        loop (expandedAfter(names, n)) { a -> out.push(Edge(earlier: a, later: n)); };
+        loop (expandedBefore(names, n)) { b -> out.push(Edge(earlier: n, later: b)); };
+        if (holdsName(names, ownerOf(n))) out.push(Edge(earlier: ownerOf(n), later: n));
+    };
+    loop (names) { x ->
+        loop (expandedBefore(names, ownerOf(x))) { b -> out.push(Edge(earlier: x, later: b)); };
+    };
+    return out;
+}
+
+fn readyFor(edges: Array<Edge>, done: string[], n: string) -> bool {
+    var ok = true;
+    loop (edges) { e -> if (e.later == n && holdsName(done, e.earlier) == false) ok = false; };
+    return ok;
+}
+
+fn firstReady(names: string[], edges: Array<Edge>, done: string[]) -> string {
+    var out = "";
+    loop (names) { n -> if (out == "" && holdsName(done, n) == false && readyFor(edges, done, n)) out = n; };
+    return out;
+}
+
+pub fn sortNames(names: string[]) -> string[] {
+    val edges = edgesOf(names);
+    var done: string[] = [];
+    var run = true;
+    loop (run) {
+        val pick = firstReady(names, edges, done);
+        if (pick == "") run = false else done.push(pick);
+    };
+    return done;
+}
+
+fn missingFrom(names: string[], done: string[]) -> string[] {
+    var out: string[] = [];
+    loop (names) { n -> if (holdsName(done, n) == false) out.push(n); };
+    return out;
+}
+
+// ── the apply pass ──────────────────────────────────────────────────────────
+//
+// `provided` is the ordered half of the answer: a configuration that matched
+// contributes the type it declared through `rkAutoProvides` to the registered
+// set BEFORE the next entry in the sorted order is evaluated, so
+// `#[conditionalOnMissingBean]` sees the state as of its own position. A pass
+// that evaluated in registration order would answer the same question two ways
+// on two machines.
+
+pub type Pass(
+    provided: string[],
+    applied: i32,
+)
+
+// The channel, recovered rather than threaded: both channels union into
+// `rkAutoApply`'s single argument, so the reason re-reads the property table to
+// say which one named this row. A name in both is reported as the property's,
+// because that is the one a reader can go and delete.
+fn excludedReason(name: string) -> string {
+    val fromProperty = holdsName(rkPropList(excludeKey()), name);
+    if (fromProperty) {
+        return "excluded by " + excludeKey();
+    };
+    return "excluded by autoConfigureExcept";
+}
+
+fn applyOne(st: Pass, excluded: string[], n: string) -> Pass {
+    if (holdsName(excluded, n)) {
+        val _ = rkAutoDecide(n, excludedState(), excludedReason(n));
+        return st;
+    };
+    val owner = ownerOf(n);
+    if (owner != "" && rkAutoState(owner) != appliedState()) {
+        val _ = rkAutoDecide(n, skippedState(), "the configuration '" + owner + "' it belongs to was not applied");
+        return st;
+    };
+    val blob = rkAutoConditions(n);
+    val v = evaluateBlob(blob, st.provided);
+    if (v.ok == false) {
+        val _ = rkAutoDecide(n, skippedState(), "did not match: " + v.record + " - " + v.observed);
+        return st;
+    };
+    val _ = rkAutoDecide(n, appliedState(), "");
+    var grown = st.provided;
+    if (rkAutoProvided(n) != "") grown.push(rkAutoProvided(n));
+    return Pass(provided: grown, applied: st.applied + 1);
+}
+
+fn checkExclusions(names: string[], excluded: string[]) -> i32 {
+    var n = 0;
+    loop (excluded) { e -> if (holdsName(names, e) == false) @panic(unknownExclusionProblem(e, names)) else n = n + 1; };
+    return n;
+}
+
+// The single resolution path both exclusion channels end at. Sorts, refuses a
+// cycle, refuses an exclusion that names nothing, then walks the sorted list
+// evaluating and recording. Idempotent: a second call re-evaluates nothing and
+// answers the same count.
+pub fn rkAutoApply(excluded: string) -> i32 {
+    if (rkAutoSealed()) {
+        return appliedCount();
+    };
+    val names = registeredList();
+    val order = sortNames(names);
+    if (order.length < names.length) {
+        @panic(cycleProblem(missingFrom(names, order)));
+    };
+    val drop = splitList(excluded);
+    val _c = checkExclusions(names, drop);
+    val seed: string[] = [];
+    var st = Pass(provided: seed, applied: 0);
+    loop (order) { n -> st = applyOne(st, drop, n); };
+    val _s = rkAutoSeal(order.join(","));
+    return st.applied;
+}
+
+pub fn appliedCount() -> i32 {
+    var n = 0;
+    loop (registeredList()) { name -> if (rkAutoState(name) == appliedState()) n = n + 1; };
+    return n;
+}
+
+// ── the gate ────────────────────────────────────────────────────────────────
+//
+// What an emitted bean factory checks before it builds. A factory belonging to
+// an unmatched configuration RAISES, naming the configuration and the condition
+// that failed; it does not return a half-built value and there is no flag that
+// turns it into a warning. A pass that never ran is its own refusal, because
+// "nothing matched" and "nobody asked" are different answers.
+
+pub fn rkAutoMatched(name: string) -> bool {
+    return rkAutoState(name) == appliedState();
+}
+
+pub fn rkAutoGate(name: string) -> i32 {
+    if (rkAutoSealed() == false) {
+        @panic(neverAppliedProblem());
+    };
+    if (rkAutoState(name) == appliedState()) {
+        return 0;
+    };
+    @panic(gateProblem(name, rkAutoReason(name)));
+}
+
+// ── the application surface ─────────────────────────────────────────────────
+
+pub fn autoConfigure() -> i32 {
+    val none: string[] = [];
+    return autoConfigureExcept(none);
+}
+
+// Two channels, one resolution path: `rakun.autoconfigure.exclude` read through
+// front 05's table and the explicit list, UNIONED and handed to `rkAutoApply`
+// as its single argument. The report names the channel that excluded each row,
+// and a name that is in both is excluded once.
+pub fn autoConfigureExcept(names: string[]) -> i32 {
+    var all: string[] = [];
+    loop (rkPropList(excludeKey())) { n -> if (n.trim() != "" && holdsName(all, n.trim()) == false) all.push(n.trim()); };
+    loop (names) { n -> if (n.trim() != "" && holdsName(all, n.trim()) == false) all.push(n.trim()); };
+    return rkAutoApply(all.join(","));
+}
+
+pub fn isAutoConfigured(name: string) -> bool {
+    return rkAutoMatched(name);
+}
+
+// ── `#[autoConfiguration]` ──────────────────────────────────────────────────
+//
+// Placement is a record-shaped `type` — `DeclKind.Type` with no `variants` —
+// the same rule the six stereotypes enforce. The body emits four kinds of line:
+//
+//   1. the registration, carrying the serialised condition blob and the two
+//      order lists;
+//   2. the scan self-registration, so an auto-configuration is a component like
+//      any other;
+//   3. the singleton factory, IDENTICAL in shape to the one `#[configuration]`
+//      emits, so a `#[value]` field and an injected field behave the same way
+//      in both;
+//   4. per `#[bean]` method, its own registration under `Type.method` and a
+//      factory for its return type that passes through `rkAutoGate` first.
+//
+// The condition serialisation is INLINED here rather than shared with
+// `conditions.bp`: `decorator_eval` emits only the decorator function into the
+// eval script, so a sibling call is undefined at run time. Every explanation
+// lives above the `pub fn` for the same family of reasons — the emitter
+// flattens a block onto one line joined by `;`, and a `//` inside the body
+// swallows the rest of it.
+//
+// `a.args` carries the SOURCE TEXT of each argument, quotes included (measured),
+// so a literal is unwrapped with `.split("\"").join("")`; `.at(i)` returns `?T`
+// and is undefined in the eval script, so an argument is read with
+// `.slice(i, i + 1).join("")`.
+//
+// WHAT THE ENTRY PROVIDES travels through `rkAutoProvides`, beside the
+// registration and not inside the blob: `rkAutoConditions` has to answer the
+// blob the annotations produced, verbatim, or it stops being the comptime
+// half's assertion point. A configuration provides itself; a `#[bean]` method
+// provides its return type, which is the one piece of the entry its NAME
+// cannot carry.
+
+pub fn autoConfiguration(comptime decl: @Decl) {
+    var conds: Array<string> = [];
+    var before: Array<string> = [];
+    var after: Array<string> = [];
+    var bad = "";
+    decl.annotations.forEach({ a ->
+        val raw = a.args.join("").split("\"").join("");
+        val a0 = a.args.slice(0, 1).join("").split("\"").join("");
+        val a1 = a.args.slice(1, 2).join("").split("\"").join("");
+        val rec = if (a.name == "conditionalOnModule") "M|" + raw else if (a.name == "conditionalOnProperty") "P|" + a0 + "|" + a1 else if (a.name == "conditionalOnBean") "B|" + raw else if (a.name == "conditionalOnMissingBean") "X|" + raw else if (a.name == "profile") "F|" + raw else "";
+        val bef = if (a.name == "autoConfigureBefore") raw else "";
+        val aft = if (a.name == "autoConfigureAfter") raw else "";
+        val dirty = (raw.indexOf(";") >= 0 || raw.indexOf("|") >= 0) && (rec != "" || bef != "" || aft != "");
+        val nb = if (dirty) raw else bad;
+        bad = nb;
+        if (rec != "") conds.push(rec) else if (bef != "") before.push(bef) else if (aft != "") after.push(aft);
+    });
+    @emit("val __rkAuto_" + decl.name + " = rkAutoRegister(\"" + decl.name + "\", \"" + conds.join(";") + "\", \"" + before.join(",") + "\", \"" + after.join(",") + "\");");
+    @emit("val __rkAutoQ_" + decl.name + " = rkAutoProvides(\"" + decl.name + "\", \"" + decl.name + "\");");
+    @emit("val __rkScan_" + decl.name + " = rkScan(\"" + decl.name + "\");");
+    var gargs: Array<string> = [];
+    decl.fields.forEach({ f ->
+        var valKey = "";
+        f.annotations.forEach({ a -> if (a.name == "value") valKey = a.args.join("") });
+        val expr = if (valKey != "") {
+            if (f.typeName == "i32") "rkPropInt(" + valKey + ")" else "rkProp(" + valKey + ")";
+        } else "__rkMake_" + f.typeName + "()";
+        gargs.push(f.name + ": " + expr);
+    });
+    @emit("pub fn __rkMake_" + decl.name + "() -> " + decl.name + " { return rkSingleton(\"" + decl.name + "\", { -> val _e = rkEnter(\"" + decl.name + "\"); val v = " + decl.name + "(" + gargs.join(
+            ", "
+        ) + "); val _d = rkDone(\"" + decl.name + "\"); v }); }");
+    decl.methods.forEach({ m ->
+        var isBean = false;
+        var mc: Array<string> = [];
+        var mbad = "";
+        m.annotations.forEach({ a ->
+            val raw = a.args.join("").split("\"").join("");
+            val a0 = a.args.slice(0, 1).join("").split("\"").join("");
+            val a1 = a.args.slice(1, 2).join("").split("\"").join("");
+            val b = if (a.name == "bean") true else isBean;
+            isBean = b;
+            val rec = if (a.name == "conditionalOnModule") "M|" + raw else if (a.name == "conditionalOnProperty") "P|" + a0 + "|" + a1 else if (a.name == "conditionalOnBean") "B|" + raw else if (a.name == "conditionalOnMissingBean") "X|" + raw else if (a.name == "profile") "F|" + raw else "";
+            val dirty = (raw.indexOf(";") >= 0 || raw.indexOf("|") >= 0) && rec != "";
+            val nm = if (dirty) raw else mbad;
+            mbad = nm;
+            if (rec != "") mc.push(rec);
+        });
+        val carried = if (mbad != "") mbad else bad;
+        bad = carried;
+        val full = decl.name + "." + m.name;
+        val regLine = if (isBean) "val __rkAutoB_" + decl.name + "_" + m.name + " = rkAutoRegister(\"" + full + "\", \"" + mc.join(";") + "\", \"\", \"\");" else "";
+        @emit(regLine);
+        val provLine = if (isBean) "val __rkAutoR_" + decl.name + "_" + m.name + " = rkAutoProvides(\"" + full + "\", \"" + m.returnType + "\");" else "";
+        @emit(provLine);
+        val facLine = if (isBean) "pub fn __rkMake_" + m.returnType + "() -> " + m.returnType + " { return rkSingleton(\"" + m.returnType + "\", { -> val _g = rkAutoGate(\"" + full + "\"); __rkMake_" + decl.name + "()." + m.name + "() }); }" else "";
+        @emit(facLine);
+    });
+    if (decl.kind != DeclKind.Type) decl.fail("#[autoConfiguration] must annotate a type");
+    if (decl.variants.length > 0) decl.fail("#[autoConfiguration] must annotate a type with fields, not an enum");
+    if (bad != "") decl.fail("#[autoConfiguration]: '" + bad + "' contains ';' or '|' - those are the condition blob's record and field separators, and a name carrying one cannot be parsed back");
+}

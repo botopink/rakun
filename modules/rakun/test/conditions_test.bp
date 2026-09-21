@@ -1,0 +1,334 @@
+//// rakun — front 72's COMPTIME half: what each marker serialises, and what the
+//// one evaluator answers for each record letter.
+////
+//// Every assertion here runs on BOTH rows. The blob is produced by a decorator
+//// body at compile time and read back through the host table with nothing in
+//// between, so `rkAutoConditions("Name")` is the tightest assertion point this
+//// front has: if the body emitted a different string, this file reds.
+////
+//// WHAT CANNOT BE ASSERTED HERE, and where it lives instead. A placement
+//// failure and an arity failure are COMPILE errors, not values, so
+//// `#[conditionalOnModule]` on a field, `#[conditionalOnProperty("k")]` with one
+//// argument, `#[conditionalOnProperty("k", 1)]` with the wrong type, a key
+//// carrying `;` or `|`, two `#[profile]` markers on one type and a condition
+//// marker with no registration to belong to are all rejected by the compiler
+//// and cannot be written down in a `.bp` test. `test/di_test.bp` records the
+//// same split for the six stereotypes: the generic rejection path is the
+//// compiler's own annotation-processor suite
+//// (`comptime/tests/decorator_invocation.zig`), and this file asserts only the
+//// cases that produce a value.
+////
+//// NOTHING HERE CALLS `autoConfigure()` OR RESETS THE TABLE. The registrations
+//// these types emit run at module LOAD, before the first test block; a reset
+//// would wipe the very thing the file is about. The apply pass lives in
+//// `test/autoconfig_test.bp`, which runs in its own process with its own table.
+
+import {service, bean, value} from "decorators";
+import {rkScan, rkSingleton, rkEnter, rkDone, rkSetProp, rkProp, rkPropInt, rkScannedNames} from "runtime";
+import {autoConfiguration, rkAutoGate} from "autoconfig";
+import {
+    conditionalOnModule,
+    conditionalOnProperty,
+    conditionalOnBean,
+    conditionalOnMissingBean,
+    profile,
+    autoConfigureBefore,
+    autoConfigureAfter,
+    moduleRecord,
+    propertyRecord,
+    beanRecord,
+    missingBeanRecord,
+    profileRecord,
+    anyValue,
+    recordField,
+    recordKind,
+    splitBlob,
+    evaluateRecord,
+    evaluateBlob,
+    activeProfiles,
+    defaultProfiles,
+    profilesAreDefaulted,
+    profileObserved,
+    registeredNames,
+    unknownRecordProblem,
+} from "conditions";
+import {
+    rkAutoRegister,
+    rkAutoProvides,
+    rkAutoConditions,
+    rkAutoProvided,
+    rkAutoBefore,
+    rkAutoAfter,
+    rkAutoNames,
+    rkAutoKnown,
+    rkModulePresent,
+    moduleList,
+    moduleListIn,
+    manifestDependencies,
+    manifestName,
+    manifestMissingProblem,
+} from "autoconfig_registry";
+import {setResolved} from "profiles";
+import {asserts} from "std";
+
+// ── the declarations whose blobs this file reads ────────────────────────────
+
+pub type CondMailSender(
+    host: string,
+)
+
+pub type CondAuditTrail(
+    tag: string,
+)
+
+// No condition at all: the blob is the `V|` record and nothing else, and the
+// entry therefore always matches.
+#[autoConfiguration]
+type PlainAutoConfiguration {
+    pub fn tag(self: Self) -> string {
+        return "plain";
+    }
+}
+
+// Three conditions, in source order, plus two ordering annotations that go to
+// the `before`/`after` lists rather than into the blob.
+#[autoConfiguration]
+#[conditionalOnModule("rakun-mail")]
+#[conditionalOnProperty("rakun.cond.mail.host", "*")]
+#[conditionalOnMissingBean("CondMailSender")]
+#[autoConfigureAfter("PlainAutoConfiguration")]
+#[autoConfigureBefore("LateAutoConfiguration")]
+type CondMailAutoConfiguration(
+    #[value("rakun.cond.mail.host")] host: string,
+    #[value("rakun.cond.mail.port")] port: i32,
+) {
+    #[bean]
+    #[conditionalOnProperty("rakun.cond.mail.from", "noreply")]
+    pub fn condMailSender(self: Self) -> CondMailSender {
+        return CondMailSender(host: self.host);
+    }
+}
+
+#[autoConfiguration]
+#[conditionalOnBean("PlainAutoConfiguration")]
+#[profile("prod")]
+type LateAutoConfiguration {
+    #[bean]
+    pub fn condAuditTrail(self: Self) -> CondAuditTrail {
+        return CondAuditTrail(tag: "audit");
+    }
+}
+
+// `#[profile]` on an ORDINARY stereotype: the marker registers the component
+// itself, with one `F|` record and the `V|` record saying what it contributes.
+#[service]
+#[profile("staging")]
+type CondStagingService {
+    pub fn tag(self: Self) -> string {
+        return "staging";
+    }
+}
+
+// ── the blob ────────────────────────────────────────────────────────────────
+
+test "rakun conditions: a type with no condition registers an always-matching blob" {
+    assert rkAutoKnown("PlainAutoConfiguration");
+    assert rkAutoConditions("PlainAutoConfiguration") == "";
+    assert rkAutoProvided("PlainAutoConfiguration") == "PlainAutoConfiguration";
+    assert rkAutoBefore("PlainAutoConfiguration") == "";
+    assert rkAutoAfter("PlainAutoConfiguration") == "";
+    val none: string[] = [];
+    assert evaluateBlob(rkAutoConditions("PlainAutoConfiguration"), none).ok;
+}
+
+test "rakun conditions: three conditions produce three records, in source order" {
+    assert rkAutoConditions("CondMailAutoConfiguration") == "M|rakun-mail;P|rakun.cond.mail.host|*;X|CondMailSender";
+    val recs = splitBlob(rkAutoConditions("CondMailAutoConfiguration"));
+    assert recs.length == 3;
+    assert recordKind(recs.at(0).unwrapOr("")) == moduleRecord();
+    assert recordKind(recs.at(1).unwrapOr("")) == propertyRecord();
+    assert recordKind(recs.at(2).unwrapOr("")) == missingBeanRecord();
+}
+
+test "rakun conditions: the ordering markers go to the two lists, never to the blob" {
+    assert rkAutoAfter("CondMailAutoConfiguration") == "PlainAutoConfiguration";
+    assert rkAutoBefore("CondMailAutoConfiguration") == "LateAutoConfiguration";
+    assert rkAutoConditions("CondMailAutoConfiguration").contains("PlainAutoConfiguration") == false;
+}
+
+test "rakun conditions: a #[bean] method registers under Type.method with its own conditions" {
+    assert rkAutoKnown("CondMailAutoConfiguration.condMailSender");
+    assert rkAutoConditions("CondMailAutoConfiguration.condMailSender") == "P|rakun.cond.mail.from|noreply";
+    assert rkAutoProvided("CondMailAutoConfiguration.condMailSender") == "CondMailSender";
+    assert rkAutoConditions("LateAutoConfiguration.condAuditTrail") == "";
+    assert rkAutoProvided("LateAutoConfiguration.condAuditTrail") == "CondAuditTrail";
+}
+
+test "rakun conditions: #[conditionalOnBean] and #[profile] serialise their own letters" {
+    assert rkAutoConditions("LateAutoConfiguration") == "B|PlainAutoConfiguration;F|prod";
+    assert recordKind("B|X") == beanRecord();
+    assert recordKind("F|prod") == profileRecord();
+}
+
+test "rakun conditions: #[profile] on a stereotype registers the component itself" {
+    assert rkAutoKnown("CondStagingService");
+    assert rkAutoConditions("CondStagingService") == "F|staging";
+    assert rkAutoProvided("CondStagingService") == "CondStagingService";
+    assert rkAutoBefore("CondStagingService") == "";
+}
+
+test "rakun conditions: every registration this file made is in the table" {
+    val names = rkAutoNames();
+    assert names.contains("PlainAutoConfiguration");
+    assert names.contains("CondMailAutoConfiguration");
+    assert names.contains("CondMailAutoConfiguration.condMailSender");
+    assert names.contains("LateAutoConfiguration");
+    assert names.contains("LateAutoConfiguration.condAuditTrail");
+    assert names.contains("CondStagingService");
+}
+
+// ── reading one record ──────────────────────────────────────────────────────
+
+test "rakun conditions: a record splits into its kind and its fields" {
+    assert recordField("P|a.b.c|value", 0) == "P";
+    assert recordField("P|a.b.c|value", 1) == "a.b.c";
+    assert recordField("P|a.b.c|value", 2) == "value";
+    assert recordField("M|only", 2) == "";
+    assert splitBlob("").length == 0;
+    assert anyValue() == "*";
+}
+
+// ── the evaluator, letter by letter ─────────────────────────────────────────
+
+test "rakun conditions: M is answered by the manifest and never guesses" {
+    assert rkModulePresent("rakun-data") == false;
+    val none: string[] = [];
+    val v = evaluateRecord("M|rakun-data", none);
+    assert v.ok == false;
+    assert v.record == "M|rakun-data";
+    assert v.observed == "the manifest declares no dependencies";
+}
+
+test "rakun conditions: P with * is set-and-non-empty, and an exact value is exact" {
+    val none: string[] = [];
+    val _ = rkSetProp("rakun.cond.probe", "");
+    assert evaluateRecord("P|rakun.cond.probe|*", none).ok == false;
+    assert evaluateRecord("P|rakun.cond.probe|*", none).observed == "the property is empty";
+    val _s = rkSetProp("rakun.cond.probe", "smtp.example.com");
+    assert evaluateRecord("P|rakun.cond.probe|*", none).ok;
+    assert evaluateRecord("P|rakun.cond.probe|smtp.example.com", none).ok;
+    val wrong = evaluateRecord("P|rakun.cond.probe|other", none);
+    assert wrong.ok == false;
+    assert wrong.observed == "the property is 'smtp.example.com'";
+}
+
+test "rakun conditions: B and X read the registered set, provided names included" {
+    val none: string[] = [];
+    assert evaluateRecord("B|CondStagingService", none).ok;
+    assert evaluateRecord("X|CondStagingService", none).ok == false;
+    assert evaluateRecord("X|CondStagingService", none).observed == "a bean named 'CondStagingService' is already registered";
+    assert evaluateRecord("B|NeverRegistered", none).ok == false;
+    assert evaluateRecord("B|NeverRegistered", none).observed == "no bean named 'NeverRegistered' is registered";
+    val supplied = ["NeverRegistered"];
+    assert evaluateRecord("B|NeverRegistered", supplied).ok;
+    assert evaluateRecord("X|NeverRegistered", supplied).ok == false;
+    assert registeredNames(supplied).contains("NeverRegistered");
+}
+
+test "rakun conditions: F reads front 05's set and names which set it read" {
+    val none: string[] = [];
+    val _ = setResolved([]);
+    assert profilesAreDefaulted();
+    assert activeProfiles().join(",") == "default";
+    assert defaultProfiles().join(",") == "default";
+    assert profileObserved() == "no profile is active; the default profile is 'default'";
+    assert evaluateRecord("F|prod", none).ok == false;
+    assert evaluateRecord("F|default", none).ok;
+    val _a = setResolved(["dev", "local"]);
+    assert profilesAreDefaulted() == false;
+    assert profileObserved() == "active profiles: dev,local";
+    assert evaluateRecord("F|dev", none).ok;
+    val missed = evaluateRecord("F|prod", none);
+    assert missed.ok == false;
+    assert missed.observed == "active profiles: dev,local";
+    val _r = setResolved([]);
+}
+
+test "rakun conditions: a named default profile is the one the report names" {
+    val none: string[] = [];
+    val _r = setResolved([]);
+    val _d = rkSetProp("rakun.profiles.default", "fallback");
+    assert activeProfiles().join(",") == "fallback";
+    assert profileObserved() == "no profile is active; the default profile is 'fallback'";
+    assert evaluateRecord("F|fallback", none).ok;
+    val _c = rkSetProp("rakun.profiles.default", "");
+}
+
+test "rakun conditions: what an entry provides is a cell, not a sixth record letter" {
+    val none: string[] = [];
+    assert rkAutoProvided("NeverRegisteredAtAll") == "";
+    try asserts.throwsWith({ ->
+        evaluateRecord("V|Anything", none);
+        0;
+    }, unknownRecordProblem("V|Anything"));
+}
+
+test "rakun conditions: an unknown record letter is refused, not ignored" {
+    val none: string[] = [];
+    try asserts.throwsWith({ ->
+        evaluateRecord("Q|mystery", none);
+        0;
+    }, unknownRecordProblem("Q|mystery"));
+}
+
+// ── short circuit ───────────────────────────────────────────────────────────
+
+test "rakun conditions: the FIRST failing record wins and the rest are not read" {
+    val none: string[] = [];
+    val _a = rkSetProp("rakun.cond.first", "");
+    val _b = rkSetProp("rakun.cond.second", "");
+    val v = evaluateBlob("P|rakun.cond.first|*;P|rakun.cond.second|*", none);
+    assert v.ok == false;
+    assert v.record == "P|rakun.cond.first|*";
+    val _c = rkSetProp("rakun.cond.first", "set");
+    val w = evaluateBlob("P|rakun.cond.first|*;P|rakun.cond.second|*", none);
+    assert w.record == "P|rakun.cond.second|*";
+}
+
+test "rakun conditions: an empty blob matches" {
+    val none: string[] = [];
+    assert evaluateBlob("", none).ok;
+    assert evaluateBlob("", none).record == "";
+}
+
+// ── the manifest ────────────────────────────────────────────────────────────
+
+test "rakun conditions: both on-disk shapes of dependencies normalise to one list" {
+    assert manifestDependencies("{\"dependencies\": [\"rakun\", \"std\"]}").join(",") == "rakun,std";
+    assert manifestDependencies("{\"dependencies\": {\"rakun\": {\"workspace\": true}, \"std\": {}}}").join(",") == "rakun,std";
+    assert manifestDependencies("{\"name\": \"x\", \"targets\": [\"erlang\"]}").length == 0;
+    assert manifestDependencies("{\"dependencies\": {}}").length == 0;
+}
+
+test "rakun conditions: a nested value is never mistaken for a dependency name" {
+    val deps = manifestDependencies("{\"dependencies\": {\"rakun\": {\"workspace\": true, \"version\": \"0.0.1\"}}}");
+    assert deps.join(",") == "rakun";
+}
+
+test "rakun conditions: the manifest is read off disk in both shapes" {
+    assert moduleListIn("test/fixtures/autoconfig/deps-array/botopink.json").join(",") == "rakun,rakun-data";
+    assert moduleListIn("test/fixtures/autoconfig/deps-object/botopink.json").join(",") == "rakun,rakun-mail";
+    assert manifestName() == "botopink.json";
+}
+
+test "rakun conditions: a manifest that cannot be read is a refusal, not a false" {
+    try asserts.throwsWith({ ->
+        moduleListIn("test/fixtures/autoconfig/does-not-exist/botopink.json");
+        0;
+    }, manifestMissingProblem());
+}
+
+test "rakun conditions: rakun core's own manifest declares no dependency" {
+    assert moduleList().length == 0;
+    assert rkModulePresent("rakun") == false;
+}
