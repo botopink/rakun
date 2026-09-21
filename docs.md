@@ -44,6 +44,12 @@ sidecar naming rule and what is still blocked.
 - **Cycle detection** — `__rkMake_X` brackets construction with `rkEnter`/`rkDone`;
   a cycle A→B→A raises at first construction (runtime — a single decorator has no
   whole-graph view).
+- **The BEAM server** — on the erlang row the same `rkServe` is a `gen_tcp`
+  acceptor with `{packet, http_bin}` (no HTTP parser, no dependency outside
+  `kernel`), one supervised process per connection, per-request reply headers,
+  the `rakun.main.*` / `rakun.server.*` boot and tuning keys, and a
+  startup-failure table that names the port, the transport or the construction
+  stack before the node halts. See [`./AGENTS.md`](AGENTS.md) § The server half.
 - **Bootstrap** — `Rakun.run(App(port: 8080, basePath: "/api"))` reads the host
   router and starts the node `http` server (`rkServe`), dispatching every live
   request to the handler.

@@ -13,7 +13,7 @@
   is what makes `application:start(rakun)` available in a plain
   `botopink test --target erlang` run. Fifteen of the sixteen cells in
   `src/runtime.bp` gained an `@External.Erlang("rakun_runtime", "<snake_case>")`
-  form beside their node one (`rkServe` follows with the acceptor).
+  form beside their node one; `rkServe` was paired with the acceptor, below.
   The module atom is `rakun_runtime`, never `runtime`: `shipErlSidecars` skips
   an atom matching a module the build emitted, rakun emits `rakun/runtime`, and
   the skip is SILENT. Measured: `botopink test` 31/31 (was 17/17);
@@ -21,6 +21,23 @@
   `.botopinkbuild/test-out/rakun_runtime.erl` present. The six erlang reds that
   remain are two erlang-BACKEND gaps, recorded in `AGENTS.md` § Blocked;
   `botopink.json` keeps `targets: ["commonJS"]` until they close.
+
+- **The BEAM serves HTTP** (front 04, steps 5-9). `rakun_runtime` gained the
+  `gen_tcp` acceptor (`{packet, http_bin}`, so OTP parses the request line and
+  the headers and rakun writes no HTTP parser and depends on nothing outside
+  `kernel`), one process per connection under `rakun_conn_sup`, per-request
+  reply headers in the process dictionary, `boot/1` (banner, PID file, port
+  file, headless, keep-alive), a startup-failure table consulted before the node
+  halts, and the transport seam that delegates to `rakun_<name>:serve/2` — an
+  unloadable named transport is a failure naming the module, never a silent fall
+  back to the acceptor. `rkServe` is paired, so all sixteen cells now carry both
+  forms. Cowboy is deliberately NOT a dependency: a sidecar is compiled by
+  `compile:file/2` at run time with no rebar and no code path, so
+  `cowboy:start_clear/3` would compile and then die with `undefined function`.
+  `runtime.mjs` is frozen, so `set_reply_header/2`, `reply_headers_json/0`,
+  `boot/1` and `add_failure/3` have no `rk*` cell — a cell with no node form
+  reddens the commonJS row, which compiles every `test/*.bp` with no per-target
+  gate. They are exercised from erlang instead; the key set is in `AGENTS.md`.
 
 - **`test/erlang_runtime_test.bp`** names the host cells directly instead of
   reaching them through the decorators, so it covers what the older five cannot:

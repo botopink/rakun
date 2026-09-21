@@ -159,8 +159,11 @@ is the callback module for the application, the supervisors and the table-owning
 | The runtime as a startable unit | `application` (`rakun`) | `application:start/1` is the only thing that gives the ETS tables an owner that outlives a request. There is no `rakun.app` file — a sidecar is compiled by `compile:file/2` at run time — so the spec is loaded from a term by `ensure_started/0` |
 | Keeping the tables alive | `supervisor` (`rakun_sup`, `one_for_one`) | A crash must not take the singleton cache with it |
 | Owning the ETS tables | `gen_server` (`rakun_registry`) | ETS tables die with their owning process; this is the owner that never exits, and a restart recreates them EMPTY rather than leaving dangling ones |
-| Scan list · singleton cache · build counts · property map · route table | ETS (`named_table, public, read_concurrency`) | The node `Map`/array equivalents; a request process reads without a message round trip |
-| Cycle guard | process dictionary | Per-process on the BEAM *is* per-construction, which is the scope node gets by accident from being single-threaded |
+| Scan list · singleton cache · build counts · property map · route table · failure table | ETS (`named_table, public, read_concurrency`) | The node `Map`/array equivalents; a request process reads without a message round trip |
+| Cycle guard, per-request reply headers | process dictionary | Per-process on the BEAM *is* per-construction and per-request, which is the scope node gets by accident from being single-threaded |
+| Accepting sockets | `gen_tcp` with `{packet, http_bin}` | OTP decodes the request line and the headers itself, so rakun writes no HTTP parser and depends on nothing outside `kernel` |
+| One process per connection | `supervisor` (`rakun_conn_sup`, `simple_one_for_one`, temporary children) | A handler that throws kills its own connection process and nothing else — the BEAM answer to `runtime.mjs`'s try/catch |
+| Boot-time keep-alive | `receive after infinity` | `main/1` returning halts the node, so a bound — or headless — app must wait |
 
 `ensure_started/0` is the first line of every cell and costs one `ets:whereis/1`
 on the warm path.
@@ -186,10 +189,69 @@ on the warm path.
   here — and front 10's security filter and front 11's request metrics enter
   through front 07's chain, not through a second hook.
 
+### The server half — cells with no node twin
+
+`runtime.mjs` is frozen for the milestone, so four pieces of the erlang host
+module have no `@External.Node` counterpart and therefore no `rk*` cell:
+`set_reply_header/2`, `reply_headers_json/0`, `boot/1` and `add_failure/3`.
+They are reached from erlang (by the acceptor, and by later fronts' sidecars),
+not from `.bp`. **A cell that is erlang-only cannot be asserted from a `.bp`
+test**: `botopink test` compiles every `test/*.bp` on BOTH rows with no
+per-target gate, and calling a cell with no node form is a located diagnostic
+that reddens the commonJS row. So these four are covered by the erlang-side
+round-trip, not by the `.bp` suite — which is the honest place for them until
+either `runtime.mjs` unfreezes or a test file can declare its target.
+
+- **Reply headers.** `Response` is `(status, body)` and `http.bp` is frozen, so
+  there is no field for a header. A request is a process, so the accumulator is
+  process-local: a request that sets none pays nothing, two requests never see
+  each other's, and the connection process clears it between keep-alive
+  requests. A second write to the same name replaces the first
+  (case-insensitively) and `reply_headers_json/0` keeps INSERTION order.
+- **Boot options.** `App(port, basePath)` is frozen and cannot grow a field, so
+  Spring's `SpringApplication` builder options are configuration keys — read
+  through `prop/1`, so front 05 feeds them automatically once it lands — plus
+  `boot/1`, which writes the SAME properties from a JSON string for a program
+  that would rather set them in code than in a file. One resolution path.
+
+| Key | Default | Effect |
+|---|---|---|
+| `rakun.main.banner-mode` | `console` | `banner.txt` from the working directory with `${application.version}`, `${rakun.version}` and `${otp.version}` substituted; a one-line default with no file. `off` prints nothing — and a test run prints nothing whatever it says |
+| `rakun.main.headless` | (unset) | `true` starts no listener; the route table is still built |
+| `rakun.main.keep-alive` | (unset = wait) | `false` makes `serve/2` return the bound port instead of blocking — the CI smoke shape, and the only way to observe the port from a caller |
+| `rakun.main.pid-file` | (unset) | `os:getpid()` is written at boot and the file removed on a clean return |
+| `rakun.main.port-file` | (unset) | the BOUND port, so `port: 0` writes the ephemeral one |
+| `rakun.server.backlog` | `128` | `gen_tcp:listen/2`'s backlog |
+| `rakun.server.idle-timeout` | `60000` | an idle keep-alive connection is closed after this many ms |
+| `rakun.server.max-connections` | `16384` | over the limit the acceptor answers 503 and closes without spawning |
+| `rakun.server.transport` | (unset = `gen_tcp`) | a named transport delegates to `rakun_<name>:serve/2`; a name whose module will not load is a startup FAILURE naming it, never a silent fall back |
+| `rakun.server.bound-port` | — | written by the listener, read by `serve/2`; not a tuning key |
+
+- **Why `gen_tcp` and not cowboy.** A sidecar is compiled by `compile:file/2` at
+  run time with no rebar, no `.app` file and no code path beyond the output
+  directory, so `cowboy:start_clear/3` compiles fine and then dies with
+  `undefined function` on every machine that has not separately installed
+  cowboy — and rakun's test row would depend on an OTP application the gate does
+  not install. `gen_tcp` is in `kernel`. Cowboy stays available as an ADAPTER
+  through `rakun.server.transport`, at `src/sidecars/rakun_cowboy.erl`.
+- **Startup failure diagnostics.** A table keyed by the error term, consulted
+  before the node halts: three blocks (the error, a description, an action) plus
+  the one thing a table row cannot carry — the port that was taken, the
+  transport value and the module it looked for, the construction stack
+  innermost last. An unmatched error prints the raw term and SAYS no diagnosis
+  is available; it does not guess. The table is data, extended by later fronts
+  through `add_failure/3` without editing this module.
+
 ### Blocked — two erlang-backend gaps, neither rakun's
 
 Both are in `botopink-lang`'s erlang emitter and neither can be worked around
 from this repository. They are why `botopink.json` does not yet list `erlang`.
+A third gap is the toolchain's: `__bp_load_siblings/0` is emitted only under the
+TEST flag (`codegen/erlang.zig`), so a `build`/`run` erlang output loads no
+sidecar and a BUILT rakun program dies with
+`undefined function rakun_runtime:serve/2`. Front 04 is fully exercisable through
+`botopink test --target erlang`; it cannot demonstrate `botopink run` serving
+HTTP on the BEAM until that emitter emits the same loader (or a `-pa` entry).
 
 1. **A module-level `val` with a side effect never runs.** The component
    decorators `@emit` `val __rkScan_<Type> = rkScan("<Type>");` and
