@@ -11,6 +11,21 @@
 > passing / 2 failing, the two reds being `{badkey,param}`/`{badkey,query}` in
 > front 04's `server_test.bp`.
 
+- **The file-convention segment grammar** (front 22, step 1).
+  `modules/rakun/src/file_router.bp` decodes a folder name into one of the seven
+  `SegmentKind`s — static, `[dynamic]`, `[...catchAll]`, `[[...optionalCatchAll]]`,
+  `(group)`, `@slot` and `_private` — in `parseSegment`, the only place either
+  spelling is read. `patternOf` drops groups and slots and keeps the bracket
+  spelling (`(marketing)/about` is `/about`; `dashboard/@team/settings` is
+  `/dashboard/settings` with `slotOf` answering `team`), and `parsePath` halts on
+  a path that may not be registered — a `_`-prefixed folder, an empty segment, or
+  a segment holding the wire format's `|` or newline — with `pathProblem` naming
+  the offending segment. The refusal text is its own function, as
+  `durationProblem` is, so a test reads it without the halt taking the test down.
+  Nine assertions, identical on both rows. Measured: `botopink test` 96/96 (was
+  87/87); `botopink test --target erlang` 94 passing / 2 failing (was 85/2, the
+  same two front-04 reds).
+
 - **`#[configurationProperties]` binds a record, and every key it declares lands
   in a catalogue** (front 05, steps 7 and 9). The decorator emits
   `__rkBind_<Name>(prefix)`, the ordinary DI factory `__rkMake_<Name>()` and a

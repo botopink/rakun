@@ -41,6 +41,11 @@ sidecar naming rule and what is still blocked.
 - **Web layer** — `#[restController, route(prefix)]` + `#[getMapping(path)]`/… emit
   a route registration per method; the dispatcher matches `(verb, path)` —
   including `:name` params — and runs the handler over `Request`/`Response`, or 404s.
+- **File-convention routing** — `file_router.bp`: a URL that comes from where a
+  file sits. `parseSegment` decodes `blog`, `[slug]`, `[...slug]`, `[[...slug]]`,
+  `(group)`, `@slot` and `_private`; `patternOf` builds the URL pattern with
+  groups and slots dropped and the bracket spelling kept, and `slotOf` names the
+  slot. Beside the decorator router, not instead of it.
 - **Cycle detection** — `__rkMake_X` brackets construction with `rkEnter`/`rkDone`;
   a cycle A→B→A raises at first construction (runtime — a single decorator has no
   whole-graph view).

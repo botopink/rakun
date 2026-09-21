@@ -1,0 +1,214 @@
+//// rakun — the file-convention route table: the segment grammar, the wire
+//// format, the matcher and the four markers that fill the registry.
+////
+//// `#[restController]` + `#[getMapping]` (`decorators.bp`) route by DECORATOR and
+//// that model is untouched. This module is the other one: a URL that comes from
+//// where a file sits, a layout that wraps everything below it, a segment that
+//// captures part of the path, a folder that is transparent to the URL and a
+//// folder that renders into a named slot of its parent. Front 23 nests layouts
+//// off `layoutChain`, front 25 registers `route.bp` handlers into the same
+//// table, front 27 asks whether a `Link` target is worth prefetching and front
+//// 61 hangs `@slot` off the same tree.
+////
+//// WHY THE ARGUMENT IS A STRING. botopink compiles only declared modules
+//// (`pub mod` in the package root), so a `.bp` file is not loadable by path, and
+//// `@Decl` carries no source location — a decorator cannot learn which file it
+//// was written in. A file-convention router in botopink is therefore
+//// REGISTRATION-driven and the app-relative directory reaches the decorator as
+//// an argument, which `scanProblem` below checks against the real tree.
+////
+//// WHY THERE IS A `.mjs` AND AN `.erl` HERE AND NOT IN `config.bp`. Front 05
+//// refused its sidecar because its work was PURE — document readers — and an
+//// erlang-only cell is a located node-row diagnostic at its call site. Nothing
+//// about that applies to a REGISTRY: botopink has no top-level mutable state, so
+//// the table has to live in the host, exactly as `rkRegisterRoute`'s does, and a
+//// registered render function is a closure that no string store can hold. Every
+//// cell below therefore carries BOTH forms — `@External.Node("./file_router.mjs")`
+//// and `@External.Erlang("rakun_file_router")` — so neither row is a compile
+//// error, and `test/file_router_test.bp` runs the same assertions on both. What
+//// is NOT duplicated is the part front 05's argument was really about: the
+//// grammar, the wire format and the matcher are botopink, compiled twice, so the
+//// browser and the BEAM cannot disagree about which route a URL is.
+////
+//// LANGUAGE NOTES this file is written around (measured, not guessed; the full
+//// list is in `AGENTS.md` § Language notes):
+////   * `String.slice`/`chars`/`lines`/`words`/`charCodeAt` kill the commonJS
+////     module before a test runs; every substring is built through `charOf`/`sub`.
+////   * A declared parameter default is still not applied at a call site, on
+////     either row, so every call passes every argument.
+////   * `&&` and `||` inside an `if (…)` head need their own parentheses.
+////   * A `//` comment inside a braced block is fatal on the node row, and a
+////     decorator body cannot call a sibling function — so the four markers below
+////     are comment-free and inline their segment walk instead of sharing one.
+
+// ── character helpers ───────────────────────────────────────────────────────
+// `config.bp` has the same two; a decorator body cannot call a sibling and a
+// module cannot import a private one, so they are spelled again rather than
+// shared. They are `pub` because the test file reads them.
+
+pub fn charOf(s: string, i: i32) -> string {
+    return s.at(i).unwrapOr("");
+}
+
+pub fn sub(s: string, begin: i32, end: i32) -> string {
+    var out = "";
+    var i = begin;
+    val stop = if (end > s.length()) s.length() else end;
+    loop (i < stop) {
+        out = out + charOf(s, i);
+        i = i + 1;
+    };
+    return out;
+}
+
+// ── step 1: the segment grammar ─────────────────────────────────────────────
+//
+// Four folder spellings are not URL segments: `(group)` is transparent,
+// `@slot` renders into a named prop of the parent layout, `_private` is
+// excluded from routing entirely, and `[dynamic]` / `[...catchAll]` /
+// `[[...optionalCatchAll]]` capture instead of matching.
+
+pub type SegmentKind {
+    Static,
+    Dynamic,
+    CatchAll,
+    OptionalCatchAll,
+    Group,
+    Slot,
+    Private,
+}
+
+pub type Segment(
+    kind: SegmentKind,
+    name: string,
+    raw: string,
+)
+
+// The one place the bracket and parenthesis spellings are decoded. Pure and
+// total: a name that may not appear on a registered path is still classified
+// here and refused by `pathProblem`, one step up.
+pub fn parseSegment(raw: string) -> Segment {
+    val n = raw.length();
+    if ((raw.startsWith("[[...") && raw.endsWith("]]"))) return Segment(
+        kind: SegmentKind.OptionalCatchAll,
+        name: sub(raw, 5, n - 2),
+        raw: raw,
+    ) else if ((raw.startsWith("[...") && raw.endsWith("]"))) return Segment(
+        kind: SegmentKind.CatchAll,
+        name: sub(raw, 4, n - 1),
+        raw: raw,
+    ) else if ((raw.startsWith("[") && raw.endsWith("]"))) return Segment(
+        kind: SegmentKind.Dynamic,
+        name: sub(raw, 1, n - 1),
+        raw: raw,
+    ) else if ((raw.startsWith("(") && raw.endsWith(")"))) return Segment(
+        kind: SegmentKind.Group,
+        name: sub(raw, 1, n - 1),
+        raw: raw,
+    ) else if (raw.startsWith("@")) return Segment(
+        kind: SegmentKind.Slot,
+        name: sub(raw, 1, n),
+        raw: raw,
+    ) else if (raw.startsWith("_")) return Segment(
+        kind: SegmentKind.Private,
+        name: sub(raw, 1, n),
+        raw: raw,
+    ) else return Segment(kind: SegmentKind.Static, name: raw, raw: raw);
+}
+
+// The kind as a word. `case` rather than `==`, so nothing depends on how a
+// payload-free variant compares on either row; it is also what a test asserts
+// against and what a diagnostic prints.
+pub fn kindName(k: SegmentKind) -> string {
+    return case k {
+        Static -> "Static";
+        Dynamic -> "Dynamic";
+        CatchAll -> "CatchAll";
+        OptionalCatchAll -> "OptionalCatchAll";
+        Group -> "Group";
+        Slot -> "Slot";
+        Private -> "Private";
+    };
+}
+
+// `""` when the path is registrable, the refusal otherwise. Split out for the
+// reason `config.bp` splits `durationProblem` out: `parsePath` HALTS on a bad
+// path (it is called from an emitted module-load `val`, which is not a
+// `#[@result]` context), and a test can only read the message if reading it
+// does not take the test down with it.
+pub fn pathProblem(seg: string) -> string {
+    var problem = "";
+    val trimmed = trimSlashes(seg);
+    if (trimmed == "") return "" else {
+        loop (trimmed.split("/")) { raw ->
+            if (problem == "") {
+                val s = parseSegment(raw);
+                if (raw.contains("|")) {
+                    problem = "rakun routing: segment `" + raw + "` in `" + seg + "` holds a `|`, which is the route table's field separator";
+                } else if (raw.contains("\n")) {
+                    problem = "rakun routing: segment `" + raw + "` in `" + seg + "` holds a newline, which is the route table's record separator";
+                } else if (raw == "") {
+                    problem = "rakun routing: `" + seg + "` holds an empty segment";
+                } else {
+                    val k = kindName(s.kind);
+                    if (k == "Private") {
+                        problem = "rakun routing: `" + raw + "` in `" + seg + "` is a private folder — a `_`-prefixed directory is excluded from routing and may not appear on a registered path";
+                    };
+                };
+            };
+        };
+        return problem;
+    };
+}
+
+pub fn trimSlashes(seg: string) -> string {
+    var out = seg;
+    loop (out.startsWith("/")) {
+        out = sub(out, 1, out.length());
+    };
+    loop (out.endsWith("/")) {
+        out = sub(out, 0, out.length() - 1);
+    };
+    return out;
+}
+
+// The app-relative directory of a convention file, split into segments. `""` is
+// the root and answers the empty list.
+pub fn parsePath(seg: string) -> Segment[] {
+    val problem = pathProblem(seg);
+    assert problem == "", problem;
+    val trimmed = trimSlashes(seg);
+    var out: Segment[] = [];
+    if (trimmed == "") return out else {
+        loop (trimmed.split("/")) { raw ->
+            out.push(parseSegment(raw));
+        };
+        return out;
+    };
+}
+
+// The URL pattern: groups and slots removed, the bracket spelling preserved.
+pub fn patternOf(segments: Segment[]) -> string {
+    var parts: string[] = [];
+    loop (segments) { s ->
+        val k = kindName(s.kind);
+        if ((k != "Group" && k != "Slot")) {
+            parts.push(s.raw);
+        };
+    };
+    if (parts.length == 0) return "/" else return "/" + parts.join("/");
+}
+
+// `""` for the children slot, the slot name for an `@slot` entry. A path holds
+// at most one `@slot`; the innermost one wins, which is the only reading that
+// makes `dashboard/@team/settings` a `team` entry rather than a `dashboard` one.
+pub fn slotOf(segments: Segment[]) -> string {
+    var name = "";
+    loop (segments) { s ->
+        val k = kindName(s.kind);
+        if (k == "Slot") {
+            name = s.name;
+        };
+    };
+    return name;
+}

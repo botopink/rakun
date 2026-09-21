@@ -72,6 +72,11 @@ rakun/
 │   │   │   │                    `shipErlSidecars`; the atom may not be `runtime`
 │   │   │   ├── decorators.bp  ← the markers AS comptime decorator fns: placement rules +
 │   │   │   │                    the DI/router/scope/bean wiring they `@emit`
+│   │   │   ├── file_router.bp ← the FILE-CONVENTION route table (§ The file-convention
+│   │   │   │                    route table): the segment grammar, the `kind|pattern|
+│   │   │   │                    slot|verb` wire format, the matcher and the four
+│   │   │   │                    markers. `decorators.bp` is frozen, so the markers
+│   │   │   │                    live here, as `#[configurationProperties]` does
 │   │   │   ├── bootstrap.bp   ← `Rakun` (concrete type): `Rakun.run(app)` starts `rkServe`
 │   │   │   └── rakun.d.bp     ← declaration-only: the `Context` IoC behavior (future)
 │   │   └── test/
@@ -80,6 +85,10 @@ rakun/
 │   │       ├── scopes_test.bp ← singleton scope (diamond) · `#[value]` · `#[bean]` (F2-scopes)
 │   │       ├── server_test.bp ← the live HTTP dispatch pipeline (`rkDispatchHttp`): path
 │   │       │                     param · query/header/body · 200/404 (F5)
+│   │       ├── file_router_test.bp ← the segment grammar · the wire-format round
+│   │       │                     trip · matcher precedence and capture · the layout
+│   │       │                     chain · the emitted param accessors. The SAME
+│   │       │                     assertions on both rows
 │   │       ├── overlapping_routes_test.bp ← two controllers sharing a path prefix both
 │   │       │                     register; dispatch matches the FULL path; a leaf (no-dep)
 │   │       │                     #[service] resolves through the DI chain
@@ -305,6 +314,47 @@ HTTP on the BEAM until the `build` path ships and loads the sidecar too.
    compile on the erlang row because of it. The erlang `request/6` map already
    carries `method`, `path`, `params`, `query`, `headers` and `body`, so closing
    the gap is an emitter change, not a runtime one.
+
+## The file-convention route table
+
+`modules/rakun/src/file_router.bp` is the second routing model, beside — not
+instead of — `#[restController]` + `#[getMapping]`. A URL comes from where a
+file sits: `layout.bp` wraps everything below it, `page.bp` makes the route
+public, `(group)` is transparent to the URL, `@slot` renders into a named prop
+of the parent layout, `_private` is excluded from routing and
+`[slug]` / `[...slug]` / `[[...slug]]` capture instead of matching.
+
+**Why the decorator takes the directory as a string.** botopink compiles only
+declared modules, so a `.bp` file is not loadable by path, and `@Decl` carries
+no source location — a decorator cannot learn which file it was written in. The
+router is therefore REGISTRATION-driven: the app-relative directory of the
+convention file reaches the marker as an argument, and the scan checks that
+argument against the real tree under `appDir`.
+
+### The segment grammar
+
+`parseSegment` is the only place the bracket and parenthesis spellings are
+decoded, and it is pure and total. `parsePath` splits an app-relative directory
+into `Segment`s and HALTS on one that may not be registered; the refusal text is
+`pathProblem`'s, a function of its own, for the reason `durationProblem` is one
+(a test can read the message without the halt taking the test down).
+`patternOf` drops groups and slots and keeps the bracket spelling, so
+`(marketing)/about` is `/about` and `dashboard/@team/settings` is
+`/dashboard/settings` with `slotOf` answering `team`.
+
+| Folder | `SegmentKind` | `name` | In the URL |
+|---|---|---|---|
+| `blog` | `Static` | `blog` | `blog` |
+| `[slug]` | `Dynamic` | `slug` | `[slug]` |
+| `[...slug]` | `CatchAll` | `slug` | `[...slug]` |
+| `[[...slug]]` | `OptionalCatchAll` | `slug` | `[[...slug]]` |
+| `(marketing)` | `Group` | `marketing` | — transparent |
+| `@team` | `Slot` | `team` | — the entry's `slot` field |
+| `_drafts` | `Private` | `drafts` | — refused on a registered path |
+
+Neither `|` nor a newline may appear in a segment name: they are the wire
+format's field and record separators, and `pathProblem` names the segment that
+holds one.
 
 ## Externalized configuration
 
