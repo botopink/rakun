@@ -39,6 +39,17 @@
   reddens the commonJS row, which compiles every `test/*.bp` with no per-target
   gate. They are exercised from erlang instead; the key set is in `AGENTS.md`.
 
+- **`targets` stays `["commonJS"]`** (front 04 step 10, a deliberate refusal).
+  The erlang host module is complete and 21 of rakun's tests run on the BEAM,
+  but `botopink test --target erlang` is not green: six registration assertions
+  fail and `server_test.bp` does not compile, and every one of those reds is an
+  erlang-BACKEND gap (`AGENTS.md` § Blocked), not rakun's. Widening `targets`
+  now would move a known red into `botopink-lib-test` rather than fix anything;
+  `erlang` joins in the change that closes the gaps. rakun has no line in
+  `botopink-lang/scripts/known-red-libs.txt` — that file lives in the compiler
+  repository and holds only its header — so nothing is deleted there either.
+  The core manifest's description now names both host runtimes.
+
 - **`test/erlang_runtime_test.bp`** names the host cells directly instead of
   reaching them through the decorators, so it covers what the older five cannot:
   declaration order in the scan registry, the `parseInt` rule behind

@@ -49,8 +49,10 @@ rakun/
 │   │                    module ↔ Spring starter map, how to add a member
 │   ├── rakun/         ← THE CORE — what `from "rakun"` gives a consumer
 │   │   ├── botopink.json  name rakun · entry root.bp · target commonJS · targets [commonJS]
-│   │   │                    (erlang joins with front 04) · files: root · http · runtime ·
-│   │   │                    decorators · bootstrap · rakun.d · no dependencies
+│   │   │                    (erlang joins when § Blocked closes) · files: root · http ·
+│   │   │                    runtime · decorators · bootstrap · rakun.d · no dependencies.
+│   │   │                    The `.erl` sidecar is NOT a `files` entry: `shipErlSidecars`
+│   │   │                    finds it under the package's `src/sidecars/`
 │   │   ├── src/
 │   │   │   ├── root.bp        ← module-tree root: `pub mod decorators; http; runtime; bootstrap;`
 │   │   │   ├── http.bp        ← concrete, emitted: `HttpMethod` enum-shaped type · `Response` type
@@ -122,7 +124,13 @@ the per-member whitelist `botopink-lib-test` reads (`lib-test-runner/src/discove
 to skip the erlang/beam cells. The workspace's `targets` is `["commonJS", "erlang"]` — the default a
 member inherits when it declares none — and a member may only **restrict** it, so the core's
 `["commonJS"]` is a restriction and dropping it would widen the core's matrix to a red erlang cell,
-not fix a no-op key. Front 04 (the erlang runtime) is what adds `erlang` to the core.
+not fix a no-op key. Front 04 built the erlang host module (§ The erlang host module) but did
+**not** widen `targets`: `botopink test --target erlang` is 21 passing / 6 failing and one test
+file that does not compile, and every one of those reds is an erlang-BACKEND gap listed in
+§ Blocked, not rakun's. `erlang` joins `targets` in the change that closes them — widening it
+now would only move a known red into the gate. rakun has no line in
+`botopink-lang/scripts/known-red-libs.txt` (that file lives in the compiler repository and
+currently holds only its header), so there is nothing to delete there either.
 
 ## The erlang host module
 
@@ -246,12 +254,16 @@ either `runtime.mjs` unfreezes or a test file can declare its target.
 
 Both are in `botopink-lang`'s erlang emitter and neither can be worked around
 from this repository. They are why `botopink.json` does not yet list `erlang`.
-A third gap is the toolchain's: `__bp_load_siblings/0` is emitted only under the
-TEST flag (`codegen/erlang.zig`), so a `build`/`run` erlang output loads no
-sidecar and a BUILT rakun program dies with
+A third gap is the toolchain's, and it is two halves: `shipErlSidecars` is
+called only from `test_cmd.zig`, so a `botopink build --target erlang` copies no
+`.erl` sidecar at all; and `__bp_load_siblings/0` is emitted only under the TEST
+flag (`codegen/erlang.zig`), so even a hand-copied sidecar would not be loaded.
+Measured on `examples/rakun`: `botopink build --target erlang` exits 0, emits ten
+modules carrying all sixteen `rakun_runtime:<fn>` qualifiers, ships no
+`rakun_runtime.erl` and emits no loader — so a BUILT rakun program dies with
 `undefined function rakun_runtime:serve/2`. Front 04 is fully exercisable through
 `botopink test --target erlang`; it cannot demonstrate `botopink run` serving
-HTTP on the BEAM until that emitter emits the same loader (or a `-pa` entry).
+HTTP on the BEAM until the `build` path ships and loads the sidecar too.
 
 1. **A module-level `val` with a side effect never runs.** The component
    decorators `@emit` `val __rkScan_<Type> = rkScan("<Type>");` and
