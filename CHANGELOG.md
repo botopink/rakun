@@ -20,6 +20,22 @@
 > (`{badkey,param}` / `{badkey,query}`), which AGENTS.md § Blocked already
 > records.
 
+- **Shutdown, the pre-destroy pass and `#[exitCode]`** (front 06, step 8).
+  `lifecycle.shutdown()` runs the pre pass in reverse registration order and
+  answers the process status — the highest value any `#[exitCode]` generator
+  returns, 0 with none. `#[exitCode]` is the one marker in `lifecycle.bp` that
+  EMITS, because a module-level function has its own name and return type where a
+  method `@Decl` has neither an owner nor a parameter list. Four new assertions
+  on both rows.
+
+  **No `rakun_context:terminate/2` was written**, though the README names one:
+  this sidecar is not an `application` callback module and is in no supervision
+  tree (`rakun_file_router`'s shape, for `rakun_file_router`'s reason), so a
+  `terminate/2` nothing calls would be dead code. Front 07 owns the signal path
+  and reaches the pass through `lifecycle:shutdown/0`. A failed boot never
+  reaches shutdown at all: `bootSequence` halts, and a halt is a non-zero status
+  on both hosts without anybody choosing a number.
+
 - **Eager initialization, and `rakun.main.lazy-initialization`** (front 06,
   step 7). `rkSingleton` takes a thunk, so rakun was already lazy and what was
   missing is the EAGERNESS: `bootSequence()` constructs every non-`#[lazy]`

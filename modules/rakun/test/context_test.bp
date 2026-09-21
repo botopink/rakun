@@ -69,6 +69,12 @@ import {
     runPreDestroy,
     postConstructProblem,
     lifecyclePhaseProblem,
+    exitCode,
+    rkRegisterExitCode,
+    rkExitValues,
+    rkExitReset,
+    processExitCode,
+    shutdown,
 } from "lifecycle";
 import {asserts} from "std";
 
@@ -758,4 +764,63 @@ test "rakun eager: a missing #[value] key is a default, not a failure - by desig
     val reason = eagerInitIn("/raises");
     assert reason.startsWith("RaisingBean: ");
     assert reason.contains("construction failed");
+}
+
+// ── step 8: shutdown and exit codes ─────────────────────────────────────────
+//
+// Shutdown is exercised by calling the pass DIRECTLY rather than by sending a
+// real SIGTERM, so the run does not take the test runner down. The signal path,
+// the readiness flip and the request drain are front 07's, which calls
+// `shutdown()` after the drain.
+//
+// These blocks are ORDER-DEPENDENT: the first reads the registration
+// `#[exitCode]` emitted at module load, and the ones after it reset.
+
+#[exitCode]
+pub fn drainExitCode() -> i32 {
+    return 3;
+}
+
+test "rakun shutdown: #[exitCode] emits a registration at module load" {
+    val wire = rkExitValues();
+    assert wire.contains("3");
+    assert processExitCode() == 3;
+}
+
+test "rakun shutdown: the highest generator wins and none means zero" {
+    val _z = rkExitReset();
+    assert processExitCode() == 0;
+    val _a = rkRegisterExitCode("low", { -> 2 });
+    val _b = rkRegisterExitCode("high", { -> 9 });
+    val _c = rkRegisterExitCode("mid", { -> 5 });
+    assert rkExitValues() == "2\n9\n5";
+    assert processExitCode() == 9;
+}
+
+test "rakun shutdown: the pre pass runs in reverse order and answers the exit code" {
+    val _z = rkLifecycleReset();
+    val _e = rkExitReset();
+    val _n = rkCtxNoteReset();
+    val _a = rkRegisterLifecycle("First", "close", "pre", 0, { -> rkCtxNote("First") });
+    val _b = rkRegisterLifecycle("Second", "close", "pre", 0, { -> rkCtxNote("Second") });
+    val _c = rkRegisterLifecycle("Third", "close", "pre", 0, { -> rkCtxNote("Third") });
+    val status = shutdown();
+    assert rkCtxNotes() == "Third\nSecond\nFirst";
+    // No generator registered: a clean stop is 0. A FAILED boot never reaches
+    // here — `bootSequence` halts, and a halt is non-zero on both hosts without
+    // anybody choosing a number.
+    assert status == 0;
+}
+
+test "rakun shutdown: a #[preDestroy] that raises is logged and the rest still run" {
+    val _z = rkLifecycleReset();
+    val _e = rkExitReset();
+    val _n = rkCtxNoteReset();
+    val _a = rkRegisterLifecycle("First", "close", "pre", 0, { -> rkCtxNote("First") });
+    val _b = rkRegisterLifecycle("Broken", "close", "pre", 0, { -> @panic("boom") });
+    val _c = rkRegisterLifecycle("Third", "close", "pre", 0, { -> rkCtxNote("Third") });
+    val _g = rkRegisterExitCode("drain", { -> 4 });
+    val status = shutdown();
+    assert rkCtxNotes() == "Third\nFirst";
+    assert status == 4;
 }

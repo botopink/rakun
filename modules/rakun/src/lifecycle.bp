@@ -1,4 +1,5 @@
-//// rakun — lifecycle: `#[postConstruct]`, `#[preDestroy]` and `#[exitCode]`.
+//// rakun — lifecycle: `#[postConstruct]`, `#[preDestroy]` and `#[exitCode]`,
+//// plus the shutdown pass and the process status.
 ////
 //// WHY THE MARKERS EMIT NOTHING. `#[postConstruct]` and `#[preDestroy]` are
 //// PLACEMENT CHECKS ONLY. A method-level `@Decl` carries no owner and no
@@ -201,6 +202,67 @@ pub fn lifecycleHooks(phase: string) -> Hook[] {
     return out;
 }
 
+// ── exit codes ──────────────────────────────────────────────────────────────
+//
+// `#[exitCode]` on a module-level function returning `i32` registers a
+// generator; the HIGHEST value any of them returns is the process status. With
+// none registered a clean stop is 0 — and a FAILED BOOT never reaches here at
+// all: `bootSequence` halts, and a halt is a non-zero process status on both
+// hosts without anybody choosing a number.
+//
+// This front hands the number back. Calling `init:stop/1` with it is the
+// runtime's, and the socket half of shutdown — stop accepting, flip readiness
+// false, drain the in-flight requests — is FRONT 07's, which calls `shutdown()`
+// after the drain.
+
+#[@External.Node("./context.mjs", "exitRegister"),
+  @External.Erlang("rakun_context", "exit_register")]
+pub declare fn rkExitStore(name: string, gen: fn() -> i32) -> i32;
+
+// Every generator called, its answer `\n`-separated in registration order. The
+// maximum is taken here: arithmetic is botopink's, not the host's.
+#[@External.Node("./context.mjs", "exitValues"),
+  @External.Erlang("rakun_context", "exit_values")]
+pub declare fn rkExitValues() -> string;
+
+#[@External.Node("./context.mjs", "exitReset"),
+  @External.Erlang("rakun_context", "exit_reset")]
+pub declare fn rkExitReset() -> i32;
+
+pub fn rkRegisterExitCode(name: string, gen: fn() -> i32) -> i32 {
+    if (unwritable(name)) @panic(lifecycleFieldProblem("exit-code generator", name));
+    return rkExitStore(name, gen);
+}
+
+// The highest value any registered generator answers, or 0 when none is. It is
+// NOT called `exitCode`: a decorator's annotation name is its function name, and
+// `#[exitCode]` is the marker below.
+pub fn processExitCode() -> i32 {
+    val wire = rkExitValues();
+    if (wire == "") return 0 else {
+        var best = 0;
+        loop (wire.split("\n")) { line ->
+            if (line != "") {
+                val n = toI32(line);
+                if (n > best) best = n;
+            };
+        };
+        return best;
+    };
+}
+
+// ── shutdown ────────────────────────────────────────────────────────────────
+
+// The pre-destroy pass followed by the exit code. Front 07 calls it AFTER the
+// drain — it owns the socket, the readiness flip and the in-flight requests;
+// this owns the callback pass and the number. A test calls it directly rather
+// than sending a real `SIGTERM`, so the run does not take the runner down; the
+// signal path is covered once, in front 07's graceful-shutdown tests.
+pub fn shutdown() -> i32 {
+    val _failed = runPreDestroy();
+    return processExitCode();
+}
+
 // ── the markers ─────────────────────────────────────────────────────────────
 //
 // Placement only, for the reason in the docblock: a method `@Decl` carries no
@@ -212,4 +274,16 @@ pub fn postConstruct(comptime decl: @Decl) {
 
 pub fn preDestroy(comptime decl: @Decl) {
     if (decl.kind != DeclKind.Method) decl.fail("#[preDestroy] must annotate a method of a #[managed] type - the registration is emitted by #[managed], which is the only decl that can see both the method and its owner");
+}
+
+// `#[exitCode]` is the one marker in this module that EMITS. A module-level
+// function has everything the registration needs — its own name and its return
+// type — where a method has neither an owner nor a parameter list.
+//
+// The generator is a lambda and not a bare name: a named function used as a
+// VALUE is `variable 'DrainExitCode' is unbound` on the erlang row.
+pub fn exitCode(comptime decl: @Decl) {
+    @emit("val __rkExit_" + decl.name + " = rkRegisterExitCode(\"" + decl.name + "\", { -> " + decl.name + "() });");
+    if (decl.kind != DeclKind.Fn) decl.fail("#[exitCode] must annotate a module-level function");
+    if (decl.returnType != "i32") decl.fail("#[exitCode] must annotate a function returning i32 - the value becomes the process status, and there is nothing else it could be");
 }

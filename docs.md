@@ -733,6 +733,28 @@ absent key and `rkPropInt` answers `0`, by design and on both rows, so a missing
 key is a default rather than an error — at boot or at any other time. Use front
 05's typed configuration readers when a key is required.
 
+### Shutdown and the exit code
+
+```bp
+import {exitCode, shutdown, rkRegisterExitCode} from "rakun";
+
+#[exitCode]
+pub fn drainExitCode() -> i32 {
+    return 0;
+}
+```
+
+`shutdown()` runs every `#[preDestroy]` in reverse registration order — reverse
+dependency order, because a component is registered after the components it was
+constructed from — and answers the process status: the highest value any
+`#[exitCode]` function returns, or 0 with none registered. A hook that raises is
+logged and the remaining ones still run.
+
+Stopping accepting, flipping readiness false and draining the in-flight requests
+are front 07's graceful shutdown, which calls `shutdown()` after the drain. A
+failed boot never reaches it: the boot halts, and a halt is a non-zero process
+status on both hosts.
+
 ### Qualifiers, primary and lazy
 
 `#[qualifier("name")]` distinguishes two beans of one type, `#[primary]` marks

@@ -1369,6 +1369,33 @@ tells `LivenessState` from `ReadinessState`. A listener registered per NAME is
 therefore registered twice and fires twice per publish;
 `test/events_test.bp`'s expected log shows that rather than papering over it.
 
+### Shutdown, the pre-destroy pass and the process status
+
+`lifecycle.shutdown()` runs the pre-destroy pass in reverse registration order
+and answers the exit code. **Front 07 calls it after the drain** — it owns the
+socket, the readiness flip and the in-flight requests; this front owns the
+callback pass and the number. A test calls it directly rather than sending a real
+`SIGTERM`, so the run does not take the runner down; the signal path is covered
+once, in front 07's graceful-shutdown tests.
+
+`#[exitCode]` is the ONE marker in `lifecycle.bp` that emits: a module-level
+function has its own name and its return type, where a method `@Decl` has neither
+an owner nor a parameter list. The highest value any generator answers is the
+status; with none registered a clean stop is 0, and a FAILED boot never reaches
+`shutdown` at all — `bootSequence` halts, and a halt is a non-zero process status
+on both hosts without anybody choosing a number.
+
+**There is no `rakun_context:terminate/2`.** The front's README names one, but
+this sidecar is not an `application` callback module and is in no supervision
+tree — `rakun_file_router`'s shape, for `rakun_file_router`'s reason, since
+`shipErlSidecars` ships per atom and the two are shipped independently. A
+`terminate/2` nothing calls would be dead code. Front 07 reaches the pass through
+the compiled `lifecycle:shutdown/0`, or `rakun_context:lifecycle_run(<<"pre">>,
+true)` directly.
+
+`processExitCode()` is deliberately not called `exitCode`: a decorator's
+annotation name IS its function name, and `#[exitCode]` is the marker.
+
 ### Eager initialization is the deliverable; lazy is already the default
 
 Spring's `spring.main.lazy-initialization` is an opt-in because Spring is EAGER.
