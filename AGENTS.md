@@ -171,9 +171,13 @@ rakun/
 ├── examples/
 │   ├── rakun/         ← member `rakun-example` (an application: entry main.bp, target commonJS,
 │   │                    depends on `rakun` via { "workspace": true }); the sixty-second app
-│   └── rakun-container/ ← member `rakun-container-example`: front 06's surface reached
-│                        through `from "rakun"`, which is the CONSUMER proof that
-│                        `Context` resolves to one declaration and not two
+│   ├── rakun-container/ ← member `rakun-container-example`: front 06's surface reached
+│   │                    through `from "rakun"`, which is the CONSUMER proof that
+│   │                    `Context` resolves to one declaration and not two
+│   └── rakun-ssr/     ← member `rakun-ssr-example`: front 23's surface reached
+│                        through `from "rakun"` — the element adapter, a layout
+│                        and a page, one render inside a request scope, and the
+│                        escaping assertion. `botopink run` prints the document
 └── scripts/git-hooks/ ← the pre-commit gate (§ Local gate): `botopink test` per module member,
                          `botopink build` per example
 ```
@@ -945,6 +949,10 @@ either dropping `query` from `PageContext` or making it private — both are fro
 22's file, and neither is this front's to change. Recorded, not smoothed over.
 
 ### The gate's own greps
+
+`examples/rakun-ssr/` is the consumer half, and it is a RUN rather than a claim:
+`botopink run` prints the document, and the program halts with a named refusal
+if the title reaches the browser unescaped or the payload is not `v1`.
 
 `scripts/git-hooks/lib/runner-standalone.sh` stage 1b enforces three claims of
 this front's *Definition of done*, because each of them is one edit away from

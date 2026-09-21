@@ -1,0 +1,96 @@
+// rakun example — the SSR pipeline, from a CONSUMER's side.
+//
+// Everything here is reached through `from "rakun"`, which is what makes this
+// example the proof that front 23's surface is exported and that both of its
+// host files ship with a consumer's build: the render runs, the document comes
+// out, and the payload is in it.
+//
+// It shows, in order: an `ElementView` adapter (the one thing a UI library
+// writes — here over rakun's own `Node`, because rakun depends on no UI
+// library and must not), a root layout and a page registered through the
+// file-convention markers' cells, a render inside a request scope, and the
+// escaping assertion — because that is the point of the walker.
+//
+// Build it with `botopink build` from this directory; `botopink run` prints the
+// document.
+//
+//   <!DOCTYPE html><html lang="pt-BR"><head>…</head><body>
+//   <div data-onze-root=""><site><article><h1>Hello &lt;script&gt;</h1>…
+//   <script id="__onze" type="application/json">{"v":1,…}</script>
+//   </body></html>
+
+import {ElementView, Node, RenderedPage, nodeView} from "rakun";
+import {PageContext, LayoutProps, rkAppLayout, rkAppPage, ctxParam} from "rakun";
+import {beginRender, endRender, render, renderNode, bodyOf, payloadOf} from "rakun";
+
+// ---- the element adapter: the ONE thing a UI library writes ----
+//
+// `isVoid` and `isRawText` are front 94's `isVoidTag` / `isRawTextTag` in a
+// real application. Here they are this example's own two-tag fixture, which is
+// exactly the shape the seam has: one definition, passed in.
+
+pub fn exampleVoid(tag: string) -> bool {
+    return tag == "img" || tag == "br";
+}
+
+pub fn exampleRawText(tag: string) -> bool {
+    return tag == "script" || tag == "style";
+}
+
+// Every field is a LAMBDA and never a bare function name: a named function used
+// as a value does not lower on the erlang row.
+pub fn exampleView() -> ElementView<Node> {
+    return nodeView({ t -> exampleVoid(t) }, { t -> exampleRawText(t) });
+}
+
+pub fn tag(name: string, children: Node[]) -> Node {
+    return Node(tag: name, value: "", attrs: [], children: children);
+}
+
+pub fn text(value: string) -> Node {
+    return Node(tag: "#text", value: value, attrs: [], children: []);
+}
+
+// ---- the conventions ----
+
+pub fn siteLayout(props: LayoutProps<Node>) -> Node {
+    return tag("site", [props.children]);
+}
+
+// A title that came from a request, a database or a file — which is every title
+// worth escaping.
+#[@future]
+pub fn postPage(route: PageContext) -> @Future<Node> {
+    val slug = ctxParam(route, "slug");
+    return tag("article", [
+        tag("h1", [text("Hello <script>alert(" + slug + ")</script>")]),
+        tag("p", [text("rendered on the server, before any JavaScript arrived")]),
+    ]);
+}
+
+// ---- bootstrap ----
+
+#[@future]
+fn main() -> @Future<i32> {
+    val _layout = rkAppLayout("", { props -> siteLayout(props) });
+    val _page = rkAppPage("blog/[slug]", { route -> postPage(route) });
+
+    val v: ElementView<Node> = exampleView();
+    val _epoch = beginRender("example-1", "/blog/1", "", false);
+    val page: RenderedPage = await render(v, "/blog/1", "");
+    // `endRender()` runs on the failure path too — it is the dispatcher's
+    // bracket, and without it the next request on a keep-alive connection
+    // starts inside this one's frame.
+    val _cookies = endRender();
+
+    val doc = bodyOf(page);
+    @println(doc);
+
+    // The escaping assertion, because that is the point: a title carrying a
+    // script tag reaches the browser as text and never as an element.
+    if (doc.contains("<script>alert(")) @panic("rakun ssr example: the walker did not escape");
+    if (doc.contains("&lt;script&gt;alert(1)") == false) @panic("rakun ssr example: the escaped title is missing");
+    if (payloadOf(doc).startsWith("{\"v\":1,") == false) @panic("rakun ssr example: the payload is not v1");
+    @println("ok: status " + page.status.toString() + ", escaped, payload v1");
+    return 0;
+}

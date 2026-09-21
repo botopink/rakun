@@ -20,6 +20,15 @@
 > (`{badkey,param}` / `{badkey,query}`), which AGENTS.md § Blocked already
 > records.
 
+- **The consumer proof** (front 23). `examples/rakun-ssr/` is a new workspace
+  member that reaches the whole front through `from "rakun"` — the
+  `ElementView` adapter, a root layout and a page registered through the
+  file-convention cells, one render inside a request scope, and the escaping
+  assertion. `botopink run` prints the document and the program halts with a
+  named refusal if a title carrying `<script>` reaches the browser as an
+  element or the payload is not `v1`. It is what proves both host files ship
+  with a consumer's build.
+
 - **The chunk protocol and the two entry points** (front 23, steps 5 and 6).
 
   `render(v, pathname, query)` opens phase `Render`, matches, awaits the page,
