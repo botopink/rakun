@@ -542,6 +542,83 @@ pub fn managed(comptime decl: @Decl) {
     if (decl.variants.length > 0) decl.fail("#[managed] must annotate a type with fields, not an enum");
 }
 
+// ── `#[provides]` ───────────────────────────────────────────────────────────
+//
+// A FACTORY FUNCTION whose return value enters the registry under its type:
+//
+//     #[provides]
+//     pub fn systemClock() -> Clock {
+//         return Clock(zone: "UTC");
+//     }
+//
+// It is not spelled `#[bean]`, because `#[bean]` already exists and is frozen
+// at `DeclKind.Method` in `decorators.bp` — it marks a method of a
+// `#[configuration]`, and `#[configuration]` does that wiring. `#[provides]` is
+// the function form under a second name.
+//
+// `decl.returnType` is what a `Fn` decl carries, and it is the same field
+// `#[configuration]` already reads off its `#[bean]` methods.
+//
+// WHO OWNS `__rkMake_<Type>`. Constructor injection emits `__rkMake_<FieldType>()`
+// and that name is unique by construction, so exactly one `#[provides]` of a
+// type may define it: the unqualified one, or the `#[primary]` one.
+//
+// Two UNQUALIFIED `#[provides]` of one type both try to. The front's README
+// expects the compiler to fail the BUILD on the duplicate definition; measured,
+// it does not — two emitted `pub fn __rkMake_Ledger` definitions compile. What
+// catches it is `rkRegisterBeanAt`'s duplicate check, which fires at MODULE
+// LOAD, before any test or request runs, and names both functions:
+//
+//     rakun: two beans of type 'Ledger' are registered ('mainLedger' and
+//            'backupLedger'); give one a distinct #[qualifier]
+//
+// That is the acceptance's "naming both functions" met at boot rather than at
+// compile time, and it is why the owner is a field of the record at all.
+//
+// Two QUALIFIED providers with no `#[primary]` define `__rkMake_<Type>` neither
+// time, so a field of that type IS a build failure — `unbound variable
+// '__rkMake_Dye'` at the injection site — and `ctx.resolve` raises the ambiguity
+// naming both; `resolveNamed` still works.
+//
+// Every provider gets a factory function either way — `__rkMake_<Type>` when it
+// owns the name, `__rkProvide_<fn>` when it does not — so the registration line
+// has ONE shape and the body is not a conditional emit. A bare `if` may only be
+// the last statement of a comptime block, which is the same restriction the
+// four markers in `file_router.bp` are written around.
+
+pub fn provides(comptime decl: @Decl) {
+    var qual = "\"\"";
+    var scopeLit = "\"singleton\"";
+    var isPrimary = "false";
+    var isLazy = "false";
+    decl.annotations.forEach({ a ->
+        val q = if (a.name == "qualifier") a.args.join("") else qual;
+        qual = q;
+        val s = if (a.name == "scope") a.args.join("") else scopeLit;
+        scopeLit = s;
+        val p = if (a.name == "primary") "true" else isPrimary;
+        isPrimary = p;
+        val l = if (a.name == "lazy") "true" else isLazy;
+        isLazy = l;
+    });
+    val t = decl.returnType;
+    val call = decl.name + "()";
+    val keyExpr = "\"" + t + "@\" + " + qual;
+    val singleton = scopeLit == "\"singleton\"";
+    val request = scopeLit == "\"request\"";
+    val unqualified = qual == "\"\"";
+    val marked = isPrimary == "true";
+    val owns = unqualified || marked;
+    val ownsName = owns && singleton;
+    val fname = if (ownsName) "__rkMake_" + t else "__rkProvide_" + decl.name;
+    val scoped = if (request) "rkRequestScoped(" + keyExpr + ", { -> " + call + " })" else call;
+    val cached = if (ownsName) "rkSingleton(\"" + t + "\", { -> " + call + " })" else if (singleton) "rkSingleton(" + keyExpr + ", { -> " + call + " })" else scoped;
+    @emit("pub fn " + fname + "() -> " + t + " { return " + cached + "; }");
+    @emit("val __rkBean_" + decl.name + " = rkRegisterBean(\"" + t + "\", " + qual + ", " + scopeLit + ", " + isPrimary + ", " + isLazy + ", \"" + decl.name + "\", { -> " + fname + "() });");
+    if (decl.kind != DeclKind.Fn) decl.fail("#[provides] must annotate a function");
+    if (decl.returnType == "") decl.fail("#[provides] must annotate a function that returns a value - a bean is what the function RETURNS, and a void function returns nothing to register");
+}
+
 // ── the argument-carrying markers ───────────────────────────────────────────
 //
 // `#[qualifier]`, `#[primary]`, `#[lazy]` and `#[scope]` are read by

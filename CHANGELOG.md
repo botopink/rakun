@@ -11,6 +11,28 @@
 > passing / 2 failing, the two reds being `{badkey,param}`/`{badkey,query}` in
 > front 04's `server_test.bp`.
 
+- **`#[provides]`, qualifiers and primary** (front 06, step 3). A factory
+  FUNCTION whose return value enters the registry under its type, spelled
+  `#[provides]` because `#[bean]` already exists and is frozen at a method.
+  Exactly one provider of a type owns `__rkMake_<Type>` — the unqualified one or
+  the `#[primary]` one — and the others get `__rkProvide_<fn>`, so the
+  registration line has one shape and needs no conditional `@emit` (a bare `if`
+  may only be a comptime block's last statement). Five new assertions on both
+  rows.
+
+  **Two unqualified providers do not fail the BUILD, as the README expects.**
+  Measured: two emitted `pub fn __rkMake_Ledger` definitions compile. The
+  duplicate check in `rkRegisterBeanAt` catches it at MODULE LOAD instead, and
+  names both functions — the acceptance's wording met at boot rather than at
+  compile time, and the reason `owner` is a field of the bean record. Two
+  QUALIFIED providers with no `#[primary]` own the name neither time, so a field
+  of that type is a genuine build failure at its injection site.
+
+  **`beanNames()` is not `rkScannedNames()` filtered**, which step 2's acceptance
+  says it is. True of `#[managed]`, false of `#[provides]`: a provided bean's
+  type is never scanned, because the scan registers component declarations and
+  `Clock` is not one.
+
 - **`Context`, and the parent/child chain** (front 06, step 2).
   `pub type Context(scopePath)` carries `resolve` / `resolveNamed` / `has` /
   `beanNames` / `child` / `path`, and `__rkMake_Context()` makes it injectable by

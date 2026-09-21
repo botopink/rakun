@@ -13,6 +13,7 @@ import {rkScan, rkSingleton, rkEnter, rkDone, rkRegisterRoute, rkBuildCount, rkS
 import {Request, Response} from "http";
 import {
     managed,
+    provides,
     qualifier,
     primary,
     lazy,
@@ -252,14 +253,22 @@ test "rakun context: Context is not a bean of its own registry and is not in the
     assert rkBuildCount("Context") == 0;
 }
 
-test "rakun context: beanNames is the registry, not the scan list" {
+// The README's acceptance reads "ctx.beanNames() matches rkScannedNames()
+// filtered to #[managed] types". That is true of `#[managed]` and false of the
+// front's own `#[provides]`: a provided bean's TYPE is never scanned, because
+// the scan registers component declarations and `Clock` is not one. The
+// registry is not a filter over the scan; it is its own table, and this
+// asserts both halves.
+test "rakun context: beanNames is the registry, not a filter over the scan list" {
     val ctx: Context = __rkMake_Context();
     val scanned = rkScannedNames();
-    loop (ctx.beanNames()) { name ->
-        assert scanned.contains(name) || name.startsWith("Dup") || name.startsWith("Tied") || name.startsWith("Picked") || name.startsWith("Layered") || name.startsWith("Scoped");
-    };
+    assert scanned.contains("OrderCache");
+    assert ctx.beanNames().contains("OrderCache");
+    assert ctx.beanNames().contains("ContextHolder");
     assert scanned.contains("UnregisteredService");
     assert !ctx.beanNames().contains("UnregisteredService");
+    assert ctx.beanNames().contains("Clock");
+    assert !scanned.contains("Clock");
 }
 
 test "rakun context: a child context finds a bean registered only in the parent" {
@@ -286,4 +295,128 @@ test "rakun context: a child needs a name and the name may not carry a separator
         ctx.child("a/b");
         0;
     }, childNameProblem());
+}
+
+// ── step 3: `#[provides]`, qualifiers and primary ───────────────────────────
+
+pub type Clock(
+    zone: string,
+) {
+    pub fn stamp(self: Self) -> string {
+        return "<now@" + self.zone + ">";
+    }
+}
+
+// The #[primary] one owns `__rkMake_Clock`, so an unqualified field of type
+// `Clock` gets it and the unqualified `resolve` answers the same instance.
+#[provides]
+#[qualifier("system")]
+#[primary]
+pub fn systemClock() -> Clock {
+    return Clock(zone: "UTC");
+}
+
+#[provides]
+#[qualifier("fixed")]
+pub fn fixedClock() -> Clock {
+    return Clock(zone: "fixed");
+}
+
+// No qualifier at all: this one owns `__rkMake_Ledger` by being the only
+// provider of its type.
+pub type Ledger(
+    name: string,
+)
+
+#[provides]
+pub fn mainLedger() -> Ledger {
+    return Ledger(name: "main");
+}
+
+// Two candidates, both qualified, NEITHER #[primary]: `__rkMake_Dye` is defined
+// by neither, so nothing may field-inject a `Dye` and the unqualified resolve
+// raises naming both.
+pub type Dye(
+    hue: string,
+)
+
+#[provides]
+#[qualifier("warm")]
+pub fn warmDye() -> Dye {
+    return Dye(hue: "amber");
+}
+
+#[provides]
+#[qualifier("cool")]
+pub fn coolDye() -> Dye {
+    return Dye(hue: "slate");
+}
+
+#[service]
+#[managed]
+pub type Stamper(
+    // Unqualified, so the #[primary] Clock wins — and it is the same instance
+    // the registry hands back.
+    clock: Clock,
+    ledger: Ledger,
+) {
+    pub fn stamp(self: Self) -> string {
+        return self.ledger.name + self.clock.stamp();
+    }
+}
+
+test "rakun context: #[provides] makes the return type injectable by type" {
+    val s = __rkMake_Stamper();
+    assert s.stamp() == "main<now@UTC>";
+    assert rkHasBean("Clock");
+    assert rkHasBean("Ledger");
+}
+
+test "rakun context: two #[provides] of one type are told apart by qualifier" {
+    val ctx: Context = __rkMake_Context();
+    val fixed: ?Clock = ctx.resolveNamed("Clock", "fixed");
+    var fz = "";
+    if (fixed != null) fz = fixed.zone;
+    val system: ?Clock = ctx.resolveNamed("Clock", "system");
+    var sz = "";
+    if (system != null) sz = system.zone;
+    assert fz == "fixed";
+    assert sz == "UTC";
+}
+
+test "rakun context: with one #[provides] marked #[primary] the unqualified resolve returns it" {
+    val ctx: Context = __rkMake_Context();
+    val any: ?Clock = ctx.resolve("Clock");
+    var zone = "";
+    if (any != null) zone = any.zone;
+    assert zone == "UTC";
+    // The same instance field injection gives: `__rkMake_Clock` is the primary
+    // provider's own factory, so there is one `rkSingleton("Clock", ...)` cell.
+    val injected = __rkMake_Stamper();
+    assert injected.clock.zone == "UTC";
+}
+
+test "rakun context: two qualified #[provides] and no #[primary] raise naming both" {
+    val ctx: Context = __rkMake_Context();
+    assert ctx.has("Dye");
+    try asserts.throwsWith({ ->
+        chooseBean("", "Dye");
+        0;
+    }, ambiguousBeanProblem("Dye", "'warmDye', 'coolDye'"));
+    val warm: ?Dye = ctx.resolveNamed("Dye", "warm");
+    var hue = "";
+    if (warm != null) hue = warm.hue;
+    assert hue == "amber";
+}
+
+test "rakun context: a qualified provider caches per qualifier, not per type" {
+    val ctx: Context = __rkMake_Context();
+    val a: ?Dye = ctx.resolveNamed("Dye", "warm");
+    val b: ?Dye = ctx.resolveNamed("Dye", "cool");
+    var ah = "";
+    if (a != null) ah = a.hue;
+    var bh = "";
+    if (b != null) bh = b.hue;
+    assert ah == "amber";
+    assert bh == "slate";
 }

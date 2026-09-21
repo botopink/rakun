@@ -535,6 +535,49 @@ optional a record method answers loses its type when the receiver is a call or a
 unannotated local. `val ctx: Context = __rkMake_Context();` is the spelling that
 keeps `?OrderCache` an `?OrderCache`.
 
+### `#[provides]` — a factory function
+
+```bp
+import {provides, qualifier, primary} from "rakun";
+
+pub type Clock(zone: string) {
+    pub fn stamp(self: Self) -> string {
+        return "<now@" + self.zone + ">";
+    }
+}
+
+#[provides]
+#[qualifier("system")]
+#[primary]
+pub fn systemClock() -> Clock {
+    return Clock(zone: "UTC");
+}
+
+#[provides]
+#[qualifier("fixed")]
+pub fn fixedClock() -> Clock {
+    return Clock(zone: "fixed");
+}
+```
+
+`Clock` is now injectable by type — a `clock: Clock` field gets the `#[primary]`
+one — and `ctx.resolveNamed("Clock", "fixed")` reaches the other. It is not
+spelled `#[bean]` because `#[bean]` already exists and is frozen at a METHOD of a
+`#[configuration]`; `#[provides]` is the function form.
+
+Exactly one provider of a type may own the `__rkMake_<Type>()` name constructor
+injection reaches for: the unqualified one, or the `#[primary]` one. So:
+
+- **Two unqualified providers of one type** both register and the second raises
+  at module load, naming both functions.
+- **Two qualified providers with no `#[primary]`** own the name neither time, so
+  a FIELD of that type does not compile (`unbound variable '__rkMake_Dye'`) and
+  an unqualified `ctx.resolve` raises the ambiguity. `resolveNamed` still works —
+  which is the point of having qualified two beans in the first place.
+
+`#[provides]` on a function returning nothing is refused at comptime: a bean is
+what the function returns.
+
 ### Qualifiers, primary and lazy
 
 `#[qualifier("name")]` distinguishes two beans of one type, `#[primary]` marks
