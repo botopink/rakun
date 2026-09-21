@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **Configuration documents load** (1.0.10-beta front 05, step 1).
+  `modules/rakun/src/config.bp` reads `.properties` (comments, `\`
+  continuations, `#---` document separators), `.json` (a flattening scanner that
+  emits `server.port` and `a[0]` as it walks, written here because std's `json`
+  answers a string with nothing to walk) and a documented YAML SUBSET (block
+  mappings, block sequences, plain and quoted scalars, `#` comments, `---`
+  separators) plus `configtree:` directories, and writes every entry through
+  front 04's `rkSetProp` — two modules, one table. An anchor, an alias, flow
+  style, a block scalar or a tag is a located refusal naming the file and the
+  line. The readers are botopink rather than the spec's
+  `sidecars/rakun_config.erl`: an erlang-only cell is a located node-row
+  diagnostic at its call site, so it could not be asserted from `test/*.bp` at
+  all (see `AGENTS.md` § Externalized configuration). Measured:
+  `botopink test` 39/39 (was 31/31); `botopink test --target erlang` 29 passing
+  (was 21), the same six pre-existing reds.
+
 - **The host runtime runs on the BEAM** (1.0.10-beta front 04, steps 1-4).
   `modules/rakun/src/sidecars/rakun_runtime.erl` is the erlang twin of
   `runtime.mjs`: an `application` whose `rakun_sup` supervises the

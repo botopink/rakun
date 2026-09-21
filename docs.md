@@ -114,6 +114,24 @@ declaring components imports those fns too (`rkScan`/`rkSingleton`/`rkEnter`/
 field). See the runnable end-to-end app under
 [`./examples/rakun/`](examples/rakun/).
 
+## Configuration
+
+`#[value("key")]` reads the property table; `config.bp` fills it.
+
+```bp
+import {readDocument, rkConfigApply, entryAt} from "rakun";
+
+val docs = try readDocument("application.yaml");
+loop (docs) { d -> val _ = rkConfigApply(d.entries); };
+```
+
+Three formats are read — `.properties`, `.json` and a documented YAML subset —
+plus `configtree:` directories (one file per key). A nested JSON object flattens
+to dot keys (`server.port`) and an array to indexed keys (`a[0]`). A YAML
+construct outside the subset (anchor, alias, flow style, block scalar, tag) is a
+located refusal naming the file and the line, never a silent mis-parse. See
+[`AGENTS.md`](AGENTS.md) § Externalized configuration for the table.
+
 ## Loading notes
 
 Unlike `libs/std`, this package is **not** `@embedFile`'d into a `prelude.zig`

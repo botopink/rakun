@@ -1,0 +1,85 @@
+// rakun — externalized configuration, on BOTH rows.
+//
+// Front 05's readers, sources and ordering are written in botopink over std's
+// `fs`/`env`, so every assertion below runs on `botopink test` (node) AND on
+// `botopink test --target erlang` (the BEAM). That is deliberate: an erlang-only
+// cell cannot be asserted from a `.bp` file at all — `botopink test` compiles
+// every test on both rows with no per-target gate, and a `declare fn` with only
+// an `#[@External.Erlang]` form is a located diagnostic at the call site on the
+// node row. See `src/config.bp`'s header.
+//
+// Fixture documents live under `test/fixtures/` and are read by path, so nothing
+// here depends on a working directory beyond the package root.
+
+import {fs};
+import {rkSetProp, rkProp};
+import {Entry, Doc};
+import {parseProperties, parseJson, parseYaml, readTree, readDocument};
+import {entryAt, entryHas, rkConfigApply, toI32, sub, charOf};
+
+// Every entry of every document of a parse, flattened — the shape an ordering
+// test wants and the shape a single-document test does not mind.
+fn allEntries(docs: Array<Doc>) -> Array<Entry> {
+    var out: Array<Entry> = [];
+    loop (docs) { d -> loop (d.entries) { e -> out.push(e); }; };
+    return out;
+}
+
+// ── step 1: the readers ──────────────────────────────────────────────────────
+
+test "rakun config: a .properties document reads back through rkProp" {
+    val docs = try readDocument("test/fixtures/config/application.properties");
+    val _ = rkConfigApply(allEntries(docs));
+    assert rkProp("server.port") == "8080";
+    assert rkProp("app.name") == "rakun";
+    // `\` continues a line; the two halves join with no separator.
+    assert rkProp("app.motto") == "one table";
+}
+
+test "rakun config: a nested .json object flattens to dot keys" {
+    // `try` inside an argument does not unwrap on the erlang row — bind first.
+    val docs = try readDocument("test/fixtures/config/application.json");
+    val es = allEntries(docs);
+    assert entryAt(es, "server.port") == "8080";
+    assert entryAt(es, "flag") == "true";
+}
+
+test "rakun config: a .json array flattens to indexed keys" {
+    val docs = try readDocument("test/fixtures/config/application.json");
+    val es = allEntries(docs);
+    assert entryAt(es, "a[0]") == "x";
+    assert entryAt(es, "a[1]") == "y";
+}
+
+test "rakun config: a YAML block mapping, block sequence and quoted scalar all read" {
+    val docs = try readDocument("test/fixtures/config/application.yaml");
+    val es = allEntries(docs);
+    assert entryAt(es, "server.port") == "8080";
+    assert entryAt(es, "server.name") == "quoted value";
+    assert entryAt(es, "fruits[0]") == "apple";
+    assert entryAt(es, "fruits[1]") == "pear";
+    assert entryAt(es, "nested.deep.key") == "v";
+}
+
+test "rakun config: a YAML anchor is refused with the file and the line" {
+    val r = readDocument("test/fixtures/config/anchors.yaml");
+    assert r.isError() == true;
+    val assert Error(msg) = r;
+    assert msg.contains("anchors.yaml:1") == true;
+    assert msg.contains("anchors") == true;
+}
+
+test "rakun config: a YAML alias and a flow mapping are refused too" {
+    assert readDocument("test/fixtures/config/alias.yaml").isError() == true;
+    assert readDocument("test/fixtures/config/flow.yaml").isError() == true;
+}
+
+test "rakun config: configtree reads one file per key, newline stripped" {
+    val es = try readTree("test/fixtures/tree");
+    assert entryAt(es, "username") == "admin";
+    assert entryAt(es, "password") == "s3cret";
+}
+
+test "rakun config: an unknown extension is refused, not guessed" {
+    assert readDocument("test/fixtures/config/application.conf").isError() == true;
+}

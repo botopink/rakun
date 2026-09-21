@@ -287,6 +287,65 @@ HTTP on the BEAM until the `build` path ships and loads the sidecar too.
    carries `method`, `path`, `params`, `query`, `headers` and `body`, so closing
    the gap is an emitter change, not a runtime one.
 
+## Externalized configuration
+
+`modules/rakun/src/config.bp` is front 05's half of `#[value("key")]`: front 04
+owns the property TABLE (`rkSetProp`/`rkProp`/`rkPropInt`), this module owns what
+FILLS it. Two modules, one table, no second store — every source ends in
+`rkSetProp`.
+
+**It is botopink, not a sidecar, and that is not a shortcut.** The front's spec
+puts the `.json`/`.yaml` decoding in `src/sidecars/rakun_config.erl` because
+std's `json` has no structured walker. An erlang-only cell cannot be asserted
+from this repository at all: `botopink test` compiles every `test/*.bp` on BOTH
+rows with no per-target gate, and a `declare fn` carrying only an
+`#[@External.Erlang]` form is a located `has no #[@External.<Target>(…)] for the
+node backend` **at the call site**, which reddens the commonJS row — the only row
+the core member's `targets` gates. `runtime.mjs` is frozen and a second Node file
+is forbidden, so there is no node twin to pair such a cell with. The readers are
+therefore written once, in botopink, over std's `fs`/`env` (both carry both
+forms), and the same code answers on both rows. `test/config_test.bp` is green on
+`commonJS` AND on `erlang`.
+
+### The document formats
+
+| Format | Covered | Refused |
+|---|---|---|
+| `.properties` | `key=value`, `key: value`, `#`/`!` comments, `\` continuations, `#---` document separator | — |
+| `.json` | the whole grammar, flattened as it is scanned: `{"server":{"port":8080}}` → `server.port`, `{"a":["x"]}` → `a[0]` | a malformed document is a located refusal naming the file |
+| `.yaml` / `.yml` | block mappings, block sequences, plain and quoted scalars, `#` comments, `---` document separators | anchors, aliases, flow style, block scalars (`|`, `>`) and tags — each a located error naming the FILE and the LINE, never a silent mis-parse |
+| `configtree:` | one file per key, the body is the value, trailing newline stripped | — |
+
+The YAML reader is a documented SUBSET. It covers what an `application.yaml`
+actually contains and says plainly what it does not; a full YAML parser is not
+this front's work and is not on the critical path. The refusal is the point: a
+construct outside the subset stops the boot naming the line rather than loading
+a value that is not the one the file says.
+
+### Language notes this module is written around
+
+Each was measured against the compiler at `repository/botopink-lang`, not
+guessed, and each costs a spelling in `src/config.bp`:
+
+- `String.slice`, `String.chars`, `String.lines`, `String.words` and
+  `String.charCodeAt` make the commonJS backend emit a self-recursive
+  `String.prototype.charCodeAt` patch that kills the module before a single test
+  runs. `String.at` (native `charAt`) does not. Every substring is therefore
+  built through `charOf`/`sub`.
+- `Array.pop` is `lists:last/1` on the erlang row — it READS the last element, it
+  does not remove it. Nothing here pops; a stack shrinks with `dropLast`.
+- `&&` and `||` cannot appear directly inside an `if (…)` or `loop (…)` head;
+  they need their own parentheses (`if ((a && b))`) or a `val` binding.
+- A `val` bound inside a `loop` lambda loses its string type, and `.length()` is
+  then emitted as a call against JavaScript's `length` PROPERTY. Every such
+  binding is annotated `val x: string = …`.
+- A `//` comment inside a braced block is fatal on the node row: the commonJS
+  emitter flattens the block onto one line and the comment swallows the closing
+  brace.
+- On the erlang row `try` unwraps only in a `val` binding — `return try f()` and
+  `g(try f())` both hand on the `{ok, …}` wrapper.
+- `from` is a keyword and cannot name a parameter.
+
 ## Design at a glance
 
 - **IoC container** — components (`#[component]`/`#[service]`/`#[repository]`/
