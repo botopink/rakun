@@ -35,6 +35,8 @@
 //// into the six stereotypes and the extra line goes away.
 
 import {rkSingleton} from "runtime";
+import {Event, event, publishEvent, bootEventNames, bootEventPayloads, applicationFailedEvent} from "events";
+import {postConstructFailure, postConstructProblem} from "lifecycle";
 
 // ── scopes ──────────────────────────────────────────────────────────────────
 //
@@ -192,6 +194,13 @@ pub declare fn rkBeanInvoke<T>(record: string) -> ?T;
 #[@External.Node("./context.mjs", "beanTouch"),
   @External.Erlang("rakun_context", "bean_touch")]
 pub declare fn rkBeanTouch(record: string) -> i32;
+
+// The eager pass needs the FAILURE, not the halt: `bootSequence` publishes
+// `ApplicationFailed` instead of the tail and only then raises, so it has to see
+// a construction fail without being taken down by it. `""` is success.
+#[@External.Node("./context.mjs", "beanTry"),
+  @External.Erlang("rakun_context", "bean_try")]
+pub declare fn rkBeanTry(record: string) -> string;
 
 #[@External.Node("./context.mjs", "beanReset"),
   @External.Erlang("rakun_context", "bean_reset")]
@@ -480,6 +489,12 @@ pub type Context(
     pub fn path(self: Self) -> string {
         return self.scopePath;
     }
+
+    // How many listeners received it. An event nobody listens for is `0` and is
+    // not an error.
+    pub fn publish(self: Self, ev: Event) -> i32 {
+        return publishEvent(ev);
+    }
 }
 
 pub fn childNameProblem() -> string {
@@ -490,6 +505,94 @@ pub fn childNameProblem() -> string {
 // deliberately NOT bracketed by `rkEnter`/`rkDone`: see above.
 pub fn __rkMake_Context() -> Context {
     return rkSingleton("Context", { -> Context(scopePath: "") });
+}
+
+// ── the boot sequence ───────────────────────────────────────────────────────
+//
+// `main` calls `context.bootSequence()`, because `src/bootstrap.bp` is frozen
+// and `Rakun.run` cannot grow a step. It publishes Spring's eight events in
+// order, with the eager pass between `ApplicationPrepared` and
+// `ApplicationStarted`:
+//
+//     ApplicationStarting -> ApplicationEnvironmentPrepared ->
+//     ApplicationContextInitialized -> ApplicationPrepared ->
+//     [eager construction + the #[postConstruct] pass] ->
+//     ApplicationStarted -> AvailabilityChanged(LivenessCorrect) ->
+//     ApplicationReady -> AvailabilityChanged(ReadinessAcceptingTraffic)
+//
+// `ApplicationFailed` REPLACES THE TAIL when the eager pass or a
+// `#[postConstruct]` raises. That is why `rkBeanTry` and `rkLifecycleRun` hand
+// the failure back rather than raising: the sequence has to publish the failure
+// event BEFORE it stops, and a raise it could not see would skip that.
+//
+// EAGER IS THE DELIVERABLE; LAZY IS ALREADY THE DEFAULT. `rkSingleton` takes a
+// thunk, so nothing is constructed until something resolves it and an unresolved
+// component is never built at all. What was missing is eagerness — which is what
+// turns a missing property or a dependency cycle into a boot failure with front
+// 04's diagnostics instead of a 500 on the first request that touches it.
+
+pub fn bootFailedProblem(reason: string) -> string {
+    return "rakun: the application failed to start - " + reason;
+}
+
+// Construct every registered singleton bean that is not `#[lazy]`, in
+// registration order. Answers `""`, or `"<Type>: <reason>"` for the first that
+// raised. A `Prototype` or `Request` bean is NOT built here: it has no instance
+// to warm, and building one at boot would only prove the constructor runs.
+pub fn eagerInit() -> string {
+    return eagerInitIn("");
+}
+
+// The eager pass belongs to the context it is run for, and only to the beans
+// registered AT that path: a child registry is opened per request and has no
+// boot of its own, so walking the ancestors here would build a request-scoped
+// bean at startup.
+pub fn eagerInitIn(path: string) -> string {
+    var failure = "";
+    loop (parseBeans(rkBeanTable())) { b ->
+        val eligible = b.path == path && !b.lazy && b.scope == "singleton";
+        if ((eligible && failure == "")) {
+            val reason = rkBeanTry(beanLine(b));
+            if (reason != "") failure = b.typeName + ": " + reason;
+        };
+    };
+    return failure;
+}
+
+fn publishBoot(index: i32, source: string) -> i32 {
+    val name = bootEventNames().at(index).unwrapOr("");
+    val payload = bootEventPayloads().at(index).unwrapOr("");
+    return publishEvent(event(name, source, payload));
+}
+
+// The whole sequence. Answers how many of the eight events were published — 8
+// on a clean boot, and on a failed one the number published before
+// `ApplicationFailed` replaced the tail (the raise follows).
+pub fn bootSequence() -> i32 {
+    return bootSequenceFor("rakun");
+}
+
+pub fn bootSequenceFor(source: string) -> i32 {
+    val _a = publishBoot(0, source);
+    val _b = publishBoot(1, source);
+    val _c = publishBoot(2, source);
+    val _d = publishBoot(3, source);
+    val built = eagerInit();
+    if (built != "") return bootFailure(source, built, 4) else {
+        val warmed = postConstructFailure();
+        if (warmed != "") return bootFailure(source, postConstructProblem(warmed), 4) else {
+            val _e = publishBoot(4, source);
+            val _f = publishBoot(5, source);
+            val _g = publishBoot(6, source);
+            val _h = publishBoot(7, source);
+            return 8;
+        };
+    };
+}
+
+fn bootFailure(source: string, reason: string, published: i32) -> i32 {
+    val _x = publishEvent(event(applicationFailedEvent(), source, reason));
+    @panic(bootFailedProblem(reason));
 }
 
 // ── `#[managed]` ────────────────────────────────────────────────────────────
@@ -517,10 +620,18 @@ pub fn __rkMake_Context() -> Context {
 // `forEach` over `decl.annotations` with a `val`-then-assign per reader rather
 // than a chain of bare `if`s, which only the LAST statement of a block may be.
 //
-// WHAT IT EMITS. One `rkRegisterBean` line, plus one `rkRegisterLifecycle` line
-// per method carrying `#[postConstruct]` or `#[preDestroy]`. `#[managed]` is the
-// only decl that sees BOTH a method and its owner: a method-level `@Decl` has no
-// owner and no parameter list, so the method markers can only check placement.
+// WHAT IT EMITS. One `rkRegisterBean` line; one `rkRegisterLifecycle` line per
+// method carrying `#[postConstruct]` or `#[preDestroy]`; one
+// `rkRegisterListener` line per method carrying `#[eventListener("Name")]`.
+// `#[managed]` is the only decl that sees BOTH a method and its owner: a
+// method-level `@Decl` has no owner and no parameter list, so the method markers
+// can only check placement.
+//
+// THE LIFECYCLE AND LISTENER WALKS ARE TWO SEPARATE `forEach`es over
+// `decl.methods`, not one. Each ends in a CONDITIONAL `@emit`, and a bare `if`
+// may only be the last statement of a comptime block — two of them in one body
+// would need a dummy emission in the else branch, which is noise in every
+// consumer's output.
 //
 // THE FACTORY IS A LAMBDA, NOT A BARE NAME. `rkRegisterBean(..., __rkMake_X)`
 // compiles on the node row and is `variable '__rkMake_X' is unbound` on the
@@ -550,6 +661,14 @@ pub fn managed(comptime decl: @Decl) {
             phase = ph;
         });
         if (phase != "") @emit("val __rkLc_" + decl.name + "_" + m.name + " = rkRegisterLifecycle(\"" + decl.name + "\", \"" + m.name + "\", \"" + phase + "\", 0, { -> __rkMake_" + decl.name + "()." + m.name + "() });");
+    });
+    decl.methods.forEach({ m ->
+        var evName = "";
+        m.annotations.forEach({ a ->
+            val en = if (a.name == "eventListener") a.args.join("") else evName;
+            evName = en;
+        });
+        if (evName != "") @emit("val __rkEv_" + decl.name + "_" + m.name + " = rkRegisterListener(" + evName + ", \"" + decl.name + "\", { ev -> __rkMake_" + decl.name + "()." + m.name + "(ev) });");
     });
     if (decl.kind != DeclKind.Type) decl.fail("#[managed] must annotate a type");
     if (decl.variants.length > 0) decl.fail("#[managed] must annotate a type with fields, not an enum");

@@ -1,0 +1,230 @@
+//// rakun — application events: listener dispatch, ordering, the boot sequence
+//// and the failure path.
+////
+//// Every assertion here runs on BOTH rows.
+////
+//// THE BOOT SEQUENCE IS ASSERTED AS A WHOLE, not one event at a time: a
+//// listener for each of the eight names appends `name:payload` to an ordered
+//// log, `bootSequence()` runs, and the log is compared to the documented order.
+//// A per-event test would pass with the events in any order; this one catches a
+//// reordering, which is the only failure mode worth testing for here.
+////
+//// NOTHING IN THIS FILE RESETS THE BEAN REGISTRY. On the erlang row every test
+//// file shares one node and one set of ETS tables, so `rkBeanReset()` here
+//// would wipe `context_test.bp`'s module-load registrations. The failure path
+//// is therefore exercised through a raising `#[postConstruct]` — the lifecycle
+//// table IS reset per block — and through `eagerInitIn` over a CHILD path, whose
+//// beans the root's eager pass never touches.
+
+import {service} from "decorators";
+import {rkScan, rkSingleton, rkEnter, rkDone} from "runtime";
+import {
+    Event,
+    event,
+    publishEvent,
+    eventListener,
+    rkRegisterListener,
+    rkListenerReset,
+    rkListenerTable,
+    listenersFor,
+    listenerFailures,
+    parseListeners,
+    listenerLine,
+    Listener,
+    bootEventNames,
+    bootEventPayloads,
+    applicationFailedEvent,
+    eventNameProblem,
+} from "events";
+import {
+    managed,
+    Context,
+    rkRegisterBean,
+    rkRegisterBeanAt,
+    rkBeanReset,
+    rkCtxNote,
+    rkCtxNotes,
+    rkCtxNoteReset,
+    rkCtxBump,
+    rkCtxCount,
+    bootSequence,
+    bootFailedProblem,
+    eagerInit,
+    eagerInitIn,
+    __rkMake_Context,
+} from "context";
+import {rkRegisterLifecycle, rkLifecycleReset, postConstructProblem} from "lifecycle";
+import {asserts} from "std";
+
+// ── a listener registered by `#[managed]` ───────────────────────────────────
+
+#[service]
+#[managed]
+pub type AuditListener {
+    #[eventListener("OrderPlaced")]
+    pub fn onOrderPlaced(self: Self, ev: Event) {
+        val _b = rkCtxBump("audit:" + ev.payload);
+    }
+
+    #[eventListener("ApplicationReady")]
+    pub fn onReady(self: Self, ev: Event) {
+        val _b = rkCtxBump("audit:ready");
+    }
+}
+
+// ── the record grammar ──────────────────────────────────────────────────────
+
+test "rakun events: a listener record round-trips through the wire line" {
+    val l = Listener(eventName: "OrderPlaced", owner: "AuditListener");
+    assert listenerLine(l) == "OrderPlaced|AuditListener";
+    val back = parseListeners("OrderPlaced|AuditListener\nApplicationReady|AuditListener");
+    assert back.length == 2;
+    val first = back.at(0);
+    var who = "";
+    if (first != null) who = first.eventName + "/" + first.owner;
+    assert who == "OrderPlaced/AuditListener";
+}
+
+test "rakun events: the eight boot names and payloads line up" {
+    assert bootEventNames().length == 8;
+    assert bootEventPayloads().length == 8;
+    assert bootEventNames().join(",") == "ApplicationStarting,ApplicationEnvironmentPrepared,ApplicationContextInitialized,ApplicationPrepared,ApplicationStarted,AvailabilityChanged,ApplicationReady,AvailabilityChanged";
+    assert bootEventPayloads().join(",") == ",,,,,LivenessCorrect,,ReadinessAcceptingTraffic";
+    assert applicationFailedEvent() == "ApplicationFailed";
+}
+
+// ── step 5: dispatch ────────────────────────────────────────────────────────
+//
+// This block runs FIRST of the dispatch group and does not reset: it is about
+// the registrations `#[managed]` emitted at module load.
+
+test "rakun events: #[eventListener] receives the event #[managed] bound it to" {
+    val bound = listenersFor("OrderPlaced");
+    var owner = "";
+    loop (bound) { l -> owner = l.owner; };
+    assert owner == "AuditListener";
+    val delivered = publishEvent(event("OrderPlaced", "test", "o-9"));
+    assert delivered == 1;
+    assert rkCtxCount("audit:o-9") == 1;
+}
+
+test "rakun events: two listeners for one event both run, in registration order" {
+    val _z = rkListenerReset();
+    val _n = rkCtxNoteReset();
+    val _a = rkRegisterListener("Ping", "First", { ev -> rkCtxNote("First:" + ev.payload) });
+    val _b = rkRegisterListener("Ping", "Second", { ev -> rkCtxNote("Second:" + ev.payload) });
+    val delivered = publishEvent(event("Ping", "test", "p"));
+    assert delivered == 2;
+    assert rkCtxNotes() == "First:p\nSecond:p";
+}
+
+test "rakun events: a listener for an event never published never runs and is not an error" {
+    val _z = rkListenerReset();
+    val _n = rkCtxNoteReset();
+    val _a = rkRegisterListener("NeverFired", "Quiet", { ev -> rkCtxNote("Quiet") });
+    val delivered = publishEvent(event("SomethingElse", "test", ""));
+    assert delivered == 0;
+    assert rkCtxNotes() == "";
+    assert listenersFor("NeverFired").length == 1;
+}
+
+test "rakun events: ctx.publish reaches an application listener" {
+    val _z = rkListenerReset();
+    val _n = rkCtxNoteReset();
+    val _a = rkRegisterListener("OrderPlaced", "Shipping", { ev -> rkCtxNote("ship:" + ev.payload) });
+    val ctx: Context = __rkMake_Context();
+    // LANGUAGE GAP: the front's example writes
+    // `ctx.publish(Event(name: …, timestampMillis: 0))`. An integer LITERAL is
+    // `i32`, there is no widening and no cast, so an `i64` field cannot be
+    // given a value at all — the same gap `config.bp`'s `Duration`/`DataSize`
+    // record. `event(name, source, payload)` is the writable form and stamps
+    // the clock itself, which is what a publisher wanted anyway.
+    val delivered = ctx.publish(event("OrderPlaced", "OrderController", "o-17"));
+    assert delivered == 1;
+    assert rkCtxNotes() == "ship:o-17";
+}
+
+test "rakun events: a listener that raises is logged with its owner and stops nothing" {
+    val _z = rkListenerReset();
+    val _n = rkCtxNoteReset();
+    val _a = rkRegisterListener("Chain", "Before", { ev -> rkCtxNote("Before") });
+    val _b = rkRegisterListener("Chain", "Broken", { ev -> @panic("boom") });
+    val _c = rkRegisterListener("Chain", "After", { ev -> rkCtxNote("After") });
+    val delivered = publishEvent(event("Chain", "test", ""));
+    // Every listener was reached, including the one that raised.
+    assert delivered == 3;
+    assert rkCtxNotes() == "Before\nAfter";
+    val failed = listenerFailures();
+    assert failed.length == 1;
+    val one = failed.at(0);
+    var who = "";
+    if (one != null) who = one.eventName + "/" + one.owner;
+    assert who == "Chain/Broken";
+}
+
+test "rakun events: an event with no name is refused rather than published to nobody" {
+    try asserts.throwsWith({ ->
+        publishEvent(event("", "test", ""));
+        0;
+    }, eventNameProblem());
+    try asserts.throwsWith({ ->
+        rkRegisterListener("", "Nobody", { ev -> 0 });
+        0;
+    }, eventNameProblem());
+}
+
+// ── the boot sequence ───────────────────────────────────────────────────────
+
+fn watchBoot() -> i32 {
+    val _z = rkListenerReset();
+    val _n = rkCtxNoteReset();
+    var n = 0;
+    loop (bootEventNames()) { name ->
+        n = rkRegisterListener(name, "BootWatch", { ev -> rkCtxNote(ev.name + ":" + ev.payload) });
+    };
+    val _f = rkRegisterListener(applicationFailedEvent(), "BootWatch", { ev -> rkCtxNote(ev.name + ":" + ev.payload) });
+    return n;
+}
+
+// `AvailabilityChanged` is registered twice because it appears twice in the
+// list, so it fires two listeners per publish — that is why the expected log
+// below carries it four times rather than two, and it is worth seeing rather
+// than papering over.
+fn bootLogExpected() -> string {
+    return "ApplicationStarting:\nApplicationEnvironmentPrepared:\nApplicationContextInitialized:\nApplicationPrepared:\nApplicationStarted:\nAvailabilityChanged:LivenessCorrect\nAvailabilityChanged:LivenessCorrect\nApplicationReady:\nAvailabilityChanged:ReadinessAcceptingTraffic\nAvailabilityChanged:ReadinessAcceptingTraffic";
+}
+
+test "rakun events: the eight boot events publish in the documented order" {
+    val _w = watchBoot();
+    val _l = rkLifecycleReset();
+    val published = bootSequence();
+    assert published == 8;
+    assert rkCtxNotes() == bootLogExpected();
+}
+
+test "rakun events: ApplicationFailed replaces the tail when a #[postConstruct] raises" {
+    val _w = watchBoot();
+    val _l = rkLifecycleReset();
+    val _h = rkRegisterLifecycle("Broken", "warm", "post", 0, { -> @panic("boom") });
+    try asserts.throwsWith({ ->
+        bootSequence();
+        0;
+    }, bootFailedProblem(postConstructProblem("Broken.warm")));
+    val log = rkCtxNotes();
+    // The head published, the tail did not, and ApplicationFailed took its place.
+    assert log.startsWith("ApplicationStarting:");
+    assert log.contains("ApplicationPrepared:");
+    assert !log.contains("ApplicationStarted:");
+    assert !log.contains("ApplicationReady:");
+    assert log.contains("ApplicationFailed:");
+    assert log.contains("Broken.warm");
+}
+
+test "rakun events: the eager pass of a child path names the bean that raised" {
+    val _b = rkRegisterBeanAt("/boom", "BoomBean", "", "singleton", false, false, "boomOwner", { -> @panic("no") });
+    val reason = eagerInitIn("/boom");
+    assert reason.startsWith("BoomBean: ");
+    // The ROOT pass never walks a child's registry, so this bean cannot fail a
+    // real boot — which is why the test may register it and leave it there.
+    assert eagerInit() == "";
+}

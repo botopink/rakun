@@ -1327,6 +1327,55 @@ tolerant: the first raise stops the boot naming the component and the method. Th
 pre pass is tolerant and logs, because a component that fails to close must not
 keep the ones after it open.
 
+### Events: one record, string-named
+
+Spring dispatches by the listener parameter's TYPE. A method-level `@Decl`
+carries no parameter list, so an `#[eventListener]` body cannot read
+`decl.parameters[0].typeName` — which is exactly what the 1.0.6-beta draft's
+step 5 was written around. So there is one `Event(name, source, payload,
+timestampMillis)` record and the event is named by a STRING, which is also what
+the boundary can carry: a fun in an ETS table handed a record it never inspects.
+
+Dispatch is synchronous and in registration order. A listener that raises is
+recorded with its owner and the sequence continues, because a broken audit
+listener must not take the boot down; `listenerFailures()` reads them back.
+
+**`Event(name: …, timestampMillis: 0)` — the front's own example — does not
+compile.** An integer LITERAL is `i32`, there is no widening and no cast, so an
+`i64` field cannot be given a value at all; it is the same gap `config.bp`'s
+`Duration` and `DataSize` record. `event(name, source, payload)` is the writable
+constructor and stamps `std/time` itself, which is what a publisher wanted
+anyway. `std/time` is imported by `events.bp` (a `src/` module) and never by a
+test, for the § Language notes reason.
+
+### The boot sequence, and why the failures come back instead of raising
+
+`context.bootSequence()` publishes the eight events in order with the eager pass
+between `ApplicationPrepared` and `ApplicationStarted`, and `ApplicationFailed`
+REPLACES the tail when the eager pass or a `#[postConstruct]` raises.
+
+That is why `rkBeanTry` and `rkLifecycleRun` hand the failure back as TEXT rather
+than raising: the sequence has to publish the failure event before it stops, and
+a raise it could not see would skip that. It is also why `postConstructFailure()`
+lives in `lifecycle.bp` and not in `context.bp` — describing a failed `Hook` is a
+record field read, and it belongs in the module that declares `Hook`.
+
+`main` calls it, not `Rakun.run`: `src/bootstrap.bp` is frozen and cannot grow a
+step.
+
+**`AvailabilityChanged` appears twice** in the list and is told apart by its
+PAYLOAD (`LivenessCorrect`, `ReadinessAcceptingTraffic`), which is how Spring
+tells `LivenessState` from `ReadinessState`. A listener registered per NAME is
+therefore registered twice and fires twice per publish;
+`test/events_test.bp`'s expected log shows that rather than papering over it.
+
+### A module that imports `Context` must also import `Event`
+
+`Context.publish(self, ev: Event)` puts `Event` in the record's method signature,
+and the type has to resolve at the USE site: a module importing `Context` and not
+`Event` is `unknown type 'Event'`, reported at an unrelated line. Every consumer
+of `Context` imports both.
+
 ### A type NAME is node-global on the erlang row
 
 `botopink test` runs each test FILE in its own process on the node row and in ONE

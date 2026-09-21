@@ -612,6 +612,75 @@ The two markers are placement checks and emit nothing: a method-level `@Decl`
 carries no owner, so it cannot name the factory whose method it is. `#[managed]`
 sees both and emits the registration.
 
+### Application events
+
+```bp
+import {Context, Event, event, eventListener, rkRegisterListener} from "rakun";
+
+#[service]
+#[managed]
+pub type AuditListener {
+    #[eventListener("OrderPlaced")]
+    pub fn onOrderPlaced(self: Self, ev: Event) {
+        @print("order placed: " + ev.payload);
+    }
+
+    #[eventListener("ApplicationReady")]
+    pub fn onReady(self: Self, ev: Event) {
+        @print("ready");
+    }
+}
+
+#[restController]
+#[route("/api/orders")]
+pub type OrderController(ctx: Context) {
+    #[postMapping("/")]
+    pub fn place(self: Self, req: Request) -> Response {
+        val _p = self.ctx.publish(event("OrderPlaced", "OrderController", req.body()));
+        return Response.created("accepted");
+    }
+}
+```
+
+One `Event` record and a STRING name: Spring dispatches by the listener
+parameter's type, and a method-level `@Decl` carries no parameter list, so the
+event type cannot be read from the listener. Dispatch is synchronous and in
+registration order; a listener that raises is recorded and the others still run.
+An event nobody listens for delivers to zero listeners and is not an error.
+
+Build an event with `event(name, source, payload)`. `Event(name: …,
+timestampMillis: 0)` does not compile — an integer literal is `i32` and there is
+no widening to the `i64` field — and `event` stamps the clock itself.
+
+A module that imports `Context` must also import `Event`, because
+`Context.publish`'s parameter type has to resolve at the use site.
+
+### The boot sequence
+
+```bp
+import {context} from "rakun";
+
+fn main() {
+    context.bootSequence();
+    Rakun.run(App(port: 8080, basePath: "/api"));
+}
+```
+
+`bootSequence()` publishes Spring's eight events, with the eager construction of
+every registered bean and the `#[postConstruct]` pass between the fourth and the
+fifth:
+
+`ApplicationStarting` → `ApplicationEnvironmentPrepared` →
+`ApplicationContextInitialized` → `ApplicationPrepared` → *[eager pass]* →
+`ApplicationStarted` → `AvailabilityChanged(LivenessCorrect)` →
+`ApplicationReady` → `AvailabilityChanged(ReadinessAcceptingTraffic)`
+
+A missing property or a dependency cycle fails HERE, not on the first request
+that touches it. When it does, `ApplicationFailed` is published in place of
+everything after the point of failure and then the boot stops.
+
+`main` calls it rather than `Rakun.run`, because `bootstrap.bp` is frozen.
+
 ### Qualifiers, primary and lazy
 
 `#[qualifier("name")]` distinguishes two beans of one type, `#[primary]` marks

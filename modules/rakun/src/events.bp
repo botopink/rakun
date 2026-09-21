@@ -1,0 +1,183 @@
+//// rakun — application events: one `Event` record, string-named, and the
+//// listeners that observe it.
+////
+//// WHY ONE RECORD AND NOT A TYPE PER EVENT. Spring dispatches by the listener
+//// parameter's TYPE. A method-level `@Decl` carries no parameter list — `Param`
+//// lives only on the `Method` entries inside a type decl — so an
+//// `#[eventListener]` body cannot read `decl.parameters[0].typeName`, which is
+//// exactly what the 1.0.6-beta draft's step 5 was written around. A stringly
+//// event is what can actually be built, and the boundary it crosses (a fun in
+//// an ETS table, handed a record it never inspects) is scalar anyway.
+////
+//// DISPATCH IS SYNCHRONOUS AND IN REGISTRATION ORDER. A listener that raises
+//// does not stop the sequence: the failure is recorded with the listener's
+//// owner and the event continues, because a broken audit listener must not take
+//// the boot down. `listenerFailures()` is where a test — and front 17's startup
+//// summary — reads them back.
+////
+//// THE EIGHT BOOT EVENTS are published by `context.bootSequence()`, which is
+//// where the order lives; this module owns the NAMES and the dispatch.
+//// `ApplicationFailed` replaces the tail when the boot fails.
+
+import {time} from "std";
+
+// ── the event ───────────────────────────────────────────────────────────────
+
+pub type Event(
+    name: string,
+    source: string,
+    payload: string,
+    timestampMillis: i64,
+)
+
+// The constructor a publisher reaches for: the timestamp is the clock's, not
+// the caller's — and it is the ONLY writable one. An integer literal is `i32`,
+// there is no widening and no cast, so `Event(name: …, timestampMillis: 0)` (the
+// front's own example) does not compile; this is the same gap `config.bp`'s
+// `Duration` and `DataSize` record, met from the other side.
+//
+// `std/time` is imported by a `src/` module on purpose: a `from "std"` module
+// imported by a `test/` file is `undef` on the erlang row, and imported by a
+// `src/` module it works.
+pub fn event(name: string, source: string, payload: string) -> Event {
+    return Event(name: name, source: source, payload: payload, timestampMillis: time.nowMillis());
+}
+
+// ── the eight boot events ───────────────────────────────────────────────────
+//
+// Spring's sequence, in the order `context.bootSequence()` publishes them.
+// `AvailabilityChanged` appears twice and is told apart by its PAYLOAD, which is
+// how Spring tells `LivenessState` from `ReadinessState`.
+
+pub fn bootEventNames() -> string[] {
+    return [
+        "ApplicationStarting",
+        "ApplicationEnvironmentPrepared",
+        "ApplicationContextInitialized",
+        "ApplicationPrepared",
+        "ApplicationStarted",
+        "AvailabilityChanged",
+        "ApplicationReady",
+        "AvailabilityChanged",
+    ];
+}
+
+pub fn bootEventPayloads() -> string[] {
+    return ["", "", "", "", "", "LivenessCorrect", "", "ReadinessAcceptingTraffic"];
+}
+
+pub fn applicationFailedEvent() -> string {
+    return "ApplicationFailed";
+}
+
+// ── the host cells ──────────────────────────────────────────────────────────
+//
+// Every cell carries BOTH forms; see `context.bp`'s docblock for why this front
+// ships host files where front 05 shipped none. A listener is a CLOSURE and no
+// string table holds one, which is half the measurement.
+
+#[@External.Node("./context.mjs", "listenerRegister"),
+  @External.Erlang("rakun_context", "listener_register")]
+pub declare fn rkListenerStore<R>(record: string, run: fn(ev: Event) -> R) -> i32;
+
+#[@External.Node("./context.mjs", "listenerTable"),
+  @External.Erlang("rakun_context", "listener_table")]
+pub declare fn rkListenerTable() -> string;
+
+// Every listener of `eventName`, in registration order, handed the event. A
+// listener that raises is recorded and the run continues. Answers how many ran.
+#[@External.Node("./context.mjs", "listenerEmit"),
+  @External.Erlang("rakun_context", "listener_emit")]
+pub declare fn rkListenerEmit(eventName: string, ev: Event) -> i32;
+
+#[@External.Node("./context.mjs", "listenerFailures"),
+  @External.Erlang("rakun_context", "listener_failures")]
+pub declare fn rkListenerFailures() -> string;
+
+#[@External.Node("./context.mjs", "listenerReset"),
+  @External.Erlang("rakun_context", "listener_reset")]
+pub declare fn rkListenerReset() -> i32;
+
+// ── the refusals ────────────────────────────────────────────────────────────
+
+pub fn eventNameProblem() -> string {
+    return "rakun: an event needs a name to be published or listened for";
+}
+
+pub fn listenerFieldProblem(what: string, value: string) -> string {
+    return "rakun: a listener's " + what + " may not contain '|' or a newline, and '" + value + "' does";
+}
+
+// ── the listener record ─────────────────────────────────────────────────────
+//
+// `event|owner`. The host reads field 1 to select by event name and nothing
+// else; it does not know that `owner` is a type name or that the order matters.
+
+pub type Listener(
+    eventName: string,
+    owner: string,
+)
+
+pub fn listenerLine(l: Listener) -> string {
+    return l.eventName + "|" + l.owner;
+}
+
+pub fn parseListeners(wire: string) -> Listener[] {
+    var out: Listener[] = [];
+    if (wire == "") return out else {
+        loop (wire.split("\n")) { line ->
+            if (line != "") {
+                val f: string[] = line.split("|");
+                out.push(Listener(eventName: f.at(0).unwrapOr(""), owner: f.at(1).unwrapOr("")));
+            };
+        };
+        return out;
+    };
+}
+
+// ── registration and publishing ─────────────────────────────────────────────
+
+pub fn rkRegisterListener<R>(eventName: string, owner: string, run: fn(ev: Event) -> R) -> i32 {
+    if (eventName == "") @panic(eventNameProblem());
+    if (unwritable(eventName)) @panic(listenerFieldProblem("event name", eventName));
+    if (unwritable(owner)) @panic(listenerFieldProblem("owner", owner));
+    return rkListenerStore(listenerLine(Listener(eventName: eventName, owner: owner)), run);
+}
+
+fn unwritable(value: string) -> bool {
+    val bad = value.contains("|") || value.contains("\n");
+    return bad;
+}
+
+// How many listeners received it. An event nobody listens for is `0` and is not
+// an error — a listener for an event that is never published is the same
+// statement from the other side.
+pub fn publishEvent(ev: Event) -> i32 {
+    if (ev.name == "") @panic(eventNameProblem());
+    return rkListenerEmit(ev.name, ev);
+}
+
+// The listeners registered for an event, in registration order — what an
+// actuator endpoint reads, and what a test counts without publishing.
+pub fn listenersFor(eventName: string) -> Listener[] {
+    var out: Listener[] = [];
+    loop (parseListeners(rkListenerTable())) { l ->
+        if (l.eventName == eventName) out.push(l);
+    };
+    return out;
+}
+
+// The `event|owner` of every listener that raised, in the order they did.
+pub fn listenerFailures() -> Listener[] {
+    return parseListeners(rkListenerFailures());
+}
+
+// ── the marker ──────────────────────────────────────────────────────────────
+//
+// Placement only, for the reason in the docblock: a method `@Decl` carries
+// neither its owner nor its parameter list, so it can name neither the factory
+// nor the event type. `#[managed]` emits the registration.
+
+pub fn eventListener(comptime decl: @Decl, eventName: string) {
+    if (decl.kind != DeclKind.Method) decl.fail("#[eventListener] must annotate a method of a #[managed] type - the registration is emitted by #[managed], which is the only decl that can see both the method and its owner");
+}

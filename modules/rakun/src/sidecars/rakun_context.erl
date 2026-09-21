@@ -38,7 +38,7 @@
 -module(rakun_context).
 
 -export([bean_register/2, bean_table/0, bean_count/0, bean_has_record/1,
-         bean_invoke/1, bean_touch/1, bean_reset/0,
+         bean_invoke/1, bean_touch/1, bean_try/1, bean_reset/0,
          request_scoped/2, request_scope_end/0,
          lifecycle_register/2, lifecycle_table/0, lifecycle_run/2,
          lifecycle_reset/0,
@@ -177,6 +177,21 @@ bean_touch(Record) ->
     case [F || {_S, Rec, F} <- ets:tab2list(?BEANS), Rec =:= R] of
         [F | _] -> _ = F(), 1;
         [] -> 0
+    end.
+
+%% The eager pass needs the FAILURE, not the halt: `bootSequence` publishes
+%% `ApplicationFailed` instead of the tail and only then raises, so it has to
+%% see the construction fail without being taken down by it. Answers <<>> on
+%% success and the error text otherwise.
+bean_try(Record) ->
+    ensure(),
+    R = to_bin(Record),
+    case [F || {_S, Rec, F} <- ets:tab2list(?BEANS), Rec =:= R] of
+        [F | _] ->
+            try F(), <<>>
+            catch C:E -> iolist_to_binary(io_lib:format("~p:~p", [C, E]))
+            end;
+        [] -> <<>>
     end.
 
 bean_reset() ->

@@ -66,6 +66,24 @@ export function beanTouch(record) {
   return 0;
 }
 
+// The eager pass needs the FAILURE, not the halt: `bootSequence` publishes
+// `ApplicationFailed` instead of the tail and only then raises, so it has to see
+// the construction fail without being taken down by it. Answers "" on success
+// and the error text otherwise.
+export function beanTry(record) {
+  for (const b of beans) {
+    if (b.record === record) {
+      try {
+        b.factory();
+        return "";
+      } catch (e) {
+        return e && e.message ? e.message : String(e);
+      }
+    }
+  }
+  return "";
+}
+
 export function beanReset() {
   beans.length = 0;
   return 0;

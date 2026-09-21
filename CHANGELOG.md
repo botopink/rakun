@@ -11,6 +11,43 @@
 > passing / 2 failing, the two reds being `{badkey,param}`/`{badkey,query}` in
 > front 04's `server_test.bp`.
 
+> **The erlang baseline moved mid-front.** Front 06 opened against a compiler
+> that had broken a record field read on erlang: nine rakun cells failed
+> `{error, badarg}` with an empty RUN LOG, and steps 1 to 4 are reported against
+> that 200/9 baseline. The fix landed in the shared checkout during step 5
+> (`fix/erl-record-field-read`), and from step 5 on the erlang row is
+> 250 passing / 2 failing — the two being front 04's own `request/6`
+> (`{badkey,param}` / `{badkey,query}`), which AGENTS.md § Blocked already
+> records.
+
+- **Application events and the boot sequence** (front 06, step 5).
+  `modules/rakun/src/events.bp`: one `Event(name, source, payload,
+  timestampMillis)` record, string-named, and the listeners that observe it.
+  Spring dispatches by the listener PARAMETER's type and a method-level `@Decl`
+  carries no parameter list, so `decl.parameters[0].typeName` — the 1.0.6-beta
+  draft's step 5 — cannot be written; `#[managed]` emits the binding and
+  `#[eventListener("Name")]` checks placement. Dispatch is synchronous and in
+  registration order, and a listener that raises is recorded with its owner and
+  stops nothing. Eleven new assertions in `test/events_test.bp`, on both rows.
+
+  `context.bootSequence()` publishes the eight events with the eager pass
+  between `ApplicationPrepared` and `ApplicationStarted`, and `ApplicationFailed`
+  REPLACES the tail on failure — which is why `rkBeanTry` and `rkLifecycleRun`
+  hand the failure back as text rather than raising: the sequence has to publish
+  the failure event before it stops. The order is asserted as a WHOLE, by a
+  listener per name appending to an ordered log, because a per-event test would
+  pass with the events in any order.
+
+  **`Event(name: …, timestampMillis: 0)`, the front's own example, does not
+  compile.** An integer literal is `i32`, there is no widening and no cast, so an
+  `i64` field cannot be given a value — the same gap `config.bp`'s `Duration` and
+  `DataSize` record. `event(name, source, payload)` is the writable form and
+  stamps `std/time` itself.
+
+  **A module that imports `Context` must also import `Event`**, because
+  `Context.publish`'s parameter type has to resolve at the use site; without it
+  the diagnostic is `unknown type 'Event'` at an unrelated line.
+
 - **Lifecycle: `#[postConstruct]` and `#[preDestroy]`** (front 06, step 4).
   `modules/rakun/src/lifecycle.bp`. The two markers are PLACEMENT CHECKS and
   emit nothing — a method-level `@Decl` carries no owner and no parameter list,
