@@ -1,0 +1,396 @@
+//// rakun-web — the web layer's side of TLS: bundle resolution for a listener,
+//// the verified peer subject a handler reads, and the one header that only
+//// makes sense over TLS.
+////
+//// Every assertion runs on BOTH rows. `botopink test` runs each test FILE in
+//// its own process, so the chain this file builds never meets the one
+//// `middleware_test.bp` or `cors_test.bp` builds.
+////
+//// WHAT IS NOT HERE, AND WHY. There is no cell that completes a TLS handshake.
+//// The listener is front 04's `gen_tcp` acceptor in `modules/rakun/src/sidecars/`,
+//// which this front does not own, and the suite has no socket — exactly the
+//// boundary front 07 recorded about `rakun_chain:run/6`. What is asserted is
+//// everything up to the socket and everything after it.
+////
+//// A refusal text carries NO double quote: on the erlang row `throwsWith` reads
+//// the `~p` rendering, in which a `"` is escaped, and one needle cannot then
+//// match both rows.
+
+import {asserts} from "std";
+import {Response} from "rakun";
+import {rkSetProp} from "rakun";
+import {
+    bundleKey,
+    bundlePrefix,
+    sslReset,
+    sslRegister,
+    sslResolvedTransport,
+    blobGet,
+    unknownBundleProblem,
+} from "rakun";
+import {
+    Chain,
+    WebRequest,
+    runChain,
+    registerFilter,
+    resetChain,
+    orderServerId,
+    headerValue,
+    headerNameSet,
+    rkChainSetTerminal,
+    rkChainClearSignals,
+    rkChainPutSignal,
+    chainNames,
+} from "filter";
+import {
+    serverBundleKey,
+    managementBundleKey,
+    serverBundleName,
+    managementBundleName,
+    resolveListenerBundle,
+    listenerTransport,
+    tlsEnabled,
+    managementTlsEnabled,
+    listenerOptions,
+    listenerHandshakeTimeout,
+    peerSubjectSignal,
+    peerVerifiedSignal,
+    notePeer,
+    peerVerified,
+    peerSubject,
+    peerCommonName,
+    hstsEnabledKey,
+    hstsMaxAgeKey,
+    hstsSubdomainsKey,
+    hstsPreloadKey,
+    hstsHeaderName,
+    hstsPreloadProblem,
+    hstsHeaderValue,
+    hstsEnabled,
+    hstsValue,
+    tlsEntry,
+    tlsEntryName,
+    registerTls,
+    clientOptionsFor,
+    listenerExpiryDays,
+    listenerLastError,
+    listenerSummary,
+    clientAuthOf,
+} from "tls";
+
+// ── fixtures ────────────────────────────────────────────────────────────────
+//
+// The bundles here are configured but NOT resolved from disk: this member
+// asserts the seam between the registry and the request path, and the registry's
+// own file reading, certificate parsing and refusals are asserted next door in
+// `modules/rakun/test/ssl_bundle_test.bp`. A resolved bundle is faked by writing
+// the registry entries directly, which is the same table `sslRegister` fills.
+
+import {rkSslPut, rkSslReset} from "rakun";
+
+fn freshTls() -> i32 {
+    val _r = rkSslReset();
+    val _c = resetChain();
+    val _s = rkChainClearSignals();
+    val _p = rkSetProp(bundlePrefix(), "");
+    val _a = rkSetProp(serverBundleKey(), "");
+    val _m = rkSetProp(managementBundleKey(), "");
+    val _e = rkSetProp(hstsEnabledKey(), "");
+    val _g = rkSetProp(hstsMaxAgeKey(), "");
+    val _d = rkSetProp(hstsSubdomainsKey(), "");
+    val _l = rkSetProp(hstsPreloadKey(), "");
+    return rkChainSetTerminal({ method, path, headersWire, queryWire, body ->
+        Response.ok("handled " + method + " " + path);
+    });
+}
+
+// A bundle that IS a TLS listener: declared in the property list, with a
+// keystore, and with the registry rows a successful resolve leaves behind.
+fn resolvedBundle(name: string, clientAuth: string) -> i32 {
+    val declared: string = bundlePrefix();
+    val _n = rkSetProp(declared, name);
+    val _c = rkSetProp(bundleKey(name, "keystore.certificate"), "/etc/rakun/" + name + ".pem");
+    val _k = rkSetProp(bundleKey(name, "keystore.private-key"), "/etc/rakun/" + name + ".key");
+    val _a = rkSetProp(bundleKey(name, "client-auth"), clientAuth);
+    val _t = rkSslPut(name, "transport", "ssl");
+    val _l = rkSslPut(name, "listener",
+        "bundle|" + name + ";certfile|/etc/rakun/" + name + ".pem;versions|tlsv1.3,tlsv1.2;verify|verify_peer");
+    val _cl = rkSslPut(name, "client",
+        "bundle|" + name + ";versions|tlsv1.3,tlsv1.2;verify|verify_peer;verify_hostname|true");
+    val _d = rkSslPut(name, "days", "45");
+    val _e = rkSslPut(name, "error", "");
+    return 0;
+}
+
+fn request(path: string) -> Response {
+    return runChain("GET", path, "", "", "");
+}
+
+// ── which bundle a listener uses ────────────────────────────────────────────
+
+test "rakun-web tls: the two listener keys are the reference's, with rakun for spring" {
+    assert serverBundleKey() == "rakun.server.ssl.bundle";
+    assert managementBundleKey() == "rakun.management.ssl.bundle";
+}
+
+test "rakun-web tls: with no bundle named the listener is gen_tcp and nothing else runs" {
+    val _f = freshTls();
+    assert serverBundleName() == "";
+    assert managementBundleName() == "";
+    assert resolveListenerBundle(serverBundleKey()) == "";
+    assert listenerTransport(serverBundleKey()) == "gen_tcp";
+    assert tlsEnabled() == false;
+    assert managementTlsEnabled() == false;
+    assert listenerOptions(serverBundleKey()) == "";
+    assert listenerSummary() == "plaintext";
+}
+
+test "rakun-web tls: a bundle named but not configured is a refusal, not plaintext" {
+    val _f = freshTls();
+    val _s = rkSetProp(serverBundleKey(), "ghost");
+    try asserts.throwsWith({ ->
+        resolveListenerBundle(serverBundleKey());
+        0;
+    }, "does not fall back to plaintext");
+    try asserts.throwsWith({ ->
+        listenerTransport(serverBundleKey());
+        0;
+    }, "rakun.server.ssl.bundle names the bundle ghost");
+    assert unknownBundleProblem(serverBundleKey(), "ghost").contains("\"") == false;
+    val _z = freshTls();
+}
+
+test "rakun-web tls: a configured bundle makes the listener ssl and carries its options" {
+    val _f = freshTls();
+    val _b = resolvedBundle("listener", "none");
+    val _s = rkSetProp(serverBundleKey(), "listener");
+    assert serverBundleName() == "listener";
+    assert listenerTransport(serverBundleKey()) == "ssl";
+    assert tlsEnabled();
+    val opts: string = listenerOptions(serverBundleKey());
+    assert blobGet(opts, "bundle") == "listener";
+    assert blobGet(opts, "versions") == "tlsv1.3,tlsv1.2";
+    assert listenerHandshakeTimeout() == 5000;
+    val _t = rkSetProp("rakun.ssl.handshake-timeout", "200");
+    assert listenerHandshakeTimeout() == 200;
+    val _u = rkSetProp("rakun.ssl.handshake-timeout", "");
+    val _z = freshTls();
+}
+
+test "rakun-web tls: the management listener resolves through the same registry" {
+    val _f = freshTls();
+    val _b = resolvedBundle("mgmt", "need");
+    val _m = rkSetProp(managementBundleKey(), "mgmt");
+    assert managementBundleName() == "mgmt";
+    assert managementTlsEnabled();
+    assert listenerTransport(managementBundleKey()) == "ssl";
+    // And the application listener is still plaintext: the two are independent
+    // bundles on one registry, which is the whole point of naming the material.
+    assert tlsEnabled() == false;
+    val _z = freshTls();
+}
+
+test "rakun-web tls: the summary names the bundle, the versions and the posture" {
+    val _f = freshTls();
+    val _b = resolvedBundle("listener", "need");
+    val _s = rkSetProp(serverBundleKey(), "listener");
+    val text: string = listenerSummary();
+    assert text.contains("TLS bundle listener");
+    assert text.contains("versions tlsv1.3,tlsv1.2");
+    assert text.contains("client-auth need");
+    assert clientAuthOf("listener") == "need";
+    // No material and no path: a boot log is read by more people than the
+    // configuration is.
+    assert text.contains("/etc/rakun") == false;
+    val _z = freshTls();
+}
+
+test "rakun-web tls: a bundle with no keystore says plaintext and says why" {
+    val _f = freshTls();
+    val _n = rkSetProp(bundlePrefix(), "trustonly");
+    val _t = rkSetProp(bundleKey("trustonly", "truststore.certificate"), "/etc/rakun/ca.pem");
+    val _p = rkSslPut("trustonly", "transport", "gen_tcp");
+    val _s = rkSetProp(serverBundleKey(), "trustonly");
+    assert sslResolvedTransport("trustonly") == "gen_tcp";
+    assert tlsEnabled() == false;
+    assert listenerSummary() == "plaintext (bundle trustonly has no keystore)";
+    val _z = freshTls();
+}
+
+// ── the peer ────────────────────────────────────────────────────────────────
+
+test "rakun-web tls: a handler reads the empty subject when there was no peer" {
+    val _f = freshTls();
+    assert peerVerified() == false;
+    assert peerSubject() == "";
+    assert peerCommonName() == "";
+}
+
+test "rakun-web tls: a verified peer's subject and common name reach the handler" {
+    val _f = freshTls();
+    val _p = notePeer("CN=svc-orders,O=internal");
+    assert peerVerified();
+    assert peerSubject() == "CN=svc-orders,O=internal";
+    assert peerCommonName() == "svc-orders";
+    assert peerSubjectSignal() == "tls.peer.subject";
+    assert peerVerifiedSignal() == "tls.peer.verified";
+}
+
+test "rakun-web tls: a connection with no certificate notes no peer at all" {
+    val _f = freshTls();
+    val _p = notePeer("");
+    assert peerVerified() == false;
+    assert peerSubject() == "";
+    assert peerCommonName() == "";
+}
+
+test "rakun-web tls: the subject is never read without the verified flag" {
+    val _f = freshTls();
+    // The signal table is reachable, so this is what an entry that wrote a
+    // subject WITHOUT the verified flag would produce — `want` silently becoming
+    // `none`. `peerSubject` refuses to read it, which is the acceptance the spec
+    // pins: an unverified peer is a rejected connection, not an empty subject.
+    val _s = rkChainPutSignal(peerSubjectSignal(), "CN=forged");
+    assert peerVerified() == false;
+    assert peerSubject() == "";
+    assert peerCommonName() == "";
+}
+
+test "rakun-web tls: a subject with no common name reads the empty name, not the subject" {
+    val _f = freshTls();
+    val _p = notePeer("O=internal,OU=orders");
+    assert peerVerified();
+    assert peerSubject() == "O=internal,OU=orders";
+    assert peerCommonName() == "";
+}
+
+// ── HSTS ────────────────────────────────────────────────────────────────────
+
+test "rakun-web tls: the header value is built from the three properties" {
+    assert hstsHeaderName() == "Strict-Transport-Security";
+    assert hstsHeaderValue(31536000, false, false) == "max-age=31536000";
+    assert hstsHeaderValue(31536000, true, false) == "max-age=31536000; includeSubDomains";
+    assert hstsHeaderValue(31536000, true, true) == "max-age=31536000; includeSubDomains; preload";
+    assert hstsHeaderValue(0, false, false) == "max-age=0";
+}
+
+test "rakun-web tls: preload without the year and the subdomains is refused at boot" {
+    try asserts.throwsWith({ ->
+        hstsHeaderValue(600, true, true);
+        0;
+    }, "the preload list requires both");
+    try asserts.throwsWith({ ->
+        hstsHeaderValue(31536000, false, true);
+        0;
+    }, "Raise the max-age and include the subdomains");
+    assert hstsPreloadProblem().contains("\"") == false;
+}
+
+test "rakun-web tls: HSTS is off until an application asks for it" {
+    val _f = freshTls();
+    assert hstsEnabled() == false;
+    val _e = rkSetProp(hstsEnabledKey(), "true");
+    assert hstsEnabled();
+    // The default is one year, no subdomains, no preload.
+    assert hstsValue() == "max-age=31536000";
+    val _m = rkSetProp(hstsMaxAgeKey(), "600");
+    val _s = rkSetProp(hstsSubdomainsKey(), "true");
+    assert hstsValue() == "max-age=600; includeSubDomains";
+    val _z = freshTls();
+}
+
+// ── the chain entry ─────────────────────────────────────────────────────────
+
+test "rakun-web tls: the entry sits in the late band and is named tls" {
+    val _f = freshTls();
+    assert tlsEntryName() == "tls";
+    val _r = registerTls();
+    assert chainNames().join(",") == "tls";
+    assert orderServerId() == 300;
+}
+
+test "rakun-web tls: no header is set on a plaintext response, whatever HSTS says" {
+    val _f = freshTls();
+    val _r = registerTls();
+    val _e = rkSetProp(hstsEnabledKey(), "true");
+    assert tlsEnabled() == false;
+    val res: Response = request("/x");
+    assert res.status == 200;
+    assert res.body == "handled GET /x";
+    // RFC 6797 §7.2: a UA must ignore the header over a non-secure transport,
+    // and sending it anyway is how a development box teaches a browser to refuse
+    // itself. There is no property that bypasses the gate.
+    assert headerValue(hstsHeaderName()) == "";
+    assert headerNameSet().length == 0;
+    val _z = freshTls();
+}
+
+test "rakun-web tls: over TLS with HSTS on, the header is set once on the way out" {
+    val _f = freshTls();
+    val _b = resolvedBundle("listener", "none");
+    val _s = rkSetProp(serverBundleKey(), "listener");
+    val _r = registerTls();
+    val _e = rkSetProp(hstsEnabledKey(), "true");
+    val _m = rkSetProp(hstsMaxAgeKey(), "63072000");
+    val _d = rkSetProp(hstsSubdomainsKey(), "true");
+    assert tlsEnabled();
+    val res: Response = request("/x");
+    assert res.status == 200;
+    assert res.body == "handled GET /x";
+    assert headerValue(hstsHeaderName()) == "max-age=63072000; includeSubDomains";
+    assert headerNameSet().join(",") == "strict-transport-security";
+    val _z = freshTls();
+}
+
+test "rakun-web tls: over TLS with HSTS off, still no header" {
+    val _f = freshTls();
+    val _b = resolvedBundle("listener", "none");
+    val _s = rkSetProp(serverBundleKey(), "listener");
+    val _r = registerTls();
+    assert tlsEnabled();
+    assert hstsEnabled() == false;
+    val res: Response = request("/x");
+    assert headerValue(hstsHeaderName()) == "";
+    val _z = freshTls();
+}
+
+// ── the outbound side ───────────────────────────────────────────────────────
+
+test "rakun-web tls: a client bundle resolves through the same registry and refusal" {
+    val _f = freshTls();
+    val _b = resolvedBundle("outbound", "none");
+    val key = "rakun.client.ssl.bundle";
+    assert clientOptionsFor(key, "api.internal") == "";
+    val _k = rkSetProp(key, "outbound");
+    val opts: string = clientOptionsFor(key, "api.internal");
+    assert blobGet(opts, "server_name_indication") == "api.internal";
+    assert blobGet(opts, "verify") == "verify_peer";
+    assert blobGet(opts, "verify_hostname") == "true";
+    // The same bundle name is usable by a listener and by a client without
+    // conflict: one registry, two readings.
+    val _s = rkSetProp(serverBundleKey(), "outbound");
+    assert tlsEnabled();
+    assert clientOptionsFor(key, "other.internal").contains("other.internal");
+
+    val _g = rkSetProp(key, "ghost");
+    try asserts.throwsWith({ ->
+        clientOptionsFor(key, "api.internal");
+        0;
+    }, "rakun.client.ssl.bundle names the bundle ghost");
+    val _z = freshTls();
+}
+
+// ── what front 11 reads through this member ─────────────────────────────────
+
+test "rakun-web tls: the listener's expiry and last error are the registry's" {
+    val _f = freshTls();
+    assert listenerExpiryDays() == 0;
+    assert listenerLastError() == "";
+    val _b = resolvedBundle("listener", "none");
+    val _s = rkSetProp(serverBundleKey(), "listener");
+    assert listenerExpiryDays() == 45;
+    assert listenerLastError() == "";
+    val _e = rkSslPut("listener", "error", "a reload failed");
+    assert listenerLastError() == "a reload failed";
+    val _z = freshTls();
+}

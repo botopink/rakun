@@ -70,6 +70,15 @@ rakun/
 │   │   │   │                    the `application` + supervision tree + ETS tables behind
 │   │   │   │                    every `@External.Erlang` cell. Shipped by
 │   │   │   │                    `shipErlSidecars`; the atom may not be `runtime`
+│   │   │   ├── ssl_bundle.bp  ← THE SSL BUNDLE REGISTRY (§ TLS and the SSL bundle
+│   │   │   │                    registry): the property grammar, the refusals,
+│   │   │   │                    the two option-list encodings, reload, and the
+│   │   │   │                    `ssl` health and info contributions
+│   │   │   ├── ssl_bundle.mjs ← the registry + X.509 reader, node half
+│   │   │   ├── sidecars/rakun_ssl.erl ← the same on the BEAM, plus the one
+│   │   │   │                    genuinely erlang-only piece: the blob →
+│   │   │   │                    `ssl:listen/2` option list decoder front 04's
+│   │   │   │                    acceptor takes
 │   │   │   ├── decorators.bp  ← the markers AS comptime decorator fns: placement rules +
 │   │   │   │                    the DI/router/scope/bean wiring they `@emit`
 │   │   │   ├── file_router.bp ← the FILE-CONVENTION route table (§ The file-convention
@@ -290,6 +299,14 @@ order and reordering nothing: `conditions` imports `autoconfig_registry`,
 `conditions` also imports `context` (front 06's `rkBeanNames` is half the answer
 to `#[conditionalOnBean]`), which is why the four sit after it rather than beside
 `runtime`.
+
+Front 74 appended `pub mod ssl_bundle;` and the matching `files` entry, last and
+reordering nothing: it imports `runtime` (the property table) and `config` (the
+typed readers and `rkValue`), and nothing inside rakun imports it — fronts 04,
+08, 09, 13, 15, 76, 79, 85 and 90 do, from outside, and
+`modules/rakun-web/src/tls.bp` is the first of them. Its two host files
+(`src/ssl_bundle.mjs`, `src/sidecars/rakun_ssl.erl`) are NOT `files` entries, for
+the reason `runtime.mjs` and `rakun_runtime.erl` are not.
 
 rakun declares **no dependencies**: the HTTP transport
 `Rakun.run` starts is `serve` in its own `runtime.mjs` (bound as `rkServe`), so a
@@ -2644,6 +2661,17 @@ ETS behind a dedicated owner process (`rakun_file_router`'s shape, and for the
 same reason: a table dies with its creator, and a registration runs in whatever
 process loaded the module).
 
+### Front 74's `tls.bp` in this member
+
+`modules/rakun-web/src/tls.bp` is appended to the member's `root.bp` and `files`
+last, reordering nothing: it imports `filter` (the chain entry, the per-request
+signal table and `withHeader`) and the core's bundle registry, and nothing in
+this member imports it. It holds the web layer's side of TLS — which bundle the
+listener and front 76's management listener use, the verified peer subject a
+handler reads, HSTS, and the outbound bundle resolution fronts 08/09/13/15 call.
+It opens no socket: the acceptor is front 04's file. See § TLS and the SSL
+bundle registry.
+
 ### What front 07 did NOT reach
 
 Steps 1, 2, 3, 3b and 4 of the spec are in. Five steps are not, and none is
@@ -2871,6 +2899,162 @@ registered binder before the handler, which is the closest thing to Spring's
 `@Valid` parameter and belongs to that front's chain, not to this module's
 decorators) and `ValidationReport.toProblemDetail()`, so an application has ONE
 error shape and not a second one for validation.
+
+## TLS and the SSL bundle registry — front 74
+
+`modules/rakun/src/ssl_bundle.bp` names TLS material ONCE and lets five
+subsystems refer to it by name, which is Spring 3.1's answer to "the HTTP
+client, the SQL driver, the Redis connection and the broker each invent three
+properties for a certificate". `modules/rakun-web/src/tls.bp` is the seam
+between that registry and the request path.
+
+**Measured 2026-09-21 against compiler `2e6bb4ac`, with fronts 04–07, 14, 22,
+23, 62 and 72 in the tree.** `modules/rakun`: **387/387** on commonJS (was
+346/346) and **385 passing / 2 failing** on erlang (was 344/2) — the two still
+front 04's `server_test.bp:74,80`. `modules/rakun-web`: **104/104** on BOTH rows
+(was 83/83). Neither pinned row in
+`botopink-lang/scripts/restricted-targets.txt` moves: `rakun-web commonJS 0`
+stays `0`, core rakun's `2` stays `2`.
+
+### Why this front ships BOTH host files where its spec said erlang only
+
+The spec declares every host seam `#[@External.Erlang("rakun_ssl", …)]` only,
+because `ssl` and `public_key` are OTP applications with no Node form. That is
+true of `ssl:listen/2` and false of everything the registry needs. And the
+measured shape decides it: `botopink test` compiles every `test/*.bp` on BOTH
+rows with no per-target gate, so a cell carrying only an `#[@External.Erlang]`
+form is a located diagnostic AT THE CALL SITE on the node row — a single
+erlang-only cell behind a called wrapper takes the whole member off commonJS,
+which is the row `modules/rakun` is pinned on. So `src/ssl_bundle.mjs` sits
+beside `src/sidecars/rakun_ssl.erl`, every cell carries both forms, and
+`test/ssl_bundle_test.bp` is one set of assertions run on both rows. Front 07
+resolved it the same way (`chain.mjs`), and front 05 the same way again
+(`config.bp` over `std`'s `fs` rather than a `rakun_config.erl`).
+
+The erlang-only work is in the sidecar as plain functions no `.bp` cell names:
+`listen_options/1`, `connect_options/2`, `transport/1` and `handshake_timeout/1`
+— the exact shape front 04's acceptor takes when it swaps `gen_tcp` for `ssl`.
+They are covered by reading, not by a cell, which is front 04's own arrangement
+for its four node-twinless cells and front 07's for `rakun_chain:run/6`.
+
+### What the hosts hold and what they do not
+
+They hold a two-level table (`name` → `field` → value, in registration order),
+an X.509 field reader (`public_key:pkix_decode_cert/2` / `crypto.X509Certificate`)
+and a certificate/key correspondence check. They do NOT hold the property
+grammar, the defaults, the posture mapping, the option-list ENCODING, the JKS
+refusal, the reload rule or any refusal text — all botopink, compiled twice and
+asserted twice.
+
+The two rows agree byte for byte on `certInfo`, which took a rendering contract:
+node answers newline-separated RDN attributes and OTP an `rdnSequence` of OID
+tuples, so both canonicalise to `CN=…,O=…` in certificate order; the instants are
+`YYYY-MM-DDTHH:MM:SSZ`; `daysRemaining` is floored on both. The one thing the
+rows word differently is the `error|` reason for text that is not a certificate
+(node quotes OpenSSL, OTP names the missing PEM block), and the suite asserts
+that there IS a reason rather than which.
+
+### One text, two deliveries
+
+`bundleProblem(b)` answers the refusal as a STRING and `validateBundle(b)`
+raises it. `sslBundle` and `sslBoot` raise; `sslRegister` and `sslReload` record.
+A reload runs at 3am, on a timer, in a process that has to survive a file being
+late — a refusal that raised there would take a running service down over a file
+that is merely slow to appear. There is one text and the suite asserts both
+deliveries of it.
+
+### A failed reload keeps the previous material by ORDERING
+
+`sslRegister` reads the files, parses the certificate and checks the key BEFORE
+it writes a single registry row, so a failure records the reason and every row
+the previous resolve wrote is still where it was. This started as an explicit
+save-and-restore; a planted defect that disabled the restore **redded nothing**,
+which is how the branch was found to be dead. It is gone. An unassertable branch
+is worse than no branch.
+
+### The certificate the suite parses is deliberately EXPIRED
+
+The spec refuses a committed fixture because "a committed certificate expires and
+turns a whole front red on a date nobody chose", and asks instead for
+`rakun_ssl:selftest_material/1` to generate a CA and two certificates through
+`public_key` at setup. That generator is erlang-only — node has no X.509 issuance
+API at all — so it would move every assertion off the commonJS row. A
+self-signed certificate whose window CLOSED in April 2020 has no date to rot on:
+its subject, issuer, notBefore and notAfter are constants and `daysRemaining` is
+negative today and more negative tomorrow. Nothing asserts a positive number of
+days from it, and the material is embedded in the test file rather than
+committed as a fixture path.
+
+The consequence is what this front could NOT reach: every acceptance that needs a
+certificate with a CHOSEN validity window — `OUT_OF_SERVICE` at three days, `UP`
+at thirty — is asserted against `sslHealthOf(days, lastError, threshold)`, a pure
+function, with synthetic numbers. Closing it needs `selftest_material/1` plus a
+`.bp` test file that can declare its target.
+
+### Names are a LIST, and exactly what would close that
+
+Spring discovers bundle names by walking the property tree for
+`spring.ssl.bundle.pem.*`. There is no key enumeration on either row: front 04's
+`?PROPS` ETS table is `public` and could be folded over, but `runtime.mjs`'s
+`props` is a module-private `Map` with no export, `runtime.mjs` is FROZEN for the
+milestone and it is this front's `Does not touch`. So `sslBundleNames()` reads
+`rakun.ssl.bundle.pem` as a comma-separated scalar (or the indexed keys a YAML
+sequence flattens to) through front 05's `rkPropList` — front 05's own idiom for
+`rakun.config.catalogue`. Closing it needs ONE cell with two halves,
+`rkPropKeys(prefix) -> string`: `ets:foldl` over `rakun_props` and a
+`props.keys()` export in `runtime.mjs`. Only `sslBundleNames()`'s body moves.
+
+### The transport seam, and the one asymmetry
+
+OTP's `ssl` exposes the same five functions with the same shapes as `gen_tcp`, so
+front 04's acceptor takes the transport MODULE as a variable rather than
+branching — `ranch_tcp`/`ranch_ssl`'s arrangement. `rakun_ssl:transport/1` answers
+the module and `listen_options/1` the option list. The asymmetry is the
+handshake: `ssl:handshake/2` must run in the process that will OWN the socket, or
+a slow or hostile client blocks every other connection from being accepted, so
+the connection process performs it as its first act bounded by
+`handshake_timeout/1`. **`rakun_runtime.erl` is not edited by this front** — it
+is front 04's file — so the swap is written and not wired, and no cell asserts a
+completed handshake.
+
+### Language notes this module is written around
+
+- **A test file that imports `std`'s `process` loses EVERY cell in it on the
+  commonJS row, silently.** The emitted test module declares `const process = …`
+  at module scope, shadowing node's global, and the harness's own
+  `__bp_run_tests` reads `process.argv[2]` — so the file dies with
+  `TypeError: Cannot read properties of undefined (reading '2')` before any cell
+  runs, and `botopink test` reports NOTHING for it: not a failure, not a skip,
+  the cells just vanish from the count. Clean on erlang. Measured against
+  `2e6bb4ac` with a two-file package whose only content is
+  `import {process} from "std";` and one trivial assertion. A `src` module may
+  import it; a `test` module may not.
+- **`std`'s `path` is `{error, undef}` on the erlang row from rakun.** `path` is
+  botopink, emitted into an `std/` subdirectory, and it does not load here —
+  `path.isAbsolute` and `path.join` both answer `{error, undef}` while
+  `process.cwd()` beside them answers on both rows, because it is a `declare fn`
+  with two host forms rather than a botopink module. rakun uses `std/path`
+  nowhere else. `absolutePath` is three lines of string work instead.
+- **`fs.exists` disagrees about a character device.** `/dev/null` is `true` on
+  node (`existsSync`) and `false` on the BEAM (`filelib:is_file/1`, which covers
+  regular files and directories). A test needing "a path that exists" writes a
+  real file; it does not point at a device node.
+- **A `throwsWith` thunk must answer `i32`.** `{ -> sslRegister("x"); }` is
+  `type mismatch: expected i32, got bool`; `{ -> sslRegister("x"); 0; }` compiles.
+- **No double quote in a refusal text.** Front 07's measurement, and one cell
+  here asserts the property over all ten refusal strings at once rather than
+  leaving it to review.
+
+### What front 74 did NOT reach
+
+| Step | What it needs |
+|---|---|
+| 2 — the server listener, end to end | An edit to `modules/rakun/src/sidecars/rakun_runtime.erl` (front 04's acceptor) to take the transport module from `rakun_ssl:transport/1` and move the handshake into the connection process. The option list, the timeout and the transport decision are all written and asserted; the acceptor is not this front's file |
+| 3 — mutual TLS, end to end | The same acceptor edit, plus `ssl:handshake/2` writing the verified peer subject into the request. `peerSubject()`/`peerVerified()` and the "never read an unverified subject" rule are written and asserted against the signal table; what is missing is the producer |
+| 5 — the mtime watcher as a `gen_server` | Front 16's scheduler. The poll body (`sslPoll()`) is written and asserted, including that `reload-on-update=false` makes no filesystem call; an erlang `gen_server` cannot call it, because the reload is botopink (`std`'s `fs` and the refusal texts) and a sidecar cannot call back into botopink |
+| 6 — registration with front 11's SPI | Front 11's `HealthIndicator` and `InfoContributor` behaviors, which have not landed. `sslHealth()` and `sslInfo()` produce the two contributions and are asserted; only the registration is missing |
+| 6 — an expiring certificate, end to end | `rakun_ssl:selftest_material/1` (erlang-only) plus a `.bp` test file that can declare its target. `sslHealthOf` covers the verdict table with synthetic numbers |
+| PKCS#12 | `public_key`'s PKCS#12 support and a refusal naming the OTP version when it cannot decode. PEM is what is implemented; a `.p12` today fails as "not a PEM certificate rakun can read", which names the file but not the format |
 
 ## Design at a glance
 

@@ -1,0 +1,286 @@
+//// rakun-web — the web layer's side of TLS: which bundle the listener uses,
+//// what a handler may read about the peer that presented a certificate, and the
+//// one header that only makes sense over TLS.
+////
+//// WHAT IS HERE AND WHAT IS IN `modules/rakun/src/ssl_bundle.bp`. The bundle
+//// REGISTRY is the core's: the property grammar, the material, the option lists,
+//// reload, and the health and info contributions. This module is the seam
+//// between that registry and the request path — it resolves `rakun.server.ssl.bundle`
+//// and `rakun.management.ssl.bundle`, it reads the verified peer subject out of
+//// front 62's per-request signal, and it registers one chain entry.
+////
+//// WHAT THIS MODULE DOES NOT DO, AND WHY. It does not open a socket. Front 04's
+//// acceptor lives in `modules/rakun/src/sidecars/rakun_runtime.erl`, which this
+//// front does not own, so the `gen_tcp` → `ssl` swap and the
+//// handshake-in-the-connection-process rule are written as
+//// `rakun_ssl:transport/1`, `listen_options/1` and `handshake_timeout/1` — the
+//// exact shape the acceptor takes — and the acceptor is not edited. What is
+//// asserted here is everything up to the socket: which transport a listener
+//// resolves to, what the option list says, and what a handler sees afterwards.
+//// Front 07 recorded the same boundary about `rakun_chain:run/6`.
+////
+//// THE PEER SUBJECT IS NEVER READ FROM AN UNVERIFIED CERTIFICATE. Under
+//// `client-auth=want` a peer whose certificate the trust store does not verify
+//// is a REJECTED connection, not a request with an empty subject — otherwise
+//// `want` would silently become `none` for anyone who sent garbage. The
+//// connection process writes the subject into the request's signal table ONLY
+//// after `ssl:handshake/2` returned, which is after verification; `peerSubject()`
+//// reads `""` when there was no certificate and never anything else.
+
+import {Response} from "rakun";
+import {rkProp, toI32, sub} from "rakun";
+import {
+    sslResolvedTransport,
+    readBundle,
+    sslListenerOpts,
+    sslClientOpts,
+    sslExpiryDays,
+    sslLastError,
+    blobGet,
+    unknownBundleProblem,
+    bundleConfigured,
+    handshakeTimeout,
+} from "rakun";
+import {WebRequest, Chain, withHeader, registerFilter, orderServerId} from "filter";
+import {rkChainSignal, rkChainPutSignal} from "filter";
+
+// ── which bundle a listener uses ────────────────────────────────────────────
+
+pub fn serverBundleKey() -> string {
+    return "rakun.server.ssl.bundle";
+}
+
+// Front 76's management listener is a second listener on a second bundle
+// (`09 § SSL Diferente para Management`). It resolves through the same registry
+// and the same refusal, so the two listeners cannot disagree about what a bundle
+// is — which is the whole point of naming the material instead of the consumer.
+pub fn managementBundleKey() -> string {
+    return "rakun.management.ssl.bundle";
+}
+
+pub fn serverBundleName() -> string {
+    return rkProp(serverBundleKey());
+}
+
+pub fn managementBundleName() -> string {
+    return rkProp(managementBundleKey());
+}
+
+// A listener that named a bundle nobody configured is a REFUSAL, never a quiet
+// fall back to plaintext. Decision 67, and a TLS listener is the worst possible
+// place for a permissive default: the failure mode is a service that comes up,
+// answers, and is unencrypted.
+pub fn resolveListenerBundle(key: string) -> string {
+    val name: string = rkProp(key);
+    if (name == "") return "";
+    if (bundleConfigured(name) == false) @panic(unknownBundleProblem(key, name));
+    return name;
+}
+
+// With no bundle named, the listener is `gen_tcp` and byte-for-byte what front
+// 04 already tests. The transport is the only thing that changes.
+pub fn listenerTransport(key: string) -> string {
+    val name: string = resolveListenerBundle(key);
+    if (name == "") return "gen_tcp";
+    return sslResolvedTransport(name);
+}
+
+pub fn tlsEnabled() -> bool {
+    return listenerTransport(serverBundleKey()) == "ssl";
+}
+
+pub fn managementTlsEnabled() -> bool {
+    return listenerTransport(managementBundleKey()) == "ssl";
+}
+
+// The option list front 04's acceptor hands to `ssl:listen/2`, and the bound it
+// hands to `ssl:handshake/2` in the CONNECTION process. Both are read from the
+// registry rather than recomputed, so a listener and a client using the same
+// bundle cannot drift.
+pub fn listenerOptions(key: string) -> string {
+    val name: string = resolveListenerBundle(key);
+    if (name == "") return "";
+    return sslListenerOpts(name);
+}
+
+pub fn listenerHandshakeTimeout() -> i32 {
+    return handshakeTimeout();
+}
+
+// ── what a handler may read about the peer ──────────────────────────────────
+
+pub fn peerSubjectSignal() -> string {
+    return "tls.peer.subject";
+}
+
+pub fn peerVerifiedSignal() -> string {
+    return "tls.peer.verified";
+}
+
+// Written by the connection process after a successful handshake, which is
+// AFTER verification. There is no path that writes an unverified subject, and
+// there is no property that adds one.
+pub fn notePeer(subject: string) -> i32 {
+    val _s = rkChainPutSignal(peerSubjectSignal(), subject);
+    if (subject == "") return rkChainPutSignal(peerVerifiedSignal(), "false");
+    return rkChainPutSignal(peerVerifiedSignal(), "true");
+}
+
+pub fn peerVerified() -> bool {
+    return rkChainSignal(peerVerifiedSignal()) == "true";
+}
+
+// `""` when there was no client certificate — which is the only other thing it
+// can be. Front 10 authenticates on this.
+pub fn peerSubject() -> string {
+    if (peerVerified() == false) return "";
+    return rkChainSignal(peerSubjectSignal());
+}
+
+// The peer's common name, which is what an authorization rule is usually
+// written against. `""` when there is no verified peer or the subject carries
+// no CN.
+pub fn peerCommonName() -> string {
+    val subject: string = peerSubject();
+    if (subject == "") return "";
+    var out = "";
+    loop (subject.split(",")) { part ->
+        val p: string = part;
+        val t: string = p.trim();
+        if (t.indexOf("CN=") == 0) {
+            if (out == "") out = sub(t, 3, t.length());
+        };
+    };
+    return out;
+}
+
+// ── HSTS ────────────────────────────────────────────────────────────────────
+//
+// `Strict-Transport-Security` is the one response header whose meaning depends
+// on the transport, which is why it is here and not in front 07's CORS or
+// convention files. It is OFF by default: a header telling a browser to refuse
+// plaintext for a year is not something rakun turns on for an application that
+// did not ask.
+
+pub fn hstsEnabledKey() -> string {
+    return "rakun.server.ssl.hsts.enabled";
+}
+
+pub fn hstsMaxAgeKey() -> string {
+    return "rakun.server.ssl.hsts.max-age";
+}
+
+pub fn hstsSubdomainsKey() -> string {
+    return "rakun.server.ssl.hsts.include-subdomains";
+}
+
+pub fn hstsPreloadKey() -> string {
+    return "rakun.server.ssl.hsts.preload";
+}
+
+pub fn hstsHeaderName() -> string {
+    return "Strict-Transport-Security";
+}
+
+pub fn hstsPreloadProblem() -> string {
+    return "rakun-web: " + hstsPreloadKey() + " is true with a max-age under "
+        + "31536000 and without " + hstsSubdomainsKey()
+        + " - the preload list requires both, so a header that asks for preload "
+        + "without them is rejected by the list and a false sense of a year of "
+        + "HTTPS in the meantime. Raise the max-age and include the subdomains, "
+        + "or turn preload off.";
+}
+
+pub fn hstsHeaderValue(maxAge: i32, includeSubdomains: bool, preload: bool) -> string {
+    if (preload) {
+        if ((maxAge < 31536000 || includeSubdomains == false)) @panic(hstsPreloadProblem());
+    };
+    var out: string = "max-age=" + maxAge;
+    if (includeSubdomains) out = out + "; includeSubDomains";
+    if (preload) out = out + "; preload";
+    return out;
+}
+
+pub fn hstsEnabled() -> bool {
+    return rkProp(hstsEnabledKey()) == "true";
+}
+
+pub fn hstsValue() -> string {
+    val raw: string = rkProp(hstsMaxAgeKey());
+    val maxAge: i32 = if (raw == "") 31536000 else toI32(raw);
+    return hstsHeaderValue(
+        maxAge,
+        rkProp(hstsSubdomainsKey()) == "true",
+        rkProp(hstsPreloadKey()) == "true",
+    );
+}
+
+// ── the chain entry ─────────────────────────────────────────────────────────
+//
+// Order +300 (`orderServerId`), the late band: the header is set on the way OUT,
+// on whatever body the chain produced, including one an error handler wrote.
+//
+// THE HEADER IS NEVER SET ON A PLAINTEXT RESPONSE. RFC 6797 §7.2 says a UA must
+// ignore the header over a non-secure transport, and sending it anyway is how a
+// development box teaches a browser to refuse itself. `tlsEnabled()` is the
+// gate and there is no property that bypasses it.
+pub fn tlsEntry(req: WebRequest, chain: Chain) -> Response {
+    val res: Response = chain.next(req);
+    if (hstsEnabled() == false) return res;
+    if (tlsEnabled() == false) return res;
+    return withHeader(res, hstsHeaderName(), hstsValue());
+}
+
+pub fn tlsEntryName() -> string {
+    return "tls";
+}
+
+pub fn registerTls() -> i32 {
+    return registerFilter(tlsEntryName(), orderServerId(), { req, chain -> tlsEntry(req, chain) });
+}
+
+// ── the outbound side ───────────────────────────────────────────────────────
+//
+// Fronts 08, 09, 13 and 15 each name a bundle in their own configuration and
+// hand it here with the host they are reaching. The option list is the
+// registry's; this is the one line that says a client bundle is resolved the
+// same way a listener's is, including the refusal.
+pub fn clientOptionsFor(key: string, host: string) -> string {
+    val name: string = rkProp(key);
+    if (name == "") return "";
+    if (bundleConfigured(name) == false) @panic(unknownBundleProblem(key, name));
+    return sslClientOpts(name, host);
+}
+
+// ── what front 11 reads through this member ─────────────────────────────────
+
+pub fn listenerExpiryDays() -> i32 {
+    val name: string = serverBundleName();
+    if (name == "") return 0;
+    return sslExpiryDays(name);
+}
+
+pub fn listenerLastError() -> string {
+    val name: string = serverBundleName();
+    if (name == "") return "";
+    return sslLastError(name);
+}
+
+// A one-line rendering of what the listener is doing, for a log line at boot and
+// for front 11's `ssl` info contribution. No material, no path — a boot log is
+// read by more people than the configuration is.
+pub fn listenerSummary() -> string {
+    val name: string = serverBundleName();
+    if (name == "") return "plaintext";
+    val transport: string = listenerTransport(serverBundleKey());
+    if (transport == "gen_tcp") return "plaintext (bundle " + name + " has no keystore)";
+    val opts: string = listenerOptions(serverBundleKey());
+    return "TLS bundle " + name + " versions " + blobGet(opts, "versions")
+        + " client-auth " + clientAuthOf(name);
+}
+
+// `readBundle`, not `sslBundle`: the registry validated this bundle when it
+// resolved it, and a summary line is not the place to re-run a filesystem check.
+pub fn clientAuthOf(name: string) -> string {
+    return readBundle(name).clientAuth;
+}

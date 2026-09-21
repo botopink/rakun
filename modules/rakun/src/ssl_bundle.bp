@@ -1,0 +1,869 @@
+//// rakun — TLS material, named once: the SSL bundle registry.
+////
+//// WHAT A BUNDLE IS. A name, some material, and a verification posture. Spring
+//// 3.1 solved the "five subsystems each invent three properties for a
+//// certificate" problem by naming the MATERIAL instead of the consumer, and this
+//// module is that registry with `spring` replaced by `rakun`, so the reference's
+//// own examples transliterate without a lookup table:
+////
+////   rakun.ssl.bundle.pem.<name>.keystore.certificate
+////   rakun.ssl.bundle.pem.<name>.keystore.private-key
+////   rakun.ssl.bundle.pem.<name>.keystore.private-key-password
+////   rakun.ssl.bundle.pem.<name>.truststore.certificate
+////   rakun.ssl.bundle.pem.<name>.protocols      (default tlsv1.3,tlsv1.2)
+////   rakun.ssl.bundle.pem.<name>.ciphers        (empty = the host's default)
+////   rakun.ssl.bundle.pem.<name>.client-auth    none | want | need   (server)
+////   rakun.ssl.bundle.pem.<name>.verify         full | none          (client)
+////   rakun.ssl.bundle.pem.<name>.reload-on-update
+////
+//// WHY THIS IS BOTOPINK AND NOT A SIDECAR, AND WHY IT SHIPS BOTH HOSTS ANYWAY.
+//// The front's spec declares every host seam `#[@External.Erlang("rakun_ssl",…)]`
+//// only, on the reasoning that `ssl` and `public_key` are OTP applications with
+//// no Node form. That is true of `ssl:listen/2` and false of everything this
+//// module actually needs, and the difference matters because of a MEASURED shape:
+//// `botopink test` compiles every `test/*.bp` on BOTH rows with no per-target
+//// gate, and a `declare fn` carrying only an `#[@External.Erlang]` form is a
+//// located diagnostic AT THE CALL SITE on the node row. A single erlang-only cell
+//// behind a called wrapper takes the whole member off the commonJS row — the row
+//// `modules/rakun`'s `targets` gates and the row
+//// `botopink-lang/scripts/restricted-targets.txt` pins. So every cell below
+//// carries both forms, `src/ssl_bundle.mjs` is the node half and
+//// `src/sidecars/rakun_ssl.erl` the BEAM half, and the two answer identically —
+//// which is the only claim worth making about a port. This is front 07's
+//// resolution (`src/chain.mjs` beside `src/sidecars/rakun_chain.erl`) and front
+//// 05's (`config.bp` over `std`'s `fs` rather than `rakun_config.erl`), applied a
+//// third time for the same reason.
+////
+//// WHAT THE HOSTS HOLD AND WHAT THEY DO NOT. They hold a two-level table
+//// (`name` → `field` → value), an X.509 field reader (`public_key` on the BEAM,
+//// `crypto.X509Certificate` on node) and a certificate/key correspondence check.
+//// They do NOT hold the property grammar, the defaults, the posture mapping, the
+//// option-list encoding, the JKS refusal, the reload rule or any refusal text —
+//// all of that is here, compiled twice and asserted twice.
+////
+//// THE ENCODING. A cell has to have a botopink return type and there is no
+//// Erlang-term type, so the option cells answer the milestone's line-oriented
+//// blob (`key|value` per record, `;` between records) and `rakun_ssl` decodes it
+//// into an `ssl:listen/2` option list itself. A consumer never parses it — it
+//// passes it back. A value carrying `;` or `|` would be unrepresentable, so a
+//// path carrying either is a REFUSAL naming the property, not a truncation.
+////
+//// MODULE ATOM. `src/sidecars/rakun_ssl.erl`, never `src/ssl.erl` and never
+//// `src/ssl_bundle.erl`: `ssl` would shadow OTP's own module, and `ssl_bundle` is
+//// the basename of the module this file emits, which `shipErlSidecars` skips
+//// SILENTLY (front 04's rule).
+
+// NOT `std`'s `path`: a `path.*` call from this module is `{error, undef}` on
+// the erlang row — `std/path` is botopink, emitted into an `std/` subdirectory,
+// and it does not load here. Measured against `2e6bb4ac` with the smallest
+// program there is; `process.cwd()` beside it answers on both rows, because it
+// is a `declare fn` with two host forms rather than a botopink module. The one
+// path operation this front needs is three lines of string work below.
+import {fs, process} from "std";
+import {rkProp, rkSetProp} from "runtime";
+import {sub, toI32, rkValue, rkValueOr, rkPropIntOr, rkPropBool, rkPropList} from "config";
+
+// ── the host cells ──────────────────────────────────────────────────────────
+//
+// Both forms, always. The two-level registry, the X.509 reader and the key
+// correspondence check; nothing else.
+
+#[@External.Node("./ssl_bundle.mjs", "put"),
+  @External.Erlang("rakun_ssl", "put")]
+pub declare fn rkSslPut(name: string, field: string, value: string) -> i32;
+
+#[@External.Node("./ssl_bundle.mjs", "get"),
+  @External.Erlang("rakun_ssl", "get")]
+pub declare fn rkSslGet(name: string, field: string) -> string;
+
+// Registered names, `\n`-separated, in REGISTRATION order — which is property
+// order, because `sslRegisterAll` walks `sslBundleNames()`.
+#[@External.Node("./ssl_bundle.mjs", "names"),
+  @External.Erlang("rakun_ssl", "names")]
+pub declare fn rkSslNames() -> string;
+
+#[@External.Node("./ssl_bundle.mjs", "forget"),
+  @External.Erlang("rakun_ssl", "forget")]
+pub declare fn rkSslForget(name: string) -> i32;
+
+#[@External.Node("./ssl_bundle.mjs", "reset"),
+  @External.Erlang("rakun_ssl", "reset")]
+pub declare fn rkSslReset() -> i32;
+
+// One PEM chain in, one blob out:
+//   subject|<rdn>;issuer|<rdn>;notBefore|<iso>;notAfter|<iso>;daysRemaining|<n>
+// or `error|<reason>` when the text is not a certificate. The RDN rendering is
+// canonicalised by both hosts to `CN=…,O=…` in certificate order, because node
+// answers newline-separated attributes and OTP answers an `rdnSequence` of OID
+// tuples, and one test has to be able to assert one string.
+#[@External.Node("./ssl_bundle.mjs", "certInfo"),
+  @External.Erlang("rakun_ssl", "cert_info")]
+pub declare fn rkSslCertInfo(pem: string) -> string;
+
+// Does this private key belong to this certificate? A mismatch is a STARTUP
+// failure, not a first-handshake one, which is the whole reason this cell exists.
+#[@External.Node("./ssl_bundle.mjs", "keyMatches"),
+  @External.Erlang("rakun_ssl", "key_matches")]
+pub declare fn rkSslKeyMatches(certPem: string, keyPem: string) -> bool;
+
+// ── the five consumer seams ─────────────────────────────────────────────────
+//
+// The spec's table, cell for cell. Each reads the registry this module fills;
+// none of them re-reads configuration, so a consumer cannot disagree with the
+// registry about what a bundle is.
+
+// Front 04's acceptor and front 76's management listener.
+#[@External.Node("./ssl_bundle.mjs", "listenerOpts"),
+  @External.Erlang("rakun_ssl", "listener_opts")]
+pub declare fn rkSslListenerOpts(bundle: string) -> string;
+
+// Fronts 08, 09, 13 and 15. `host` becomes `server_name_indication` and, under
+// `verify=full`, the hostname the chain is checked against.
+#[@External.Node("./ssl_bundle.mjs", "clientOpts"),
+  @External.Erlang("rakun_ssl", "client_opts")]
+pub declare fn rkSslClientOpts(bundle: string, host: string) -> string;
+
+// The health indicator and the info contributor.
+#[@External.Node("./ssl_bundle.mjs", "expiryDays"),
+  @External.Erlang("rakun_ssl", "expiry_days")]
+pub declare fn rkSslExpiryDays(bundle: string) -> i32;
+
+// The info contributor.
+#[@External.Node("./ssl_bundle.mjs", "subject"),
+  @External.Erlang("rakun_ssl", "subject")]
+pub declare fn rkSslSubject(bundle: string) -> string;
+
+// The health indicator; `""` when the last resolve succeeded.
+#[@External.Node("./ssl_bundle.mjs", "lastError"),
+  @External.Erlang("rakun_ssl", "last_error")]
+pub declare fn rkSslLastError(bundle: string) -> string;
+
+// ── the blob ────────────────────────────────────────────────────────────────
+
+pub fn blobPut(blob: string, key: string, value: string) -> string {
+    if (blob == "") return key + "|" + value else return blob + ";" + key + "|" + value;
+}
+
+pub fn blobGet(blob: string, key: string) -> string {
+    var out = "";
+    loop (blob.split(";")) { rec ->
+        val r: string = rec;
+        val bar = r.indexOf("|");
+        if (bar > 0) {
+            if (sub(r, 0, bar) == key) out = sub(r, bar + 1, r.length());
+        };
+    };
+    return out;
+}
+
+pub fn blobKeys(blob: string) -> string[] {
+    var out: string[] = [];
+    if (blob == "") return out else {
+        loop (blob.split(";")) { rec ->
+            val r: string = rec;
+            val bar = r.indexOf("|");
+            if (bar > 0) out.push(sub(r, 0, bar));
+        };
+        return out;
+    };
+}
+
+// ── the property grammar ────────────────────────────────────────────────────
+
+pub fn bundlePrefix() -> string {
+    return "rakun.ssl.bundle.pem";
+}
+
+pub fn bundleKey(name: string, leaf: string) -> string {
+    return bundlePrefix() + "." + name + "." + leaf;
+}
+
+pub fn defaultProtocols() -> string {
+    return "tlsv1.3,tlsv1.2";
+}
+
+pub fn defaultClientAuth() -> string {
+    return "none";
+}
+
+pub fn defaultVerify() -> string {
+    return "full";
+}
+
+pub fn handshakeTimeout() -> i32 {
+    return rkPropIntOr("rakun.ssl.handshake-timeout", 5000);
+}
+
+pub fn reloadInterval() -> i32 {
+    return rkPropIntOr("rakun.ssl.reload-interval", 60000);
+}
+
+pub fn warnThresholdDays() -> i32 {
+    return rkPropIntOr("rakun.ssl.health.warn-threshold", 14);
+}
+
+// THE ONE DEVIATION FROM THE REFERENCE, AND EXACTLY WHAT WOULD CLOSE IT.
+// Spring discovers the bundle names by walking the property tree for
+// `spring.ssl.bundle.pem.*` and taking the segment after the prefix. rakun's
+// property table has no key enumeration on either row: front 04's `?PROPS` ETS
+// table is `public` and could be folded over, but `runtime.mjs`'s `props` is a
+// module-private `Map` with no export, `runtime.mjs` is FROZEN for the milestone
+// and it is this front's `Does not touch`. So the names are read as a LIST —
+// `rakun.ssl.bundle.pem` as a comma-separated scalar, or the indexed keys a YAML
+// sequence flattens to — through front 05's `rkPropList`, which is the same
+// idiom front 05 uses for its own key catalogue (`rakun.config.catalogue`).
+// Closing it needs ONE cell with two halves, `rkPropKeys(prefix) -> string`:
+// `ets:foldl` over `rakun_props` on the BEAM and a `props.keys()` export in
+// `runtime.mjs` on node. The `.bp` surface below does not change when it lands —
+// only this function's body does.
+pub fn sslBundleNames() -> string[] {
+    return rkPropList(bundlePrefix());
+}
+
+pub fn bundleConfigured(name: string) -> bool {
+    return sslBundleNames().indexOf(name) >= 0;
+}
+
+// ── the bundle ──────────────────────────────────────────────────────────────
+
+pub type SslBundle(
+    name: string,
+    certificateFile: string,
+    privateKeyFile: string,
+    trustStoreFile: string,
+    protocols: string,
+    ciphers: string,
+    clientAuth: string,
+    verify: string,
+)
+
+// The raw read: configuration in, record out, nothing checked. `sslBundle`
+// checks; this is what the refusals are computed FROM, so a test can build an
+// invalid bundle to assert a refusal against.
+pub fn readBundle(name: string) -> SslBundle {
+    return SslBundle(
+        name: name,
+        certificateFile: rkValue(bundleKey(name, "keystore.certificate")),
+        privateKeyFile: rkValue(bundleKey(name, "keystore.private-key")),
+        trustStoreFile: rkValue(bundleKey(name, "truststore.certificate")),
+        protocols: rkValueOr(bundleKey(name, "protocols"), defaultProtocols()),
+        ciphers: rkValue(bundleKey(name, "ciphers")),
+        clientAuth: rkValueOr(bundleKey(name, "client-auth"), defaultClientAuth()),
+        verify: rkValueOr(bundleKey(name, "verify"), defaultVerify()),
+    );
+}
+
+// The password and the reload flag are NOT fields of `SslBundle`: the spec pins
+// the record at eight fields and a published contract is not widened for a
+// reader's convenience. A password on the record would also mean a password in
+// every rendering of it, including the info contribution.
+pub fn bundlePassword(name: string) -> string {
+    return rkValue(bundleKey(name, "keystore.private-key-password"));
+}
+
+pub fn bundleReloadOnUpdate(name: string) -> bool {
+    return rkPropBool(bundleKey(name, "reload-on-update"), false);
+}
+
+pub fn hasKeystore(b: SslBundle) -> bool {
+    return (b.certificateFile != "" || b.privateKeyFile != "");
+}
+
+pub fn hasTrustStore(b: SslBundle) -> bool {
+    return b.trustStoreFile != "";
+}
+
+// ── the refusals ────────────────────────────────────────────────────────────
+//
+// NO DOUBLE QUOTE IN ANY TEXT BELOW. On the erlang row `asserts.throwsWith`
+// reads the `~p` rendering of the raised binary, in which a `"` is escaped to
+// `\"`; on commonJS it reads the raw message. One needle cannot match both rows
+// if either side carries a quote. Front 07 measured it; every refusal here is
+// written around it.
+
+pub fn halfKeystoreProblem(name: string, present: string, missing: string) -> string {
+    return "rakun ssl: the bundle " + name + " sets "
+        + bundleKey(name, present) + " and not " + bundleKey(name, missing)
+        + " - a keystore is a chain AND the key that goes with it, and rakun will "
+        + "not present half of one. Set both, or set neither and use only "
+        + bundleKey(name, "truststore.certificate") + " for a verify-only bundle.";
+}
+
+pub fn missingFileProblem(name: string, leaf: string, given: string) -> string {
+    return "rakun ssl: the bundle " + name + " sets " + bundleKey(name, leaf)
+        + " to " + given + ", and nothing is there. The absolute path searched was "
+        + absolutePath(given) + ".";
+}
+
+pub fn jksProblem(name: string, leaf: string, given: string) -> string {
+    return "rakun ssl: the bundle " + name + " sets " + bundleKey(name, leaf)
+        + " to " + given + ", which is a Java keystore. JKS is a JVM container "
+        + "format, OTP public_key does not read it, and accepting it would mean "
+        + "shipping a parser for it - so there is no property that lifts this. "
+        + "Convert it once: keytool -importkeystore -srckeystore " + given
+        + " -destkeystore " + given + ".p12 -deststoretype PKCS12";
+}
+
+pub fn clientAuthProblem(name: string, value: string) -> string {
+    return "rakun ssl: " + bundleKey(name, "client-auth") + " is " + value
+        + " - the three postures a server can take are none, want and need.";
+}
+
+pub fn verifyProblem(name: string, value: string) -> string {
+    return "rakun ssl: " + bundleKey(name, "verify") + " is " + value
+        + " - the two postures a client can take are full and none.";
+}
+
+pub fn protocolProblem(name: string, value: string) -> string {
+    return "rakun ssl: " + bundleKey(name, "protocols") + " names " + value
+        + " - the versions rakun offers are tlsv1.3 and tlsv1.2, highest first. "
+        + "TLS 1.1 and below are not a property away; they are gone.";
+}
+
+pub fn separatorProblem(name: string, leaf: string, given: string) -> string {
+    return "rakun ssl: " + bundleKey(name, leaf) + " is " + given
+        + ", which carries a ; or a | - the option list is a blob whose records "
+        + "are separated by those two characters, so such a path cannot be "
+        + "encoded and rakun will not truncate it. Move the file.";
+}
+
+pub fn unknownBundleProblem(key: string, name: string) -> string {
+    return "rakun ssl: " + key + " names the bundle " + name
+        + ", which is not configured. Add it to " + bundlePrefix()
+        + " and set " + bundleKey(name, "keystore.certificate")
+        + ", or remove the reference. rakun does not fall back to plaintext for a "
+        + "listener that asked for TLS.";
+}
+
+pub fn keyMismatchProblem(name: string) -> string {
+    return "rakun ssl: the bundle " + name + " pairs "
+        + bundleKey(name, "keystore.certificate") + " with "
+        + bundleKey(name, "keystore.private-key")
+        + ", and the key does not belong to the certificate. This is refused at "
+        + "startup rather than at the first handshake, because a handshake "
+        + "failure names the peer and not the deployment that caused it.";
+}
+
+pub fn notACertificateProblem(name: string, leaf: string, reason: string) -> string {
+    return "rakun ssl: " + bundleKey(name, leaf)
+        + " is not a PEM certificate rakun can read - " + reason;
+}
+
+pub fn verifyNoneWarning(name: string) -> string {
+    return "rakun ssl: the bundle " + name + " resolves with verify=none. "
+        + "Nothing about the server it connects to is checked: not the chain, "
+        + "not the hostname, not the expiry. This is only ever correct in a test.";
+}
+
+// ── validation ──────────────────────────────────────────────────────────────
+
+pub fn absolutePath(given: string) -> string {
+    if (given.indexOf("/") == 0) return given else {
+        val here: string = process.cwd();
+        if (here.endsWith("/")) return here + given else return here + "/" + given;
+    };
+}
+
+pub fn isJks(given: string) -> bool {
+    val lower: string = given.toLower();
+    return (lower.endsWith(".jks") || lower.endsWith(".keystore"));
+}
+
+pub fn carriesSeparator(given: string) -> bool {
+    return (given.contains(";") || given.contains("|"));
+}
+
+pub fn knownProtocol(v: string) -> bool {
+    return (v == "tlsv1.3" || v == "tlsv1.2");
+}
+
+pub fn protocolsValid(raw: string) -> bool {
+    var ok = true;
+    if (raw == "") return false else {
+        loop (raw.split(",")) { part ->
+            val p: string = part;
+            if (knownProtocol(p.trim()) == false) ok = false;
+        };
+        return ok;
+    };
+}
+
+// One file, three ways it can be wrong; `""` when it is not. Every material
+// property is checked the same way, so the three refusals cannot drift.
+//
+// THE CHECK ANSWERS A STRING AND DOES NOT RAISE. A reload runs at 3am, on a
+// timer, in a process that must survive it, and a refusal that raises there
+// would take a running service down over a file that is merely late. The
+// raising form is `validateBundle`, which `sslBundle` and `sslBoot` use, and
+// the recording form is this, which `sslRegister` and `sslReload` use. One
+// text, two deliveries.
+pub fn fileProblem(name: string, leaf: string, given: string) -> string {
+    if (given == "") return "";
+    if (carriesSeparator(given)) return separatorProblem(name, leaf, given);
+    if (isJks(given)) return jksProblem(name, leaf, given);
+    if (fs.exists(given) == false) return missingFileProblem(name, leaf, given);
+    return "";
+}
+
+pub fn checkFile(name: string, leaf: string, given: string) -> i32 {
+    val p: string = fileProblem(name, leaf, given);
+    if (p != "") @panic(p);
+    return 0;
+}
+
+// Everything that can be wrong with a bundle before its certificate is read,
+// as a string. `""` is a bundle that will resolve.
+pub fn bundleProblem(b: SslBundle) -> string {
+    if ((b.certificateFile != "" && b.privateKeyFile == "")) {
+        return halfKeystoreProblem(b.name, "keystore.certificate", "keystore.private-key");
+    };
+    if ((b.privateKeyFile != "" && b.certificateFile == "")) {
+        return halfKeystoreProblem(b.name, "keystore.private-key", "keystore.certificate");
+    };
+    if ((b.clientAuth != "none" && b.clientAuth != "want" && b.clientAuth != "need")) {
+        return clientAuthProblem(b.name, b.clientAuth);
+    };
+    if ((b.verify != "full" && b.verify != "none")) {
+        return verifyProblem(b.name, b.verify);
+    };
+    if (protocolsValid(b.protocols) == false) {
+        return protocolProblem(b.name, b.protocols);
+    };
+    val c: string = fileProblem(b.name, "keystore.certificate", b.certificateFile);
+    if (c != "") return c;
+    val k: string = fileProblem(b.name, "keystore.private-key", b.privateKeyFile);
+    if (k != "") return k;
+    return fileProblem(b.name, "truststore.certificate", b.trustStoreFile);
+}
+
+// Called by `sslBundle`, so an application cannot reach a consumer with a
+// bundle that was never checked.
+pub fn validateBundle(b: SslBundle) -> i32 {
+    val p: string = bundleProblem(b);
+    if (p != "") @panic(p);
+    return 0;
+}
+
+// The documented read: `if (b) { bundle -> … }`. A name nobody configured is the
+// empty optional, NOT a bundle with empty fields — "no TLS configured" and "TLS
+// misconfigured" must not have the same shape, here for the same reason the
+// health indicator distinguishes them.
+pub fn sslBundle(name: string) -> ?SslBundle {
+    if (bundleConfigured(name) == false) return null else {
+        val b = readBundle(name);
+        val _v = validateBundle(b);
+        return b;
+    };
+}
+
+// ── the option lists ────────────────────────────────────────────────────────
+//
+// The posture mapping, in one place and never in a host. `client-auth` is what a
+// SERVER demands of a connecting client; `verify` is what a CLIENT demands of
+// the server it reaches. They are separate properties because they are separate
+// questions, and a single `verify` would make `want` unspellable.
+
+pub fn verifyForListener(b: SslBundle) -> string {
+    if (b.clientAuth == "none") return "verify_none" else return "verify_peer";
+}
+
+pub fn failIfNoPeerCert(b: SslBundle) -> bool {
+    return b.clientAuth == "need";
+}
+
+pub fn verifyForClient(b: SslBundle) -> string {
+    if (b.verify == "none") return "verify_none" else return "verify_peer";
+}
+
+// `tlsv1.3,tlsv1.2` → `tlsv1.3,tlsv1.2`, trimmed and in the order written.
+pub fn versionsOf(b: SslBundle) -> string {
+    var out = "";
+    loop (b.protocols.split(",")) { part ->
+        val p: string = part;
+        val v: string = p.trim();
+        if (v != "") {
+            if (out == "") out = v else out = out + "," + v;
+        };
+    };
+    return out;
+}
+
+pub fn listenerBlob(b: SslBundle) -> string {
+    var out = "";
+    out = blobPut(out, "bundle", b.name);
+    out = blobPut(out, "certfile", b.certificateFile);
+    out = blobPut(out, "keyfile", b.privateKeyFile);
+    if (bundlePassword(b.name) != "") out = blobPut(out, "password", bundlePassword(b.name));
+    if (b.trustStoreFile != "") out = blobPut(out, "cacertfile", b.trustStoreFile);
+    out = blobPut(out, "versions", versionsOf(b));
+    if (b.ciphers != "") out = blobPut(out, "ciphers", b.ciphers);
+    out = blobPut(out, "verify", verifyForListener(b));
+    if (failIfNoPeerCert(b)) out = blobPut(out, "fail_if_no_peer_cert", "true")
+    else out = blobPut(out, "fail_if_no_peer_cert", "false");
+    out = blobPut(out, "handshake_timeout", "" + handshakeTimeout());
+    return out;
+}
+
+// SNI is appended by the host at call time, because the hostname is the caller's
+// and the bundle is not. `verify_hostname` is what `verify=full` MEANS on the
+// client side and it is carried separately from `verify`, so a reader of the
+// blob can tell "checks the chain" from "checks the chain and the name".
+pub fn clientBlob(b: SslBundle) -> string {
+    var out = "";
+    out = blobPut(out, "bundle", b.name);
+    if (b.certificateFile != "") out = blobPut(out, "certfile", b.certificateFile);
+    if (b.privateKeyFile != "") out = blobPut(out, "keyfile", b.privateKeyFile);
+    if (bundlePassword(b.name) != "") out = blobPut(out, "password", bundlePassword(b.name));
+    if (b.trustStoreFile != "") out = blobPut(out, "cacertfile", b.trustStoreFile);
+    out = blobPut(out, "versions", versionsOf(b));
+    if (b.ciphers != "") out = blobPut(out, "ciphers", b.ciphers);
+    out = blobPut(out, "verify", verifyForClient(b));
+    if (b.verify == "full") out = blobPut(out, "verify_hostname", "true")
+    else out = blobPut(out, "verify_hostname", "false");
+    return out;
+}
+
+// The transport seam. OTP's `ssl` exposes the same five functions with the same
+// shapes as `gen_tcp`, so front 04's acceptor takes the transport MODULE as a
+// variable rather than branching on it — `ranch_tcp`/`ranch_ssl`'s arrangement.
+// A bundle with no keystore cannot terminate TLS (there is nothing to present),
+// so it answers `gen_tcp` and says so rather than listening insecurely.
+pub fn transportFor(b: SslBundle) -> string {
+    if ((b.certificateFile != "" && b.privateKeyFile != "")) return "ssl" else return "gen_tcp";
+}
+
+// The RESOLVED transport: what `sslRegister` stored, and only when nothing is
+// stored does this re-read configuration. A listener asks this rather than
+// `sslTransport` because re-validating a bundle means a filesystem call on a
+// path that is asked about once per request, and because the registry is the one
+// place that already decided what the bundle is.
+pub fn sslResolvedTransport(name: string) -> string {
+    if (name == "") return "gen_tcp";
+    val stored: string = rkSslGet(name, "transport");
+    if (stored != "") return stored;
+    return sslTransport(name);
+}
+
+pub fn sslTransport(name: string) -> string {
+    if (name == "") return "gen_tcp" else {
+        val b = sslBundle(name);
+        var out = "gen_tcp";
+        if (b) { bundle -> out = transportFor(bundle); };
+        return out;
+    };
+}
+
+// ── the registry ────────────────────────────────────────────────────────────
+
+pub fn sslReset() -> i32 {
+    return rkSslReset();
+}
+
+pub fn sslRegisteredNames() -> string[] {
+    val raw: string = rkSslNames();
+    if (raw == "") {
+        val none: string[] = [];
+        return none;
+    } else return raw.split("\n");
+}
+
+fn readTextOr(p: string) -> string {
+    return try fs.readText(p) catch "";
+}
+
+#[@result]
+fn statMtime(p: string) -> @Result<string, string> {
+    val st = try fs.stat(p);
+    return "" + st.mtime;
+}
+
+pub fn mtimeOf(p: string) -> string {
+    if (p == "") return "" else return try statMtime(p) catch "0";
+}
+
+// The material fingerprint a poll compares: every file the bundle names, with
+// its mtime. A bundle whose files never move produces the same line for ever.
+pub fn materialStamp(b: SslBundle) -> string {
+    return mtimeOf(b.certificateFile) + "/" + mtimeOf(b.privateKeyFile)
+        + "/" + mtimeOf(b.trustStoreFile);
+}
+
+// Resolve one bundle: read the files ONCE, read the certificate's fields, check
+// the key belongs to the chain, and store the two option blobs beside them.
+//
+// A failure is RECORDED against the bundle and answered as `false`; it does not
+// raise. That is what makes "two bundles resolve independently, and one failing
+// does not prevent the other from resolving" true. `sslBoot()` is the startup
+// pass that turns any recorded failure into the refusal.
+pub fn sslRegister(name: string) -> bool {
+    if (bundleConfigured(name) == false) {
+        val _u = rkSslPut(name, "error", "not configured");
+        return false;
+    };
+    val b = readBundle(name);
+    var failure: string = bundleProblem(b);
+    if (failure != "") {
+        val _p = rkSslPut(name, "error", failure);
+        return false;
+    };
+
+    var subject = "";
+    var issuer = "";
+    var notBefore = "";
+    var notAfter = "";
+    var days = "0";
+
+    if (b.certificateFile != "") {
+        val pem: string = readTextOr(b.certificateFile);
+        val info: string = rkSslCertInfo(pem);
+        val err: string = blobGet(info, "error");
+        if (err != "") failure = notACertificateProblem(name, "keystore.certificate", err)
+        else {
+            subject = blobGet(info, "subject");
+            issuer = blobGet(info, "issuer");
+            notBefore = blobGet(info, "notBefore");
+            notAfter = blobGet(info, "notAfter");
+            days = blobGet(info, "daysRemaining");
+            val key: string = readTextOr(b.privateKeyFile);
+            if (rkSslKeyMatches(pem, key) == false) failure = keyMismatchProblem(name);
+        };
+    };
+
+    if (failure != "") {
+        val _e = rkSslPut(name, "error", failure);
+        return false;
+    };
+
+    val _l = rkSslPut(name, "listener", listenerBlob(b));
+    val _c = rkSslPut(name, "client", clientBlob(b));
+    val _s = rkSslPut(name, "subject", subject);
+    val _i = rkSslPut(name, "issuer", issuer);
+    val _nb = rkSslPut(name, "notBefore", notBefore);
+    val _na = rkSslPut(name, "notAfter", notAfter);
+    val _d = rkSslPut(name, "days", days);
+    val _t = rkSslPut(name, "transport", transportFor(b));
+    val _m = rkSslPut(name, "stamp", materialStamp(b));
+    val _r = rkSslPut(name, "error", "");
+    if (b.verify == "none") {
+        val _w = rkSslPut(name, "warning", verifyNoneWarning(name));
+        @print(verifyNoneWarning(name));
+    } else {
+        val _w = rkSslPut(name, "warning", "");
+    };
+    return true;
+}
+
+pub fn sslRegisterAll() -> i32 {
+    var n = 0;
+    loop (sslBundleNames()) { name ->
+        val bn: string = name;
+        if (sslRegister(bn)) n = n + 1;
+    };
+    return n;
+}
+
+pub fn sslFailures() -> string[] {
+    var out: string[] = [];
+    loop (sslRegisteredNames()) { name ->
+        val bn: string = name;
+        val e: string = rkSslGet(bn, "error");
+        if (e != "") out.push(e);
+    };
+    return out;
+}
+
+pub fn sslWarnings() -> string[] {
+    var out: string[] = [];
+    loop (sslRegisteredNames()) { name ->
+        val bn: string = name;
+        val w: string = rkSslGet(bn, "warning");
+        if (w != "") out.push(w);
+    };
+    return out;
+}
+
+// The startup pass. Every bundle is resolved; ANY recorded failure is then the
+// refusal, so a boot does not get half a TLS configuration and a log line.
+pub fn sslBoot() -> i32 {
+    val n = sslRegisterAll();
+    val bad = sslFailures();
+    if (bad.length > 0) @panic(bad.at(0).unwrapOr(""));
+    return n;
+}
+
+// ── reload ──────────────────────────────────────────────────────────────────
+//
+// A certificate is rotated far more often than a process is restarted and on the
+// BEAM there is no reason for the two to be connected.
+//
+// A FAILED RELOAD KEEPS THE PREVIOUS MATERIAL, and it does so by ORDERING
+// rather than by putting anything back. `sslRegister` reads the files, parses
+// the certificate and checks the key BEFORE it writes a single registry row: a
+// failure records the reason and returns, and every row the previous resolve
+// wrote is still exactly where it was. Replacing a working certificate with a
+// broken one at 3am because a deploy half-wrote a file is a worse outcome than
+// serving the old one for another hour.
+//
+// This was written first as an explicit save-and-restore around the re-resolve.
+// A planted defect that disabled the restore redded NOTHING, which is how the
+// branch was found to be dead — the ordering had already made it unreachable.
+// An unassertable branch is worse than no branch, so it is gone and the
+// paragraph above is the record of why.
+//
+// Existing connections keep the material they handshook with: OTP gives no way
+// to change it underneath them and there is no reason to want one.
+pub fn sslReload(name: string) -> bool {
+    return sslRegister(name);
+}
+
+// THE WATCHER, AND WHY IT IS A FUNCTION RATHER THAN A `gen_server`. The spec
+// asks for a `gen_server` polling mtimes on `rakun.ssl.reload-interval`. The
+// reload it would call is `sslReload` — botopink, because re-reading the files
+// is `std`'s `fs` and the refusals are here — and an erlang sidecar cannot call
+// back into botopink. So the poll is this function, and what turns it into a
+// timer is front 16's scheduler (`#[scheduled(fixedRate)]`), which has not
+// landed. `sslPoll()` is the body that front 16 will call; with
+// `reload-on-update=false` it makes NO filesystem call for that bundle, which is
+// the acceptance the spec pins.
+pub fn sslPoll() -> i32 {
+    var reloaded = 0;
+    loop (sslRegisteredNames()) { name ->
+        val bn: string = name;
+        if (bundleReloadOnUpdate(bn)) {
+            val before: string = rkSslGet(bn, "stamp");
+            val now: string = materialStamp(readBundle(bn));
+            if (now != before) {
+                if (sslReload(bn)) reloaded = reloaded + 1
+                else {
+                    // Keep the NEW stamp on a failed reload, so a file that is
+                    // broken rather than half-written is not re-read on every
+                    // tick for ever. A later rotation changes it again.
+                    val _s = rkSslPut(bn, "stamp", now);
+                };
+            };
+        };
+    };
+    return reloaded;
+}
+
+// ── what the consumers read back ────────────────────────────────────────────
+
+pub fn sslExpiryDays(name: string) -> i32 {
+    return rkSslExpiryDays(name);
+}
+
+pub fn sslSubject(name: string) -> string {
+    return rkSslSubject(name);
+}
+
+pub fn sslIssuer(name: string) -> string {
+    return rkSslGet(name, "issuer");
+}
+
+pub fn sslNotBefore(name: string) -> string {
+    return rkSslGet(name, "notBefore");
+}
+
+pub fn sslNotAfter(name: string) -> string {
+    return rkSslGet(name, "notAfter");
+}
+
+pub fn sslLastError(name: string) -> string {
+    return rkSslLastError(name);
+}
+
+pub fn sslListenerOpts(name: string) -> string {
+    return rkSslListenerOpts(name);
+}
+
+pub fn sslClientOpts(name: string, host: string) -> string {
+    return rkSslClientOpts(name, host);
+}
+
+// ── health and info (front 11's two SPIs, the `ssl` key of each) ────────────
+//
+// Front 11 has not landed, so what is here is the CONTRIBUTION — the status and
+// the detail blob — and not the registration. When 11's `HealthIndicator` and
+// `InfoContributor` behaviors exist, the registration is `sslHealth()` and
+// `sslInfo()` handed to them; nothing below moves.
+
+pub fn statusUp() -> string { return "UP"; }
+pub fn statusOutOfService() -> string { return "OUT_OF_SERVICE"; }
+pub fn statusDown() -> string { return "DOWN"; }
+
+// One bundle's verdict. A reload that failed is DOWN even while the OLD material
+// is still being served, because "serving yesterday's certificate" is a state an
+// operator has to know about.
+pub fn sslHealthOf(days: i32, lastError: string, threshold: i32) -> string {
+    if (lastError != "") return statusDown() else {
+        if (days < 0) return statusDown() else {
+            if (days <= threshold) return statusOutOfService() else return statusUp();
+        };
+    };
+}
+
+fn worst(a: string, b: string) -> string {
+    if ((a == statusDown() || b == statusDown())) return statusDown() else {
+        if ((a == statusOutOfService() || b == statusOutOfService())) return statusOutOfService()
+        else return statusUp();
+    };
+}
+
+// `status|<S>;bundles|<n>;<name>.status|<S>;<name>.days|<n>;<name>.subject|<rdn>`
+// and, when there is one, `<name>.error|<reason>`.
+//
+// WITH NO BUNDLES CONFIGURED THIS IS `UP` WITH AN EMPTY DETAIL, never absent:
+// "no TLS configured" and "TLS broken" must not look the same to a monitor.
+pub fn sslHealth() -> string {
+    val threshold = warnThresholdDays();
+    val names = sslRegisteredNames();
+    var status = statusUp();
+    var detail = "";
+    loop (names) { name ->
+        val bn: string = name;
+        val e: string = rkSslGet(bn, "error");
+        val d = toI32(rkSslGet(bn, "days"));
+        val s: string = sslHealthOf(d, e, threshold);
+        status = worst(status, s);
+        detail = blobPut(detail, bn + ".status", s);
+        detail = blobPut(detail, bn + ".days", "" + d);
+        detail = blobPut(detail, bn + ".subject", rkSslGet(bn, "subject"));
+        if (e != "") detail = blobPut(detail, bn + ".error", e);
+    };
+    var out = "";
+    out = blobPut(out, "status", status);
+    out = blobPut(out, "bundles", "" + names.length);
+    if (detail == "") return out else return out + ";" + detail;
+}
+
+// Per bundle: the subject, the issuer, the two instants and the days remaining.
+// NO KEY MATERIAL, no fingerprint of the private key, nothing that is worse to
+// leak than the certificate itself — which is public by construction.
+pub fn sslInfo() -> string {
+    var out = "";
+    loop (sslRegisteredNames()) { name ->
+        val bn: string = name;
+        out = blobPut(out, bn + ".subject", rkSslGet(bn, "subject"));
+        out = blobPut(out, bn + ".issuer", rkSslGet(bn, "issuer"));
+        out = blobPut(out, bn + ".notBefore", rkSslGet(bn, "notBefore"));
+        out = blobPut(out, bn + ".notAfter", rkSslGet(bn, "notAfter"));
+        out = blobPut(out, bn + ".daysRemaining", rkSslGet(bn, "days"));
+    };
+    return out;
+}
+
+// ── the keys rakun reads, registered beside the application's ───────────────
+
+pub fn registerSslKeys() -> i32 {
+    val _b = rkSetProp(
+        "rakun.config.catalogue.rakun.ssl",
+        "handshake-timeout:i32:5000|reload-interval:i32:60000|"
+            + "health.warn-threshold:i32:14|bundle.pem:string:",
+    );
+    val known: string = rkProp("rakun.config.catalogue");
+    val already = (("," + known + ",").contains(",rakun.ssl,"));
+    if (already) return 0 else {
+        val next: string = if (known == "") "rakun.ssl" else known + ",rakun.ssl";
+        return rkSetProp("rakun.config.catalogue", next);
+    };
+}

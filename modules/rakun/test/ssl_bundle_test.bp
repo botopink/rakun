@@ -1,0 +1,1043 @@
+//// rakun — the SSL bundle registry: the property grammar, the refusals, the
+//// two option lists, reload and the `ssl` health and info contributions.
+////
+//// Every assertion runs on BOTH rows. `botopink test` compiles every test file
+//// on both targets with no per-target gate, which is why every host cell this
+//// file drives carries an `#[@External.Node]` form beside its
+//// `#[@External.Erlang]` one — see `src/ssl_bundle.bp`'s header for the
+//// measurement that forces it.
+////
+//// THE CERTIFICATE THIS FILE PARSES IS DELIBERATELY EXPIRED, AND THAT IS WHY IT
+//// CAN BE COMMITTED. The spec refuses a committed fixture because "a committed
+//// certificate expires and turns a whole front red on a date nobody chose". A
+//// certificate whose validity window CLOSED in April 2020 has no such date: its
+//// subject, issuer, notBefore and notAfter are constants, and `daysRemaining` is
+//// negative today and more negative tomorrow. Nothing below asserts a positive
+//// number of days from it. The spec's alternative — `rakun_ssl:selftest_material/1`
+//// generating a CA and two certificates through `public_key` at setup — is
+//// erlang-only (node has no X.509 issuance API at all), so it would move every
+//// assertion here off the commonJS row, which is the row `modules/rakun` is
+//// pinned on. The material is written to a scratch directory by the cells that
+//// need a file on disk and removed again.
+////
+//// A refusal text carries NO double quote: on the erlang row `throwsWith` reads
+//// the `~p` rendering, in which a `"` is escaped, and one needle cannot then
+//// match both rows. Front 07 measured it.
+
+// NOT `process`: a test file that imports `std`'s `process` shadows node's
+// global `process` in the emitted harness, whose own `__bp_run_tests` reads
+// `process.argv[2]` — the module dies before any cell runs and `botopink test`
+// reports NOTHING for the file, not even a failure. Measured against `2e6bb4ac`;
+// see `AGENTS.md` § Language notes. `absolutePath` is asserted through its own
+// shape instead.
+import {asserts, fs} from "std";
+import {rkSetProp, rkProp, toI32};
+import {
+    SslBundle,
+    blobPut,
+    blobGet,
+    blobKeys,
+    bundlePrefix,
+    bundleKey,
+    defaultProtocols,
+    defaultClientAuth,
+    defaultVerify,
+    handshakeTimeout,
+    reloadInterval,
+    warnThresholdDays,
+    sslBundleNames,
+    bundleConfigured,
+    readBundle,
+    bundlePassword,
+    bundleReloadOnUpdate,
+    hasKeystore,
+    hasTrustStore,
+    halfKeystoreProblem,
+    missingFileProblem,
+    jksProblem,
+    clientAuthProblem,
+    verifyProblem,
+    protocolProblem,
+    separatorProblem,
+    unknownBundleProblem,
+    keyMismatchProblem,
+    verifyNoneWarning,
+    absolutePath,
+    isJks,
+    carriesSeparator,
+    knownProtocol,
+    protocolsValid,
+    checkFile,
+    bundleProblem,
+    fileProblem,
+    validateBundle,
+    sslBundle,
+    verifyForListener,
+    failIfNoPeerCert,
+    verifyForClient,
+    versionsOf,
+    listenerBlob,
+    clientBlob,
+    transportFor,
+    sslTransport,
+    sslReset,
+    sslRegisteredNames,
+    mtimeOf,
+    materialStamp,
+    sslRegister,
+    sslRegisterAll,
+    sslFailures,
+    sslWarnings,
+    sslBoot,
+    sslReload,
+    sslPoll,
+    sslExpiryDays,
+    sslSubject,
+    sslIssuer,
+    sslNotBefore,
+    sslNotAfter,
+    sslLastError,
+    sslListenerOpts,
+    sslClientOpts,
+    statusUp,
+    statusOutOfService,
+    statusDown,
+    sslHealthOf,
+    sslHealth,
+    sslInfo,
+    registerSslKeys,
+    rkSslCertInfo,
+    rkSslKeyMatches,
+    rkSslGet,
+};
+
+// ── the material ────────────────────────────────────────────────────────────
+//
+// A self-signed RSA certificate with the window 2020-01-01 to 2020-04-01 and the
+// key that belongs to it, plus a second key that does not. Written to disk by
+// the cells that need a path and read back through `std/fs`, which is the same
+// path front 05's document readers take.
+
+fn certPem() -> string {
+    return """-----BEGIN CERTIFICATE-----
+MIIDOzCCAiOgAwIBAgIUOB4iVPYkEjVrpYNYnZ448T3bK/AwDQYJKoZIhvcNAQEL
+BQAwLTEbMBkGA1UEAwwScmFrdW4tc3NsLXNlbGZ0ZXN0MQ4wDAYDVQQKDAVyYWt1
+bjAeFw0yMDAxMDEwMDAwMDBaFw0yMDA0MDEwMDAwMDBaMC0xGzAZBgNVBAMMEnJh
+a3VuLXNzbC1zZWxmdGVzdDEOMAwGA1UECgwFcmFrdW4wggEiMA0GCSqGSIb3DQEB
+AQUAA4IBDwAwggEKAoIBAQDHiKWuPObBsyL/19TScTe+P9hLxehyMyu1/SXsehBs
+bo440lv+45a+oJF9lf5scN2akWhrGxWXsMioQ/nCDLZ906ayglchg0NPzFN4cEoR
+j0mAtN1KLebIiC44nEBgDg1I9Va5V6czsXueEKLYjpDH/gBrI4+xTiJL4CxU2dOS
+LPfNGhoK18es9w4slGLxvzzoJWidumPVRGHzjtctv2X0DKjR5spQM2Y2GVGXDwJR
+S4spxuCTBt7m1M+81pqjnuSARojM6C3TvpkGjvHVDDs6MFNZdfvPQPZE1xsY7hN9
+tgvTkp226o4yJzjuydtkjK91kFBb5NswfdBH6WAMTlfHAgMBAAGjUzBRMB0GA1Ud
+DgQWBBQe5OWmUr5YtD4ecClWcmlFHBL0wTAfBgNVHSMEGDAWgBQe5OWmUr5YtD4e
+cClWcmlFHBL0wTAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQBE
+jEGIbGBFol9ThAI5AI8zROrmb9Tx9/dd4yaKZOghoS2bpqrYm4qu+80K8icTvYGv
+q3U1hkefOwGLvORv+Nu4Cgc0kMaqJpYz07a9E3y73KDuAjURqUS4bNkvDaWd4Rh1
+rQTjZOlXqXNguYgJgWjVqEjhettXNpgmbtN4MOJ3+qbV8LqB40VTuriE0WxZZioy
+c37NLSWLUrDLAz7kMt8exVKz19J+8qBzrMjtuh0QevnzgeKU2EBleEOS5mkMTVYB
+Hx4+nu+ZuZ7JWtf867sWiIlVdXoPOXmpHkXAr3eMlflQiXb9d2WUjz38mribv1Li
+W6//szzll8TjIBvXaXOO
+-----END CERTIFICATE-----
+""";
+}
+
+fn keyPem() -> string {
+    return """-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDHiKWuPObBsyL/
+19TScTe+P9hLxehyMyu1/SXsehBsbo440lv+45a+oJF9lf5scN2akWhrGxWXsMio
+Q/nCDLZ906ayglchg0NPzFN4cEoRj0mAtN1KLebIiC44nEBgDg1I9Va5V6czsXue
+EKLYjpDH/gBrI4+xTiJL4CxU2dOSLPfNGhoK18es9w4slGLxvzzoJWidumPVRGHz
+jtctv2X0DKjR5spQM2Y2GVGXDwJRS4spxuCTBt7m1M+81pqjnuSARojM6C3TvpkG
+jvHVDDs6MFNZdfvPQPZE1xsY7hN9tgvTkp226o4yJzjuydtkjK91kFBb5NswfdBH
+6WAMTlfHAgMBAAECggEABtlMYo4pl4V4EpMMdYq4UJntaTBqWZ0jB3SgfBz2elpT
+HGUwDjAuqO1nAQoIeR1opdkO3fpIg/Pn90qaBIyeKPR+WMs7hWV1hoQra0tjZ3Xl
+HntWyyiHLuPpvjyywvlIgHQXXXZCQXZ6mULV7Bv8oTi5N/Q5But5JuSTcPgnGHHO
+La3k0s2vryAVSRDnFjkRPa6UYERuFY5FVq57F1qrW4IEU4/PQ9uXaw0lJabkfGfi
+xKeN1kMT1a0s4LHrQmVMPUDNbjIYSNZKdjBSrRHdW3jAlvHCDUi0edWigohUa6/G
+xrzz1Gu44TpI4V2rGZDogz1GHEWSXwbxIzlNKDawXQKBgQDirZmMIL6Jpngr09pN
+apkaqu+EBPGbQyhMTHpNI+z+ml3praY+zn/Wckvt0kS/PuycCtCY+Fr3kvEbRYxn
+KgDFmMVelYafgCgucAITRcew5UwkUBndEgc1z2psb1gDBognK8pCQmcpGqwn+Lns
+mN+E+vWjm0DADZIyIUG7Uav1BQKBgQDhWCr5YQWORymKwhZN2J1KJ9YB3JN7z+vY
+FzJhqDTDK1J4obRb+Y1n+XQIH5m1lKIO3g6/ktQtzL9II+U0v3x5/3SRm0wbOPL2
+Dlo+DXh/7++ACr4pbo718Q8Y0liPIGHKplWFsMQdWDdIw7LnFlSPsKDHxom+i946
+J/h1CzlzWwKBgQCc8TLxeS5S4aYsOhbYKOjuNNF2Z3HcXMgG46B9zlTlBn3lL6x9
+qb2K/UGi3EVq4Ccz9qzsbG+XH+69Qg7u0n8MUDS+wuodfr7TQAu/yj1zNZ7dOXRe
+wn+pev0lLIYUOi6EaGY2MAF6zRPK7QPVUxbW3Ga8Kt7O2daRzMLU7bwP/QKBgFDE
+y1JrJhSjCQ7FFj18wJPNx3UPXIVqNvxTBCngoli59GtsejrlLXvw+1fWC7/7sEJn
+8R1VQVvRIVZ4FzVa1QDdQSjXYuX2+Y6cAlhvd5tToqJgN1yeVfttFZ4t9rQGRUbf
+a5PpkcF61wXrrvoJFPITuu0gCksT0ulBXlqFVWg1AoGALql0vC4l7fDLRUvaXrf6
+vpq0w5wIEykltvzP89fiwIWZ7x2PnScRgAs41+aUOu0QAjdKV6XYDoeQvosFERFV
+Hmwm39Iy36Cgxic8OgxTzcMj92fam4K7t4flx2Ge8CJ2l7doYam6+9GrxgRblapO
+ReuBlfWXJJ0D8j68gA/cDAc=
+-----END PRIVATE KEY-----
+""";
+}
+
+fn otherKeyPem() -> string {
+    return """-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDQTozt04n/E3qe
+BOfuP/1rRGAyq4cEi/9bYEo91JK0m4lHbkV1ki37tsywX5N0vOdf7rfk6IcFFOEP
+k9LmN1ED0LcLT1Mmbd3itL+FlYsxUcY1ij6mzIvvgytdDZ1X04MWV9/ilQlz/h0o
+2L9dqHNDUn6vjiCK01vgSUl7Ee6ML/EMGiozfRhfBW4L3b4zLFuoV8Uu/qD+88FS
+UHhOji/aH3ip/TXXVhQGVSiVa+JUTe+xzpKvbV+uI5BWqqJc/sNJ6JxXQAf/RJrv
+HiQPMVteWF+kszRgGTGTDWzKnOcOvphv8K1Sb9zJh0rluewfuT3VSNJd0jRJgWtC
+9FcAaodNAgMBAAECggEAAVp6yL935Bp/hNOK9q5TrpCz3tza9syP1429dguIKmo+
+9g8AI0ZGR3hxllHbBqLQwqG74dkhEmrmIFesUQNHEkFizB2bfryJaqUw45jTQY0c
+ufJ6HJ9n1HdDmikQ0ZM6pgklPZWt8aMHOdgpDPX05VIChrYl9A3/bslMTNBxt1dg
+gxPyNKT50XZL9tB/J/+gRvdtLXHyC2CmcN6+d/aB8Y/l0g/ANt5K+3jUH3OsLOUe
+T/w7dWPUIDnl11wmjR44gUNaflEL7SVfkDxjZhYB17/s1ZUXH+muIGbcCi+3Laq+
+H0fFQ8yWY5lF59wzXGai3/apKHZdp9WmA6mGgc65wQKBgQDoWqOTK6QLXhfv9oOJ
+DnRuOT4t636/n40DQnbDRG6UggLPz7ZlGjUg2XNSSJNRgceTsAUdRRVWtMWw9B/Q
+9lisAqUbMfuxWcXDgdIqh99bn+2v9MKoSAy4MUIRglmwVhjozmM3u/7kM3wN8Qgl
+RlAsiK1Rx8n1xScEJFo771a9MQKBgQDlgW0ALNXEQyWBES28hD1iT9C26j9ec2b8
+NQky44yz85WPbSNbWurMTjIKUx1ToFZWzRDj+VLe7Ibem0KpF7eHnMOHRFDoHDgp
+5IqnAzw4coP8g5Abtk3TT/eUdTAcwEPtslyRY+VKU5Shyc/K/EggDsjrhpNt2Mif
+6cXNcf903QKBgFfngp75EbTjQjcckiLV/yJ8MZP51hf06spi6L9zMkqo7Rtlv+F8
+CsGEwuZMYr+hU7oCC81JB4uoFGqf0TGjIWTiE0i4njo4dmNCyBojEVN+q9O3y7US
+nQ1KRW6OXBQkXoQlINBDJWl8OOClYamIcmiGxNt9tGBw2BPvFNw77hrhAoGAUyZR
+F38m87RgIiLXLzW6B6RjOeIkk1O8PCP68TUABTJ7PTuNU8vcxaiO+K6kMWgl38zs
+EayDGcEYHA6kWB7/n2JsdNWLeoy+zG7AzUGez9StfQ8tZtzl1WljiaXriH8gHT5B
+y2sl54fgkb1MS36bowG4SZy4TVP9W/KWd5iVtQECgYEA3r+rbh/pJDQN3mrznxJC
+wP3G0+6opOX0Dl/oA6IJohd2YAFaxbYFPeBzAOXHDbBRfcVX73N2bGj8p/RQXnSH
+GkyZBotkF9xk0ebi063dDzub5sM24Mi+bWLDDAeEZnakglwBMLNHPTrzqIaoIpP1
+frtpeBZ+oas0s2rckVBskT4=
+-----END PRIVATE KEY-----
+""";
+}
+
+// A real regular file every cell that needs "a path that exists" can point at.
+// NOT `/dev/null`: it is a character device, and `std`'s `fs.exists` is
+// `existsSync` on node (true) and `filelib:is_file/1` on the BEAM (false), so a
+// device node is the one path shape the two rows disagree about.
+fn anchorFile() -> string {
+    val p = scratch("anchor.pem");
+    val _w = writeFile(p, certPem());
+    return p;
+}
+
+fn scratch(leaf: string) -> string {
+    return ".botopinkbuild/tmp/ssl-bundle-test-" + leaf;
+}
+
+fn writeFile(p: string, body: string) -> i32 {
+    val _d1 = try fs.mkdir(".botopinkbuild") catch 0;
+    val _d2 = try fs.mkdir(".botopinkbuild/tmp") catch 0;
+    return try fs.writeText(p, body) catch 0;
+}
+
+fn removeFile(p: string) -> i32 {
+    return try fs.rm(p) catch 0;
+}
+
+// ── fixtures ────────────────────────────────────────────────────────────────
+
+fn clearBundle(name: string) -> i32 {
+    val _a = rkSetProp(bundleKey(name, "keystore.certificate"), "");
+    val _b = rkSetProp(bundleKey(name, "keystore.private-key"), "");
+    val _c = rkSetProp(bundleKey(name, "keystore.private-key-password"), "");
+    val _d = rkSetProp(bundleKey(name, "truststore.certificate"), "");
+    val _e = rkSetProp(bundleKey(name, "protocols"), "");
+    val _f = rkSetProp(bundleKey(name, "ciphers"), "");
+    val _g = rkSetProp(bundleKey(name, "client-auth"), "");
+    val _h = rkSetProp(bundleKey(name, "verify"), "");
+    val _i = rkSetProp(bundleKey(name, "reload-on-update"), "");
+    return 0;
+}
+
+fn declareBundles(names: string) -> i32 {
+    return rkSetProp(bundlePrefix(), names);
+}
+
+fn freshRegistry() -> i32 {
+    val _r = sslReset();
+    val _n = declareBundles("");
+    val _a = clearBundle("one");
+    val _b = clearBundle("two");
+    val _c = clearBundle("only-trust");
+    val _d = clearBundle("mtls");
+    val _e = clearBundle("lax");
+    val _f = clearBundle("rotating");
+    val _t = rkSetProp("rakun.ssl.handshake-timeout", "");
+    val _i = rkSetProp("rakun.ssl.reload-interval", "");
+    val _w = rkSetProp("rakun.ssl.health.warn-threshold", "");
+    return 0;
+}
+
+fn materialOn(name: string, certPath: string, keyPath: string) -> i32 {
+    val _c = rkSetProp(bundleKey(name, "keystore.certificate"), certPath);
+    val _k = rkSetProp(bundleKey(name, "keystore.private-key"), keyPath);
+    return 0;
+}
+
+fn sample(name: string) -> SslBundle {
+    return SslBundle(
+        name: name,
+        certificateFile: "/etc/rakun/cert.pem",
+        privateKeyFile: "/etc/rakun/key.pem",
+        trustStoreFile: "",
+        protocols: defaultProtocols(),
+        ciphers: "",
+        clientAuth: defaultClientAuth(),
+        verify: defaultVerify(),
+    );
+}
+
+// ── the blob ────────────────────────────────────────────────────────────────
+
+test "rakun ssl: the blob is key bar value, records separated by semicolons" {
+    var b = "";
+    b = blobPut(b, "certfile", "/a.pem");
+    b = blobPut(b, "verify", "verify_peer");
+    assert b == "certfile|/a.pem;verify|verify_peer";
+    assert blobGet(b, "certfile") == "/a.pem";
+    assert blobGet(b, "verify") == "verify_peer";
+    assert blobGet(b, "absent") == "";
+    assert blobKeys(b).join(",") == "certfile,verify";
+    assert blobKeys("").length == 0;
+}
+
+test "rakun ssl: a blob value may itself be empty and still be found" {
+    val b = blobPut("", "ciphers", "");
+    assert b == "ciphers|";
+    assert blobGet(b, "ciphers") == "";
+    assert blobKeys(b).join(",") == "ciphers";
+}
+
+// ── the property grammar ────────────────────────────────────────────────────
+
+test "rakun ssl: the property names are Spring's with rakun in place of spring" {
+    assert bundlePrefix() == "rakun.ssl.bundle.pem";
+    assert bundleKey("mybundle", "keystore.certificate")
+        == "rakun.ssl.bundle.pem.mybundle.keystore.certificate";
+    assert bundleKey("mybundle", "client-auth")
+        == "rakun.ssl.bundle.pem.mybundle.client-auth";
+}
+
+test "rakun ssl: the declared defaults are both TLS versions, none and full" {
+    val _f = freshRegistry();
+    assert defaultProtocols() == "tlsv1.3,tlsv1.2";
+    assert defaultClientAuth() == "none";
+    assert defaultVerify() == "full";
+    assert handshakeTimeout() == 5000;
+    assert reloadInterval() == 60000;
+    assert warnThresholdDays() == 14;
+}
+
+test "rakun ssl: the three tuning keys are read from configuration when set" {
+    val _f = freshRegistry();
+    val _a = rkSetProp("rakun.ssl.handshake-timeout", "200");
+    val _b = rkSetProp("rakun.ssl.reload-interval", "1000");
+    val _c = rkSetProp("rakun.ssl.health.warn-threshold", "30");
+    assert handshakeTimeout() == 200;
+    assert reloadInterval() == 1000;
+    assert warnThresholdDays() == 30;
+    val _r = freshRegistry();
+}
+
+test "rakun ssl: a bundle reads every property and falls back per field" {
+    val _f = freshRegistry();
+    val _n = declareBundles("one");
+    val _c = rkSetProp(bundleKey("one", "keystore.certificate"), "/a/cert.pem");
+    val _k = rkSetProp(bundleKey("one", "keystore.private-key"), "/a/key.pem");
+    val _p = rkSetProp(bundleKey("one", "keystore.private-key-password"), "hunter2");
+    val _t = rkSetProp(bundleKey("one", "truststore.certificate"), "/a/ca.pem");
+    val b = readBundle("one");
+    assert b.name == "one";
+    assert b.certificateFile == "/a/cert.pem";
+    assert b.privateKeyFile == "/a/key.pem";
+    assert b.trustStoreFile == "/a/ca.pem";
+    assert b.protocols == "tlsv1.3,tlsv1.2";
+    assert b.ciphers == "";
+    assert b.clientAuth == "none";
+    assert b.verify == "full";
+    // The password and the reload flag are deliberately NOT fields of the
+    // record: the spec pins it at eight, and a password on the record would mean
+    // a password in every rendering of it.
+    assert bundlePassword("one") == "hunter2";
+    assert bundleReloadOnUpdate("one") == false;
+    assert hasKeystore(b);
+    assert hasTrustStore(b);
+}
+
+test "rakun ssl: the bundle names are read in property order" {
+    val _f = freshRegistry();
+    assert sslBundleNames().length == 0;
+    val _n = declareBundles("zeta,alpha,mid");
+    assert sslBundleNames().join(",") == "zeta,alpha,mid";
+    assert bundleConfigured("alpha");
+    assert bundleConfigured("absent") == false;
+}
+
+test "rakun ssl: a name nobody configured is the empty optional, not an empty bundle" {
+    val _f = freshRegistry();
+    val _n = declareBundles("one");
+    val _c = rkSetProp(bundleKey("one", "truststore.certificate"), anchorFile());
+    var seen = "";
+    val present = sslBundle("one");
+    if (present) { b -> seen = b.name; };
+    assert seen == "one";
+
+    var absentSeen = false;
+    val absent = sslBundle("nothing-by-this-name");
+    if (absent) { b -> absentSeen = true; };
+    assert absentSeen == false;
+}
+
+// ── the refusals ────────────────────────────────────────────────────────────
+
+test "rakun ssl: half a keystore is refused, naming the half that is missing" {
+    val _f = freshRegistry();
+    try asserts.throwsWith({ ->
+        validateBundle(SslBundle(
+            name: "one",
+            certificateFile: "/a/cert.pem",
+            privateKeyFile: "",
+            trustStoreFile: "",
+            protocols: defaultProtocols(),
+            ciphers: "",
+            clientAuth: "none",
+            verify: "full",
+        ));
+        0;
+    }, "rakun.ssl.bundle.pem.one.keystore.private-key");
+    try asserts.throwsWith({ ->
+        validateBundle(SslBundle(
+            name: "one",
+            certificateFile: "",
+            privateKeyFile: "/a/key.pem",
+            trustStoreFile: "",
+            protocols: defaultProtocols(),
+            ciphers: "",
+            clientAuth: "none",
+            verify: "full",
+        ));
+        0;
+    }, "rakun.ssl.bundle.pem.one.keystore.certificate");
+    // Neither half is a verify-only bundle, and that is legal.
+    assert validateBundle(SslBundle(
+        name: "only-trust",
+        certificateFile: "",
+        privateKeyFile: "",
+        trustStoreFile: anchorFile(),
+        protocols: defaultProtocols(),
+        ciphers: "",
+        clientAuth: "none",
+        verify: "full",
+    )) == 0;
+}
+
+test "rakun ssl: a file that is not there is refused, naming the absolute path searched" {
+    val _f = freshRegistry();
+    val text: string = missingFileProblem("one", "keystore.certificate", "certs/server.pem");
+    assert text.contains("rakun.ssl.bundle.pem.one.keystore.certificate");
+    assert text.contains("certs/server.pem");
+    assert text.contains(absolutePath("certs/server.pem"));
+    assert absolutePath("/already/absolute") == "/already/absolute";
+    // A relative path is resolved against the working directory, so the answer
+    // is absolute and still ends in what was asked for.
+    val resolved: string = absolutePath("relative/x.pem");
+    assert resolved.indexOf("/") == 0;
+    assert resolved.endsWith("relative/x.pem");
+    assert resolved != "relative/x.pem";
+    try asserts.throwsWith({ ->
+        checkFile("one", "keystore.certificate", "certs/definitely-not-here.pem");
+    }, "and nothing is there");
+}
+
+test "rakun ssl: a JKS is refused with the keytool command, and no property lifts it" {
+    val _f = freshRegistry();
+    assert isJks("/etc/app/keystore.jks");
+    assert isJks("/etc/app/KEYSTORE.JKS");
+    assert isJks("/etc/app/server.keystore");
+    assert isJks("/etc/app/cert.pem") == false;
+    val text: string = jksProblem("one", "keystore.certificate", "/etc/app/keystore.jks");
+    assert text.contains("keytool -importkeystore");
+    assert text.contains("-deststoretype PKCS12");
+    assert text.contains("there is no property that lifts this");
+    try asserts.throwsWith({ ->
+        checkFile("one", "keystore.certificate", "/etc/app/keystore.jks");
+    }, "keytool -importkeystore");
+}
+
+test "rakun ssl: a path carrying a blob separator is refused rather than truncated" {
+    val _f = freshRegistry();
+    assert carriesSeparator("/a/b;c.pem");
+    assert carriesSeparator("/a/b|c.pem");
+    assert carriesSeparator("/a/b.pem") == false;
+    assert separatorProblem("one", "keystore.certificate", "/a/b;c.pem").contains("Move the file");
+    try asserts.throwsWith({ ->
+        checkFile("one", "keystore.certificate", "/a/b|c.pem");
+    }, "cannot be encoded");
+}
+
+test "rakun ssl: the three server postures and the two client postures, and nothing else" {
+    val _f = freshRegistry();
+    loop (["none", "want", "need"]) { posture ->
+        val p: string = posture;
+        assert validateBundle(SslBundle(
+            name: "one", certificateFile: "", privateKeyFile: "", trustStoreFile: "",
+            protocols: defaultProtocols(), ciphers: "", clientAuth: p, verify: "full",
+        )) == 0;
+    };
+    try asserts.throwsWith({ ->
+        validateBundle(SslBundle(
+            name: "one", certificateFile: "", privateKeyFile: "", trustStoreFile: "",
+            protocols: defaultProtocols(), ciphers: "", clientAuth: "maybe", verify: "full",
+        ));
+        0;
+    }, "none, want and need");
+    try asserts.throwsWith({ ->
+        validateBundle(SslBundle(
+            name: "one", certificateFile: "", privateKeyFile: "", trustStoreFile: "",
+            protocols: defaultProtocols(), ciphers: "", clientAuth: "none", verify: "partial",
+        ));
+        0;
+    }, "full and none");
+    assert clientAuthProblem("one", "maybe").contains("maybe");
+    assert verifyProblem("one", "partial").contains("partial");
+}
+
+test "rakun ssl: TLS 1.1 and below are gone, not a property away" {
+    val _f = freshRegistry();
+    assert knownProtocol("tlsv1.3");
+    assert knownProtocol("tlsv1.2");
+    assert knownProtocol("tlsv1.1") == false;
+    assert knownProtocol("sslv3") == false;
+    assert protocolsValid("tlsv1.3,tlsv1.2");
+    assert protocolsValid(" tlsv1.2 ");
+    assert protocolsValid("tlsv1.3,tlsv1.1") == false;
+    assert protocolsValid("") == false;
+    assert protocolProblem("one", "tlsv1.1").contains("they are gone");
+    try asserts.throwsWith({ ->
+        validateBundle(SslBundle(
+            name: "one", certificateFile: "", privateKeyFile: "", trustStoreFile: "",
+            protocols: "sslv3", ciphers: "", clientAuth: "none", verify: "full",
+        ));
+        0;
+    }, "tlsv1.3 and tlsv1.2");
+}
+
+test "rakun ssl: a listener naming a bundle that is not configured is a refusal, not plaintext" {
+    val text: string = unknownBundleProblem("rakun.server.ssl.bundle", "ghost");
+    assert text.contains("rakun.server.ssl.bundle names the bundle ghost");
+    assert text.contains("does not fall back to plaintext");
+}
+
+test "rakun ssl: every refusal text is free of double quotes" {
+    // The needle a `throwsWith` matches is read from the `~p` rendering on the
+    // erlang row, where a `"` is escaped. One quote anywhere below would make a
+    // refusal unassertable on one of the two rows; this cell is the guard.
+    val texts: string[] = [
+        halfKeystoreProblem("a", "keystore.certificate", "keystore.private-key"),
+        missingFileProblem("a", "keystore.certificate", "/x.pem"),
+        jksProblem("a", "keystore.certificate", "/x.jks"),
+        clientAuthProblem("a", "maybe"),
+        verifyProblem("a", "partial"),
+        protocolProblem("a", "sslv3"),
+        separatorProblem("a", "keystore.certificate", "/x;y.pem"),
+        unknownBundleProblem("rakun.server.ssl.bundle", "a"),
+        keyMismatchProblem("a"),
+        verifyNoneWarning("a"),
+    ];
+    loop (texts) { t ->
+        val text: string = t;
+        assert text.contains("\"") == false;
+    };
+    assert texts.length == 10;
+}
+
+// ── the two option lists ────────────────────────────────────────────────────
+
+test "rakun ssl: client-auth maps to verify plus fail-if-no-peer-cert, and verify does not" {
+    assert verifyForListener(sample("one")) == "verify_none";
+    assert failIfNoPeerCert(sample("one")) == false;
+
+    val want = SslBundle(
+        name: "one", certificateFile: "/c.pem", privateKeyFile: "/k.pem",
+        trustStoreFile: "/ca.pem", protocols: defaultProtocols(), ciphers: "",
+        clientAuth: "want", verify: "full",
+    );
+    assert verifyForListener(want) == "verify_peer";
+    assert failIfNoPeerCert(want) == false;
+
+    val need = SslBundle(
+        name: "one", certificateFile: "/c.pem", privateKeyFile: "/k.pem",
+        trustStoreFile: "/ca.pem", protocols: defaultProtocols(), ciphers: "",
+        clientAuth: "need", verify: "full",
+    );
+    assert verifyForListener(need) == "verify_peer";
+    assert failIfNoPeerCert(need);
+
+    // `verify` is the CLIENT's question and never touches the listener's answer.
+    val lax = SslBundle(
+        name: "one", certificateFile: "/c.pem", privateKeyFile: "/k.pem",
+        trustStoreFile: "", protocols: defaultProtocols(), ciphers: "",
+        clientAuth: "need", verify: "none",
+    );
+    assert verifyForListener(lax) == "verify_peer";
+    assert verifyForClient(lax) == "verify_none";
+    assert verifyForClient(need) == "verify_peer";
+}
+
+test "rakun ssl: the listener option list carries the material, the versions and the posture" {
+    val _f = freshRegistry();
+    val b = SslBundle(
+        name: "one", certificateFile: "/c.pem", privateKeyFile: "/k.pem",
+        trustStoreFile: "/ca.pem", protocols: "tlsv1.3, tlsv1.2", ciphers: "",
+        clientAuth: "need", verify: "full",
+    );
+    assert versionsOf(b) == "tlsv1.3,tlsv1.2";
+    val blob: string = listenerBlob(b);
+    assert blobGet(blob, "bundle") == "one";
+    assert blobGet(blob, "certfile") == "/c.pem";
+    assert blobGet(blob, "keyfile") == "/k.pem";
+    assert blobGet(blob, "cacertfile") == "/ca.pem";
+    assert blobGet(blob, "versions") == "tlsv1.3,tlsv1.2";
+    assert blobGet(blob, "verify") == "verify_peer";
+    assert blobGet(blob, "fail_if_no_peer_cert") == "true";
+    assert blobGet(blob, "handshake_timeout") == "5000";
+    // An empty cipher list means the host's default and is left OUT rather than
+    // encoded as empty: an empty `ciphers` option to OTP is not the default, it
+    // is a listener that negotiates nothing.
+    assert blobKeys(blob).indexOf("ciphers") < 0;
+}
+
+test "rakun ssl: a named cipher list and a key password reach the option list" {
+    val _f = freshRegistry();
+    val _n = declareBundles("one");
+    val _p = rkSetProp(bundleKey("one", "keystore.private-key-password"), "hunter2");
+    val b = SslBundle(
+        name: "one", certificateFile: "/c.pem", privateKeyFile: "/k.pem",
+        trustStoreFile: "", protocols: "tlsv1.2", ciphers: "ECDHE-RSA-AES128-GCM-SHA256",
+        clientAuth: "none", verify: "full",
+    );
+    val blob: string = listenerBlob(b);
+    assert blobGet(blob, "ciphers") == "ECDHE-RSA-AES128-GCM-SHA256";
+    assert blobGet(blob, "password") == "hunter2";
+    assert blobGet(blob, "versions") == "tlsv1.2";
+}
+
+test "rakun ssl: a trust-store-only bundle produces a verify-only client option list" {
+    val _f = freshRegistry();
+    val b = SslBundle(
+        name: "only-trust", certificateFile: "", privateKeyFile: "",
+        trustStoreFile: "/ca.pem", protocols: defaultProtocols(), ciphers: "",
+        clientAuth: "none", verify: "full",
+    );
+    val blob: string = clientBlob(b);
+    assert blobGet(blob, "cacertfile") == "/ca.pem";
+    assert blobGet(blob, "verify") == "verify_peer";
+    assert blobGet(blob, "verify_hostname") == "true";
+    assert blobKeys(blob).indexOf("certfile") < 0;
+    assert blobKeys(blob).indexOf("keyfile") < 0;
+}
+
+test "rakun ssl: verify none turns off the chain and the hostname together" {
+    val b = SslBundle(
+        name: "lax", certificateFile: "", privateKeyFile: "",
+        trustStoreFile: "/ca.pem", protocols: defaultProtocols(), ciphers: "",
+        clientAuth: "none", verify: "none",
+    );
+    val blob: string = clientBlob(b);
+    assert blobGet(blob, "verify") == "verify_none";
+    assert blobGet(blob, "verify_hostname") == "false";
+}
+
+test "rakun ssl: a bundle with no keystore cannot terminate TLS and says gen_tcp" {
+    val _f = freshRegistry();
+    val _n = declareBundles("only-trust");
+    val _t = rkSetProp(bundleKey("only-trust", "truststore.certificate"), anchorFile());
+    assert transportFor(sample("one")) == "ssl";
+    assert transportFor(SslBundle(
+        name: "only-trust", certificateFile: "", privateKeyFile: "",
+        trustStoreFile: "/ca.pem", protocols: defaultProtocols(), ciphers: "",
+        clientAuth: "none", verify: "full",
+    )) == "gen_tcp";
+    assert sslTransport("") == "gen_tcp";
+    assert sslTransport("only-trust") == "gen_tcp";
+    assert sslTransport("absent") == "gen_tcp";
+}
+
+// ── the certificate reader ──────────────────────────────────────────────────
+
+test "rakun ssl: both rows read the same five fields out of one certificate" {
+    val info: string = rkSslCertInfo(certPem());
+    assert blobGet(info, "error") == "";
+    assert blobGet(info, "subject") == "CN=rakun-ssl-selftest,O=rakun";
+    assert blobGet(info, "issuer") == "CN=rakun-ssl-selftest,O=rakun";
+    assert blobGet(info, "notBefore") == "2020-01-01T00:00:00Z";
+    assert blobGet(info, "notAfter") == "2020-04-01T00:00:00Z";
+    // The window closed in April 2020, so this is negative today and more
+    // negative tomorrow. Nothing here pins a number.
+    assert toI32(blobGet(info, "daysRemaining")) < 0;
+}
+
+test "rakun ssl: text that is not a certificate answers an error rather than empty fields" {
+    // The two hosts word the reason differently — node reports OpenSSL's message
+    // and OTP reports the missing PEM block — so what is asserted is that there
+    // IS a reason and that no field came back.
+    val info: string = rkSslCertInfo("this is not a certificate");
+    assert blobGet(info, "error") != "";
+    assert blobGet(info, "subject") == "";
+    assert blobGet(info, "notAfter") == "";
+}
+
+test "rakun ssl: a key belongs to a certificate or it does not, and both rows agree" {
+    assert rkSslKeyMatches(certPem(), keyPem());
+    assert rkSslKeyMatches(certPem(), otherKeyPem()) == false;
+    assert rkSslKeyMatches(certPem(), "") == false;
+    assert rkSslKeyMatches("", keyPem()) == false;
+    assert rkSslKeyMatches(certPem(), "-----BEGIN PRIVATE KEY-----\nnope\n-----END PRIVATE KEY-----\n") == false;
+}
+
+// ── the registry ────────────────────────────────────────────────────────────
+
+test "rakun ssl: two bundles resolve independently and one failing does not stop the other" {
+    val _f = freshRegistry();
+    val cert = scratch("indep-cert.pem");
+    val key = scratch("indep-key.pem");
+    val _w1 = writeFile(cert, certPem());
+    val _w2 = writeFile(key, keyPem());
+    val _n = declareBundles("one,two");
+    val _m1 = materialOn("one", cert, key);
+    // `two` pairs the same certificate with a key that does not belong to it.
+    val other = scratch("indep-other.pem");
+    val _w3 = writeFile(other, otherKeyPem());
+    val _m2 = materialOn("two", cert, other);
+
+    val registered = sslRegisterAll();
+    assert registered == 1;
+    assert sslRegisteredNames().join(",") == "one,two";
+    assert sslLastError("one") == "";
+    assert sslLastError("two").contains("does not belong to the certificate");
+    assert sslSubject("one") == "CN=rakun-ssl-selftest,O=rakun";
+    assert sslSubject("two") == "";
+    assert sslListenerOpts("one") != "";
+    assert sslListenerOpts("two") == "";
+
+    // The startup pass turns the recorded failure into the refusal.
+    try asserts.throwsWith({ -> sslBoot(); }, "does not belong to the certificate");
+
+    val _r1 = removeFile(cert);
+    val _r2 = removeFile(key);
+    val _r3 = removeFile(other);
+    val _z = freshRegistry();
+}
+
+test "rakun ssl: a resolved bundle stores the certificate fields and both option lists" {
+    val _f = freshRegistry();
+    val cert = scratch("resolve-cert.pem");
+    val key = scratch("resolve-key.pem");
+    val _w1 = writeFile(cert, certPem());
+    val _w2 = writeFile(key, keyPem());
+    val _n = declareBundles("one");
+    val _m = materialOn("one", cert, key);
+    val _a = rkSetProp(bundleKey("one", "client-auth"), "need");
+    assert sslRegister("one");
+
+    assert sslSubject("one") == "CN=rakun-ssl-selftest,O=rakun";
+    assert sslIssuer("one") == "CN=rakun-ssl-selftest,O=rakun";
+    assert sslNotBefore("one") == "2020-01-01T00:00:00Z";
+    assert sslNotAfter("one") == "2020-04-01T00:00:00Z";
+    assert sslExpiryDays("one") < 0;
+    assert sslLastError("one") == "";
+    assert sslTransport("one") == "ssl";
+    assert rkSslGet("one", "transport") == "ssl";
+
+    val listener: string = sslListenerOpts("one");
+    assert blobGet(listener, "certfile") == cert;
+    assert blobGet(listener, "fail_if_no_peer_cert") == "true";
+
+    // SNI is the CALLER's hostname and is appended by the host at call time, so
+    // the same bundle serves a listener and any number of clients.
+    val client: string = sslClientOpts("one", "api.internal");
+    assert blobGet(client, "server_name_indication") == "api.internal";
+    assert blobGet(client, "verify") == "verify_peer";
+    assert sslClientOpts("one", "other.internal").contains("other.internal");
+    assert sslClientOpts("absent", "api.internal") == "";
+
+    val _r1 = removeFile(cert);
+    val _r2 = removeFile(key);
+    val _z = freshRegistry();
+}
+
+test "rakun ssl: a bundle that is not configured records that and resolves nothing" {
+    val _f = freshRegistry();
+    assert sslRegister("ghost") == false;
+    assert sslLastError("ghost") == "not configured";
+    assert sslListenerOpts("ghost") == "";
+    assert sslExpiryDays("ghost") == 0;
+    val _z = freshRegistry();
+}
+
+test "rakun ssl: a file that vanished between configuration and boot is a refusal" {
+    val _f = freshRegistry();
+    val _n = declareBundles("one");
+    val _m = materialOn("one", scratch("never-written-cert.pem"), scratch("never-written-key.pem"));
+    // `sslRegister` RECORDS and answers false; it does not raise. A reload runs
+    // on a timer in a process that has to survive a file being late.
+    assert sslRegister("one") == false;
+    assert sslLastError("one").contains("and nothing is there");
+    // `sslBoot` is the raising form, and it is the same text.
+    try asserts.throwsWith({ -> sslBoot(); }, "and nothing is there");
+    // As is the direct read.
+    try asserts.throwsWith({ ->
+        sslBundle("one");
+        0;
+    }, "and nothing is there");
+    val _z = freshRegistry();
+}
+
+test "rakun ssl: one text, two deliveries - bundleProblem records what validateBundle raises" {
+    val bad = SslBundle(
+        name: "one", certificateFile: "", privateKeyFile: "", trustStoreFile: "",
+        protocols: defaultProtocols(), ciphers: "", clientAuth: "maybe", verify: "full",
+    );
+    assert bundleProblem(bad) == clientAuthProblem("one", "maybe");
+    try asserts.throwsWith({ -> validateBundle(bad); }, "none, want and need");
+    val good = SslBundle(
+        name: "one", certificateFile: "", privateKeyFile: "", trustStoreFile: "",
+        protocols: defaultProtocols(), ciphers: "", clientAuth: "need", verify: "none",
+    );
+    assert bundleProblem(good) == "";
+    assert validateBundle(good) == 0;
+    assert fileProblem("one", "keystore.certificate", "") == "";
+    assert fileProblem("one", "keystore.certificate", "/a/b.jks").contains("keytool");
+}
+
+test "rakun ssl: a reload of a bundle whose file went away records rather than raises" {
+    val _f = freshRegistry();
+    val cert = scratch("vanish-cert.pem");
+    val key = scratch("vanish-key.pem");
+    val _w1 = writeFile(cert, certPem());
+    val _w2 = writeFile(key, keyPem());
+    val _n = declareBundles("rotating");
+    val _m = materialOn("rotating", cert, key);
+    assert sslRegister("rotating");
+    val goodListener: string = sslListenerOpts("rotating");
+
+    val _r1 = removeFile(cert);
+    assert sslReload("rotating") == false;
+    assert sslLastError("rotating").contains("and nothing is there");
+    // The previous material is untouched: `sslRegister` computes everything
+    // before it writes anything, so a failure cannot half-write.
+    assert sslListenerOpts("rotating") == goodListener;
+    assert sslSubject("rotating") == "CN=rakun-ssl-selftest,O=rakun";
+
+    val _r2 = removeFile(key);
+    val _z = freshRegistry();
+}
+
+test "rakun ssl: verify none resolves with a warning naming the bundle" {
+    val _f = freshRegistry();
+    val _n = declareBundles("lax");
+    val _t = rkSetProp(bundleKey("lax", "truststore.certificate"), scratch("lax-ca.pem"));
+    val _w = writeFile(scratch("lax-ca.pem"), certPem());
+    val _v = rkSetProp(bundleKey("lax", "verify"), "none");
+    assert sslRegister("lax");
+    assert sslWarnings().length == 1;
+    assert sslWarnings().at(0).unwrapOr("").contains("the bundle lax resolves with verify=none");
+    assert sslFailures().length == 0;
+
+    // A bundle at the default posture produces no warning at all.
+    val _v2 = rkSetProp(bundleKey("lax", "verify"), "full");
+    assert sslRegister("lax");
+    assert sslWarnings().length == 0;
+
+    val _r = removeFile(scratch("lax-ca.pem"));
+    val _z = freshRegistry();
+}
+
+// ── reload ──────────────────────────────────────────────────────────────────
+
+test "rakun ssl: a reload after the files change presents the new material" {
+    val _f = freshRegistry();
+    val cert = scratch("reload-cert.pem");
+    val key = scratch("reload-key.pem");
+    val _w1 = writeFile(cert, certPem());
+    val _w2 = writeFile(key, keyPem());
+    val _n = declareBundles("rotating");
+    val _m = materialOn("rotating", cert, key);
+    assert sslRegister("rotating");
+    val before: string = rkSslGet("rotating", "stamp");
+    assert before != "//";
+
+    // The rotation: the same pair written again, which is what a renewal looks
+    // like from the registry's side.
+    val _w3 = writeFile(cert, certPem());
+    assert sslReload("rotating");
+    assert sslLastError("rotating") == "";
+    assert sslSubject("rotating") == "CN=rakun-ssl-selftest,O=rakun";
+
+    val _r1 = removeFile(cert);
+    val _r2 = removeFile(key);
+    val _z = freshRegistry();
+}
+
+test "rakun ssl: a broken rotation keeps the previous material and is recorded" {
+    val _f = freshRegistry();
+    val cert = scratch("broken-cert.pem");
+    val key = scratch("broken-key.pem");
+    val _w1 = writeFile(cert, certPem());
+    val _w2 = writeFile(key, keyPem());
+    val _n = declareBundles("rotating");
+    val _m = materialOn("rotating", cert, key);
+    assert sslRegister("rotating");
+    val goodListener: string = sslListenerOpts("rotating");
+    val goodSubject: string = sslSubject("rotating");
+
+    // The deploy half-wrote the key: it is now somebody else's.
+    val _w3 = writeFile(key, otherKeyPem());
+    assert sslReload("rotating") == false;
+    assert sslLastError("rotating").contains("does not belong to the certificate");
+    // The previous material is still there. Serving yesterday's certificate for
+    // another hour beats serving nothing at 3am.
+    assert sslListenerOpts("rotating") == goodListener;
+    assert sslSubject("rotating") == goodSubject;
+
+    // And the error clears on a good rotation.
+    val _w4 = writeFile(key, keyPem());
+    assert sslReload("rotating");
+    assert sslLastError("rotating") == "";
+
+    val _r1 = removeFile(cert);
+    val _r2 = removeFile(key);
+    val _z = freshRegistry();
+}
+
+test "rakun ssl: reload-on-update false makes the poll touch no file at all" {
+    val _f = freshRegistry();
+    val cert = scratch("poll-cert.pem");
+    val key = scratch("poll-key.pem");
+    val _w1 = writeFile(cert, certPem());
+    val _w2 = writeFile(key, keyPem());
+    val _n = declareBundles("rotating");
+    val _m = materialOn("rotating", cert, key);
+    assert sslRegister("rotating");
+    assert bundleReloadOnUpdate("rotating") == false;
+
+    // With the flag off the poll is a no-op even when the files DID move: the
+    // stamp is never read, so nothing reloads. Proved by removing the files
+    // entirely — a poll that stat'd them would fail or reload.
+    val _r1 = removeFile(cert);
+    val _r2 = removeFile(key);
+    assert sslPoll() == 0;
+    assert sslLastError("rotating") == "";
+    assert sslSubject("rotating") == "CN=rakun-ssl-selftest,O=rakun";
+    val _z = freshRegistry();
+}
+
+test "rakun ssl: a material stamp changes when a file does and not otherwise" {
+    val _f = freshRegistry();
+    val cert = scratch("stamp-cert.pem");
+    val _w1 = writeFile(cert, certPem());
+    val b = SslBundle(
+        name: "rotating", certificateFile: cert, privateKeyFile: "",
+        trustStoreFile: "", protocols: defaultProtocols(), ciphers: "",
+        clientAuth: "none", verify: "full",
+    );
+    val first: string = materialStamp(b);
+    assert first == materialStamp(b);
+    assert mtimeOf("") == "";
+    assert mtimeOf(scratch("not-a-file")) == "0";
+    val _r = removeFile(cert);
+    // A file that is gone stamps as `0`, which differs from any mtime, so a
+    // deletion is a change the poll sees rather than one it misses.
+    assert materialStamp(b) != first;
+    val _z = freshRegistry();
+}
+
+// ── health and info ─────────────────────────────────────────────────────────
+
+test "rakun ssl: the four verdicts one bundle can have" {
+    assert sslHealthOf(30, "", 14) == statusUp();
+    assert sslHealthOf(15, "", 14) == statusUp();
+    assert sslHealthOf(14, "", 14) == statusOutOfService();
+    assert sslHealthOf(3, "", 14) == statusOutOfService();
+    assert sslHealthOf(0, "", 14) == statusOutOfService();
+    assert sslHealthOf(0 - 1, "", 14) == statusDown();
+    // A failed reload is DOWN even while the OLD material is still being served.
+    assert sslHealthOf(300, "a reload failed", 14) == statusDown();
+    assert statusUp() == "UP";
+    assert statusOutOfService() == "OUT_OF_SERVICE";
+    assert statusDown() == "DOWN";
+}
+
+test "rakun ssl: with no bundles the indicator is UP with an empty detail, never absent" {
+    val _f = freshRegistry();
+    val h: string = sslHealth();
+    assert blobGet(h, "status") == "UP";
+    assert blobGet(h, "bundles") == "0";
+    // "no TLS configured" and "TLS broken" must not look the same to a monitor.
+    assert h == "status|UP;bundles|0";
+    assert sslInfo() == "";
+}
+
+test "rakun ssl: the indicator names the bundle, the days and the reason" {
+    val _f = freshRegistry();
+    val cert = scratch("health-cert.pem");
+    val key = scratch("health-key.pem");
+    val _w1 = writeFile(cert, certPem());
+    val _w2 = writeFile(key, keyPem());
+    val _n = declareBundles("one");
+    val _m = materialOn("one", cert, key);
+    assert sslRegister("one");
+
+    // The committed certificate is expired, so this bundle is DOWN by expiry and
+    // the detail says which bundle and what its subject is.
+    val h: string = sslHealth();
+    assert blobGet(h, "status") == "DOWN";
+    assert blobGet(h, "bundles") == "1";
+    assert blobGet(h, "one.status") == "DOWN";
+    assert blobGet(h, "one.subject") == "CN=rakun-ssl-selftest,O=rakun";
+    assert blobGet(h, "one.error") == "";
+
+    val i: string = sslInfo();
+    assert blobGet(i, "one.subject") == "CN=rakun-ssl-selftest,O=rakun";
+    assert blobGet(i, "one.issuer") == "CN=rakun-ssl-selftest,O=rakun";
+    assert blobGet(i, "one.notBefore") == "2020-01-01T00:00:00Z";
+    assert blobGet(i, "one.notAfter") == "2020-04-01T00:00:00Z";
+    assert blobGet(i, "one.daysRemaining") != "";
+    // No key material, no private-key fingerprint, no password — the whole
+    // contribution is what the certificate already tells anyone who connects.
+    assert i.contains("PRIVATE") == false;
+    assert i.contains("password") == false;
+
+    val _r1 = removeFile(cert);
+    val _r2 = removeFile(key);
+    val _z = freshRegistry();
+}
+
+test "rakun ssl: a failed resolve is DOWN with the reason as the detail" {
+    val _f = freshRegistry();
+    val cert = scratch("down-cert.pem");
+    val other = scratch("down-other.pem");
+    val _w1 = writeFile(cert, certPem());
+    val _w2 = writeFile(other, otherKeyPem());
+    val _n = declareBundles("two");
+    val _m = materialOn("two", cert, other);
+    assert sslRegister("two") == false;
+    val h: string = sslHealth();
+    assert blobGet(h, "status") == "DOWN";
+    assert blobGet(h, "two.status") == "DOWN";
+    assert blobGet(h, "two.error").contains("does not belong to the certificate");
+    val _r1 = removeFile(cert);
+    val _r2 = removeFile(other);
+    val _z = freshRegistry();
+}
+
+// ── the key catalogue ───────────────────────────────────────────────────────
+
+test "rakun ssl: the front's own keys join front 05's catalogue once" {
+    val _f = freshRegistry();
+    val _a = registerSslKeys();
+    val _b = registerSslKeys();
+    val known: string = rkProp("rakun.config.catalogue");
+    assert known.contains("rakun.ssl");
+    val spec: string = rkProp("rakun.config.catalogue.rakun.ssl");
+    assert spec.contains("handshake-timeout:i32:5000");
+    assert spec.contains("health.warn-threshold:i32:14");
+    // Registered twice, listed once.
+    assert (("," + known + ",").split(",rakun.ssl,").length) == 2;
+}

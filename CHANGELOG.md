@@ -20,6 +20,69 @@
 > (`{badkey,param}` / `{badkey,query}`), which AGENTS.md § Blocked already
 > records.
 
+- **TLS: named SSL bundles, one registry for five subsystems** (front 74).
+  `modules/rakun/src/ssl_bundle.bp`, `src/ssl_bundle.mjs`,
+  `src/sidecars/rakun_ssl.erl`, `modules/rakun-web/src/tls.bp`, and two suites
+  (`modules/rakun/test/ssl_bundle_test.bp`,
+  `modules/rakun-web/test/tls_test.bp`).
+
+  A bundle is a name, some material and a verification posture —
+  `rakun.ssl.bundle.pem.<name>.*`, Spring's property names with `spring` replaced
+  by `rakun` — and every consumer refers to it by name:
+  `rakun.server.ssl.bundle` for the listener, `rakun.management.ssl.bundle` for
+  front 76's, `rkSslClientOpts(bundle, host)` for fronts 08, 09, 13 and 15.
+  Rotating a certificate is one edit.
+
+  What landed: the property grammar and the defaults (`tlsv1.3,tlsv1.2`, `none`,
+  `full`); the refusals — half a keystore, a file that is not there (naming the
+  absolute path searched), a JKS (naming the exact `keytool -importkeystore
+  -deststoretype PKCS12` command, with no property that lifts it), an unknown
+  posture, a protocol below TLS 1.2, a path carrying a blob separator, a private
+  key that does not belong to its chain (at STARTUP, not at the first
+  handshake), and a listener naming a bundle nobody configured; the two
+  option-list encodings, including the `client-auth` → `{verify,
+  fail_if_no_peer_cert}` and `verify` → `{verify, hostname}` mappings and SNI
+  appended at call time; `sslReload`/`sslPoll` with the property that a failed
+  reload keeps the previous material; the `ssl` health verdicts (`UP` /
+  `OUT_OF_SERVICE` / `DOWN`, and `UP` with an empty detail when no TLS is
+  configured — "no TLS" and "TLS broken" must not look the same) and the info
+  contribution, which carries no key material; and, in `rakun-web`, the listener
+  and management bundle resolution, the verified peer subject, and an HSTS chain
+  entry that is never set on a plaintext response.
+
+  `modules/rakun`: **387/387** on commonJS (was 346/346) and **385 passing / 2
+  failing** on erlang (was 344/2) — the two still front 04's
+  `server_test.bp:74,80`. `modules/rakun-web`: **104/104** on BOTH rows (was
+  83/83). Neither pinned row in `scripts/restricted-targets.txt` moves.
+
+  Deviations from the spec, each measured rather than chosen. (1) Every host cell
+  carries BOTH `#[@External.Node]` and `#[@External.Erlang]` forms where the spec
+  said erlang only: a cell with one form is a located diagnostic at its CALL SITE
+  on the other row, and one such cell behind a called wrapper takes the whole
+  member off commonJS. The genuinely erlang-only work (the blob →
+  `ssl:listen/2` decoder) is in the sidecar as functions no `.bp` cell names.
+  (2) `sslBundleNames()` reads `rakun.ssl.bundle.pem` as a LIST rather than
+  discovering names from the property tree: there is no key enumeration on either
+  row and `runtime.mjs` is frozen. One cell, `rkPropKeys(prefix)`, closes it.
+  (3) The suite embeds a deliberately EXPIRED self-signed certificate instead of
+  generating material at setup: the generator the spec asks for is erlang-only
+  (node has no X.509 issuance API), and a certificate whose window closed in 2020
+  has no date to rot on.
+
+  Not reached, none of it stubbed: the acceptor edit that would make front 04's
+  listener actually terminate TLS and run the handshake in the connection process
+  (`rakun_runtime.erl` is front 04's file); the `gen_server` mtime watcher (needs
+  front 16's scheduler — a sidecar cannot call back into the botopink reload);
+  registration with front 11's two SPIs (front 11 has not landed — the two
+  contributions are produced and asserted, only the registration is missing); and
+  PKCS#12.
+
+  Three compiler shapes measured on the way, each with the smallest program:
+  a test file that imports `std`'s `process` loses EVERY cell in it on commonJS,
+  silently and without a failure line; `std`'s `path` is `{error, undef}` on the
+  erlang row from rakun; and `fs.exists` answers `true` on node and `false` on
+  the BEAM for a character device such as `/dev/null`.
+
 - **Validation: `#[validated]`, one predicate for both rows, and the report**
   (front 14). `modules/rakun-validation/src/{report,table,messages,spi,constraints,binding,boot,decorators}.bp`,
   `src/validation_host.mjs`, `src/sidecars/rakun_validation.erl`, and seven
