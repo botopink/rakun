@@ -257,6 +257,69 @@ The five phases are `Middleware`, `Render`, `Action`, `Handler` and `After`, and
 the phase is stored once: front 12's `rkCachePhase()` reads this slot rather
 than keeping a second one.
 
+### The dispatcher contract
+
+```bp
+val epoch = beginRequest(RequestScope(
+    id: newRequestId(),
+    phase: RequestPhase.Handler,
+    method: "GET",
+    path: "/api/posts",
+    query: "page=2",
+    headersWire: wire,
+    strict: false,
+));
+val body = runHandler();       // wrapped: a raise must still reach the line below
+val setCookies = endRequest(); // the queued `Set-Cookie` lines, `\n`-separated
+// … write the response …
+val _ = drainAfter(30000);     // reap the deferred work
+```
+
+`endRequest()` must run on the failure path too. The blob splits on `\n` into
+whole header values and a cookie value can never split it — `serializeCookie`
+percent-encodes a newline.
+
+| Phase | `headers()` | `cookies()` | `.set`/`.delete` | `after()` | marks dynamic |
+|---|---|---|---|---|---|
+| `Middleware` | yes | yes | yes | yes | no |
+| `Render` | yes | yes | **raises** | yes | yes |
+| `Action` | yes | yes | yes | yes | no |
+| `Handler` | yes | yes | yes | yes | yes |
+| `After` | yes | yes | **raises** | **raises** | no |
+
+### A scenario, end to end
+
+```bp
+// a layout's auth guard — front 23 renders this in phase Render
+fn requireSession() -> string {
+    val sid = cookieOf(cookies(), "session", "");
+    if (sid == "") return "" else return sid;
+}
+
+// a server action — front 24 dispatches this in phase Action
+fn setTheme(theme: string) -> i32 {
+    val jar: Cookies = cookies();
+    val _ = jar.set("theme", theme, CookieAttrs(
+        path: "/", domain: "", maxAge: 31536000,
+        httpOnly: false, secure: true, sameSite: "Lax",
+    ));
+    return after({ ->
+        writeAnalytics(requestId(), "theme:" + theme);
+        0;
+    });
+}
+
+// a route handler — front 25 dispatches this in phase Handler
+fn whoAmI() -> string {
+    return headerOf(headers(), "user-agent", "unknown");
+}
+
+// one loader shared by generateMetadata and the page — loads once per request
+fn getPost(id: string) -> string {
+    return memoize(memoKey("post", [id]), { -> loadPost(id) });
+}
+```
+
 ### `headers()`
 
 ```bp

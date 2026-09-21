@@ -639,7 +639,7 @@ That is the first test in `test/request_context_test.bp`, deliberately.
 
 | Verb | Who calls it | What it does |
 |---|---|---|
-| `beginRequest(scope)` | front 04's acceptor, front 23's SSR pipeline, front 24's action dispatcher, front 07's chain | writes the one frame key and answers the epoch. Over an existing frame it RAISES, naming the outer scope's path |
+| `beginRequest(scope)` | front 04's acceptor, front 23's SSR pipeline, front 24's action dispatcher, front 07's chain | writes the one frame key — `rakun_request` in the serving process's dictionary on the BEAM, one module global on node — and answers the epoch. Over an existing frame it RAISES, naming the outer scope's path |
 | `setPhase(p)` / `requestPhase()` | the same dispatchers | one phase, stored once. Front 12's `rkCachePhase()` is to read this slot, not a second one |
 | `endRequest()` | the same caller, always, including on the failure path | answers the queued `Set-Cookie` lines and erases the key. With no frame it RAISES |
 
@@ -855,6 +855,49 @@ fixed width.
 
 A loader that raises stores nothing, so the next `memoize` with that key runs it
 again.
+
+### The dispatcher contract
+
+This front owns no dispatcher. It owns the contract four of them must honour,
+and it is three lines plus a teardown that runs on the failure path too:
+
+```bp
+val epoch = beginRequest(RequestScope(
+    id: random.uuidV4(),
+    phase: RequestPhase.Handler,
+    method: "GET",
+    path: "/api/posts",
+    query: "page=2",
+    headersWire: wire,
+    strict: false,
+));
+val body = runHandler();          // wrapped, so a raise still reaches the line below
+val setCookies = endRequest();    // the queued `Set-Cookie` lines, `\n`-separated
+// … write the response …
+val _ = drainAfter(30000);        // reap the deferred work
+```
+
+`endRequest()` MUST run on the failure path, or the next request on a keep-alive
+connection starts inside the previous one's frame — asserted here by raising a
+handler, tearing down, and checking the next request sees a clean frame. The
+blob splits on `\n` into whole header values and a value can never split it,
+because `serializeCookie` percent-encodes a newline into `%0A` — asserted with a
+cookie value carrying a literal `Set-Cookie:` injection.
+
+The phase-to-permission table is written down ONCE, in
+`test/request_context_test.bp`'s `permissionRow`, as five literals — `yyyyn`,
+`yynyy`, `yyyyn`, `yyyyy`, `yynnn` for headers-read · cookies-read · set-allowed
+· after-allowed · marks-dynamic. Fronts 12, 23, 24, 25, 60, 63, 64, 65 and 66
+inherit it rather than re-deriving it.
+
+**What this front does NOT ship.** The spec lists two example programs under its
+own `examples/` directory, which lives in the meta repository's `specs/` tree
+and is not this worktree's to write. The developer's view — a layout auth guard,
+a server action writing a cookie and deferring an analytics write, a route
+handler reading a header, and one `getPost` shared by `generateMetadata` and the
+page — is in `docs.md` instead. `examples/` here is a workspace of buildable
+members, and a member exercising a layout or a server action needs fronts 23 and
+24, neither of which has landed.
 
 ### Language notes this module is written around
 

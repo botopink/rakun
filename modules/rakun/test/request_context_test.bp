@@ -861,3 +861,121 @@ test "rakun request: after() with no frame raises" {
     }, "request context is not established");
     assert afterPhaseProblem().contains("the response is already written");
 }
+
+
+// ── step 7: the dispatcher contract ─────────────────────────────────────────
+//
+// This front owns no dispatcher. It owns the contract four of them must honour,
+// and the contract is three lines plus a teardown that runs on the failure path
+// too. The phase-to-permission table lives here once so fronts 23, 24, 25 and
+// 07 inherit it rather than restating it.
+
+fn contractScope(phase: RequestPhase, id: string) -> RequestScope {
+    return RequestScope(
+        id: id,
+        phase: phase,
+        method: "GET",
+        path: "/api/posts",
+        query: "page=2",
+        headersWire: "host\texample.com\ncookie\ttheme=dark",
+        strict: false,
+    );
+}
+
+fn raisingHandler() -> i32 {
+    @panic("the handler blew up");
+    return 0;
+}
+
+// `y`/`n` for: headers() reads · cookies() reads · cookies().set is allowed ·
+// after() is allowed · the phase marks a render dynamic.
+fn permissionRow(phase: RequestPhase) -> string {
+    val _e = beginRequest(contractScope(phase, "perm"));
+    val h: Headers = headers();
+    val readsHeader: bool = headerOf(h, "host", "") == "example.com";
+    val jar: Cookies = cookies();
+    val readsCookie: bool = cookieOf(jar, "theme", "") == "dark";
+    val setRefused = asserts.throwsWith({ ->
+        jar.set("x", "1", cookieDefaults());
+        0;
+    }, "rakun request:");
+    val afterRefused = asserts.throwsWith({ ->
+        after({ -> 0; });
+        0;
+    }, "rakun request:");
+    val marks: bool = isDynamic();
+    val _x = endRequest();
+    val a: string = if (readsHeader) "y" else "n";
+    val b: string = if (readsCookie) "y" else "n";
+    val c: string = if (asserts.errorText(setRefused) == "") "n" else "y";
+    val d: string = if (asserts.errorText(afterRefused) == "") "n" else "y";
+    val e: string = if (marks) "y" else "n";
+    return a + b + c + d + e;
+}
+
+test "rakun request: the phase-to-permission table, written down once" {
+    assert permissionRow(RequestPhase.Middleware) == "yyyyn";
+    assert permissionRow(RequestPhase.Render) == "yynyy";
+    assert permissionRow(RequestPhase.Action) == "yyyyn";
+    assert permissionRow(RequestPhase.Handler) == "yyyyy";
+    assert permissionRow(RequestPhase.After) == "yynnn";
+}
+
+test "rakun request: endRequest runs on the failure path and the next request is clean" {
+    val _z = cleanSlate();
+    val _e = beginRequest(contractScope(RequestPhase.Handler, "fails"));
+    val jar: Cookies = cookies();
+    val _c = jar.set("theme", "dark", cookieDefaults());
+    try asserts.throwsWith({ ->
+        raisingHandler();
+        0;
+    }, "the handler blew up");
+    val blob: string = endRequest();
+    assert blob.contains("theme=dark") == true;
+
+    val _e2 = beginRequest(contractScope(RequestPhase.Handler, "clean"));
+    assert requestId() == "clean";
+    assert isDynamic() == false;
+    assert dynamicReason() == "";
+    assert deferredCount() == 0;
+    assert endRequest() == "";
+}
+
+test "rakun request: the three-line contract, end to end" {
+    val _z = cleanSlate();
+    val epoch = beginRequest(RequestScope(
+        id: "req-contract",
+        phase: RequestPhase.Handler,
+        method: "GET",
+        path: "/api/posts",
+        query: "page=2",
+        headersWire: "host\texample.com",
+        strict: false,
+    ));
+    assert epoch > 0;
+    assert requestPath() == "/api/posts";
+    assert requestQuery() == "page=2";
+    val jar: Cookies = cookies();
+    val _a = jar.set("theme", "dark", cookieDefaults());
+    val _b = jar.set("sid", "abc", cookieDefaults());
+    val _d = after({ ->
+        rkReqShareBump("contract");
+        0;
+    });
+    val setCookies: string = endRequest();
+    val lines: string[] = setCookies.split("\n");
+    assert lines.length() == 2;
+    assert lines.at(0).unwrapOr("").contains("\n") == false;
+    assert lines.at(1).unwrapOr("").contains("\n") == false;
+    val _w = drainAfter(5000);
+    assert rkReqShareCount("contract") == 1;
+}
+
+test "rakun request: a queued cookie value can never split the blob" {
+    val _e = beginRequest(contractScope(RequestPhase.Handler, "split"));
+    val jar: Cookies = cookies();
+    val _a = jar.set("evil", "a\nSet-Cookie: admin=1", cookieDefaults());
+    val blob: string = endRequest();
+    assert blob.split("\n").length() == 1;
+    assert blob.contains("%0ASet-Cookie") == true;
+}

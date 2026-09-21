@@ -191,6 +191,32 @@
   `botopink test` 205/205; `botopink test --target erlang` 196 passing / 9
   failing, the same nine that are not this front's.
 
+- **The dispatcher contract, written down once** (front 62, step 7). This front
+  owns no dispatcher; it owns the contract four of them must honour.
+  `endRequest()` runs on the failure path too — asserted by raising a handler,
+  tearing down and checking the next request on the same process sees a clean
+  frame, since otherwise a keep-alive connection starts request N+1 inside
+  request N's scope. The `Set-Cookie` blob splits on `\n` into whole header
+  values and a cookie value can never split it, asserted with a value carrying a
+  literal `Set-Cookie:` injection that comes out as `%0ASet-Cookie`. The
+  phase-to-permission table is five literals in `permissionRow` — `yyyyn`,
+  `yynyy`, `yyyyn`, `yyyyy`, `yynnn` — so fronts 12, 23, 24, 25, 60, 63, 64, 65
+  and 66 inherit it rather than re-deriving it.
+
+  **`targets` still reads `["commonJS"]`**, the call front 04, front 05 and
+  front 22 each made for the same reason: the member's erlang row carries reds
+  that are not this front's, and widening now would move a known red into
+  `botopink-lib-test` rather than fix anything. All 73 of this front's
+  assertions are green on BOTH rows.
+
+  The spec's two example programs live under its own `examples/` directory in
+  the meta repository's `specs/` tree, which this worktree may not write; the
+  developer's view is in `docs.md` instead, and an example MEMBER exercising a
+  layout or a server action would need fronts 23 and 24, neither of which has
+  landed. Measured: `botopink test` 209/209 (was 136/136 at this front's
+  baseline); `botopink test --target erlang` 200 passing / 9 failing, the same
+  nine that are not this front's.
+
 - **The route table crosses the boundary, and one matcher reads it on both
   rows** (front 22, steps 3 and 4). `RouteEntry(kind, pattern, slot, verb)`
   writes as `kind|pattern|slot|verb`, one record per line in registration order,
