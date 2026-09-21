@@ -91,6 +91,15 @@
   be written. Measured: `botopink test` 136/136; `botopink test --target erlang`
   134 passing / 2 failing, the same two front-04 reds.
 
+- **`targets` still reads `["commonJS"]`** (front 22, a deliberate refusal
+  repeating front 04's and front 05's). All 48 of front 22's assertions are
+  green on both rows, and the member's erlang row is 134 passing / 2 failing —
+  the two reds being front 04's `request/6` `{badkey,param}` / `{badkey,query}`.
+  Widening now would move a known red into `botopink-lib-test`.
+  `src/sidecars/rakun_file_router.erl` also inherits the toolchain gap front 04
+  recorded: it ships and loads under `botopink test --target erlang`, and a
+  `botopink build --target erlang` copies no sidecar at all.
+
 - **The file-convention segment grammar** (front 22, step 1).
   `modules/rakun/src/file_router.bp` decodes a folder name into one of the seven
   `SegmentKind`s — static, `[dynamic]`, `[...catchAll]`, `[[...optionalCatchAll]]`,

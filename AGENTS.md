@@ -470,6 +470,24 @@ host knows the format. That is what makes "the two sides cannot disagree about
 which route a URL is" a property rather than a hope — and it is the same
 conclusion front 05 reached, applied to the half of this front that is pure.
 
+**What a BUILT program still cannot do on the BEAM.** `shipErlSidecars` is
+called only from `test_cmd.zig`, so `botopink build --target erlang` copies no
+`.erl` sidecar and `__bp_load_siblings/0` is emitted only under the TEST flag
+(front 04's § Blocked, third gap). `rakun_file_router.erl` inherits that
+exactly: it is shipped and loaded under `botopink test --target erlang`, where
+every assertion in this front runs, and a BUILT erlang program would die with
+`undefined function rakun_file_router:table/0` for the same reason a built one
+already dies on `rakun_runtime:serve/2`. Nothing in this front makes that worse
+and nothing in this front can fix it — it is the toolchain's.
+
+**`targets` still reads `["commonJS"]`, deliberately.** All 48 of this front's
+assertions are green on both rows, but `botopink test --target erlang` for the
+member is 134 passing / 2 failing, and the two reds are front 04's `request/6`
+(`{badkey,param}` / `{badkey,query}`), not this front's. Widening `targets` now
+would move a known red into `botopink-lib-test` rather than fix anything, which
+is the call front 04 and front 05 each made for the same reason. `erlang` joins
+in the change that closes them.
+
 **Table ownership on the BEAM.** An ETS table dies with the process that created
 it, and a registration runs in whatever process loaded the module, so
 `rakun_file_router` creates its tables in a dedicated owner process registered
