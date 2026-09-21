@@ -34,6 +34,16 @@ import {
     nestedFrameProblem,
     staleEpochProblem,
     afterTimeoutMs,
+    headers,
+    Headers,
+    headerOf,
+    headerNames,
+    headerLookup,
+    headerPresent,
+    isDynamic,
+    dynamicReason,
+    markDynamic,
+    strictProblem,
 } from "request_context";
 
 fn scopeOf(id: string, phase: RequestPhase, path: string) -> RequestScope {
@@ -182,4 +192,133 @@ test "rakun request: the refusal texts say what they mean" {
 
 test "rakun request: the deferred-work budget defaults to thirty seconds" {
     assert afterTimeoutMs() == 30000;
+}
+
+// ── step 2: headers() ───────────────────────────────────────────────────────
+
+fn wireOf() -> string {
+    return "host\texample.com\nuser-agent\trakun/1\naccept\ttext/html\naccept\tapplication/json";
+}
+
+fn headerScope(phase: RequestPhase, strict: bool) -> RequestScope {
+    return RequestScope(
+        id: "h-1",
+        phase: phase,
+        method: "GET",
+        path: "/api/posts",
+        query: "",
+        headersWire: wireOf(),
+        strict: strict,
+    );
+}
+
+test "rakun request: a header lookup case-folds its name" {
+    val _e = beginRequest(headerScope(RequestPhase.Handler, false));
+    val h: Headers = headers();
+    val mixed = h.get("User-Agent");
+    val lower = h.get("user-agent");
+    val upper = h.get("USER-AGENT");
+    assert mixed.unwrapOr("") == "rakun/1";
+    assert lower.unwrapOr("") == "rakun/1";
+    assert upper.unwrapOr("") == "rakun/1";
+    val _x = endRequest();
+}
+
+test "rakun request: an absent header answers null, not the empty string" {
+    val _e = beginRequest(headerScope(RequestPhase.Handler, false));
+    val h: Headers = headers();
+    val absent = h.get("x-absent");
+    try asserts.isNil(absent);
+    assert h.has("x-absent") == false;
+    assert h.has("host") == true;
+    val _x = endRequest();
+}
+
+test "rakun request: a header sent twice answers both values joined" {
+    val _e = beginRequest(headerScope(RequestPhase.Handler, false));
+    val h: Headers = headers();
+    val both = h.get("accept");
+    assert both.unwrapOr("") == "text/html, application/json";
+    val _x = endRequest();
+}
+
+test "rakun request: names answers each header once, in wire order" {
+    val _e = beginRequest(headerScope(RequestPhase.Handler, false));
+    val h: Headers = headers();
+    assert h.names().join(",") == "host,user-agent,accept";
+    val _x = endRequest();
+}
+
+test "rakun request: headerOf reads through the handle with no annotation at the call site" {
+    val _e = beginRequest(headerScope(RequestPhase.Handler, false));
+    assert headerOf(headers(), "User-Agent", "") == "rakun/1";
+    assert headerOf(headers(), "x-absent", "none") == "none";
+    val _x = endRequest();
+}
+
+test "rakun request: the wire grammar is readable with no frame at all" {
+    assert headerLookup("a\t1\nb\t2", "A") == "1";
+    assert headerLookup("a\t1\na\t2", "a") == "1, 2";
+    assert headerLookup("a\t1", "zz") == "";
+    assert headerPresent("a\t1", "A") == true;
+    assert headerPresent("a\t1", "b") == false;
+    assert headerNames("").join(",") == "";
+    assert headerNames("a\t1\n\nb\t2").join(",") == "a,b";
+    assert headerLookup("a\t", "a") == "";
+    assert headerPresent("a\t", "a") == true;
+}
+
+test "rakun request: headers() marks a render dynamic and an action does not" {
+    val _e = beginRequest(headerScope(RequestPhase.Render, false));
+    assert isDynamic() == false;
+    val hr: Headers = headers();
+    val _h = hr.get("host");
+    assert isDynamic() == true;
+    assert dynamicReason() == "headers";
+    val _x = endRequest();
+
+    val _e2 = beginRequest(headerScope(RequestPhase.Action, false));
+    val ha: Headers = headers();
+    val _h2 = ha.get("host");
+    assert isDynamic() == false;
+    assert dynamicReason() == "";
+    val _x2 = endRequest();
+}
+
+test "rakun request: headers() in a strict frame raises, naming the function and the route" {
+    val _e = beginRequest(headerScope(RequestPhase.Render, true));
+    try asserts.throwsWith({ ->
+        headers();
+        0;
+    }, "headers() read the in-flight request while prerendering `/api/posts`");
+    val _x = endRequest();
+}
+
+test "rakun request: headers() with no frame raises" {
+    try asserts.throwsWith({ ->
+        headers();
+        0;
+    }, "request context is not established");
+}
+
+test "rakun request: a Headers handle used after endRequest raises" {
+    val _e = beginRequest(headerScope(RequestPhase.Handler, false));
+    val h: Headers = headers();
+    val _x = endRequest();
+    try asserts.throwsWith({ ->
+        h.get("host");
+        0;
+    }, "request context is not established");
+}
+
+test "rakun request: a Headers handle minted in the previous request raises in the next" {
+    val _e = beginRequest(headerScope(RequestPhase.Handler, false));
+    val stale: Headers = headers();
+    val _x = endRequest();
+    val _e2 = beginRequest(headerScope(RequestPhase.Handler, false));
+    try asserts.throwsWith({ ->
+        stale.get("host");
+        0;
+    }, "belongs to a request that has ended");
+    val _x2 = endRequest();
 }

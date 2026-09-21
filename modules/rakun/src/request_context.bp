@@ -38,6 +38,7 @@
 //// serialization and every refusal message are botopink, compiled twice.
 
 import {rkPropInt} from "runtime";
+import {sub} from "config";
 
 // ── the five phases ─────────────────────────────────────────────────────────
 //
@@ -238,4 +239,150 @@ pub fn afterTimeoutMs() -> i32 {
     val raw: i32 = rkPropInt("rakun.request.after.timeout");
     if (raw <= 0) return 30000;
     return raw;
+}
+
+// ── the dynamic marker ──────────────────────────────────────────────────────
+//
+// Every accessor that reads the in-flight request marks the render dynamic when
+// the phase is `Render` or `Handler`. `connection()` marks and reads nothing,
+// which is its whole purpose. Front 60 reads `isDynamic()` after the render to
+// decide whether the output may become a prerendered entry, and
+// `dynamicReason()` names the FIRST function that made it dynamic — which is
+// what turns "this page is not being prerendered" from a mystery into a line of
+// build output.
+//
+// `strict` is the other mode, set by front 60's build-time prerenderer and by
+// nothing else: a dynamic read RAISES there, naming the function and the route,
+// which is how `output: 'export'` fails the build rather than silently shipping
+// a page that read a cookie at build time.
+
+pub fn strictProblem(what: string, path: string) -> string {
+    return "rakun request: " + what + "() read the in-flight request while prerendering `"
+        + path + "` - a strict render may not be dynamic";
+}
+
+pub fn markDynamic(reason: string) -> i32 {
+    val _d = demand("markDynamic()");
+    if (requestStrict()) @panic(strictProblem(reason, rkReqSlot("path")));
+    val first: string = rkReqSlot("reason");
+    val keep: string = if (first == "") reason else first;
+    val _r = rkReqPutSlot("reason", keep);
+    return rkReqPutSlot("dynamic", "1");
+}
+
+pub fn isDynamic() -> bool {
+    val _d = demand("isDynamic()");
+    return rkReqSlot("dynamic") != "";
+}
+
+pub fn dynamicReason() -> string {
+    val _d = demand("dynamicReason()");
+    return rkReqSlot("reason");
+}
+
+// Only `Render` and `Handler` can be prerendered, so only they carry a dynamic
+// decision; `Middleware`, `Action` and `After` are dynamic by construction and
+// marking them would put a reason on a render that never existed.
+fn markIfRendering(what: string) -> i32 {
+    val _d = demand(what + "()");
+    val phase: string = rkReqSlot("phase");
+    val rendering = ((phase == "render") || (phase == "handler"));
+    if (rendering) return markDynamic(what);
+    return 0;
+}
+
+// ── the header wire ─────────────────────────────────────────────────────────
+//
+// `name\tvalue` lines, `\n`-separated, names already lowercased by the
+// dispatcher — `headerName` lowercases again anyway, because a lookup that
+// trusts its caller is a lookup that answers `null` in production. A repeated
+// header is joined with `", "`, which is what RFC 9110 § 5.3 says a recipient
+// may do and what front 04's dispatcher already does for a repeated query key.
+//
+// The three readers below take the WIRE as a parameter, so the grammar is
+// unit-testable with no frame, no process and no socket.
+
+pub fn headerNames(wire: string) -> string[] {
+    var out: string[] = [];
+    val lines: string[] = wire.split("\n");
+    var i = 0;
+    loop (i < lines.length()) {
+        val line: string = lines.at(i).unwrapOr("");
+        val tab: i32 = line.indexOf("\t");
+        val name: string = if (tab > 0) sub(line, 0, tab).toLower() else "";
+        val fresh = ((name != "") && (out.indexOf(name) < 0));
+        if (fresh) out.push(name);
+        i = i + 1;
+    };
+    return out;
+}
+
+pub fn headerLookup(wire: string, name: string) -> string {
+    val want: string = name.toLower().trim();
+    val lines: string[] = wire.split("\n");
+    var out = "";
+    var found = false;
+    var i = 0;
+    loop (i < lines.length()) {
+        val line: string = lines.at(i).unwrapOr("");
+        val tab: i32 = line.indexOf("\t");
+        val key: string = if (tab > 0) sub(line, 0, tab).toLower() else "";
+        val value: string = if (tab > 0) sub(line, tab + 1, line.length()) else "";
+        val hit = ((key != "") && (key == want));
+        val joined: string = if (found) out + ", " + value else value;
+        out = if (hit) joined else out;
+        found = if (hit) true else found;
+        i = i + 1;
+    };
+    return out;
+}
+
+pub fn headerPresent(wire: string, name: string) -> bool {
+    val want: string = name.toLower().trim();
+    return headerNames(wire).indexOf(want) >= 0;
+}
+
+// ── headers() ───────────────────────────────────────────────────────────────
+//
+// `get` answers `?string` and `null` for an absent header — the one place this
+// front deliberately differs from `Request.header`, which is frozen at plain
+// `string`. A header that is absent and a header whose value is empty are
+// different questions, and a server that cannot tell them apart cannot
+// implement a conditional request.
+
+pub type Headers(
+    epoch: i64,
+) {
+    pub fn get(self: Self, name: string) -> ?string {
+        val _c = checkEpoch(self.epoch, "headers");
+        val wire: string = rkReqSlot("headers");
+        if (headerPresent(wire, name) == false) return null;
+        return headerLookup(wire, name);
+    }
+
+    pub fn has(self: Self, name: string) -> bool {
+        val _c = checkEpoch(self.epoch, "headers");
+        return headerPresent(rkReqSlot("headers"), name);
+    }
+
+    pub fn names(self: Self) -> string[] {
+        val _c = checkEpoch(self.epoch, "headers");
+        return headerNames(rkReqSlot("headers"));
+    }
+}
+
+pub fn headers() -> Headers {
+    val _m = markIfRendering("headers");
+    return Headers(epoch: rkReqEpoch());
+}
+
+// Read a header with `headerOf(h, name, fallback)`, not
+// `headers().get(name).unwrapOr(fallback)`. The optional a record method
+// answers loses its type when the receiver is itself a CALL — the shape
+// `paramOf` already exists for in `file_router.bp` — and `.unwrapOr` is then a
+// bare local call that no module defines. This is the typed form, and it is
+// what fronts 23, 24 and 25 should use.
+pub fn headerOf(h: Headers, name: string, fallback: string) -> string {
+    val found: ?string = h.get(name);
+    return found.unwrapOr(fallback);
 }

@@ -682,6 +682,42 @@ process's dictionary. Deferred work runs in a CHILD process, so its bookkeeping
 can live in neither, and the shared area is ETS owned by a dedicated process —
 `rakun_file_router`'s shape, for `rakun_file_router`'s reason.
 
+### `headers()` and the dynamic marker
+
+`headersWire` is `name\tvalue` lines, `\n`-separated, names already lowercased
+by the dispatcher — and `headerLookup` lowercases again anyway, because a lookup
+that trusts its caller is a lookup that answers `null` in production. A repeated
+header is joined with `", "`, which is what RFC 9110 § 5.3 lets a recipient do
+and what front 04's dispatcher already does for a repeated query key.
+
+`headerNames`, `headerLookup` and `headerPresent` take the WIRE as a parameter,
+so the grammar is unit-testable with no frame, no process and no socket; the
+`Headers` handle is the frame-bound face of the same three.
+
+`get` answers `?string` and `null` for an absent header — the one place this
+front deliberately differs from `Request.header`, which is frozen at plain
+`string`. A header that is absent and a header whose value is empty are
+different questions, and a server that cannot tell them apart cannot implement a
+conditional request.
+
+**Read a header with `headerOf(h, name, fallback)`, not
+`headers().get(name).unwrapOr(fallback)`.** The optional a record method answers
+LOSES ITS TYPE when the receiver is itself a call or an unannotated local, and
+`.unwrapOr` is then emitted as a bare local call — `unwrapOr is not a function`
+on the node row, `function unwrapOr/2 undefined` on the erlang one. Either
+annotate the handle (`val h: Headers = headers();`) or go through `headerOf`,
+whose PARAMETER is typed. It is the same shape `paramOf` already exists for in
+`file_router.bp`, one type further out, and it is why every handle in
+`test/request_context_test.bp` carries its annotation.
+
+Every accessor that reads the in-flight request marks the render dynamic when
+the phase is `Render` or `Handler` — `Middleware`, `Action` and `After` are
+dynamic by construction and marking them would put a reason on a render that
+never existed. `dynamicReason()` names the FIRST function to mark, which is what
+turns "this page is not being prerendered" into a line of build output. The
+frame's `strict` flag is set by front 60's prerenderer and by nothing else: a
+dynamic read raises there, naming the function and the route.
+
 ### Language notes this module is written around
 
 - **A `@panic` message must be pure ASCII.** `asserts.throwsWith` catches

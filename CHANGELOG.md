@@ -48,6 +48,27 @@
   136/136); `botopink test --target erlang` 146 passing / 2 failing (was 134/2),
   the same two front-04 `request/6` reds.
 
+- **`headers()`, and the dynamic marker every accessor goes through** (front
+  62, step 2). `headerNames` / `headerLookup` / `headerPresent` read the
+  `name\tvalue` wire with the wire as a PARAMETER, so the grammar is asserted
+  with no frame and no socket; `headers()` is the frame-bound face of the same
+  three and answers a `Headers` handle carrying the epoch it was minted with.
+  A name is case-folded on both sides, a header sent twice answers both values
+  joined with `", "` (RFC 9110 § 5.3), and an absent header answers `null`
+  rather than `""` — the one place this front deliberately differs from
+  `Request.header`, which is frozen at plain `string`. A read in phase `Render`
+  or `Handler` marks the render dynamic and records the FIRST reason; in a
+  `strict` frame it raises instead, naming the function and the route.
+
+  A second compiler shape, recorded rather than worked around: **the optional a
+  record method answers loses its type when the receiver is a call or an
+  unannotated local**, so `headers().get(n).unwrapOr(d)` is `unwrapOr is not a
+  function` on node and `function unwrapOr/2 undefined` on erlang. The typed
+  form is `headerOf(h, name, fallback)` — the same shape `paramOf` already
+  exists for in `file_router.bp`, one type further out. Measured:
+  `botopink test` 159/159; `botopink test --target erlang` 157 passing / 2
+  failing, the same two front-04 reds.
+
 - **The route table crosses the boundary, and one matcher reads it on both
   rows** (front 22, steps 3 and 4). `RouteEntry(kind, pattern, slot, verb)`
   writes as `kind|pattern|slot|verb`, one record per line in registration order,
