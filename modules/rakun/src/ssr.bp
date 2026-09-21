@@ -40,11 +40,33 @@
 ////   This is front 22's measurement, and it is what the four markers already
 ////   emit.
 
-import {dict} from "std";
+import {dict, time} from "std";
 import {Response} from "http";
+import {rkProp} from "runtime";
+// `toI32` is front 05's `parseInt(v, 10)` rule, reached through a `pub fn` in
+// `src/` rather than spelled a second time — the reason `lifecycle.bp` imports
+// it too.
+import {toI32} from "config";
+import {
+    RequestPhase,
+    percentDecode,
+    percentEncode,
+    RequestScope,
+    beginRequest,
+    endRequest,
+    isDynamic,
+    markDynamic,
+    requestPhase,
+    setPhase,
+} from "request_context";
 import {
     RouteEntry,
     charOf,
+    contextOf,
+    ctxParam,
+    matchPath,
+    appTable,
+    rkAppTable,
     sub,
     PageContext,
     LayoutProps,
@@ -102,7 +124,7 @@ pub declare fn rkSsrNextNav() -> i32;
 #[@future]
 #[@External.Node("./ssr.mjs", "all"),
   @External.Erlang("rakun_ssr", "all")]
-pub declare fn rkSsrAll<T>(thunks: Array<fn() -> T>) -> @Future<Array<T>>;
+pub declare fn rkSsrAll<T>(thunks: Array<fn() -> @Future<T>>) -> @Future<Array<T>>;
 
 #[@External.Node("./ssr.mjs", "settledOrder"),
   @External.Erlang("rakun_ssr", "settled_order")]
@@ -183,6 +205,23 @@ pub fn headerOfPage(page: RenderedPage, name: string) -> string {
         };
     };
     return found;
+}
+
+// THREE TYPED ACCESSORS, for the reason `paramOf`, `headerOf` and `ctxParam`
+// exist one module over: `page.chunks.at(0).unwrapOr("")` written at a call
+// site reads the element back UNWRAPPED on the erlang row and dies with a
+// `case_clause` on the chunk itself — the array came off a RECORD FIELD and the
+// type is lost there. Read through a typed PARAMETER and it is correct.
+pub fn chunkCount(page: RenderedPage) -> i32 {
+    return page.chunks.length;
+}
+
+pub fn chunkAt(page: RenderedPage, index: i32) -> string {
+    return page.chunks.at(index).unwrapOr("");
+}
+
+pub fn bodyOf(page: RenderedPage) -> string {
+    return page.chunks.join("");
 }
 
 pub fn toResponse(page: RenderedPage) -> Response {
@@ -367,6 +406,12 @@ pub type RenderHooks(
     collectHead: fn() -> string,
     collectChunk: fn(string) -> string,
     closeSink: fn() -> string,
+    // `contracts.md § 6a` says `emittedClasses(sink)` is what the wrapper hands
+    // this front for the payload's `s` key — but the front's own field list
+    // stops at `closeSink`, so a sink filled with classes had no way to answer
+    // them. This is that field. It is read once, after `collectHead`, and it is
+    // never a re-scan of the CSS: the sink records as it fills.
+    emittedClasses: fn() -> string,
 )
 
 pub fn islandId(ordinal: i32) -> string {
@@ -407,6 +452,10 @@ pub fn noCloseSink() -> string {
     return "";
 }
 
+pub fn noEmittedClasses() -> string {
+    return "";
+}
+
 // A working document with no bundler and no stylesheet pipeline: no extra tags,
 // the marker pair of `contracts.md § 2`, and a sink that collects nothing. An
 // app with no toolchain renders correctly through it.
@@ -419,6 +468,7 @@ pub fn defaultHooks() -> RenderHooks {
         collectHead: { -> noCollectHead() },
         collectChunk: { h -> noCollectChunk(h) },
         closeSink: { -> noCloseSink() },
+        emittedClasses: { -> noEmittedClasses() },
     );
 }
 
@@ -435,6 +485,7 @@ pub fn withHeadExtra(h: RenderHooks, f: fn(string) -> string) -> RenderHooks {
         collectHead: h.collectHead,
         collectChunk: h.collectChunk,
         closeSink: h.closeSink,
+        emittedClasses: h.emittedClasses,
     );
 }
 
@@ -447,6 +498,7 @@ pub fn withBodyExtra(h: RenderHooks, f: fn(string) -> string) -> RenderHooks {
         collectHead: h.collectHead,
         collectChunk: h.collectChunk,
         closeSink: h.closeSink,
+        emittedClasses: h.emittedClasses,
     );
 }
 
@@ -459,6 +511,7 @@ pub fn withIslandAttr(h: RenderHooks, f: fn(i32) -> #(string, string)) -> Render
         collectHead: h.collectHead,
         collectChunk: h.collectChunk,
         closeSink: h.closeSink,
+        emittedClasses: h.emittedClasses,
     );
 }
 
@@ -471,6 +524,20 @@ pub fn withCollectHead(h: RenderHooks, f: fn() -> string) -> RenderHooks {
         collectHead: f,
         collectChunk: h.collectChunk,
         closeSink: h.closeSink,
+        emittedClasses: h.emittedClasses,
+    );
+}
+
+pub fn withEmittedClasses(h: RenderHooks, f: fn() -> string) -> RenderHooks {
+    return RenderHooks(
+        headExtra: h.headExtra,
+        bodyExtra: h.bodyExtra,
+        islandAttr: h.islandAttr,
+        openSink: h.openSink,
+        collectHead: h.collectHead,
+        collectChunk: h.collectChunk,
+        closeSink: h.closeSink,
+        emittedClasses: f,
     );
 }
 
@@ -489,6 +556,7 @@ pub fn withSink(
         collectHead: head,
         collectChunk: chunk,
         closeSink: close,
+        emittedClasses: h.emittedClasses,
     );
 }
 
@@ -819,4 +887,376 @@ pub fn compose<El>(
 // wire record by hand.
 pub fn registerBoundary<El>(kind: string, pattern: string, render: fn(props: LayoutProps<El>) -> El) -> i32 {
     return rkAppRegisterTemplate(recordLine(kind, pattern), render);
+}
+
+
+// ── steps 5 and 6: the two entry points ─────────────────────────────────────
+//
+// THE PHASE WORD IS NOT BOOKKEEPING. `setPhase(RequestPhase.Render)` is the
+// same word front 12's `rkCachePhase()` reads to decide whether a revalidation
+// is legal, so a pipeline that skips it makes `revalidatePath` raise from
+// inside an action. The phase table of `contracts.md § 5` is ENFORCED, which
+// also means `cookies().set(...)` from a render raises — asserted here, not
+// described.
+//
+// AWAITING CHILDREN, AND WHY `@Future` IS NOT CONCURRENCY. `@Future<T>` lowers
+// EAGERLY on erlang — `libs/std/src/http.bp:16-18` says so outright — so a
+// future is a value that has already been computed, and calling two loaders and
+// awaiting both afterwards runs them one after the other at full latency. No
+// assertion over the markup would ever say so. And a `#[@future]` fn cannot
+// `await` inside a `loop` or a closure, because the effect marker attaches to
+// the function and not to the closure. So the pipeline NEVER awaits in a loop
+// and never hands anything an already-started future: it builds an
+// `Array<fn() -> @Future<El>>` — unstarted THUNKS — and gathers them in ONE
+// await. The concurrency comes from spawned processes.
+
+// `std/querystring` DOES NOT COMPILE on the erlang row: the emitted
+// `std/querystring.erl` reds with `function slice/3 undefined` at
+// `stripPrefix`, so every cell reaching it answers `{error, undef}`. Measured
+// here, on the current binary; it is std's defect and not this front's, and it
+// is why the two functions below exist. When it is fixed they are two bodies to
+// delete. The percent codec is NOT written a second time — `percentEncode` /
+// `percentDecode` are front 62's, and they already encode everything outside
+// the unreserved set, which is exactly what a query component needs.
+
+pub fn splitQuery(query: string) -> Array<#(string, string)> {
+    var out: Array<#(string, string)> = [];
+    val body = if (query.startsWith("?")) sub(query, 1, query.length()) else query;
+    if (body == "") return out else {
+        loop (body.split("&")) { chunk ->
+            if (chunk != "") {
+                val eq = chunk.indexOf("=");
+                val name = if (eq < 0) chunk else sub(chunk, 0, eq);
+                val value = if (eq < 0) "" else sub(chunk, eq + 1, chunk.length());
+                out.push(#(percentDecode(name), percentDecode(value)));
+            };
+        };
+        return out;
+    };
+}
+
+pub fn encodeQuery(pairs: Array<#(string, string)>) -> string {
+    var parts: string[] = [];
+    loop (pairs) { pair ->
+        parts.push(percentEncode(pair._0) + "=" + percentEncode(pair._1));
+    };
+    return parts.join("&");
+}
+
+pub fn queryDict(query: string) -> Dict<string, string> {
+    var d = dict.empty();
+    loop (splitQuery(query)) { pair ->
+        d = d.insert(pair._0, pair._1);
+    };
+    return d;
+}
+
+pub fn encodeParams(route: PageContext) -> string {
+    var pairs: Array<#(string, string)> = [];
+    val names: string[] = route.params.keys();
+    loop (names) { k ->
+        pairs.push(#(k, ctxParam(route, k)));
+    };
+    return encodeQuery(pairs);
+}
+
+// The build id is front 03's content hash of the build. Front 03 has not
+// landed, so it is read from front 04's property table and is `""` in a project
+// that sets nothing — which is honest: an empty build id is a build nobody
+// stamped, not a build whose hash happens to be empty.
+pub fn buildId() -> string {
+    return rkProp("rakun.build.id");
+}
+
+// READING THE SEARCH PARAMS MARKS THE RENDER DYNAMIC, and the marking is done
+// by the accessor rather than by a developer remembering to declare it: the one
+// that is remembered is not the one that leaks. Front 60's prerenderer with
+// `strict` set RAISES here instead of marking, which is how a static export
+// fails the build.
+pub fn searchParams(route: PageContext) -> Dict<string, string> {
+    val _m = markDynamic("searchParams");
+    return route.query;
+}
+
+pub fn searchParam(route: PageContext, name: string) -> string {
+    val _m = markDynamic("searchParams");
+    return route.query.at(name).unwrapOr("");
+}
+
+// One process per thunk, one await. This is the shape every sibling render in
+// this front goes through, and the type is what makes "no call site passes an
+// already-started future" checkable: the parameter is a FUNCTION, so a value
+// does not fit.
+#[@future]
+pub fn renderAll<T>(thunks: Array<fn() -> @Future<T>>) -> @Future<Array<T>> {
+    return await rkSsrAll(thunks);
+}
+
+// The one timing assertion this front makes reaches the clock through these two
+// functions, because `std/time` imported by a `test/` file is `undef` on the
+// erlang row and works when the same call is reached through a `pub fn` in
+// `src/`. They are two functions rather than one `measure(body)` because the
+// body being measured is an AWAIT, and a `#[@future]` body may not await inside
+// a closure.
+pub fn nowMs() -> i64 {
+    return time.monotonicMillis();
+}
+
+pub fn sinceUnder(start: i64, budgetMs: i32) -> bool {
+    return (time.monotonicMillis() - start) < budgetMs;
+}
+
+pub fn settledOrder() -> string {
+    return rkSsrSettledOrder();
+}
+
+pub fn concurrentRow() -> bool {
+    return rkSsrConcurrent();
+}
+
+// ── the request scope the pipeline runs inside ──────────────────────────────
+//
+// `beginRender` / `endRender` are the two halves a dispatcher brackets a render
+// with, and `endRender` MUST run on the failure path too — front 62's contract,
+// for front 62's reason: the next request on a keep-alive connection would
+// otherwise start inside this one's frame. botopink has no `finally` and a
+// raise is not catchable from a `.bp` body, so the bracket is the DISPATCHER's
+// and this front provides the two halves rather than pretending a single call
+// can hold it. On the BEAM the frame dies with the serving process, which is
+// why it is process-local; on node it would survive, which is why the rule is
+// written down here as well as in front 62.
+
+pub fn beginRender(id: string, pathname: string, query: string, strict: bool) -> i64 {
+    return beginRequest(RequestScope(
+        id: id,
+        phase: RequestPhase.Render,
+        method: "GET",
+        path: pathname,
+        query: query,
+        headersWire: "",
+        strict: strict,
+    ));
+}
+
+pub fn endRender() -> string {
+    return endRequest();
+}
+
+pub fn notFoundProblem(pathname: string) -> string {
+    return "rakun ssr: no page claims `" + pathname
+        + "` - a pattern carrying nothing but a layout is not public";
+}
+
+// ── step 6: the non-streaming entry point ───────────────────────────────────
+
+#[@future]
+pub fn missingPage<El>(v: ElementView<El>, route: PageContext) -> @Future<El> {
+    val make = v.make;
+    return make("#fragment", "", [], []);
+}
+
+#[@future]
+pub fn render<El>(v: ElementView<El>, pathname: string, query: string) -> @Future<RenderedPage> {
+    val previous: RequestPhase = requestPhase();
+    val _p = setPhase(RequestPhase.Render);
+    val h: RenderHooks = hooks();
+    val openSink = h.openSink;
+    val emitted = h.emittedClasses;
+    val _o = openSink();
+    val nav = rkSsrNextNav();
+    val table: RouteEntry[] = appTable();
+    var matched = false;
+    var pattern = "";
+    var chain: RouteEntry[] = [];
+    var route: PageContext = PageContext(
+        pathname: pathname,
+        pattern: "",
+        params: dict.empty(),
+        query: queryDict(query),
+        rest: [],
+    );
+    // The optional binder is a CLOSURE, and a `#[@future]` body may not await
+    // inside one — so the match is unpacked here and every await happens below
+    // it, in the function's own body.
+    if (matchPath(table, pathname)) { hit ->
+        matched = true;
+        pattern = hit.entry.pattern;
+        chain = hit.chain;
+        route = contextOf(hit, pathname, queryDict(query));
+    };
+    // THE AWAIT IS UNCONDITIONAL, and that is not a simplification. `await`
+    // inside an `if`/`else` block of a `#[@future]` body is emitted on the
+    // commonJS row inside a NON-ASYNC arrow IIFE — botopink's `if` is an
+    // expression — and node refuses the file at LOAD with `SyntaxError: await
+    // is only valid in async functions`, which takes the whole test file down
+    // rather than one cell. Measured here. So the page function is looked up
+    // for both arms (a miss resolves to `missingPage`, an empty fragment) and
+    // awaited once, at the body's own level.
+    val pageFn: fn(route: PageContext) -> @Future<El> =
+        rkAppRender(recordLine("P", pattern), { r -> missingPage(v, r) });
+    val page = await pageFn(route);
+    var body = "";
+    var status = 404;
+    if (matched) {
+        body = renderNode(v, compose(v, chain, route, nav, page));
+        status = 200;
+    } else {
+        body = renderNode(v, compose(v, rootChain(table), route, nav, page));
+    };
+    val payload = Payload(
+        build: buildId(),
+        pathname: pathname,
+        pattern: pattern,
+        params: encodeParams(route),
+        query: query,
+        table: rkAppTable(),
+        islands: [],
+        actions: [],
+        styles: emitted(),
+        holes: [],
+        dynamic: isDynamic(),
+        kinds: "",
+        slots: "",
+    );
+    val doc = await document("", body, payload);
+    val _back = setPhase(previous);
+    return renderedPage(status, [doc]);
+}
+
+// The layout chain of the root, which is what a 404 is wrapped in: a URL that
+// matches no page still renders inside the layouts that would have wrapped it,
+// and the `not-found` boundary is one of the five wrappers `compose` applies.
+pub fn rootChain(table: RouteEntry[]) -> RouteEntry[] {
+    var out: RouteEntry[] = [];
+    loop (table) { e ->
+        if (((e.kind == "L" && e.slot == "") && e.pattern == "/")) {
+            out.push(e);
+        };
+    };
+    return out;
+}
+
+// ── step 5: streaming ───────────────────────────────────────────────────────
+//
+// The response goes out as an ordered list of chunks and front 04's transport
+// writes them.
+//
+//   1. SHELL — doctype, head, open body, the composed tree with each boundary
+//      rendered as `<div data-onze-h="h1">…fallback…</div>`. The payload's `h`
+//      lists every hole still open.
+//   2. FILL — one per resolved boundary, in RESOLUTION order:
+//      `<template data-onze-f="h1">…</template><script>__onzeFill("h1")</script>`.
+//   3. TAIL — the payload script, the sink's closing block, the body extra.
+//
+// Front 30 owns the Suspense boundaries; this front owns the IDS and the chunk
+// PROTOCOL, and guarantees that a hole id in `h` is filled by exactly one fill
+// chunk. A boundary that resolved before the shell was flushed is simply not in
+// the `holes` list — it was rendered inline and never became a hole.
+
+// `Hole<El>` was a record here — `(fallback, body)` — and it is gone: a
+// parameter typed `Array<Hole<El>>` hits the same `generic-arg-skip-forbidden`
+// refusal as the bare thunk array, so a caller passes the fallbacks (already in
+// the shell) and the bodies (an `Array<fn() -> @Future<El>>`) as two lists. A
+// record nothing can take as a parameter is surface with no use.
+
+// The shell marker for a hole. The ordinal is assigned HERE, as an ordinal in
+// SHELL order, and is not derived from the route, the pattern or the boundary's
+// position in the tree.
+pub fn holeMarker<El>(v: ElementView<El>, ordinal: i32, fallback: El) -> El {
+    val make = v.make;
+    return make("div", "", [#("data-onze-h", holeId(ordinal))], [fallback]);
+}
+
+pub fn nextHoleOrdinal() -> i32 {
+    return rkSsrNextHole();
+}
+
+pub fn fillChunk(id: string, markup: string) -> string {
+    return "<template data-onze-f=\"" + id + "\">" + markup + "</template>"
+        + "<script>__onzeFill(\"" + id + "\")</script>";
+}
+
+pub fn shellChunk(head: string, body: string) -> string {
+    val h: RenderHooks = hooks();
+    val collectHead = h.collectHead;
+    val headExtra = h.headExtra;
+    return doctype() + head + collectHead() + headExtra("") + "</head><body>"
+        + rootOpen() + body + "</div>";
+}
+
+pub fn indicesOf(order: string) -> i32[] {
+    var out: i32[] = [];
+    if (order == "") return out else {
+        loop (order.split(",")) { part ->
+            if (part != "") {
+                out.push(toI32(part));
+            };
+        };
+        return out;
+    };
+}
+
+// The bodies are gathered in ONE await over unstarted thunks. The fills then go
+// out in the order the gather SETTLED in — which a gather by index cannot also
+// answer, so the host records it on the side — while the ids stay in shell
+// order. Two boundaries that resolve out of order therefore produce two fill
+// chunks in resolution order, each carrying the markup of its own boundary.
+// **The streaming entry is three calls and not one, and the reason is a
+// compiler gap, not a design choice.** A parameter typed
+// `Array<fn() -> @Future<El>>` in a function that also takes an
+// `ElementView<El>` is refused with `generic-arg-skip-forbidden: cannot skip a
+// defaulted argument while providing a later one` — reported on the token AFTER
+// the parameter, at any position in the list. Each half compiles on its own;
+// the two together do not. So the gather keeps its own function, where the
+// thunk type is the thing that makes "no call site passes an already-started
+// future" checkable, and the chunk protocol keeps its own, where nothing is
+// generic at all:
+//
+// ```bp
+// val resolved = await renderAll(bodies);          // ONE await, over thunks
+// val markups = markupAll(v, resolved);            // the walker, per boundary
+// val page = streamChunks(head, shell, ids, markups, p);
+// ```
+
+pub fn markupAll<El>(v: ElementView<El>, resolved: Array<El>) -> string[] {
+    var out: string[] = [];
+    loop (resolved) { e ->
+        out.push(renderNode(v, e));
+    };
+    return out;
+}
+
+// The chunk list. Nothing here is generic: by this point every boundary is a
+// finished string, which is also why a fill chunk can carry the markup of its
+// own boundary and nothing else.
+//
+// The fills go out in the order the gather SETTLED in — which a gather by index
+// cannot also answer, so the host records it on the side — while the IDS stay
+// in shell order. Two boundaries that resolve out of order therefore produce
+// two fill chunks in resolution order, each carrying its own markup, and every
+// id in the payload's `h` is filled by exactly one chunk.
+pub fn streamChunks(
+    head: string,
+    shell: string,
+    ids: string[],
+    markups: string[],
+    p: Payload,
+) -> RenderedPage {
+    val h: RenderHooks = hooks();
+    val collectChunk = h.collectChunk;
+    val closeSink = h.closeSink;
+    val bodyExtra = h.bodyExtra;
+    var chunks: string[] = [shellChunk(head, shell)];
+    loop (indicesOf(settledOrder())) { i ->
+        val id = ids.at(i).unwrapOr("");
+        val markup = markups.at(i).unwrapOr("");
+        chunks.push(collectChunk(id) + fillChunk(id, markup));
+    };
+    chunks.push(payloadScript(p) + closeSink() + bodyExtra(p.pattern) + "</body></html>");
+    return renderedPage(200, chunks);
+}
+
+pub fn emptyOf<El>(v: ElementView<El>) -> El {
+    val make = v.make;
+    return make("#fragment", "", [], []);
 }

@@ -29,7 +29,22 @@ import {
     rkAppPage,
     rkAppReset,
 } from "file_router";
-import {rkReqShareBump, rkReqShareCount, rkReqShareReset} from "request_context";
+import {
+    Cookies,
+    RequestPhase,
+    RequestScope,
+    beginRequest,
+    CookieAttrs,
+    cookieDefaults,
+    cookies,
+    endRequest,
+    phaseName,
+    requestPhase,
+    rkReqShareBump,
+    rkReqShareCount,
+    rkReqShareReset,
+    rkReqSleep,
+} from "request_context";
 import {
     ElementView,
     Node,
@@ -54,8 +69,26 @@ import {
     payloadOf,
     payloadScript,
     raw,
+    beginRender,
+    concurrentRow,
+    endRender,
+    holeId,
+    holeMarker,
+    markupAll,
+    nextHoleOrdinal,
+    nowMs,
+    render,
+    renderAll,
+    bodyOf,
+    chunkAt,
+    chunkCount,
     registerBoundary,
     renderNode,
+    searchParam,
+    settledOrder,
+    sinceUnder,
+    streamChunks,
+    withSink,
     renderedPage,
     rkSsrPayloadKeys,
     rkSsrPayloadText,
@@ -115,7 +148,7 @@ pub fn depthLayout(props: LayoutProps<Node>) -> Node {
 test "rakun ssr: a rendered page carries headers and an ordered chunk list" {
     val page: RenderedPage = renderedPage(200, ["<html>", "<body>", "</html>"]);
     assert page.status == 200;
-    assert page.chunks.length == 3;
+    assert chunkCount(page) == 3;
     assert headerOfPage(page, "Content-Type") == "text/html; charset=utf-8";
     assert htmlHeaders().length == 1;
 }
@@ -427,4 +460,256 @@ pub fn countedSheet() -> string {
 
 pub fn countOf(haystack: string, needle: string) -> i32 {
     return haystack.split(needle).length - 1;
+}
+
+// ── steps 5 and 6: streaming and the two entry points ───────────────────────
+
+#[@future]
+pub fn slowLeaf(name: string, ms: i32) -> @Future<Node> {
+    val _s = rkReqSleep(ms);
+    return el(name, [], []);
+}
+
+#[@future]
+pub fn blogPage(route: PageContext) -> @Future<Node> {
+    return el("article", [], [txt("post " + route.pathname)]);
+}
+
+#[@future]
+pub fn queryPage(route: PageContext) -> @Future<Node> {
+    val q = searchParam(route, "page");
+    return el("article", [], [txt("page " + q)]);
+}
+
+pub fn scopeFor(path: string) -> i64 {
+    return beginRender("ssr-" + path, path, "", false);
+}
+
+test "rakun ssr: a URL no page claims answers 404 with the not-found boundary's markup" {
+    val _r = rkAppReset();
+    val _s = rkSsrReset();
+    val v: ElementView<Node> = view();
+    val _l = rkAppLayout("", { props -> wrapLayout("layout", props) });
+    val _n = registerBoundary("N", "/", { props -> wrapLayout("not-found", props) });
+    val _p = rkAppPage("blog/[slug]", { route -> blogPage(route) });
+    val _e = scopeFor("/nowhere");
+    val page: RenderedPage = await render(v, "/nowhere", "");
+    val _x = endRender();
+    assert page.status == 404;
+    val doc = bodyOf(page);
+    assert doc.contains("<layout><not-found></not-found></layout>");
+    assert doc.contains("<div data-onze-root=\"\"><layout>");
+}
+
+test "rakun ssr: a matched URL renders the page inside its layouts and answers 200" {
+    val _r = rkAppReset();
+    val _s = rkSsrReset();
+    val v: ElementView<Node> = view();
+    val _l = rkAppLayout("", { props -> wrapLayout("layout", props) });
+    val _b = rkAppLayout("blog", { props -> wrapLayout("blog", props) });
+    val _p = rkAppPage("blog/[slug]", { route -> blogPage(route) });
+    val _e = scopeFor("/blog/hello");
+    val page: RenderedPage = await render(v, "/blog/hello", "");
+    val _x = endRender();
+    assert page.status == 200;
+    val doc = bodyOf(page);
+    assert doc.contains("<layout><blog><article>post /blog/hello</article></blog></layout>");
+    assert headerOfPage(page, "Content-Type") == "text/html; charset=utf-8";
+    val json = payloadOf(doc);
+    assert rkSsrPayloadText(json, "r") == "/blog/[slug]";
+    assert rkSsrPayloadText(json, "m") == "slug=hello";
+    assert rkSsrPayloadText(json, "d") == "false";
+}
+
+test "rakun ssr: the render runs in phase Render, where a cookie write raises" {
+    val _r = rkAppReset();
+    val _s = rkSsrReset();
+    val _e = scopeFor("/phase");
+    assert phaseName(requestPhase()) == "render";
+    val c: Cookies = cookies();
+    try asserts.throwsWith({ ->
+        c.set("a", "b", cookieDefaults());
+        0;
+    }, "in phase `render`");
+    val _x = endRender();
+}
+
+test "rakun ssr: reading the search params marks the render dynamic; not reading leaves `d` false" {
+    val _r = rkAppReset();
+    val _s = rkSsrReset();
+    val v: ElementView<Node> = view();
+    val _p = rkAppPage("plain", { route -> blogPage(route) });
+    val _q = rkAppPage("filtered", { route -> queryPage(route) });
+    val _e1 = scopeFor("/plain");
+    val quiet: RenderedPage = await render(v, "/plain", "page=2");
+    val _x1 = endRender();
+    assert rkSsrPayloadText(payloadOf(bodyOf(quiet)), "d") == "false";
+    val _e2 = scopeFor("/filtered");
+    val loud: RenderedPage = await render(v, "/filtered", "page=2");
+    val _x2 = endRender();
+    val doc = bodyOf(loud);
+    assert doc.contains("<article>page 2</article>");
+    assert rkSsrPayloadText(payloadOf(doc), "d") == "true";
+}
+
+test "rakun ssr: the previous phase is restored after a render" {
+    val _r = rkAppReset();
+    val _s = rkSsrReset();
+    val v: ElementView<Node> = view();
+    val _e = beginRequest(RequestScope(
+        id: "h-1",
+        phase: RequestPhase.Handler,
+        method: "GET",
+        path: "/x",
+        query: "",
+        headersWire: "",
+        strict: false,
+    ));
+    val _page = await render(v, "/x", "");
+    assert phaseName(requestPhase()) == "handler";
+    val _x = endRequest();
+}
+
+test "rakun ssr: sibling loaders are unstarted thunks gathered in ONE await" {
+    val _s = rkSsrReset();
+    var thunks: Array<fn() -> @Future<Node>> = [];
+    thunks.push({ -> slowLeaf("one", 50) });
+    thunks.push({ -> slowLeaf("two", 50) });
+    val start = nowMs();
+    val resolved = await renderAll(thunks);
+    val fast = sinceUnder(start, 100);
+    assert resolved.length == 2;
+    val v: ElementView<Node> = view();
+    assert markupAll(v, resolved).join("") == "<one></one><two></two>";
+    // The BEAM spawns one process per thunk, so two 50 ms loaders finish in
+    // well under 100 ms. Node has no process and `rkReqSleep` blocks the event
+    // loop, so the same two take 100 ms there — which is exactly what the same
+    // test written over already-started `@Future` values would look like on BOTH
+    // rows, and why the thunk type is the thing that is asserted, not the clock.
+    assert fast == concurrentRow();
+}
+
+test "rakun ssr: a shell and one boundary produce three chunks, the first ending inside <body>" {
+    val _s = rkSsrReset();
+    val v: ElementView<Node> = view();
+    val first = nextHoleOrdinal();
+    assert holeId(first) == "h1";
+    val shell = renderNode(v, el("main", [], [holeMarker(v, first, txt("loading"))]));
+    var thunks: Array<fn() -> @Future<Node>> = [];
+    thunks.push({ -> slowLeaf("late", 1) });
+    val resolved = await renderAll(thunks);
+    val page: RenderedPage = streamChunks(
+        "<title>t</title>",
+        shell,
+        [holeId(first)],
+        markupAll(v, resolved),
+        holePayload(["h1"]),
+    );
+    assert chunkCount(page) == 3;
+    assert chunkAt(page, 0).endsWith("</div>");
+    assert chunkAt(page, 0).contains("<body>");
+    assert chunkAt(page, 0).contains("<div data-onze-h=\"h1\">loading</div>");
+    assert chunkAt(page, 1)
+        == "<template data-onze-f=\"h1\"><late></late></template><script>__onzeFill(\"h1\")</script>";
+    assert chunkAt(page, 2).endsWith("</body></html>");
+    val doc = bodyOf(page);
+    assert rkSsrPayloadText(payloadOf(doc), "h") == "[\"h1\"]";
+    assert countOf(doc, "data-onze-f=\"h1\"") == 1;
+}
+
+test "rakun ssr: hole ids are ordinals in shell order even when the boundaries resolve in reverse" {
+    val _s = rkSsrReset();
+    val v: ElementView<Node> = view();
+    val a = nextHoleOrdinal();
+    val b = nextHoleOrdinal();
+    assert holeId(a) == "h1";
+    assert holeId(b) == "h2";
+    val shell = renderNode(v, el("main", [], [
+        holeMarker(v, a, txt("A")),
+        holeMarker(v, b, txt("B")),
+    ]));
+    var thunks: Array<fn() -> @Future<Node>> = [];
+    thunks.push({ -> slowLeaf("slow", 60) });
+    thunks.push({ -> slowLeaf("quick", 1) });
+    val resolved = await renderAll(thunks);
+    val page: RenderedPage = streamChunks(
+        "",
+        shell,
+        [holeId(a), holeId(b)],
+        markupAll(v, resolved),
+        holePayload(["h1", "h2"]),
+    );
+    assert chunkCount(page) == 4;
+    // shell order, in the shell and in the payload, whatever the clock did
+    assert shell == "<main><div data-onze-h=\"h1\">A</div><div data-onze-h=\"h2\">B</div></main>";
+    // resolution order, in the chunks — and each fill carries its OWN markup
+    val expected = if (concurrentRow()) "1,0" else "0,1";
+    assert settledOrder() == expected;
+    val firstFill = chunkAt(page, 1);
+    val secondFill = chunkAt(page, 2);
+    if (concurrentRow()) {
+        assert firstFill.contains("data-onze-f=\"h2\"");
+        assert firstFill.contains("<quick></quick>");
+        assert secondFill.contains("data-onze-f=\"h1\"");
+        assert secondFill.contains("<slow></slow>");
+    } else {
+        assert firstFill.contains("data-onze-f=\"h1\"");
+        assert firstFill.contains("<slow></slow>");
+        assert secondFill.contains("data-onze-f=\"h2\"");
+        assert secondFill.contains("<quick></quick>");
+    };
+}
+
+test "rakun ssr: a boundary that resolved before the shell flush is no hole and gets no fill chunk" {
+    val _s = rkSsrReset();
+    val v: ElementView<Node> = view();
+    val shell = renderNode(v, el("main", [], [el("inline", [], [txt("already here")])]));
+    val page: RenderedPage = streamChunks("", shell, [], [], holePayload([]));
+    assert chunkCount(page) == 2;
+    val doc = bodyOf(page);
+    assert doc.contains("data-onze-h") == false;
+    assert doc.contains("data-onze-f") == false;
+    assert doc.contains("__onzeFill") == false;
+    assert rkSsrPayloadText(payloadOf(doc), "h") == "[]";
+}
+
+test "rakun ssr: a streamed chunk carries the sink's block before its markup" {
+    val _s = rkSsrReset();
+    val v: ElementView<Node> = view();
+    val base: RenderHooks = defaultHooks();
+    val sunk: RenderHooks = withSink(
+        base,
+        { -> 0 },
+        { -> "<style>.shell{}</style>" },
+        { hole -> "<style data-onze-s=\"" + hole + "\">.chunk{}</style>" },
+        { -> "" },
+    );
+    val _i = setHooks(sunk);
+    val hole = nextHoleOrdinal();
+    val shell = renderNode(v, el("main", [], [holeMarker(v, hole, txt("..."))]));
+    var thunks: Array<fn() -> @Future<Node>> = [];
+    thunks.push({ -> slowLeaf("late", 1) });
+    val resolved = await renderAll(thunks);
+    val page: RenderedPage = streamChunks("", shell, [holeId(hole)], markupAll(v, resolved), holePayload(["h1"]));
+    assert chunkAt(page, 0).contains("<style>.shell{}</style>");
+    assert chunkAt(page, 1).startsWith("<style data-onze-s=\"h1\">.chunk{}</style><template");
+    val _r = rkSsrReset();
+}
+
+pub fn holePayload(ids: string[]) -> Payload {
+    return Payload(
+        build: "b0",
+        pathname: "/stream",
+        pattern: "/stream",
+        params: "",
+        query: "",
+        table: "",
+        islands: [],
+        actions: [],
+        styles: "",
+        holes: ids,
+        dynamic: false,
+        kinds: "",
+        slots: "",
+    );
 }

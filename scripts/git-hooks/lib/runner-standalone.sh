@@ -64,6 +64,39 @@ runStandaloneGate() {
         pass "No conflict markers"
     fi
 
+    # 1b. front 23's own greps (`specs/.../23-rakun-ssr-pipeline` § Definition of
+    #     done). Three claims that are cheap to check and expensive to lose:
+    #     the SSR walker never calls the unescaped renderer, `repository/rakun/`
+    #     names no module of onze (decision 77), and `ssr.bp` keeps no tag list
+    #     of its own — the void and raw-text sets are front 94's, passed in as
+    #     `ElementView` fields.
+    local ssr="modules/rakun/src/ssr.bp"
+    if [ -f "$ssr" ]; then
+        if grep -q 'renderToString' "$ssr"; then
+            fail "ssr.bp calls renderToString — the frozen renderer escapes nothing; a single call is the whole hole"
+        fi
+        # Decision 77: no module of onze is reachable from rakun's core. The
+        # allowed occurrences are all `contracts.md § 2` STRINGS — the
+        # `data-onze-*` markers, the `__onze` payload id, `__onzeFill`, and
+        # front 22's `onze.appDir` property key — plus prose in comments.
+        if grep -rn 'from "onze' modules/rakun/src/ 2>/dev/null | grep -q .; then
+            fail "modules/rakun/src/ imports a module of onze (decision 77)"
+        fi
+        if grep -rn 'onze' modules/rakun/src/ 2>/dev/null \
+            | grep -vE '\.bp:[0-9]+: *//' \
+            | grep -v 'data-onze-' | grep -v '__onze' \
+            | grep -v 'onze\.appDir' | grep -q .; then
+            fail "modules/rakun/src/ names onze outside the contract-2 marker strings (decision 77)"
+        fi
+        local voidtag
+        for voidtag in area base col embed hr img input link meta source track wbr; do
+            if grep -q "\"$voidtag\"" "$ssr"; then
+                fail "ssr.bp spells the void tag \"$voidtag\" — the set is front 94's isVoidTag, passed in"
+            fi
+        done
+        pass "front 23 greps: no renderToString, no onze module, no tag list"
+    fi
+
     # 2. botopink test.
     local bin
     if grep -q '"workspaces"' "$root/botopink.json" 2>/dev/null; then

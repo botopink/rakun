@@ -543,6 +543,60 @@ other six staying at their defaults. A document rendered through
 the stylesheet is the sink's, and the sink is installed by whoever boots the
 app.
 
+### Rendering a request
+
+```bp
+val epoch = beginRender(random.uuidV4(), "/blog/hello", "page=2", false);
+val page = await render(view, "/blog/hello", "page=2");
+val cookies = endRender();          // on the failure path too
+val res = toResponse(page);
+```
+
+`render` opens phase `Render`, finds the page, wraps it in its layouts, renders
+with escaping, writes the document, and answers a `RenderedPage(status, headers,
+chunks)` carrying `Content-Type: text/html; charset=utf-8`. A URL no page claims
+answers 404 with the `not-found` boundary's markup. Read a chunk with
+`chunkAt(page, i)` and the whole body with `bodyOf(page)` — not
+`page.chunks.at(i)`, which loses the optional on the erlang row.
+
+`endRender()` must run **on the failure path too**: without it, the next request
+on a keep-alive connection starts inside this one's frame.
+
+Reading the search params marks the render dynamic:
+
+```bp
+val page = searchParam(route, "page");   // sets the payload's `d` to true
+```
+
+### Slow sections: thunks, never futures
+
+`@Future<T>` lowers eagerly on erlang, so awaiting two futures runs them one
+after the other at full latency. Concurrency comes from processes:
+
+```bp
+var loaders: Array<fn() -> @Future<Element>> = [];
+loaders.push({ -> loadPosts() });
+loaders.push({ -> loadAuthor() });
+val resolved = await renderAll(loaders);   // one process per thunk, one await
+```
+
+Never hand `renderAll` an already-started `@Future` — the parameter is a
+function type, so it will not fit, which is the point.
+
+### Streaming
+
+```bp
+val resolved = await renderAll(bodies);
+val page = streamChunks(head, shell, ids, markupAll(view, resolved), payload);
+```
+
+The shell goes out first, ending inside `<body>`; one fill chunk follows per
+boundary, in the order they RESOLVED —
+`<template data-onze-f="h1">…</template><script>__onzeFill("h1")</script>` —
+and the tail carries the payload. Hole ids are `h1`, `h2`, … in SHELL order
+whatever the clock did, and a boundary that finished before the shell was
+flushed is simply not in the list: it rendered inline and gets no hole.
+
 ## The container: beans, `Context`, lifecycle and events
 
 Constructor injection resolves a field by type and needs no help. Everything

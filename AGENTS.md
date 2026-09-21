@@ -827,6 +827,170 @@ to be a dependency of rakun, and `s` arrives through the style sink's
 `emittedClasses`, so the assertion belongs to front 69 or 68, where both sides
 of the comparison exist.
 
+### Steps 5 and 6 — the chunk protocol and the two entry points
+
+```bp
+#[@future] pub fn render<El>(v: ElementView<El>, pathname: string, query: string) -> @Future<RenderedPage>
+#[@future] pub fn renderAll<T>(thunks: Array<fn() -> @Future<T>>) -> @Future<Array<T>>
+pub fn markupAll<El>(v: ElementView<El>, resolved: Array<El>) -> string[]
+pub fn streamChunks(head, shell, ids: string[], markups: string[], p: Payload) -> RenderedPage
+pub fn beginRender(id, pathname, query, strict) -> i64
+pub fn endRender() -> string
+```
+
+**The phase word is not bookkeeping.** `render` enters
+`setPhase(RequestPhase.Render)` and restores the previous phase when it is
+done, because that is the same word front 12's `rkCachePhase()` reads to decide
+whether a revalidation is legal. The phase table of `contracts.md § 5` is
+ENFORCED, and the suite proves it by writing a cookie from a render and reading
+the refusal.
+
+**`beginRender` / `endRender` are two halves, deliberately.** front 62's
+contract says `endRequest()` must run on the failure path too, or the next
+request on a keep-alive connection starts inside this one's frame. botopink has
+no `finally` and a raise is not catchable from a `.bp` body, so the bracket is
+the DISPATCHER's; this front provides the two halves rather than pretending one
+call can hold it. On the BEAM the frame dies with the serving process, which is
+why it is process-local; on node it would survive, which is why the rule is
+written here as well as in front 62.
+
+**`@Future` is not concurrency on the target this front compiles for.** It
+lowers EAGERLY on erlang, so a future is a value that has already been computed
+and two of them awaited together have already run in sequence, at full latency —
+and no assertion over the markup would ever say so. A `#[@future]` fn also
+cannot `await` inside a `loop` or a closure. So the pipeline never awaits in a
+loop and never hands anything an already-started future: it builds an
+`Array<fn() -> @Future<El>>` — unstarted THUNKS — and `renderAll` gathers them
+in ONE await, one spawned process per thunk. The PARAMETER TYPE is what makes
+"no call site passes an already-started future" checkable: a value does not fit
+where a function is required.
+
+The suite measures it: two 50 ms loaders finish under 100 ms on the row that
+spawns and take 100 ms on the row that cannot, and the cell asserts
+`fast == concurrentRow()` rather than claiming one shape for both. The same
+test written over already-started futures takes 100 ms on BOTH rows and looks
+correct in every other respect, which is the whole reason the thunk type is
+pinned.
+
+**The streaming entry is three calls and not one, and that is a compiler gap.**
+A parameter typed `Array<fn() -> @Future<El>>` in a function that also takes an
+`ElementView<El>` is refused with `generic-arg-skip-forbidden: cannot skip a
+defaulted argument while providing a later one`, reported on the token AFTER the
+parameter and at any position in the list; each half compiles alone, the two
+together do not, and wrapping the thunk in a record (`Hole<El>`) hits the same
+refusal. So the gather keeps its own function and the chunk protocol keeps its
+own, where nothing is generic:
+
+```bp
+val resolved = await renderAll(bodies);
+val page = streamChunks(head, shell, ids, markupAll(v, resolved), payload);
+```
+
+1. **Shell** — doctype, head, open body, the composed tree with each boundary
+   rendered as `<div data-onze-h="h1">…fallback…</div>`; the payload's `h`
+   lists every hole still open.
+2. **Fill** — one per boundary, in RESOLUTION order:
+   `<template data-onze-f="h1">…</template><script>__onzeFill("h1")</script>`.
+3. **Tail** — the payload script, the sink's closing block, the body extra.
+
+The ids stay in SHELL order while the fills go out in the order the gather
+SETTLED in — which a gather by index cannot also answer, so the host records it
+on the side and `settledOrder()` reads it back. Two boundaries that resolve out
+of order therefore produce two fill chunks in resolution order, each carrying
+its own markup, and every id in `h` is filled by exactly one chunk. A boundary
+that resolved before the shell flush is simply not in the list: it was rendered
+inline, and there is no hole and no fill chunk for it.
+
+`__onzeFill` lives in `ssr.mjs` and is idempotent by construction — a second
+call for one id finds no template, or no hole, and leaves the DOM unchanged.
+**Its DOM-level assertion is not a cell in this suite and cannot be**: it is
+browser code, so there is no erlang twin to pair it with, and a node-only
+`declare fn` would red the erlang row at its call site (front 05's first
+measurement). What this suite asserts is the PROTOCOL — one fill chunk per hole
+id, the `<template>` + `<script>__onzeFill("…")</script>` shape, the ids. The
+DOM half belongs to front 68's bundle test, where a DOM exists.
+
+### What jhonstart front 26 consumes from this front
+
+Front 26 (the client router) and the chain behind it — 27 to 32 — wait on this
+front. This is the surface they may rely on; none of it changes without a note
+here.
+
+| What | Where | Shape |
+|---|---|---|
+| The element adapter | `ElementView<El>` + `nodeView` | front 26 writes ONE adapter for jhonstart's `Element`: `make`/`tagOf`/`valueOf`/`attrsOf`/`childrenOf` plus front 94's `isVoidTag`/`isRawTextTag`. Every field is a LAMBDA (`{ t -> isVoidTag(t) }`), never a bare function name |
+| The escaping walker | `renderNode(v, e)` · `raw(v, html)` | the only renderer any milestone path may call on untrusted data; `renderToString` escapes nothing and still writes `</input>` |
+| Composition | `compose(v, chain, route, nav, page)` | `chain` is front 22's `RouteMatch.chain`, already root-first. `nav` is the navigation counter the `data-onze-t` key carries |
+| The layout depth | `selected()` | front 26's `selected`, root layout `0`. A call and not a field of `LayoutProps`, which is front 22's three-field record |
+| The payload | `Payload` · `writePayload` · `payloadEscape` · `payloadOf(document)` | `contracts.md § 2` verbatim, `v`=1. `p`/`m`/`q`/`r` are front 26's router state one-to-one; `segments` is derived from `r`, never transported |
+| The document | `document(head, body, p)` | `head` is front 32's `renderHead(m)` output. The body sits inside `<div data-onze-root="">` |
+| The seam | `RenderHooks` · `defaultHooks()` · `setHooks` · the six `with*` fillers | front 29 defines `islandAttr`; `Onze.run` installs the record |
+| Islands | `nextIslandOrdinal()` · `islandId(n)` · `island(v, h, n, inner)` | ordinals `i0`, `i1`, … in render order, assigned HERE; the component name and props live in the payload's `i`, never on the element |
+| Holes | `nextHoleOrdinal()` · `holeId(n)` · `holeMarker(v, n, fallback)` · `fillChunk(id, markup)` | ordinals `h1`, `h2`, … in shell order, assigned HERE, never route-derived |
+| The page | `RenderedPage` · `chunkCount` · `chunkAt` · `bodyOf` · `toResponse` | read a chunk through the typed accessor, not `page.chunks.at(i)` |
+| Entry points | `render(v, pathname, query)` · `beginRender` / `endRender` | `endRender()` runs on the failure path too — it is the dispatcher's bracket |
+| The search params | `searchParams(route)` · `searchParam(route, name)` | reading them MARKS the render dynamic |
+
+**One call-site rule for all of it, and it only shows on the erlang row:** a
+function-valued record field must be read into a local before it is called —
+`val tagOf = v.tagOf; tagOf(e)`, never `v.tagOf(e)`.
+
+**One hole front 26 should know about.** `searchParams(route)` marks the render
+dynamic; `route.query` is a public field of front 22's `PageContext` and a
+direct read of it is a field read this front cannot intercept. The marking is
+therefore enforced for everyone who goes through the accessor and for nobody
+who does not, which is weaker than the front's own text ("the marking is done by
+the accessor, not by a developer remembering to declare it"). Closing it means
+either dropping `query` from `PageContext` or making it private — both are front
+22's file, and neither is this front's to change. Recorded, not smoothed over.
+
+### The gate's own greps
+
+`scripts/git-hooks/lib/runner-standalone.sh` stage 1b enforces three claims of
+this front's *Definition of done*, because each of them is one edit away from
+being false and none of them is visible in a test:
+
+- `ssr.bp` contains no `renderToString` — a single call is the whole hole.
+- `modules/rakun/src/` imports no module of onze and names `onze` only in the
+  `contracts.md § 2` strings (`data-onze-*`, `__onze`, `__onzeFill`) and front
+  22's `onze.appDir` property key (decision 77).
+- `ssr.bp` spells no void tag — the set is front 94's `isVoidTag`, arriving as
+  an `ElementView` field.
+
+### Language notes this module is written around
+
+Beyond the two call-site rules above, five measurements shaped this file and
+each of them cost a red:
+
+- **`await` inside an `if`/`else` block of a `#[@future]` body is emitted inside
+  a NON-ASYNC arrow IIFE on the commonJS row** — botopink's `if` is an
+  expression — and node refuses the file at LOAD with `SyntaxError: await is
+  only valid in async functions`, taking the whole test FILE down rather than
+  one cell. `render` therefore looks the page function up for both arms and
+  awaits once, at the body's own level.
+- **The optional binder is a closure.** `if (matchPath(…)) { m -> … }` may not
+  `await` inside it, so `render` unpacks the match into locals and every await
+  happens below.
+- **`xs.at(i).unwrapOr(…)` reads the element back UNWRAPPED** both inside a
+  function generic in `El` and at a call site where the array came off a RECORD
+  FIELD — `{case_clause, <<"…">>}` on the erlang row. Read through a typed
+  PARAMETER (`chunkAt(page, 0)`) or walk with a `loop` binder. It is the same
+  shape `paramOf`, `headerOf` and `ctxParam` already exist for.
+- **A local `val` or a PARAMETER may shadow a module-level `pub fn` of the same
+  name for an IMPORTER.** A parameter named `raw` in `jsonString(raw: string)`
+  made a test importing `pub fn raw` fail with `expected Node, got bool`. The
+  parameters are `plain` and `text` now.
+- **`std/querystring` does not compile on the erlang row.** The emitted
+  `std/querystring.erl` reds with `function slice/3 undefined` at
+  `stripPrefix`, so every cell reaching it answers `{error, undef}`.
+  `splitQuery` / `encodeQuery` are here instead, over front 62's
+  `percentEncode` / `percentDecode` — the percent codec is NOT written a second
+  time. Two bodies to delete when std is fixed.
+- **`std/time` reached from a `test/` file is `undef`**, and reached through a
+  `pub fn` in `src/` it works — front 62's measurement, confirmed. `nowMs()` and
+  `sinceUnder()` are that `pub fn`, and they are two functions rather than one
+  `measure(body)` because the body being measured is an AWAIT.
+
 ### Why this front ships BOTH host files where front 05 shipped none
 
 Front 05's three measurements still hold and none of them is violated here:

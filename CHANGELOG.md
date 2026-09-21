@@ -20,6 +20,49 @@
 > (`{badkey,param}` / `{badkey,query}`), which AGENTS.md § Blocked already
 > records.
 
+- **The chunk protocol and the two entry points** (front 23, steps 5 and 6).
+
+  `render(v, pathname, query)` opens phase `Render`, matches, awaits the page,
+  composes it into its layouts, writes the document and answers a
+  `RenderedPage`; a URL no page claims answers **404** with the `not-found`
+  boundary's markup inside the layouts that would have wrapped it, not an empty
+  body. The previous phase is restored afterwards, and a `cookies().set(…)` from
+  a render raises — the phase table of `contracts.md § 5` is enforced, not
+  described.
+
+  **Concurrency is processes, not `@Future`.** `renderAll` takes an
+  `Array<fn() -> @Future<T>>` — unstarted THUNKS — and gathers them in one
+  await, one spawned BEAM process per thunk. Two 50 ms loaders finish under
+  100 ms on the row that spawns and take 100 ms on the row that cannot, and the
+  cell asserts `fast == concurrentRow()` rather than claiming one shape for
+  both. The parameter type is what makes "no call site passes an already-started
+  future" checkable.
+
+  **The streaming entry is three calls and not one, and it is a compiler gap
+  rather than a design choice.** A parameter typed `Array<fn() -> @Future<El>>`
+  in a function that also takes an `ElementView<El>` is refused with
+  `generic-arg-skip-forbidden`; each half compiles alone. So the gather keeps
+  its own function and `streamChunks` — where nothing is generic — keeps the
+  protocol: shell, one fill per boundary in RESOLUTION order, tail. Ids stay in
+  shell order, fills go out in settle order, every id in `h` is filled exactly
+  once, and a boundary that resolved before the flush is no hole at all.
+
+  **Four more measurements, each of which cost a red:** `await` inside an
+  `if`/`else` block of a `#[@future]` body is emitted in a non-async arrow IIFE
+  on commonJS and takes the whole test FILE down at load; the optional binder is
+  a closure and may not await; `xs.at(i).unwrapOr(…)` reads the element back
+  unwrapped when the array came off a record field or the function is generic;
+  and **`std/querystring` does not compile on the erlang row** (`function
+  slice/3 undefined` at `stripPrefix`), so `splitQuery` / `encodeQuery` are here
+  over front 62's percent codec.
+
+  The gate gained stage 1b — front 23's own three greps: no `renderToString` in
+  `ssr.bp`, no module of onze reachable from `modules/rakun/src/`, and no void
+  tag spelled in `ssr.bp`.
+
+  20 new assertions, every one on both rows: 292 → **302** on commonJS,
+  290/2 → **300/2** on erlang. The whole front is 35 cells, all running on both.
+
 - **The document, the payload and `RenderHooks`** (front 23, step 4 and decision
   77).
 
