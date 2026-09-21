@@ -1,0 +1,247 @@
+// rakun — the SSR pipeline (front 23): the rendered page, the composition
+// order, the escaping walker, the document and its payload, the chunk protocol
+// and the two entry points.
+//
+// EVERY CELL IN THIS FILE RUNS ON BOTH ROWS. The render, the escaping and the
+// chunk writer are the erlang half of the front; the payload reader and the
+// streaming-hole swapper are the js half; the payload format is the contract
+// between them, so a suite that only wrote or only read would prove nothing
+// about the boundary this front exists to hold.
+//
+// THE ELEMENT THE CELLS RENDER is rakun's own `Node`, reached through
+// `nodeView`. jhonstart's `Element` is not importable here and must not become
+// importable: rakun declares no dependency on it. The two tag predicates are
+// PARAMETERS of the view — front 94's `isVoidTag` / `isRawTextTag` in a real
+// application — and the two written here are this file's fixture, deliberately
+// two tags wide so that nobody mistakes them for a second void list.
+
+import {asserts} from "std";
+import {dict} from "std";
+import {
+    LayoutProps,
+    PageContext,
+    RouteEntry,
+    contextOf,
+    emptyParams,
+    matchPath,
+    appTable,
+    rkAppLayout,
+    rkAppPage,
+    rkAppReset,
+} from "file_router";
+import {
+    ElementView,
+    Node,
+    RenderedPage,
+    compose,
+    escapeAttribute,
+    escapeHtml,
+    headerOfPage,
+    htmlHeaders,
+    nodeView,
+    raw,
+    registerBoundary,
+    renderNode,
+    renderedPage,
+    rkSsrReset,
+    selected,
+    toResponse,
+} from "ssr";
+
+// ── the fixture view ────────────────────────────────────────────────────────
+
+pub fn fixtureVoid(tag: string) -> bool {
+    return tag == "input" || tag == "br";
+}
+
+pub fn fixtureRawText(tag: string) -> bool {
+    return tag == "script" || tag == "style";
+}
+
+pub fn view() -> ElementView<Node> {
+    return nodeView({ t -> fixtureVoid(t) }, { t -> fixtureRawText(t) });
+}
+
+pub fn el(tag: string, attrs: Array<#(string, string)>, children: Node[]) -> Node {
+    return Node(tag: tag, value: "", attrs: attrs, children: children);
+}
+
+pub fn txt(value: string) -> Node {
+    return Node(tag: "#text", value: value, attrs: [], children: []);
+}
+
+pub fn ssrContext(pathname: string, pattern: string) -> PageContext {
+    return PageContext(
+        pathname: pathname,
+        pattern: pattern,
+        params: emptyParams(),
+        query: dict.empty(),
+        rest: [],
+    );
+}
+
+// A layout that names itself and keeps its children, which is what makes the
+// nesting readable as a string rather than asserted in prose.
+pub fn wrapLayout(name: string, props: LayoutProps<Node>) -> Node {
+    return el(name, [], [props.children]);
+}
+
+pub fn depthLayout(props: LayoutProps<Node>) -> Node {
+    return el("d" + selected().toString(), [], [props.children]);
+}
+
+// ── step 1: the rendered page ───────────────────────────────────────────────
+
+test "rakun ssr: a rendered page carries headers and an ordered chunk list" {
+    val page: RenderedPage = renderedPage(200, ["<html>", "<body>", "</html>"]);
+    assert page.status == 200;
+    assert page.chunks.length == 3;
+    assert headerOfPage(page, "Content-Type") == "text/html; charset=utf-8";
+    assert htmlHeaders().length == 1;
+}
+
+test "rakun ssr: toResponse joins the chunks and is the only place that does" {
+    val page: RenderedPage = renderedPage(404, ["a", "b", "c"]);
+    val res = toResponse(page);
+    assert res.status == 404;
+    assert res.body == "abc";
+}
+
+// ── step 3: the escaping walker ─────────────────────────────────────────────
+
+test "rakun ssr: a text node carrying a script tag renders with no `<` at all" {
+    val v: ElementView<Node> = view();
+    val out = renderNode(v, txt("<script>alert(1)</script>"));
+    assert out.contains("<") == false;
+    assert out == "&lt;script&gt;alert(1)&lt;/script&gt;";
+}
+
+test "rakun ssr: the ampersand is escaped first, so an entity is not doubled" {
+    assert escapeHtml("a & b") == "a &amp; b";
+    assert escapeHtml("&lt;") == "&amp;lt;";
+    assert escapeAttribute("say \"hi\" & 'bye'") == "say &quot;hi&quot; &amp; &#39;bye&#39;";
+}
+
+test "rakun ssr: an attribute value containing a quote renders as an entity" {
+    val v: ElementView<Node> = view();
+    val out = renderNode(v, el("div", [#("title", "a \"quoted\" <b>")], []));
+    assert out == "<div title=\"a &quot;quoted&quot; &lt;b&gt;\"></div>";
+    assert out.contains("\"a \"") == false;
+}
+
+test "rakun ssr: a void tag emits no closing tag" {
+    val v: ElementView<Node> = view();
+    val out = renderNode(v, el("input", [#("name", "q")], []));
+    assert out == "<input name=\"q\">";
+    assert out.contains("</input>") == false;
+}
+
+test "rakun ssr: a raw-text body is verbatim, in both directions" {
+    val v: ElementView<Node> = view();
+    val style = renderNode(v, el("style", [], [txt("a > b { color: red }")]));
+    assert style == "<style>a > b { color: red }</style>";
+    val script = renderNode(v, el("script", [], [txt("if (a && b) go();")]));
+    assert script == "<script>if (a && b) go();</script>";
+}
+
+test "rakun ssr: a raw-text body that closes its own element is refused, in any case" {
+    val v: ElementView<Node> = view();
+    try asserts.throwsWith({ ->
+        renderNode(v, el("script", [], [txt("var a = \"</script>\";")]));
+        0;
+    }, "a <script> body contains");
+    try asserts.throwsWith({ ->
+        renderNode(v, el("style", [], [txt("/* </STYLE> */")]));
+        0;
+    }, "a <style> body contains");
+}
+
+test "rakun ssr: `#raw` is the one escape hatch and renders verbatim" {
+    val v: ElementView<Node> = view();
+    assert renderNode(v, raw(v, "<b>x</b>")) == "<b>x</b>";
+}
+
+test "rakun ssr: the walker is a superset of the frozen renderer, not a divergence" {
+    val v: ElementView<Node> = view();
+    val tree = el("div", [#("class", "post")], [el("p", [], [txt("hi")])]);
+    assert renderNode(v, tree) == "<div class=\"post\"><p>hi</p></div>";
+    assert renderNode(v, Node(tag: "#fragment", value: "", attrs: [], children: [txt("a"), txt("b")])) == "ab";
+}
+
+// ── step 2: composition order ───────────────────────────────────────────────
+
+test "rakun ssr: one segment holding all six conventions nests layout > template > error > loading > not-found > page" {
+    val _r = rkAppReset();
+    val _s = rkSsrReset();
+    val v: ElementView<Node> = view();
+    val _l = rkAppLayout("", { props -> wrapLayout("layout", props) });
+    val _t = registerBoundary("T", "/", { props -> wrapLayout("template", props) });
+    val _e = registerBoundary("E", "/", { props -> wrapLayout("error", props) });
+    val _o = registerBoundary("S", "/", { props -> wrapLayout("loading", props) });
+    val _n = registerBoundary("N", "/", { props -> wrapLayout("not-found", props) });
+    val tree = compose(v, [RouteEntry(kind: "L", pattern: "/", slot: "", verb: "")], ssrContext("/", "/"), 1, el("page", [], []));
+    val out = renderNode(v, tree);
+    assert out.startsWith("<layout><div data-onze-t=\"/#1\"><template><error><loading><not-found><page>");
+    assert out.endsWith("</page></not-found></loading></error></template></div></layout>");
+}
+
+test "rakun ssr: a segment with no template contributes no wrapper" {
+    val _r = rkAppReset();
+    val _s = rkSsrReset();
+    val v: ElementView<Node> = view();
+    val _l = rkAppLayout("", { props -> wrapLayout("layout", props) });
+    val tree = compose(v, [RouteEntry(kind: "L", pattern: "/", slot: "", verb: "")], ssrContext("/", "/"), 1, el("page", [], []));
+    assert renderNode(v, tree) == "<layout><page></page></layout>";
+    assert renderNode(v, tree).contains("div") == false;
+}
+
+test "rakun ssr: the root layout is outermost and the page innermost for a real chain" {
+    val _r = rkAppReset();
+    val _s = rkSsrReset();
+    val v: ElementView<Node> = view();
+    val _root = rkAppLayout("", { props -> wrapLayout("root", props) });
+    val _blog = rkAppLayout("blog", { props -> wrapLayout("blog", props) });
+    val _page = rkAppPage("blog/[slug]", { route -> pageOf(route) });
+    val table = appTable();
+    var out = "";
+    if (matchPath(table, "/blog/hello")) { hit ->
+        val ctx = contextOf(hit, "/blog/hello", emptyParams());
+        out = renderNode(v, compose(v, hit.chain, ctx, 1, el("page", [], [])));
+    };
+    assert out == "<root><blog><page></page></blog></root>";
+}
+
+test "rakun ssr: a template key changes between two renders of the same route" {
+    val _r = rkAppReset();
+    val _s = rkSsrReset();
+    val v: ElementView<Node> = view();
+    val _t = registerBoundary("T", "/", { props -> wrapLayout("template", props) });
+    val chain = [RouteEntry(kind: "L", pattern: "/", slot: "", verb: "")];
+    val first = renderNode(v, compose(v, chain, ssrContext("/", "/"), 1, el("page", [], [])));
+    val second = renderNode(v, compose(v, chain, ssrContext("/", "/"), 2, el("page", [], [])));
+    assert first.contains("data-onze-t=\"/#1\"");
+    assert second.contains("data-onze-t=\"/#2\"");
+    assert first == second == false;
+}
+
+test "rakun ssr: each layout render receives its own selected depth, root first" {
+    val _r = rkAppReset();
+    val _s = rkSsrReset();
+    val v: ElementView<Node> = view();
+    val _root = rkAppLayout("", { props -> depthLayout(props) });
+    val _blog = rkAppLayout("blog", { props -> depthLayout(props) });
+    val _year = rkAppLayout("blog/[year]", { props -> depthLayout(props) });
+    val _page = rkAppPage("blog/[year]/[slug]", { route -> pageOf(route) });
+    val table = appTable();
+    var out = "";
+    if (matchPath(table, "/blog/2026/hello")) { hit ->
+        val ctx = contextOf(hit, "/blog/2026/hello", emptyParams());
+        out = renderNode(v, compose(v, hit.chain, ctx, 1, el("page", [], [])));
+    };
+    assert out == "<d0><d1><d2><page></page></d2></d1></d0>";
+}
+
+#[@future]
+pub fn pageOf(route: PageContext) -> @Future<Node> {
+    return el("page", [], []);
+}

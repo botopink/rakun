@@ -425,6 +425,88 @@ BEAM, an eager load on node) and a later `memoize` with that key waits for it
 rather than starting a second one. `memoKey` does not hash and refuses a part
 carrying its `|` separator.
 
+## Server-side rendering
+
+`from "rakun"` gives you the render pipeline: a URL in, an ordered list of HTML
+chunks out, with every string that came from a request, a database or a file
+escaped on the way.
+
+### The element view — one adapter, written once
+
+rakun does not know what an element is. It declares no dependency on a UI
+library, so the six things a walker needs are handed to it as a record:
+
+```bp
+import {ElementView, renderNode} from "rakun";
+import {Element, isVoidTag, isRawTextTag} from "jhonstart";
+
+pub fn jhonstartView() -> ElementView<Element> {
+    return ElementView(
+        make: { t, v, a, c -> Element(tag: t, value: v, children: c, attrs: a) },
+        tagOf: { e -> elementTag(e) },
+        valueOf: { e -> elementValue(e) },
+        attrsOf: { e -> elementAttrs(e) },
+        childrenOf: { e -> elementChildren(e) },
+        isVoid: { t -> isVoidTag(t) },
+        isRawText: { t -> isRawTextTag(t) },
+    );
+}
+```
+
+Two rules, both of which cost an hour if you learn them from an erlang
+diagnostic instead of from here:
+
+- **Wrap every function in a lambda.** `isVoid: isVoidTag` compiles on node and
+  is `variable 'IsVoidTag' is unbound` on erlang. `{ t -> isVoidTag(t) }` is the
+  same value and lowers on both.
+- **Read a field before you call it.** `v.tagOf(e)` is a METHOD call to the
+  compiler and reds with `function tagOf/2 undefined` on erlang. Write
+  `val tagOf = v.tagOf; tagOf(e)`. The same holds for every field of
+  `RenderHooks`.
+
+The four readers are named functions taking a typed parameter — a field read
+inside a lambda loses the parameter's type on the erlang row.
+
+An application that ships no UI library can use rakun's own `Node` through
+`nodeView(isVoid, isRawText)`.
+
+### Rendering a tree
+
+```bp
+val v: ElementView<Element> = jhonstartView();
+val html = renderNode(v, tree);
+```
+
+`renderNode` escapes `&`, `<` and `>` in a text node and adds `"` and `'` in an
+attribute value; it emits `<input>` with no closing tag; it emits a `script` or
+`style` body verbatim, because escaping CSS or JavaScript changes the program;
+and it REFUSES a `script`/`style` body containing `</script` or `</style`, in
+any case, naming the tag. There is no option that turns that refusal into
+escaping.
+
+`raw(v, "<b>x</b>")` is the one escape hatch and it renders verbatim. Every use
+of it is a place a reviewer must look at.
+
+### Composing a page with its layouts
+
+```bp
+val table = appTable();
+if (matchPath(table, "/blog/hello")) { hit ->
+    val ctx = contextOf(hit, "/blog/hello", emptyParams());
+    val tree = compose(v, hit.chain, ctx, nav, page);
+};
+```
+
+`hit.chain` is already the root-first layout list — do not call `layoutChain`
+again for a match you already hold. `compose` wraps the page from the inside
+out, so the rendered nesting is
+`layout > template > error > loading > not-found > page`, and a convention your
+app does not define contributes no wrapper.
+
+A layout learns how deep it sits with `selected()` — `0` for the root layout,
+`1` for the next one down. It is a call rather than a field of `LayoutProps`
+because that record is the router's and carries three fields.
+
 ## The container: beans, `Context`, lifecycle and events
 
 Constructor injection resolves a field by type and needs no help. Everything

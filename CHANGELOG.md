@@ -20,6 +20,41 @@
 > (`{badkey,param}` / `{badkey,query}`), which AGENTS.md § Blocked already
 > records.
 
+- **The escaping walker, the composition order and the rendered page** (front 23,
+  steps 1 to 3).
+
+  `modules/rakun/src/ssr.bp` is new, with `modules/rakun/src/ssr.mjs` and
+  `modules/rakun/src/sidecars/rakun_ssr.erl` beside it. `renderNode` escapes
+  text and attribute values, emits no closing tag for a void element, emits a
+  raw-text body verbatim, and REFUSES a `script` or `style` body that closes its
+  own element in any case rather than rewriting it into something that no longer
+  runs. `compose` wraps a page from the inside out — `layout > template > error >
+  loading > not-found > page` — and a convention nobody registered contributes no
+  wrapper at all.
+
+  **`Element` is generic, and the tag predicates are values.** rakun declares no
+  dependency on jhonstart and gains none: the six things a walker must be able to
+  do to a tree arrive as an `ElementView<El>` record of function values, and
+  front 94's `isVoidTag` / `isRawTextTag` are two of its fields. This module
+  keeps no void set and no raw-text set — the grep its own gate runs finds one
+  tag name in the whole file, the `div` a template wrapper is.
+
+  **Front 01's `escape` module does not exist on this binary**, so `escapeHtml`
+  and `escapeAttribute` are here in pure botopink, spelled as front 01 specifies
+  them, and are two bodies to delete when it lands.
+
+  **Two erlang-only call-site rules, measured rather than inherited.** A
+  function-valued record FIELD must be read into a local before it is called —
+  `v.tagOf(e)` lowers to a method call and reds with `function tagOf/2
+  undefined`, while the commonJS row is perfectly happy. And a local `val` may
+  shadow a module-level `pub fn` of the same name *for an importer*: a test
+  importing `raw` was told `expected Node, got bool`, the type of a local inside
+  another function.
+
+  15 new assertions, every one of them running on both rows: 267 → **282** on
+  commonJS and 265/2 → **280/2** on erlang, the two reds being front 04's own
+  `request/6`.
+
 - **`#[imports]`, the retired stub and the consumer proof** (front 06, step 9 and
   the Mechanism's last marker).
 

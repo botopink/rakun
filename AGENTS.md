@@ -108,6 +108,17 @@ rakun/
 │   │   │   │                    generators. Knows no record grammar
 │   │   │   ├── sidecars/rakun_context.erl ← the same four on the BEAM, in ETS
 │   │   │   │                    behind a dedicated owner process
+│   │   │   ├── ssr.bp         ← THE SSR PIPELINE (§ The SSR pipeline): the escaping
+│   │   │   │                    walker, the composition order, `RenderHooks`, the
+│   │   │   │                    payload, the document and the chunk protocol.
+│   │   │   │                    Generic in `El` throughout — rakun declares no
+│   │   │   │                    dependency on jhonstart and gains none here
+│   │   │   ├── ssr.mjs        ← the pipeline's node half: the installed hooks, the
+│   │   │   │                    gather over thunks, two ordinals — and `__onzeFill`,
+│   │   │   │                    the browser function a fill chunk calls
+│   │   │   ├── sidecars/rakun_ssr.erl ← the same cells on the BEAM, in the serving
+│   │   │   │                    process's dictionary; `all/1` spawns one monitored
+│   │   │   │                    child per thunk, because `@Future` is eager there
 │   │   │   ├── bootstrap.bp   ← `Rakun` (concrete type): `Rakun.run(app)` starts `rkServe`
 │   │   │   └── rakun.d.bp     ← the declaration module. EMPTY since front 06: it
 │   │   │                        carried a declaration-only `behavior Context`,
@@ -143,6 +154,10 @@ rakun/
 │   │       │                     rows
 │   │       ├── events_test.bp ← listener dispatch, ordering, the boot sequence
 │   │       │                     asserted as a WHOLE, and the failure path
+│   │       ├── ssr_test.bp    ← the SSR pipeline: the rendered page, the escaping
+│   │       │                     walker, the composition order, the payload round
+│   │       │                     trip, the chunk protocol and the two entry points.
+│   │       │                     Every cell runs on BOTH rows
 │   │       └── erlang_runtime_test.bp ← the host cells named DIRECTLY (no decorator):
 │   │                             scan order · singleton/build count · the parseInt rule ·
 │   │                             route order · the `Response` round-trip shape. The same
@@ -1592,6 +1607,194 @@ arguments do not parse at a call site. The type comes from the annotated binding
 of `T` with the string is unchecked. Both halves are language gaps, recorded in
 the front's README; dropping the generic and returning `any` would lose the type
 everywhere, and the string is the smaller cost.
+
+## The SSR pipeline
+
+`modules/rakun/src/ssr.bp` is where a URL becomes bytes. Front 22 finds the
+page and the layout chain, front 62 opens the request scope, front 06 resolves
+what the render asks the container for — and this file composes, escapes,
+renders, wraps the result in a document, writes the payload the browser
+reconnects through, and hands front 04's transport an ordered list of chunks.
+
+### `Element` is generic here, and that is not a style choice
+
+`Element` is jhonstart's type. rakun declares no dependency on jhonstart and
+must not learn one — the rule that already made every signature in
+`file_router.bp` generic in `El`. A walker, though, has to be able to ask a tree
+six questions, so the questions arrive as a record of function values:
+
+```bp
+pub type ElementView<El>(
+    make: fn(string, string, Array<#(string, string)>, El[]) -> El,
+    tagOf: fn(El) -> string,
+    valueOf: fn(El) -> string,
+    attrsOf: fn(El) -> Array<#(string, string)>,
+    childrenOf: fn(El) -> El[],
+    isVoid: fn(string) -> bool,
+    isRawText: fn(string) -> bool,
+)
+```
+
+`isVoid` and `isRawText` are front 94's `isVoidTag` / `isRawTextTag`, **passed
+in**. That is the point: the front's own text says the void set is not restated
+here, because two lists that must agree will not agree for long and the second
+one is always the stale one. `grep` this module for a tag name and there is one
+— `"div"`, the element a template wrapper and an island marker are — and no set
+of any kind. The same seam shape as `RenderHooks`, one type-level out.
+
+`make` takes the four parts in one order — tag, value, attrs, children — where
+jhonstart's `Element` spells them in another. An adapter that maps them is one
+line in the library that owns the element type; front 26 writes it, this front
+never sees it.
+
+`Node` + `nodeView(isVoid, isRawText)` is rakun's own element, for a rakun
+application that ships no UI library and for this front's own assertions. It is
+not a second `Element`: nothing in the pipeline mentions it, and its two
+predicates are still parameters.
+
+### Two call-site rules, both erlang-only, both measured here
+
+- **A function-valued record FIELD must be read into a local before it is
+  called.** `v.tagOf(e)` lowers to a METHOD call — `tagOf(V, E)` — and the
+  erlang row reds with `function tagOf/2 undefined`; the commonJS row is
+  perfectly happy, which is what makes it worth writing down. `val tagOf =
+  v.tagOf; tagOf(e)` is the same value and lowers on both rows. Every call
+  through `ElementView` and `RenderHooks` in this module and in its consumers is
+  written that way.
+- **A named function used as a value does not lower on erlang.** Build a view or
+  a hooks record with `{ t -> isVoidTag(t) }`, never `isVoidTag`. Front 22
+  measured it for the four markers; it applies to every field of both records.
+
+Two more the front hit and worked around rather than reported second-hand:
+
+- **`xs.at(i).unwrapOr(…)` reads the element back UNWRAPPED inside a function
+  generic in `El`.** `compose` died with `{case_clause, {file_router__t__routeentry, …}}`
+  on the erlang row — the record itself in the clause, not an optional around
+  it. The same expression in `file_router.bp`, in a non-generic function, is
+  correct. `compose` walks `chain.reverse()` with a `loop` binder instead, which
+  is the shape the front's own gap table already prefers.
+- **A local `val` may shadow a module-level `pub fn` of the same name for an
+  IMPORTER.** `renderIn` bound `val raw = isRawText(tag);` beside the module's
+  `pub fn raw(v, html) -> El`, and a test file importing `raw` was told
+  `expected Node, got bool` — the local's type, reaching a consumer. The local is
+  `rawBody` now. Two minutes, if the error had not been read in the right file.
+
+### Step 1 — the rendered page
+
+`http.bp` is frozen and `Response(status, body)` carries no header list and no
+streaming body, so the pipeline answers with a record of its own:
+
+```bp
+pub type RenderedPage(status: i32, headers: Array<#(string, string)>, chunks: string[])
+pub fn renderedPage(status: i32, chunks: string[]) -> RenderedPage
+pub fn toResponse(page: RenderedPage) -> Response
+```
+
+`Content-Type: text/html; charset=utf-8` is on every `RenderedPage` this front
+produces — `htmlHeaders()` is not a parameter — and `toResponse` is the ONLY
+place the chunks are joined, which is exactly what the streaming path refuses to
+do. When `http.bp` unfreezes, `RenderedPage` collapses into `Response` and
+`toResponse` disappears.
+
+### Step 2 — composition order is a function, and it is tested
+
+```bp
+pub fn compose<El>(v: ElementView<El>, chain: RouteEntry[], route: PageContext,
+                   nav: i32, page: El) -> El
+```
+
+For each segment, root-first, the page is wrapped from the inside out: `page`,
+then `N` not-found, `S` loading, `E` error, `T` template, `L` layout. So the
+outermost element is the root layout and the nesting reads
+`layout > template > error > loading > not-found > page`, asserted on the markup
+string rather than in prose. A convention nobody registered contributes NO
+wrapper — the nesting shrinks, it does not gain an empty `div`.
+
+The chain is front 22's: `matchPath(…)`'s `chain` field is ALREADY the root-first
+`L` list, so a caller holding a match never calls `layoutChain` a second time.
+
+A `T` wrapper is the one place this front adds an element of its own: a `div`
+carrying `data-onze-t="<pattern>#<nav>"`, the key that makes a template re-mount
+on the client while the layout around it does not. Two renders of one route
+carry two different keys, because `nav` is a counter and not a hash of the
+route.
+
+**`selected`, the layout depth, is a slot and not a field.** Front 26's router
+state maps one-to-one onto the payload's `p`/`m`/`q`/`r` with one exception —
+`selected` is per-layout rather than per-document. `LayoutProps(route, children,
+slots)` is front 22's record and carries three fields; widening it would touch a
+file this front does not own, and a fourth positional argument is not
+expressible while a declared parameter default is never applied. So the pipeline
+writes the depth before each layout render and a layout reads it back with
+`selected()` — root layout `0`, the next one down `1`. A three-deep chain yields
+`0, 1, 2`, asserted by a layout that renders its own depth as its tag.
+
+**`registerBoundary(kind, pattern, render)`** puts an `S`, an `E` or an `N`
+record in front 22's table with its render beside it, through front 22's own
+public cell. Fronts 30 and 31 own those MARKERS; until they land this is how a
+boundary gets registered, and nothing here writes a wire record by hand.
+
+### Step 3 — escaping is the render, not a step before it
+
+`renderNode(v, e)` is a full re-implementation of the walk in
+`jhonstart/element.bp`, and it is what every path in this front calls. The four
+differences:
+
+| Node | the frozen `renderToString` | `renderNode` here |
+|---|---|---|
+| `#text` | `e.value` verbatim | `escapeHtml(e.value)` |
+| `#text` inside a raw-text tag | verbatim | verbatim, and `</script` / `</style` is **refused** |
+| attribute | `name="value"` verbatim | `name="` + `escapeAttribute(value)` + `"` |
+| a void tag | `<input></input>` | `<input …>`, no closing tag |
+| `#raw` | renders `<#raw>` | `e.value` verbatim — the single documented escape hatch |
+
+`escapeHtml` covers `&`, `<`, `>`; `escapeAttribute` adds `"` and `'`. The `&`
+is replaced FIRST or the ampersand of an entity is escaped a second time.
+
+**Front 01's `escape.html` / `escape.attribute` do not exist on this binary** —
+`libs/std` has no `escape` module — so the two functions are here, in pure
+botopink, spelled as front 01 specifies them. When front 01 lands they are two
+bodies to delete, not to reconcile.
+
+**A raw-text body is verbatim, and the one sequence that closes it early is
+refused rather than escaped.** `escapeHtml` applied to a CSS body turns `a > b`
+into `a &gt; b` and applied to a script body turns working code into text, so
+escaping a `script` or `style` body would silently change the program. Emitting
+it verbatim is only safe because a body containing `</script` or `</style` — in
+any case, matching the HTML parser's own rule — FAILS the render with the tag
+named. Refusing is the restrictive answer and there is no flag that turns it
+into escaping.
+
+**No path in `ssr.bp` calls `renderToString`**, and it could not: jhonstart is
+not importable from here. The frozen renderer still writes `</input>` and still
+escapes nothing, so any assertion about escaped output or a missing closing tag
+holds through `renderNode` ONLY. A test that renders a form with
+`renderToString` is testing the wrong function.
+
+### Why this front ships BOTH host files
+
+Front 05's three measurements hold and none is violated: every cell carries an
+`@External.Node` and an `@External.Erlang` form, so neither row has a call with
+no binding; `runtime.mjs` is frozen but `ssr.mjs` is this front's own file; and
+the atom `rakun_ssr` is named in emitted output — twenty-two call sites in
+`.botopinkbuild/test-out/ssr.erl` — so `shipErlSidecars` copies
+`src/sidecars/rakun_ssr.erl`, **verified by reading**
+`.botopinkbuild/test-out/rakun_ssr.erl` and diffing it against the source, not
+by trusting exit 0.
+
+What decides the shape is front 22's question, and it is the same answer fronts
+22, 62 and 06 gave: **is the thing being stored pure?** Front 05's config
+readers were, and a sidecar would have been a second copy of something botopink
+can do. These are not. The host holds a record of seven FUNCTIONS (the installed
+`RenderHooks`), a gather over unstarted THUNKS, and two per-render ordinals that
+must survive a call into user code. No string table holds a closure. The
+escaping, the walker, the composition order, the payload format, the document
+shell and the chunk protocol are botopink, compiled to both targets; neither
+host knows what HTML is.
+
+The module atom may not be `ssr`: rakun emits `rakun/ssr`, and `shipErlSidecars`
+skips a qualifier matching a module this build emitted — silently. Every rakun
+sidecar is `rakun_<name>.erl`.
 
 ## Design at a glance
 

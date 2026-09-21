@@ -1,0 +1,412 @@
+//// rakun/ssr — the server-side render pipeline (front 23).
+////
+//// This is where a URL becomes bytes: front 22's table finds the page, front
+//// 22's layout chain wraps it, this file renders the tree with ESCAPING, wraps
+//// the markup in a document, writes the payload the browser reconnects
+//// through, and hands front 04's transport an ordered list of chunks.
+////
+//// THREE THINGS THIS FILE DELIBERATELY DOES NOT KNOW.
+////
+//// 1. What an element IS. `Element` is jhonstart's type and rakun declares no
+////    dependency on jhonstart — the same rule that made every signature in
+////    `file_router.bp` generic in `El`. So the walker is generic too, and the
+////    six things it must be able to do to a tree (make a node, read its tag,
+////    its value, its attributes and its children, and ask whether a tag is
+////    void or raw-text) arrive as an `ElementView<El>` — a record of function
+////    values, the same seam shape `RenderHooks` is. `isVoid` and `isRawText`
+////    are front 94's `isVoidTag`/`isRawTextTag`, PASSED IN: one definition,
+////    never two lists that must agree. `grep` this file for a tag list and
+////    there is none.
+////
+//// 2. What a bundler, a stylesheet pipeline or a framework is. Those arrive as
+////    `RenderHooks` values (decision 77). `defaultHooks()` is a working
+////    document with none of them.
+////
+//// 3. What is slow. A suspense boundary is front 30's; this front owns the
+////    hole IDS and the chunk PROTOCOL, and takes a boundary as an unstarted
+////    thunk.
+////
+//// TWO CALL-SITE RULES MEASURED WHILE WRITING THIS FILE, both erlang-only and
+//// both invisible on the commonJS row:
+////
+//// - **A function-valued record FIELD must be read into a local before it is
+////   called.** `v.tagOf(e)` lowers to a METHOD call — `tagOf(V, E)` — and the
+////   erlang row reds with `function tagOf/2 undefined`. `val tagOf = v.tagOf;
+////   tagOf(e)` is the same value and lowers on both. Every call through
+////   `ElementView` and `RenderHooks` in this file is written that way, and so
+////   is every consumer's.
+//// - **A named function used as a value does not lower on erlang.** Build a
+////   view or a hooks record with `{ t -> isVoidTag(t) }`, never `isVoidTag`.
+////   This is front 22's measurement, and it is what the four markers already
+////   emit.
+
+import {dict} from "std";
+import {Response} from "http";
+import {
+    RouteEntry,
+    PageContext,
+    LayoutProps,
+    rkAppHasRender,
+    rkAppRegisterTemplate,
+    rkAppRender,
+    writeTable,
+} from "file_router";
+
+// ── the host cells, and why this front ships both files ─────────────────────
+//
+// Front 05's three measurements hold here and none of them is violated: EVERY
+// cell below carries both an `@External.Node` and an `@External.Erlang` form,
+// so neither row has a call with no binding; `runtime.mjs` is frozen but
+// `ssr.mjs` is this front's own file; and the atom `rakun_ssr` is named in this
+// module's emitted output, so `shipErlSidecars` copies
+// `src/sidecars/rakun_ssr.erl` — verified by READING
+// `.botopinkbuild/test-out/rakun_ssr.erl`, not by trusting exit 0.
+//
+// What decides the shape is front 22's question — is the thing being stored
+// PURE? Front 05's config readers were, and a sidecar would have been a second
+// copy of something botopink can do. These are not: a record of seven
+// FUNCTIONS, a list of unstarted THUNKS and two ordinals that must survive a
+// call into user code. No string table holds a closure.
+
+#[@External.Node("./ssr.mjs", "setHooks"),
+  @External.Erlang("rakun_ssr", "set_hooks")]
+pub declare fn rkSsrSetHooks<H>(hooks: H) -> i32;
+
+#[@External.Node("./ssr.mjs", "hasHooks"),
+  @External.Erlang("rakun_ssr", "has_hooks")]
+pub declare fn rkSsrHasHooks() -> bool;
+
+#[@External.Node("./ssr.mjs", "hooksOr"),
+  @External.Erlang("rakun_ssr", "hooks_or")]
+pub declare fn rkSsrHooksOr<H>(fallback: H) -> H;
+
+#[@External.Node("./ssr.mjs", "setSelected"),
+  @External.Erlang("rakun_ssr", "set_selected")]
+pub declare fn rkSsrSetSelected(depth: i32) -> i32;
+
+#[@External.Node("./ssr.mjs", "selectedDepth"),
+  @External.Erlang("rakun_ssr", "selected_depth")]
+pub declare fn rkSsrSelected() -> i32;
+
+#[@External.Node("./ssr.mjs", "nextNav"),
+  @External.Erlang("rakun_ssr", "next_nav")]
+pub declare fn rkSsrNextNav() -> i32;
+
+// One process per thunk on the BEAM, the results gathered BY INDEX. The
+// argument is an `Array<fn() -> T>` and never an already-started `@Future`:
+// `@Future<T>` lowers eagerly on erlang, so two futures awaited together have
+// already run one after the other, at full latency, and no assertion over the
+// markup would ever say so.
+#[@future]
+#[@External.Node("./ssr.mjs", "all"),
+  @External.Erlang("rakun_ssr", "all")]
+pub declare fn rkSsrAll<T>(thunks: Array<fn() -> T>) -> @Future<Array<T>>;
+
+#[@External.Node("./ssr.mjs", "settledOrder"),
+  @External.Erlang("rakun_ssr", "settled_order")]
+pub declare fn rkSsrSettledOrder() -> string;
+
+// Does this row spawn? The BEAM does and node does not, which is the one place
+// the two rows are a different mechanism. It is stated here rather than papered
+// over, and the suite's single timing assertion reads it.
+#[@External.Node("./ssr.mjs", "concurrent"),
+  @External.Erlang("rakun_ssr", "concurrent")]
+pub declare fn rkSsrConcurrent() -> bool;
+
+#[@External.Node("./ssr.mjs", "reset"),
+  @External.Erlang("rakun_ssr", "reset")]
+pub declare fn rkSsrReset() -> i32;
+
+// The layout depth the render that is running handed the current layout — `0`
+// for the root layout, `1` for the next one down. Front 26's router state calls
+// it `selected`; it is the one router value with no payload key, because it is
+// per-layout rather than per-document.
+pub fn selected() -> i32 {
+    return rkSsrSelected();
+}
+
+// ── step 1: the rendered page, and why it is not a `Response` ───────────────
+//
+// `http.bp` is frozen and `Response(status, body)` carries no header list and
+// no streaming body. So the pipeline's own answer is a record of its own, and
+// `toResponse` is the boundary conversion — used ONLY on the non-streaming
+// path, because joining the chunks is exactly what streaming refuses to do.
+// When `http.bp` unfreezes, `RenderedPage` collapses into `Response` and
+// `toResponse` disappears.
+
+pub type RenderedPage(
+    status: i32,
+    headers: Array<#(string, string)>,
+    chunks: string[],
+)
+
+// The one content type this front produces. A document is UTF-8 HTML or it is
+// not this front's answer, so the header is not a parameter.
+pub fn htmlHeaders() -> Array<#(string, string)> {
+    return [#("Content-Type", "text/html; charset=utf-8")];
+}
+
+pub fn renderedPage(status: i32, chunks: string[]) -> RenderedPage {
+    return RenderedPage(status: status, headers: htmlHeaders(), chunks: chunks);
+}
+
+pub fn headerOfPage(page: RenderedPage, name: string) -> string {
+    var found = "";
+    loop (page.headers) { h ->
+        if (h._0 == name) {
+            found = h._1;
+        };
+    };
+    return found;
+}
+
+pub fn toResponse(page: RenderedPage) -> Response {
+    return Response(status: page.status, body: page.chunks.join(""));
+}
+
+// ── the element surface, as a record of function values ─────────────────────
+//
+// `make` takes the four parts in ONE order — tag, value, attrs, children —
+// because jhonstart's `Element` spells them in another (`tag, value, children,
+// attrs`) and an adapter that maps them is one line, while two orders that must
+// agree are a bug waiting for a reviewer. The adapter lives in the library that
+// owns the element type; front 26 writes it, this front never sees it.
+
+pub type ElementView<El>(
+    make: fn(string, string, Array<#(string, string)>, El[]) -> El,
+    tagOf: fn(El) -> string,
+    valueOf: fn(El) -> string,
+    attrsOf: fn(El) -> Array<#(string, string)>,
+    childrenOf: fn(El) -> El[],
+    isVoid: fn(string) -> bool,
+    isRawText: fn(string) -> bool,
+)
+
+// rakun's own element, for a rakun application that ships no UI library and for
+// this front's own assertions. It is NOT a second `Element`: nothing in this
+// file mentions it, `nodeView` is the only bridge, and the two predicates are
+// still parameters — so rakun keeps no tag list of any kind.
+pub type Node(
+    tag: string,
+    value: string,
+    attrs: Array<#(string, string)>,
+    children: Node[],
+)
+
+pub fn nodeView(
+    isVoid: fn(string) -> bool,
+    isRawText: fn(string) -> bool,
+) -> ElementView<Node> {
+    return ElementView(
+        make: { t, v, a, c -> Node(tag: t, value: v, attrs: a, children: c) },
+        tagOf: { e -> nodeTag(e) },
+        valueOf: { e -> nodeValue(e) },
+        attrsOf: { e -> nodeAttrs(e) },
+        childrenOf: { e -> nodeChildren(e) },
+        isVoid: isVoid,
+        isRawText: isRawText,
+    );
+}
+
+// The four readers are named functions taking a TYPED parameter rather than
+// field reads inside the lambdas: a lambda parameter's type is lost on the
+// erlang row, and a field read off a value whose type was lost lowers to a
+// property read.
+pub fn nodeTag(e: Node) -> string {
+    return e.tag;
+}
+
+pub fn nodeValue(e: Node) -> string {
+    return e.value;
+}
+
+pub fn nodeAttrs(e: Node) -> Array<#(string, string)> {
+    return e.attrs;
+}
+
+pub fn nodeChildren(e: Node) -> Node[] {
+    return e.children;
+}
+
+// ── step 3: escaping is the render, not a step before it ────────────────────
+//
+// Front 01's `escape.html` / `escape.attribute` do not exist yet: `libs/std`
+// has no `escape` module on this binary. The two functions are HERE, in pure
+// botopink, spelled exactly as front 01 specifies them — `&`, `<`, `>` for
+// html, plus `"` and `'` for an attribute — and when front 01 lands they are
+// the two bodies to delete, not to reconcile. `&` is replaced FIRST or the
+// ampersand of an entity is escaped a second time.
+
+pub fn escapeHtml(raw: string) -> string {
+    return raw.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
+pub fn escapeAttribute(raw: string) -> string {
+    return escapeHtml(raw).replaceAll("\"", "&quot;").replaceAll("'", "&#39;");
+}
+
+// A `script` or `style` body that closes its own element is REFUSED, never
+// escaped: escaping a raw-text body changes the program it holds — `a > b`
+// becomes `a &gt; b` in CSS and working code becomes text in a script — so the
+// one sequence that can end the element early fails the render with the tag
+// named. There is no flag that turns this into escaping.
+pub fn rawTextProblem(tag: string) -> string {
+    return "rakun ssr: a <" + tag + "> body contains `</" + tag
+        + "` - a raw-text body is emitted verbatim, so the one sequence that "
+        + "closes the element early is refused rather than rewritten into "
+        + "something that no longer runs";
+}
+
+pub fn attrMarkup(attrs: Array<#(string, string)>) -> string {
+    var out = "";
+    loop (attrs) { a ->
+        out = out + " " + a._0 + "=\"" + escapeAttribute(a._1) + "\"";
+    };
+    return out;
+}
+
+// The escape hatch, and there are exactly two uses of it in the milestone: the
+// style block and the payload script. Built through the view's own `make`, so
+// this front adds it without touching a frozen element module.
+pub fn raw<El>(v: ElementView<El>, html: string) -> El {
+    val make = v.make;
+    return make("#raw", html, [], []);
+}
+
+pub fn renderNode<El>(v: ElementView<El>, e: El) -> string {
+    return renderIn(v, e, false);
+}
+
+// `rawParent` is what makes "a `#text` inside a raw-text tag is verbatim" a
+// property of the WALK rather than of the node: a text node does not know who
+// its parent is, and the tag that decides is one frame up.
+pub fn renderIn<El>(v: ElementView<El>, e: El, rawParent: bool) -> string {
+    val tagOf = v.tagOf;
+    val valueOf = v.valueOf;
+    val attrsOf = v.attrsOf;
+    val childrenOf = v.childrenOf;
+    val isVoid = v.isVoid;
+    val isRawText = v.isRawText;
+    val tag = tagOf(e);
+    if (tag == "#text") {
+        return if (rawParent) valueOf(e) else escapeHtml(valueOf(e));
+    } else if (tag == "#raw") {
+        return valueOf(e);
+    } else {
+        val rawBody = isRawText(tag);
+        var inner = "";
+        loop (childrenOf(e)) { c ->
+            inner = inner + renderIn(v, c, rawBody);
+        };
+        if (rawBody) inner = inner + valueOf(e);
+        if (rawBody && inner.toLower().contains("</" + tag.toLower())) @panic(rawTextProblem(tag));
+        if (tag == "#fragment") {
+            return inner;
+        } else {
+            val open = "<" + tag + attrMarkup(attrsOf(e)) + ">";
+            return if (isVoid(tag)) open else open + inner + "</" + tag + ">";
+        };
+    };
+}
+
+// ── step 2: composition order ───────────────────────────────────────────────
+//
+// For each segment, root-first, the page is wrapped from the INSIDE OUT: the
+// page is innermost, then `not-found`, then `loading`, then `error`, then
+// `template`, then `layout`. So the outermost element is the root layout and
+// the nesting reads `layout > template > error > loading > not-found > page`,
+// which is `NEXTJS-DOCS.md § 4` exactly.
+//
+// The chain this takes is front 22's — `matchPath(…)`'s `chain` field is ALREADY
+// the root-first `L` list, so a caller holding a match never calls
+// `layoutChain` a second time.
+
+pub fn recordLine(kind: string, pattern: string) -> string {
+    return writeTable([RouteEntry(kind: kind, pattern: pattern, slot: "", verb: "")]);
+}
+
+// The wrapper order, innermost first. A convention nobody registered
+// contributes NO wrapper — the nesting shrinks, it does not gain an empty div.
+pub fn wrapperKinds() -> string[] {
+    return ["N", "S", "E", "T", "L"];
+}
+
+pub fn propsChildren<El>(p: LayoutProps<El>) -> El {
+    return p.children;
+}
+
+pub fn emptySlots<El>() -> Dict<string, El> {
+    return dict.empty();
+}
+
+// The fallback `rkAppRender` answers when a record holds no function. It is
+// never CALLED — every call site asks `rkAppHasRender` first — but the cell is
+// typed and total, so a value of the right shape has to exist.
+pub fn identityLayout<El>() -> fn(props: LayoutProps<El>) -> El {
+    return { p -> propsChildren(p) };
+}
+
+pub fn templateKey(pattern: string, nav: i32) -> string {
+    return pattern + "#" + nav.toString();
+}
+
+pub fn wrapOne<El>(
+    v: ElementView<El>,
+    kind: string,
+    pattern: string,
+    route: PageContext,
+    depth: i32,
+    nav: i32,
+    inner: El,
+) -> El {
+    val line = recordLine(kind, pattern);
+    if (rkAppHasRender(line) == false) {
+        return inner;
+    } else {
+        val f: fn(props: LayoutProps<El>) -> El = rkAppRender(line, identityLayout());
+        val _d = rkSsrSetSelected(depth);
+        val out = f(LayoutProps(route: route, children: inner, slots: emptySlots()));
+        if (kind == "T") {
+            val make = v.make;
+            return make("div", "", [#("data-onze-t", templateKey(pattern, nav))], [out]);
+        } else {
+            return out;
+        };
+    };
+}
+
+// `chain` is front 22's root-first `L` list — the `chain` field of the
+// `RouteMatch` a caller already holds, never a second `layoutChain` call.
+pub fn compose<El>(
+    v: ElementView<El>,
+    chain: RouteEntry[],
+    route: PageContext,
+    nav: i32,
+    page: El,
+) -> El {
+    var tree = page;
+    var depth = chain.length - 1;
+    // The chain is walked INNERMOST FIRST through `reverse()` rather than with
+    // an index: `xs.at(i).unwrapOr(…)` inside a function generic in `El` reads
+    // the element back UNWRAPPED on the erlang row and dies with a
+    // `case_clause` on the record itself. Measured on this binary; the same
+    // expression in `file_router.bp`, in a non-generic function, is correct.
+    val ordered: RouteEntry[] = chain.reverse();
+    loop (ordered) { e ->
+        loop (wrapperKinds()) { k ->
+            tree = wrapOne(v, k, e.pattern, route, depth, nav, tree);
+        };
+        depth = depth - 1;
+    };
+    return tree;
+}
+
+// Registering a boundary convention. Fronts 30 (`loading.bp`) and 31
+// (`error.bp` / `not-found.bp`) own the MARKERS; the records they write are
+// front 22's `S`, `E` and `N` lines, and this is the cell that puts one in the
+// table with its render beside it until those fronts land. It reaches front
+// 22's registry through front 22's own public cell — nothing here writes a
+// wire record by hand.
+pub fn registerBoundary<El>(kind: string, pattern: string, render: fn(props: LayoutProps<El>) -> El) -> i32 {
+    return rkAppRegisterTemplate(recordLine(kind, pattern), render);
+}
