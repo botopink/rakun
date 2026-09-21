@@ -250,6 +250,25 @@ either `runtime.mjs` unfreezes or a test file can declare its target.
   is available; it does not guess. The table is data, extended by later fronts
   through `add_failure/3` without editing this module.
 
+### Blocked — the erlang-backend gaps
+
+> **Updated during front 05 (2026-09-21).** The two gaps below were CLOSED by a
+> compiler change that landed mid-front: a module-level `val` with a side effect
+> now runs on erlang (it *is* the module body — evaluated once, in declaration
+> order, at load, cached in `persistent_term`, with the init emitted in every
+> mode), and a method on a host-supplied `behavior` now dispatches through the
+> value. Measured against the rebuilt binary with front 05 in the tree:
+> `botopink test` 87/87 and `botopink test --target erlang` 85 passing / 2
+> failing. The six registration reds are gone and `server_test.bp` compiles for
+> the first time. The two remaining erlang reds are `{badkey,param}` /
+> `{badkey,query}` — `request/6` in `rakun_runtime.erl` builds a map carrying
+> `method`, `path`, `params`, `query`, `headers` and `body` but no member funs,
+> so `req.param("name")` now dispatches and finds nothing. That is rakun's own
+> line, in front 04's file, and front 05 does not touch it. `targets` stays
+> `["commonJS"]` until the front that re-measures the whole library against the
+> new compiler makes that call — not a front mid-flight. The text below is
+> front 04's and is kept for the reasoning it records.
+
 ### Blocked — two erlang-backend gaps, neither rakun's
 
 Both are in `botopink-lang`'s erlang emitter and neither can be worked around

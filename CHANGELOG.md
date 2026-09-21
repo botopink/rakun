@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+> **On the numbers below.** The shared compiler binary was rebuilt partway
+> through front 05 and closed two erlang-backend gaps (module-level `val` side
+> effects, `behavior` method dispatch). The counts in front 05's first two
+> entries — 39/39 and 67/67 on commonJS, 29 and 57 passing on erlang — were
+> taken with the PREVIOUS binary. Against the rebuilt one, with the whole front
+> in the tree: `botopink test` 87/87 and `botopink test --target erlang` 85
+> passing / 2 failing, the two reds being `{badkey,param}`/`{badkey,query}` in
+> front 04's `server_test.bp`.
+
 - **`#[configurationProperties]` binds a record, and every key it declares lands
   in a catalogue** (front 05, steps 7 and 9). The decorator emits
   `__rkBind_<Name>(prefix)`, the ordinary DI factory `__rkMake_<Name>()` and a
