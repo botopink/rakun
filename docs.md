@@ -45,7 +45,9 @@ sidecar naming rule and what is still blocked.
   file sits. `parseSegment` decodes `blog`, `[slug]`, `[...slug]`, `[[...slug]]`,
   `(group)`, `@slot` and `_private`; `patternOf` builds the URL pattern with
   groups and slots dropped and the bracket spelling kept, and `slotOf` names the
-  slot. Beside the decorator router, not instead of it.
+  slot. The table is `kind|pattern|slot|verb` lines — `parseTable` / `writeTable`
+  — and `matchPath` / `layoutChain` read it, one implementation compiled to both
+  targets. Beside the decorator router, not instead of it.
 - **Cycle detection** — `__rkMake_X` brackets construction with `rkEnter`/`rkDone`;
   a cycle A→B→A raises at first construction (runtime — a single decorator has no
   whole-graph view).

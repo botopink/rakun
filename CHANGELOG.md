@@ -11,6 +11,25 @@
 > passing / 2 failing, the two reds being `{badkey,param}`/`{badkey,query}` in
 > front 04's `server_test.bp`.
 
+- **The route table crosses the boundary, and one matcher reads it on both
+  rows** (front 22, steps 3 and 4). `RouteEntry(kind, pattern, slot, verb)`
+  writes as `kind|pattern|slot|verb`, one record per line in registration order,
+  with trailing empty fields dropped so no line ends in a bar; `parseTable` reads
+  a short line back as empty fields and the round trip is asserted field by
+  field over one entry of each of the eight kinds, on both targets.
+  `matchPath` applies the precedence segment by segment — static, dynamic,
+  catch-all, optional catch-all — so `/blog/new` beats `/blog/[slug]` and
+  `/shop/[id]` beats `/shop/[...rest]`, with registration order deciding a tie.
+  `/shop/[...slug]` does not match `/shop`; `/docs/[[...slug]]` matches `/docs`
+  with an empty `rest`; a pattern carrying only an `L` entry is not public and
+  answers `null`; a slot entry is not a candidate. `layoutChain` walks the
+  pattern's ancestors root-first, and a group never reaches it because
+  `patternOf` dropped it. `paramOf(m, name)` is how a bound parameter is read —
+  the optional binder loses the match's type, so `m.params.at(name).unwrapOr(…)`
+  is a run-time `unwrapOr is not a function` on the node row. Measured:
+  `botopink test` 113/113; `botopink test --target erlang` 111 passing / 2
+  failing, the same two front-04 reds.
+
 - **The file-convention segment grammar** (front 22, step 1).
   `modules/rakun/src/file_router.bp` decodes a folder name into one of the seven
   `SegmentKind`s — static, `[dynamic]`, `[...catchAll]`, `[[...optionalCatchAll]]`,

@@ -356,6 +356,62 @@ Neither `|` nor a newline may appear in a segment name: they are the wire
 format's field and record separators, and `pathProblem` names the segment that
 holds one.
 
+### The wire format
+
+The table crosses the boundary as a LINE-ORIENTED BLOB, not as JSON: std's
+`json` is `string -> @Result<string, string>` with no structured walker, and the
+parser has to compile to the BEAM as well as to the browser. One record per
+line, `\n`-separated, in registration order:
+
+```text
+kind|pattern|slot|verb
+```
+
+| Letter | Convention | Registered by |
+|---|---|---|
+| `L` | `layout.bp` | front 22 |
+| `T` | `template.bp` | front 22 |
+| `P` | `page.bp` | front 22 |
+| `D` | `default.bp` | front 22 |
+| `R` | `route.bp` | front 25 |
+| `S` | `loading.bp` | front 30 |
+| `E` | `error.bp` | front 31 |
+| `N` | `not-found.bp` | front 31 |
+
+**Trailing empty fields are dropped.** A root layout is `L|/`, a slot entry is
+`D|/dashboard|team` and a handler is `R|/api/posts||GET`. That is what makes the
+front's rule "no line terminates with a trailing `|`" true of the common record,
+whose slot and verb are both empty; a fixed four-field record would end in `|`
+by construction. `parseTable` reads a short line back as empty fields, so the
+round trip is unaffected — and no consumer splits a line by hand, because
+`parseTable` IS the reader on both rows.
+
+### The matcher
+
+`matchPath(table, pathname) -> ?RouteMatch` and
+`layoutChain(table, pattern) -> RouteEntry[]` are botopink, compiled to both
+targets. Precedence is applied SEGMENT BY SEGMENT, highest first — static (3),
+dynamic (2), catch-all (1), optional catch-all (0) — and compared
+lexicographically, so `/blog/new` beats `/blog/[slug]` and `/shop/[id]` beats
+`/shop/[...rest]`. Two candidates with the same score are decided by
+REGISTRATION order, the rule `rkDispatch` already follows.
+
+- A route is PUBLIC only when a `P` or an `R` entry claims it. A pattern
+  carrying nothing but an `L` entry answers `null`.
+- A slot entry (`slot != ""`) is not a candidate: front 61 matches it separately
+  against the same URL.
+- `/shop/[...slug]` does not match `/shop`; `/docs/[[...slug]]` matches `/docs`
+  with `rest` empty.
+- `layoutChain` walks the pattern's ancestors root-first. Group segments never
+  appear, because `patternOf` dropped them before the entry was written.
+
+**Read a bound parameter with `paramOf(m, name)`, not `m.params.at(name)`.** A
+`RouteMatch` reached through the optional binder — `if (matchPath(…)) { m -> … }`
+— has lost its type at that name, so `m.params.at(…)` lowers to a property read
+and `.unwrapOr` is not a function on it. `paramOf` takes a TYPED parameter and
+is the form fronts 23 and 26 should use. The same rule bit `parseTable`: a `val`
+bound inside a `loop` lambda needs its annotation (`val f: string[] = …`).
+
 ## Externalized configuration
 
 `modules/rakun/src/config.bp` is front 05's half of `#[value("key")]`: front 04
