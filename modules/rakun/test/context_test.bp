@@ -47,6 +47,10 @@ import {
     rkCtxNoteReset,
     rkCtxBump,
     rkCtxCount,
+    rkRequestScoped,
+    rkRequestScopeEnd,
+    eagerInit,
+    eagerInitIn,
 } from "context";
 import {Event, event, publishEvent} from "events";
 import {
@@ -561,4 +565,109 @@ test "rakun lifecycle: a phase that is not post or pre is refused" {
         rkRegisterLifecycle("X", "m", "during", 0, { -> 1 });
         0;
     }, lifecyclePhaseProblem("during"));
+}
+
+// ── step 6: scopes ──────────────────────────────────────────────────────────
+//
+// A non-singleton `#[managed]` type carries NO stereotype, and that is the
+// enforcement rather than a convention: the stereotype is what emits the
+// singleton `__rkMake_<Type>()` a field would be injected through, `#[managed]`
+// refuses the pair at comptime, and without one a field of this type does not
+// compile at all. `#[managed]` emits `__rkNew_<Type>()` and the scan itself.
+
+#[managed]
+#[scope("prototype")]
+pub type TicketMachine(
+    repo: OrderRepository,
+) {
+    pub fn pull(self: Self) -> i32 {
+        return rkCtxBump("ticket");
+    }
+}
+
+#[managed]
+#[scope("request")]
+pub type RequestBasket(
+    repo: OrderRepository,
+) {
+    pub fn mark(self: Self) -> i32 {
+        return rkCtxBump("basket");
+    }
+}
+
+test "rakun scope: a prototype bean is constructed on every resolve" {
+    val ctx: Context = __rkMake_Context();
+    val _n = rkCtxNoteReset();
+    assert ctx.has("TicketMachine");
+    val a: ?TicketMachine = ctx.resolve("TicketMachine");
+    val b: ?TicketMachine = ctx.resolve("TicketMachine");
+    var first = 0;
+    if (a != null) first = a.pull();
+    var second = 0;
+    if (b != null) second = b.pull();
+    // Two distinct instances, each of which ran. The counter is the observable:
+    // `rkBuildCount` only counts what `rkEnter`/`rkDone` bracket, and a
+    // prototype constructor is deliberately not bracketed.
+    assert first == 1;
+    assert second == 2;
+    assert rkCtxCount("ticket") == 2;
+}
+
+test "rakun scope: the registered record carries the scope the decorator was given" {
+    assert chooseBean("", "TicketMachine") == "|TicketMachine||prototype|0|0|TicketMachine";
+    assert chooseBean("", "RequestBasket") == "|RequestBasket||request|0|0|RequestBasket";
+}
+
+test "rakun scope: a request bean is one instance within a request and another in the next" {
+    val ctx: Context = __rkMake_Context();
+    val _e = rkRequestScopeEnd();
+    val _n = rkCtxNoteReset();
+    val a: ?RequestBasket = ctx.resolve("RequestBasket");
+    val b: ?RequestBasket = ctx.resolve("RequestBasket");
+    var inFirst = 0;
+    if (a != null) inFirst = a.mark();
+    if (b != null) inFirst = b.mark();
+    // Two resolves inside one request: the SAME instance, so the constructor
+    // ran once. The marks are two because both handles were used.
+    assert rkCtxCount("basket") == 2;
+    val cleared = rkRequestScopeEnd();
+    assert cleared == 1;
+    val c: ?RequestBasket = ctx.resolve("RequestBasket");
+    var inSecond = 0;
+    if (c != null) inSecond = c.mark();
+    assert inSecond == 3;
+    // On the BEAM the cache is the process dictionary, so two CONCURRENT
+    // requests are two processes and never share; that half cannot be asserted
+    // from a `.bp` test, which has no way to spawn one. The bracket above is the
+    // half that can, and it is the same statement on both rows.
+    val second = rkRequestScopeEnd();
+    assert second == 1;
+}
+
+test "rakun scope: rkRequestScoped caches by key and the bracket clears it" {
+    val _e = rkRequestScopeEnd();
+    val _n = rkCtxNoteReset();
+    val one = rkRequestScoped("k", { -> rkCtxBump("scoped") });
+    val two = rkRequestScoped("k", { -> rkCtxBump("scoped") });
+    assert one == 1;
+    assert two == 1;
+    assert rkCtxCount("scoped") == 1;
+    val other = rkRequestScoped("other", { -> rkCtxBump("scoped") });
+    assert other == 2;
+    val cleared = rkRequestScopeEnd();
+    assert cleared == 2;
+    val again = rkRequestScoped("k", { -> rkCtxBump("scoped") });
+    assert again == 3;
+    val _z = rkRequestScopeEnd();
+}
+
+test "rakun scope: a non-singleton bean is not constructed by the eager pass" {
+    val _n = rkCtxNoteReset();
+    val _e = rkRequestScopeEnd();
+    assert eagerInit() == "";
+    // Neither the prototype nor the request bean ran a constructor: the eager
+    // pass builds singletons, and a bean built afresh per resolve has no
+    // instance to warm.
+    assert rkCtxCount("ticket") == 0;
+    assert rkCtxCount("basket") == 0;
 }

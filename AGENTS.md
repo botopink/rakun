@@ -1369,6 +1369,38 @@ tells `LivenessState` from `ReadinessState`. A listener registered per NAME is
 therefore registered twice and fires twice per publish;
 `test/events_test.bp`'s expected log shows that rather than papering over it.
 
+### Scopes, and the refusal reflection can actually reach
+
+`Singleton` registers `{ -> __rkMake_<Type>() }`, the stereotype's cached
+factory, and that is what constructor injection always gets. `Prototype` and
+`Request` register a FRESH constructor `__rkNew_<Type>()` that `#[managed]` emits
+itself, with the same per-field injection rule the stereotypes use; `Request`
+wraps it in `rkRequestScoped`, which is `rkSingleton` one scope down — the
+process dictionary on the BEAM, so two concurrent requests are two processes and
+never share, and an explicit bracket on node, which is single-threaded.
+
+The front's step 6 asks for "`#[scope("request")]` on a type whose factory is
+constructor-injected somewhere fails at comptime naming the injection site's
+limitation". **No decorator can see another type's fields**, so that check is not
+writable. What IS writable is its REASON: the stereotype is what emits the
+singleton `__rkMake_<Type>()` a field resolves through, so `#[managed]` refuses a
+non-singleton scope on a type that also carries a stereotype. Without one there
+is no `__rkMake_<Type>` at all, and a field of that type fails the build at its
+own injection site with `unbound variable`. Same guarantee, reached from the half
+reflection can see.
+
+`#[managed]` also refuses `#[postConstruct]`/`#[preDestroy]` on a non-singleton
+bean: both passes run once, over an instance nobody kept.
+
+**A non-singleton `#[managed]` type carries its own `rkScan`**, because no
+stereotype scanned it. Its module therefore imports `rkScan` and, for a request
+bean, `rkRequestScoped`.
+
+**`rkBuildCount` does not count a prototype.** It counts what `rkEnter`/`rkDone`
+bracket, and `__rkNew_<Type>` is deliberately unbracketed — a fresh construction
+per resolve is not a cycle. A prototype test observes the constructor through its
+own counter instead.
+
 ### A module that imports `Context` must also import `Event`
 
 `Context.publish(self, ev: Event)` puts `Event` in the record's method signature,

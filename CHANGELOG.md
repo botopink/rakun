@@ -20,6 +20,28 @@
 > (`{badkey,param}` / `{badkey,query}`), which AGENTS.md § Blocked already
 > records.
 
+- **Scopes: `singleton`, `prototype` and `request`** (front 06, step 6).
+  `#[scope("prototype")]` and `#[scope("request")]` change what `#[managed]`
+  registers: a FRESH `__rkNew_<Type>()` it emits itself (same per-field injection
+  rule as the stereotypes), `request` wrapped in `rkRequestScoped` — the process
+  dictionary on the BEAM, an explicit bracket on node. Five new assertions on
+  both rows.
+
+  **The refusal the README asks for is not writable; its reason is.** "A type
+  whose factory is constructor-injected somewhere fails at comptime" needs a
+  whole-graph view no decorator has. The STEREOTYPE is what emits the singleton
+  `__rkMake_<Type>()` a field resolves through, so `#[managed]` refuses a
+  non-singleton scope beside a stereotype — and without one there is no
+  `__rkMake_<Type>`, so a field of that type fails the build at its own injection
+  site. Same guarantee, from the half reflection can see. A non-singleton bean
+  also may not carry `#[postConstruct]`/`#[preDestroy]`: both passes run once,
+  over an instance nobody kept.
+
+  "Two concurrent requests each get their own instance" is true by construction
+  on the BEAM and **not assertable from a `.bp` test**, which cannot spawn a
+  process; the within-request/next-request bracket is asserted instead, and it is
+  the same statement on both rows.
+
 - **Application events and the boot sequence** (front 06, step 5).
   `modules/rakun/src/events.bp`: one `Event(name, source, payload,
   timestampMillis)` record, string-named, and the listeners that observe it.

@@ -681,6 +681,38 @@ everything after the point of failure and then the boot stops.
 
 `main` calls it rather than `Rakun.run`, because `bootstrap.bp` is frozen.
 
+### Scopes
+
+```bp
+import {managed, scope, rkScan, rkRequestScoped} from "rakun";
+
+#[managed]
+#[scope("prototype")]
+pub type TicketMachine(repo: OrderRepository) { … }
+
+#[managed]
+#[scope("request")]
+pub type RequestBasket(repo: OrderRepository) { … }
+```
+
+`singleton` (the default) is what constructor injection always gets.
+`prototype` constructs on every `resolve`. `request` caches in the request
+process's dictionary, so two resolves inside one request share an instance and
+two requests do not — nearly free on the BEAM, where a request IS a process.
+
+**A prototype or request bean carries no stereotype, and that is enforced.** The
+stereotype is what emits the singleton `__rkMake_<Type>()` a FIELD is injected
+through, so the pair would register a prototype and inject a singleton;
+`#[managed]` refuses it at comptime. Without a stereotype there is no
+`__rkMake_<Type>` at all, so a field of that type does not compile and the bean
+is reached through `ctx.resolve`, which is the point. Such a type also may not
+carry `#[postConstruct]` or `#[preDestroy]`: both passes run once, over an
+instance nobody kept.
+
+Front 62 owns the per-request accessors (`cookies()`, `headers()`, `after()`,
+per-request memoization). Front 06 ships the scope kind and its storage and
+defines no accessor.
+
 ### Qualifiers, primary and lazy
 
 `#[qualifier("name")]` distinguishes two beans of one type, `#[primary]` marks

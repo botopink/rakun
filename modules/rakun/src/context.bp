@@ -620,6 +620,28 @@ fn bootFailure(source: string, reason: string, published: i32) -> i32 {
 // `forEach` over `decl.annotations` with a `val`-then-assign per reader rather
 // than a chain of bare `if`s, which only the LAST statement of a block may be.
 //
+// SCOPE CHANGES WHAT THE REGISTERED FACTORY IS. `Singleton` registers
+// `{ -> __rkMake_<Type>() }`, the stereotype's cached factory, and that is what
+// constructor injection always gets. `Prototype` and `Request` register a FRESH
+// constructor `__rkNew_<Type>()` that `#[managed]` emits itself, with the same
+// per-field injection rule the stereotypes use (a `#[value]` field comes from
+// the property table and is not a DI edge) — `Request` wrapped in
+// `rkRequestScoped`, which is `rkSingleton` one scope down.
+//
+// AND IT REFUSES THE COMBINATION THE README CANNOT SEE. "A prototype or request
+// bean cannot be a constructor-injected field" is not checkable from a
+// decorator: no decl sees another type's fields. What IS checkable is the reason
+// — the STEREOTYPE is what emits the singleton `__rkMake_<Type>()` a field
+// resolves through. So a non-singleton `#[managed]` type carrying a stereotype
+// is refused at comptime, and without one there is no `__rkMake_<Type>` at all,
+// so a field of that type fails the build at its own injection site with
+// `unbound variable`. That is the guarantee the README asks for, reached from
+// the half of it reflection can see.
+//
+// It also refuses `#[postConstruct]`/`#[preDestroy]` on a non-singleton bean:
+// the passes run once at boot and once at shutdown, over an instance nobody
+// kept.
+//
 // WHAT IT EMITS. One `rkRegisterBean` line; one `rkRegisterLifecycle` line per
 // method carrying `#[postConstruct]` or `#[preDestroy]`; one
 // `rkRegisterListener` line per method carrying `#[eventListener("Name")]`.
@@ -643,6 +665,7 @@ pub fn managed(comptime decl: @Decl) {
     var scopeLit = "\"singleton\"";
     var isPrimary = "false";
     var isLazy = "false";
+    var stereotype = "";
     decl.annotations.forEach({ a ->
         val q = if (a.name == "qualifier") a.args.join("") else qual;
         qual = q;
@@ -652,15 +675,42 @@ pub fn managed(comptime decl: @Decl) {
         isPrimary = p;
         val l = if (a.name == "lazy") "true" else isLazy;
         isLazy = l;
+        val isStereo = a.name == "component" || a.name == "service" || a.name == "repository" || a.name == "controller" || a.name == "restController" || a.name == "configuration";
+        val st = if (isStereo) a.name else stereotype;
+        stereotype = st;
     });
-    @emit("val __rkBean_" + decl.name + " = rkRegisterBean(\"" + decl.name + "\", " + qual + ", " + scopeLit + ", " + isPrimary + ", " + isLazy + ", \"" + decl.name + "\", { -> __rkMake_" + decl.name + "() });");
+    val singleton = scopeLit == "\"singleton\"";
+    val request = scopeLit == "\"request\"";
+    var args: Array<string> = [];
+    decl.fields.forEach({ f ->
+        var valKey = "";
+        f.annotations.forEach({ a -> if (a.name == "value") valKey = a.args.join("") });
+        val expr = if (valKey != "") {
+            if (f.typeName == "i32") "rkPropInt(" + valKey + ")" else "rkProp(" + valKey + ")";
+        } else "__rkMake_" + f.typeName + "()";
+        args.push(f.name + ": " + expr);
+    });
+    val scanLine = if (singleton) "" else "val __rkScan_" + decl.name + " = rkScan(\"" + decl.name + "\");";
+    @emit(scanLine);
+    val newLine = if (singleton) "" else "pub fn __rkNew_" + decl.name + "() -> " + decl.name + " { return " + decl.name + "(" + args.join(
+            ", "
+        ) + "); }";
+    @emit(newLine);
+    val fresh = "__rkNew_" + decl.name + "()";
+    val scoped = if (request) "{ -> rkRequestScoped(\"" + decl.name + "\", { -> " + fresh + " }) }" else "{ -> " + fresh + " }";
+    val factory = if (singleton) "{ -> __rkMake_" + decl.name + "() }" else scoped;
+    @emit("val __rkBean_" + decl.name + " = rkRegisterBean(\"" + decl.name + "\", " + qual + ", " + scopeLit + ", " + isPrimary + ", " + isLazy + ", \"" + decl.name + "\", " + factory + ");");
+    val instance = if (singleton) "__rkMake_" + decl.name + "()" else fresh;
+    var hooked = "";
     decl.methods.forEach({ m ->
         var phase = "";
         m.annotations.forEach({ a ->
             val ph = if (a.name == "postConstruct") "post" else if (a.name == "preDestroy") "pre" else phase;
             phase = ph;
         });
-        if (phase != "") @emit("val __rkLc_" + decl.name + "_" + m.name + " = rkRegisterLifecycle(\"" + decl.name + "\", \"" + m.name + "\", \"" + phase + "\", 0, { -> __rkMake_" + decl.name + "()." + m.name + "() });");
+        val seen = if (phase != "") m.name else hooked;
+        hooked = seen;
+        if (phase != "") @emit("val __rkLc_" + decl.name + "_" + m.name + " = rkRegisterLifecycle(\"" + decl.name + "\", \"" + m.name + "\", \"" + phase + "\", 0, { -> " + instance + "." + m.name + "() });");
     });
     decl.methods.forEach({ m ->
         var evName = "";
@@ -668,10 +718,12 @@ pub fn managed(comptime decl: @Decl) {
             val en = if (a.name == "eventListener") a.args.join("") else evName;
             evName = en;
         });
-        if (evName != "") @emit("val __rkEv_" + decl.name + "_" + m.name + " = rkRegisterListener(" + evName + ", \"" + decl.name + "\", { ev -> __rkMake_" + decl.name + "()." + m.name + "(ev) });");
+        if (evName != "") @emit("val __rkEv_" + decl.name + "_" + m.name + " = rkRegisterListener(" + evName + ", \"" + decl.name + "\", { ev -> " + instance + "." + m.name + "(ev) });");
     });
     if (decl.kind != DeclKind.Type) decl.fail("#[managed] must annotate a type");
     if (decl.variants.length > 0) decl.fail("#[managed] must annotate a type with fields, not an enum");
+    if ((!singleton && stereotype != "")) decl.fail("a #[managed] type with a non-singleton #[scope] may not also carry a stereotype - the stereotype emits the singleton __rkMake_<Type>() that constructor injection resolves a field through, so the bean would be REGISTERED as a prototype and INJECTED as a singleton. Drop the stereotype: a prototype or request bean is reached through ctx.resolve, and a field of it then fails the build at its own injection site");
+    if ((!singleton && hooked != "")) decl.fail("a #[managed] type with a non-singleton #[scope] may not carry #[postConstruct] or #[preDestroy] - the passes run once at boot and once at shutdown, over an instance nobody kept, which is not what either marker means on a bean built afresh per resolve");
 }
 
 // ── `#[provides]` ───────────────────────────────────────────────────────────
