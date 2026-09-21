@@ -1,0 +1,121 @@
+//// rakun — the four file-convention markers and what they emit.
+////
+//// Separate from `file_router_test.bp` for a mechanical reason, not a tidy one.
+//// An `@emit`ted module-load `val` lands at the END of the emitted module,
+//// after every hand-written module-level `val`, so a registration cannot be
+//// snapshotted in the module that hosts it; and the registry-cell assertions
+//// next door need `rkAppReset()`, which would wipe these. `botopink test` runs
+//// each test FILE in its own process — measured, not assumed — so the two
+//// concerns live in two files and neither sees the other's table.
+////
+//// Every assertion here runs on both rows.
+
+import {
+    page,
+    layout,
+    template,
+    defaultView,
+    PageContext,
+    LayoutProps,
+    RouteEntry,
+    parseTable,
+    matchPath,
+    paramsOf,
+    emptyParams,
+    ctxParam,
+    ctxRest,
+    rkAppTable,
+    rkAppPage,
+    rkAppLayout,
+    rkAppTemplate,
+    rkAppDefault,
+    rkAppHasRender,
+} from "file_router";
+
+// The four markers sit at module level, so the `val`s they emit run at LOAD,
+// before the first test block. Nothing in this file resets the table.
+
+#[layout("")]
+pub fn rootLayout(props: LayoutProps<string>) -> string {
+    return "root(" + props.children + ")";
+}
+
+#[template("blog")]
+pub fn blogTemplate(props: LayoutProps<string>) -> string {
+    return "blog(" + props.children + ")";
+}
+
+#[defaultView("dashboard/@team")]
+pub fn teamDefault(props: LayoutProps<string>) -> string {
+    return "team";
+}
+
+#[page("blog/[slug]")]
+#[@future]
+pub fn blogPostPage(route: PageContext) -> @Future<string> {
+    return "post:" + ctxParam(route, "slug");
+}
+
+#[page("shop/[...slug]")]
+#[@future]
+pub fn shopPage(route: PageContext) -> @Future<string> {
+    return "shop";
+}
+
+#[page("about")]
+#[@future]
+pub fn aboutPage(route: PageContext) -> @Future<string> {
+    return "about";
+}
+
+fn ctxFor(pattern: string, names: string[], values: string[], rest: string[]) -> PageContext {
+    return PageContext(
+        pathname: pattern,
+        pattern: pattern,
+        params: paramsOf(names, values),
+        query: emptyParams(),
+        rest: rest,
+    );
+}
+
+test "rakun routing: the four markers register at module load" {
+    val wire = rkAppTable();
+    assert wire.contains("L|/");
+    assert wire.contains("T|/blog");
+    assert wire.contains("D|/dashboard|team");
+    assert wire.contains("P|/blog/[slug]");
+    assert wire.contains("P|/shop/[...slug]");
+    assert wire.contains("P|/about");
+    assert rkAppHasRender("P|/blog/[slug]");
+    assert rkAppHasRender("L|/");
+}
+
+test "rakun routing: the boot table parses and matches like any other" {
+    val table = parseTable(rkAppTable());
+    var pattern = "";
+    if (matchPath(table, "/blog/hello")) { hit -> pattern = hit.entry.pattern; };
+    assert pattern == "/blog/[slug]";
+    var about = "";
+    if (matchPath(table, "/about")) { hit -> about = hit.entry.pattern; };
+    assert about == "/about";
+}
+
+test "rakun routing: a dynamic page gets an accessor with a string field" {
+    val one: string[] = [];
+    val ctx = ctxFor("/blog/[slug]", ["slug"], ["hello"], one);
+    assert blogPostPageParams(ctx).slug == "hello";
+}
+
+test "rakun routing: a catch-all page gets an accessor with a string[] field" {
+    val rest = ["a", "b"];
+    val ctx = ctxFor("/shop/[...slug]", ["slug"], ["a/b"], rest);
+    assert shopPageParams(ctx).slug.join("/") == "a/b";
+    assert shopPageParams(ctx).slug.length == 2;
+}
+
+test "rakun routing: a page with no dynamic segment gets an empty accessor" {
+    val none: string[] = [];
+    val ctx = ctxFor("/about", [], [], none);
+    val empty = aboutPageParams(ctx);
+    assert ctxRest(ctx).length == 0;
+}

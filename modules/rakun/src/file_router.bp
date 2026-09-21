@@ -42,6 +42,7 @@
 ////     are comment-free and inline their segment walk instead of sharing one.
 
 import {dict} from "std";
+import {Request} from "http";
 
 // ── character helpers ───────────────────────────────────────────────────────
 // `config.bp` has the same two; a decorator body cannot call a sibling and a
@@ -492,4 +493,256 @@ pub fn matchPath(table: RouteEntry[], pathname: string) -> ?RouteMatch {
             chain: layoutChain(table, entry.pattern),
         );
     };
+}
+
+// ── step 2: what a registered route is handed ───────────────────────────────
+//
+// `Element` is jhonstart's type, not rakun's — rakun declares no dependency on
+// it and must not learn one — so everything that would name it is GENERIC in
+// `El`, the same trick `rkRegisterRoute<Req>` and `rkSingleton<T>` use to stay
+// typed without naming the caller's types.
+//
+// `LayoutProps` is ONE record rather than three parameters because a declared
+// parameter default is still not applied at a call site (measured on this
+// binary, on BOTH rows, for a free fn and for a record field alike — the
+// compiler's `docs.md` says otherwise). A layout that uses no slot would
+// otherwise still have to spell out an empty `slots:` argument at every call
+// site the registry generates. One uniform arity is the only shape that
+// survives the gap.
+
+pub type PageContext(
+    pathname: string,
+    pattern: string,
+    params: Dict<string, string>,
+    query: Dict<string, string>,
+    rest: string[],
+)
+
+pub type LayoutProps<El>(
+    route: PageContext,
+    children: El,
+    slots: Dict<string, El>,
+)
+
+// A `PageContext` for a matched URL. The query is the caller's — front 23 hands
+// what the request carried, a test hands an empty dict.
+pub fn contextOf(m: RouteMatch, pathname: string, query: Dict<string, string>) -> PageContext {
+    return PageContext(
+        pathname: pathname,
+        pattern: m.entry.pattern,
+        params: m.params,
+        query: query,
+        rest: m.rest,
+    );
+}
+
+pub fn emptyParams() -> Dict<string, string> {
+    return dict.empty();
+}
+
+// ── the registry ────────────────────────────────────────────────────────────
+//
+// Each cell carries BOTH host forms, which is what makes this shape legal where
+// front 05's was not: `botopink test` compiles every `test/*.bp` on both rows
+// with no per-target gate, so a cell with only an `@External.Erlang` form is a
+// located diagnostic on the commonJS row at its call site. Nothing here is
+// erlang-only.
+//
+// The cells take the FINISHED `kind|pattern|slot|verb` line, never the raw
+// segment: the grammar and the wire format stay in botopink, compiled twice,
+// and neither host knows how to build a record. The `rkApp*` wrappers below are
+// what the markers emit and what keeps the front's own surface
+// `(seg, render)`.
+
+#[@External.Node("./file_router.mjs", "registerPage"),
+  @External.Erlang("rakun_file_router", "register_page")]
+pub declare fn rkAppRegisterPage<El>(
+    record: string,
+    render: fn(route: PageContext) -> @Future<El>,
+) -> i32;
+
+#[@External.Node("./file_router.mjs", "registerLayout"),
+  @External.Erlang("rakun_file_router", "register_layout")]
+pub declare fn rkAppRegisterLayout<El>(
+    record: string,
+    render: fn(props: LayoutProps<El>) -> El,
+) -> i32;
+
+#[@External.Node("./file_router.mjs", "registerTemplate"),
+  @External.Erlang("rakun_file_router", "register_template")]
+pub declare fn rkAppRegisterTemplate<El>(
+    record: string,
+    render: fn(props: LayoutProps<El>) -> El,
+) -> i32;
+
+#[@External.Node("./file_router.mjs", "registerDefault"),
+  @External.Erlang("rakun_file_router", "register_default")]
+pub declare fn rkAppRegisterDefault<El>(
+    record: string,
+    render: fn(props: LayoutProps<El>) -> El,
+) -> i32;
+
+// Front 25's `route.bp` handlers register into the SAME table as `R` records,
+// through a cell declared here and generic over the response type — so this
+// front never has to know what a `HandlerResponse` is and front 25 never has to
+// declare a host cell.
+#[@External.Node("./file_router.mjs", "registerHandler"),
+  @External.Erlang("rakun_file_router", "register_handler")]
+pub declare fn rkAppRegisterHandler<Res>(
+    record: string,
+    handle: fn(req: Request) -> Res,
+) -> i32;
+
+#[@External.Node("./file_router.mjs", "table"),
+  @External.Erlang("rakun_file_router", "table")]
+pub declare fn rkAppTable() -> string;
+
+#[@External.Node("./file_router.mjs", "count"),
+  @External.Erlang("rakun_file_router", "count")]
+pub declare fn rkAppCount() -> i32;
+
+#[@External.Node("./file_router.mjs", "hasRender"),
+  @External.Erlang("rakun_file_router", "has_render")]
+pub declare fn rkAppHasRender(record: string) -> bool;
+
+// The stored function, or `fallback` when nothing registered that record.
+// Total and typed: an optional function type is a shape neither row reads
+// comfortably, and front 23 needs a value it can call either way.
+#[@External.Node("./file_router.mjs", "render"),
+  @External.Erlang("rakun_file_router", "render")]
+pub declare fn rkAppRender<F>(record: string, fallback: F) -> F;
+
+#[@External.Node("./file_router.mjs", "reset"),
+  @External.Erlang("rakun_file_router", "reset")]
+pub declare fn rkAppReset() -> i32;
+
+// The one place a `kind`, a segment and a verb become a wire record. It HALTS
+// on a segment that may not be registered — a `_`-prefixed folder, an empty
+// segment, a `|` or a newline — which is the right moment for that refusal: the
+// call is a module-load `val`, so the program stops at load rather than serving
+// something surprising.
+pub fn entryLine(kind: string, seg: string, verb: string) -> string {
+    val segs = parsePath(seg);
+    return writeTable(
+        [RouteEntry(kind: kind, pattern: patternOf(segs), slot: slotOf(segs), verb: verb)],
+    );
+}
+
+pub fn rkAppPage<El>(seg: string, render: fn(route: PageContext) -> @Future<El>) -> i32 {
+    return rkAppRegisterPage(entryLine("P", seg, ""), render);
+}
+
+pub fn rkAppLayout<El>(seg: string, render: fn(props: LayoutProps<El>) -> El) -> i32 {
+    return rkAppRegisterLayout(entryLine("L", seg, ""), render);
+}
+
+pub fn rkAppTemplate<El>(seg: string, render: fn(props: LayoutProps<El>) -> El) -> i32 {
+    return rkAppRegisterTemplate(entryLine("T", seg, ""), render);
+}
+
+pub fn rkAppDefault<El>(seg: string, render: fn(props: LayoutProps<El>) -> El) -> i32 {
+    return rkAppRegisterDefault(entryLine("D", seg, ""), render);
+}
+
+pub fn rkAppHandler<Res>(verb: string, seg: string, handle: fn(req: Request) -> Res) -> i32 {
+    return rkAppRegisterHandler(entryLine("R", seg, verb), handle);
+}
+
+// The registered table, parsed. The server reads it from its own registry and
+// the client rebuilds it out of the `"t"` field of front 23's payload with the
+// same `parseTable`, which is what makes the two sides agree.
+pub fn appTable() -> RouteEntry[] {
+    return parseTable(rkAppTable());
+}
+
+// ── what an emitted accessor reads ──────────────────────────────────────────
+// A `PageContext` reached through a TYPED parameter, which is the shape the
+// emitted code has; `route.params.at(name)` written inline would be read off an
+// untyped binder at some call sites and lower to a property read.
+
+pub fn ctxParam(route: PageContext, name: string) -> string {
+    return route.params.at(name).unwrapOr("");
+}
+
+pub fn ctxRest(route: PageContext) -> string[] {
+    return route.rest;
+}
+
+// ── step 2 and step 6: the four markers ─────────────────────────────────────
+//
+// One decorator per file convention, each taking the APP-RELATIVE DIRECTORY of
+// the file it sits in. `default` is a reserved keyword, so the `default.bp`
+// marker is spelled `#[defaultView]` — the only name in the set that does not
+// match its file.
+//
+// Each body does three things, in the order rakun's own component markers do
+// them: it `@emit`s the registration, it `@emit`s the per-route parameter
+// accessor, and then it enforces placement with `decl.fail`. The `@emit`s run
+// first because a failed outcome discards the contributions.
+//
+// THREE RESTRICTIONS SHAPE THESE BODIES AND NONE IS NEGOTIABLE. A decorator
+// body cannot call a sibling function — the evaluator emits only the decorator
+// function into the eval script — which is why the segment walk is inlined in
+// each of the four rather than shared, exactly as `decorators.bp` copies its
+// field-injection block six times. A `//` comment anywhere in the body breaks
+// the flattened emit, so the bodies are comment-free and the prose lives here.
+// And nothing optional works in a comptime body — no `.at(i)`, no `?T` — so the
+// walk uses `split` / `forEach` / `push` / `join` / `startsWith` / `replaceAll`
+// only, and everything a field needs is pushed in the SAME pass.
+//
+// THE REGISTRATION IS A LAMBDA, NOT A BARE NAME. `rkAppPage("blog",
+// blogPostPage)` compiles on the node row and is `variable 'BlogPostPage' is
+// unbound` on the erlang one: a named function used as a VALUE is not lowered
+// to a `fun name/1`. `{ route -> blogPostPage(route) }` is the same value and
+// lowers on both, and it is what `decorators.bp` already emits for a controller
+// method. Recorded in `AGENTS.md`, not worked around anywhere else.
+//
+// THE RETURN TYPE A `@Decl` CARRIES HAS NO TYPE ARGUMENT. `decl.returnType` is
+// `"Future"` for `-> @Future<Element>`, `"Element"` for `-> Element` and `""`
+// for a type. So a page is checked to be a `Future` and a layout to be anything
+// that is not one; the required spelling is in the MESSAGE, which is as close to
+// "naming the required return type" as the reflection allows.
+
+pub fn page(comptime decl: @Decl, seg: string) {
+    @emit("val __rkPage_" + decl.name + " = rkAppPage(\"" + seg + "\", { route -> " + decl.name + "(route) });");
+    var lets: Array<string> = [];
+    var sigs: Array<string> = [];
+    var fields: Array<string> = [];
+    seg.split("/").forEach({ raw ->
+        if (raw.startsWith("[")) {
+            val bare = raw.replaceAll("[", "").replaceAll("]", "").replaceAll(".", "");
+            val isList = raw.startsWith("[[") || raw.startsWith("[.");
+            val reader = if (isList) "ctxRest(route)" else "ctxParam(route, \"" + bare + "\")";
+            val shown = if (isList) "string[]" else "string";
+            lets.push("val " + bare + " = " + reader + ";");
+            sigs.push(bare + ": " + shown);
+            fields.push(bare);
+        };
+    });
+    @emit("pub fn " + decl.name + "Params(route: PageContext) -> #(" + sigs.join(", ") + ") { " + lets.join(
+            " "
+        ) + " return #(" + fields.join(", ") + "); }");
+    if (decl.kind != DeclKind.Fn) decl.fail("#[page] must annotate a function");
+    if (decl.returnType != "Future") decl.fail("#[page] must annotate a #[@future] fn returning @Future<Element> — every page is async so the render pipeline has one shape to drive");
+}
+
+pub fn layout(comptime decl: @Decl, seg: string) {
+    @emit("val __rkLayout_" + decl.name + " = rkAppLayout(\"" + seg + "\", { props -> " + decl.name + "(props) });");
+    if (decl.kind != DeclKind.Fn) decl.fail("#[layout] must annotate a function");
+    if (decl.returnType == "") decl.fail("#[layout] must annotate a fn(props: LayoutProps) -> Element");
+    if (decl.returnType == "Future") decl.fail("#[layout] must annotate a fn(props: LayoutProps) -> Element — a layout is synchronous, only a page is a @Future");
+}
+
+pub fn template(comptime decl: @Decl, seg: string) {
+    @emit("val __rkTemplate_" + decl.name + " = rkAppTemplate(\"" + seg + "\", { props -> " + decl.name + "(props) });");
+    if (decl.kind != DeclKind.Fn) decl.fail("#[template] must annotate a function");
+    if (decl.returnType == "") decl.fail("#[template] must annotate a fn(props: LayoutProps) -> Element");
+    if (decl.returnType == "Future") decl.fail("#[template] must annotate a fn(props: LayoutProps) -> Element — a template is synchronous, only a page is a @Future");
+}
+
+pub fn defaultView(comptime decl: @Decl, seg: string) {
+    @emit("val __rkDefault_" + decl.name + " = rkAppDefault(\"" + seg + "\", { props -> " + decl.name + "(props) });");
+    if (decl.kind != DeclKind.Fn) decl.fail("#[defaultView] must annotate a function");
+    if (decl.returnType == "") decl.fail("#[defaultView] must annotate a fn(props: LayoutProps) -> Element");
+    if (decl.returnType == "Future") decl.fail("#[defaultView] must annotate a fn(props: LayoutProps) -> Element — a default view is synchronous, only a page is a @Future");
 }

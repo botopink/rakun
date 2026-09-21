@@ -30,6 +30,43 @@
   `botopink test` 113/113; `botopink test --target erlang` 111 passing / 2
   failing, the same two front-04 reds.
 
+- **The four markers, the registry and the emitted parameter accessors**
+  (front 22, steps 2 and 6). `#[layout(seg)]`, `#[template(seg)]`,
+  `#[page(seg)]` and `#[defaultView(seg)]` take the app-relative directory of the
+  file they sit in and `@emit` a module-load registration plus, for a page, an
+  accessor `<name>Params(route) -> #(slug: string)` whose fields come from the
+  bracket segments (`string[]` for a catch-all, `#()` for a route with none).
+  They live in `file_router.bp` because `decorators.bp` is frozen — the same
+  reason `#[configurationProperties]` lives in `config.bp` — and `default` is a
+  reserved keyword, so the `default.bp` marker is `#[defaultView]`.
+
+  **This front ships a `.mjs` AND an `.erl` where front 05 refused to, and the
+  difference is that front 05's work was pure.** A registry is not: botopink has
+  no top-level mutable state, and a registered render function is a closure no
+  string table can hold. Front 05's three measurements still hold and none of
+  them is violated — every cell here carries BOTH host forms, so neither row has
+  a call with no binding; `runtime.mjs` is frozen but `file_router.mjs` is this
+  front's own file; and the atom `rakun_file_router` is named in emitted output,
+  so `shipErlSidecars` copies it, verified by looking in
+  `.botopinkbuild/test-out/`. What the two hosts do NOT hold is the part front
+  05's argument was really about: each is handed the finished
+  `kind|pattern|slot|verb` line and appends it beside its function, so neither
+  knows the grammar, the format or the matcher, and the browser and the BEAM
+  cannot disagree about which route a URL is. "The same matcher compiled twice"
+  is one botopink matcher on two targets, not two matchers.
+
+  Two new measurements are recorded in `AGENTS.md` rather than worked around: a
+  named function used as a VALUE is `variable 'BlogPostPage' is unbound` on the
+  erlang row, so a marker emits `{ route -> blogPostPage(route) }`; and
+  `decl.returnType` carries no type argument (`"Future"`, not
+  `"@Future<Element>"`), so a page is checked to BE a future and the required
+  spelling lives in the message. A third is why there are two test files: an
+  `@emit`ted module-load `val` lands at the END of the emitted module, so a
+  registration cannot be snapshotted in its own module, and `botopink test` runs
+  each test file in its own process. Measured: `botopink test` 123/123;
+  `botopink test --target erlang` 121 passing / 2 failing, the same two front-04
+  reds.
+
 - **The file-convention segment grammar** (front 22, step 1).
   `modules/rakun/src/file_router.bp` decodes a folder name into one of the seven
   `SegmentKind`s — static, `[dynamic]`, `[...catchAll]`, `[[...optionalCatchAll]]`,

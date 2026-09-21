@@ -22,7 +22,25 @@ import {
     splitPath,
     attempt,
     paramOf,
+    PageContext,
+    LayoutProps,
+    emptyParams,
+    entryLine,
+    rkAppHandler,
+    rkAppTable,
+    rkAppCount,
+    rkAppHasRender,
+    rkAppRender,
+    rkAppReset,
+    appTable,
+    contextOf,
+    ctxParam,
+    paramsOf,
+    rkAppPage,
+    rkAppLayout,
 } from "file_router";
+import {Request} from "http";
+import {dict} from "std";
 
 // The eight `kind` letters, one entry each — the table this front's contract
 // with fronts 23, 25, 27, 30, 31, 60, 61 and 66 is written in.
@@ -317,4 +335,101 @@ test "rakun routing: splitPath and attempt are total on odd input" {
     assert attempt("/blog/[slug]", "/blog").ok.negate();
     assert attempt("/blog", "/blog/x").ok.negate();
     assert attempt("/", "/").ok;
+}
+
+// ── step 2: the registry ────────────────────────────────────────────────────
+//
+// `El` is `string` here: `Element` is jhonstart's type and rakun declares no
+// dependency on it, which is exactly why every registry cell is generic.
+
+#[@future]
+fn probePage(route: PageContext) -> @Future<string> {
+    return "page:" + route.pattern;
+}
+
+fn probeLayout(props: LayoutProps<string>) -> string {
+    return "layout:" + props.children;
+}
+
+fn noLayout(props: LayoutProps<string>) -> string {
+    return "none:" + props.children;
+}
+
+fn probeHandler(req: Request) -> string {
+    return "handled";
+}
+
+fn rootContext() -> PageContext {
+    val none: string[] = [];
+    return PageContext(
+        pathname: "/",
+        pattern: "/",
+        params: emptyParams(),
+        query: emptyParams(),
+        rest: none,
+    );
+}
+
+test "rakun routing: a record becomes one line of the host table" {
+    assert entryLine("P", "blog/[slug]", "") == "P|/blog/[slug]";
+    assert entryLine("L", "", "") == "L|/";
+    assert entryLine("D", "dashboard/@team", "") == "D|/dashboard|team";
+    assert entryLine("R", "api/posts", "GET") == "R|/api/posts||GET";
+    assert entryLine("P", "(marketing)/about", "") == "P|/about";
+}
+
+test "rakun routing: the registry appends in order and keeps each renderer" {
+    val _reset = rkAppReset();
+    val _l = rkAppLayout("", { props -> probeLayout(props) });
+    val _p = rkAppPage("blog/[slug]", { route -> probePage(route) });
+    val _h = rkAppHandler("GET", "api/posts", { req -> probeHandler(req) });
+    assert rkAppCount() == 3;
+    assert rkAppTable() == "L|/\nP|/blog/[slug]\nR|/api/posts||GET";
+    val back = appTable();
+    assert back.length == 3;
+    assert back.at(1).unwrapOr(RouteEntry(kind: "", pattern: "", slot: "", verb: "")).kind == "P";
+    assert rkAppHasRender("L|/");
+    assert rkAppHasRender("P|/blog/[slug]");
+    assert rkAppHasRender("P|/nothing-registered").negate();
+}
+
+test "rakun routing: a registered renderer comes back callable, with a fallback" {
+    val _reset = rkAppReset();
+    val _l = rkAppLayout("", { props -> probeLayout(props) });
+    val found = rkAppRender("L|/", { props -> noLayout(props) });
+    val lp = LayoutProps(route: rootContext(), children: "x", slots: dict.empty());
+    assert found(lp) == "layout:x";
+    val missing = rkAppRender("L|/nothing", { props -> noLayout(props) });
+    assert missing(lp) == "none:x";
+}
+
+test "rakun routing: the host table and the botopink matcher agree" {
+    val _reset = rkAppReset();
+    val _l = rkAppLayout("", { props -> probeLayout(props) });
+    val _b = rkAppLayout("blog", { props -> probeLayout(props) });
+    val _p = rkAppPage("blog/[slug]", { route -> probePage(route) });
+    val table = appTable();
+    var slug = "";
+    var depth = 0;
+    if (matchPath(table, "/blog/hello")) { hit ->
+        slug = paramOf(hit, "slug");
+        depth = hit.chain.length;
+    };
+    assert slug == "hello";
+    assert depth == 2;
+}
+
+test "rakun routing: a context carries the match through to a page" {
+    val _reset = rkAppReset();
+    val _p = rkAppPage("blog/[slug]", { route -> probePage(route) });
+    val table = appTable();
+    var pattern = "";
+    var pathname = "";
+    if (matchPath(table, "/blog/hello")) { hit ->
+        val ctx = contextOf(hit, "/blog/hello", emptyParams());
+        pattern = ctx.pattern;
+        pathname = ctx.pathname;
+    };
+    assert pattern == "/blog/[slug]";
+    assert pathname == "/blog/hello";
 }

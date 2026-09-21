@@ -77,6 +77,10 @@ rakun/
 │   │   │   │                    slot|verb` wire format, the matcher and the four
 │   │   │   │                    markers. `decorators.bp` is frozen, so the markers
 │   │   │   │                    live here, as `#[configurationProperties]` does
+│   │   │   ├── file_router.mjs ← the App-Router REGISTRY, node half: an append-only
+│   │   │   │                    list of (wire line, render fn). Knows no grammar
+│   │   │   ├── sidecars/rakun_file_router.erl ← the same registry on the BEAM, in
+│   │   │   │                    ETS behind a dedicated owner process
 │   │   │   ├── bootstrap.bp   ← `Rakun` (concrete type): `Rakun.run(app)` starts `rkServe`
 │   │   │   └── rakun.d.bp     ← declaration-only: the `Context` IoC behavior (future)
 │   │   └── test/
@@ -87,8 +91,12 @@ rakun/
 │   │       │                     param · query/header/body · 200/404 (F5)
 │   │       ├── file_router_test.bp ← the segment grammar · the wire-format round
 │   │       │                     trip · matcher precedence and capture · the layout
-│   │       │                     chain · the emitted param accessors. The SAME
-│   │       │                     assertions on both rows
+│   │       │                     chain · the registry cells. The SAME assertions on
+│   │       │                     both rows
+│   │       ├── file_router_markers_test.bp ← the four markers at module level and
+│   │       │                     the accessors they emit; no `rkAppReset()`, because
+│   │       │                     a module-load registration cannot be snapshotted in
+│   │       │                     its own module
 │   │       ├── overlapping_routes_test.bp ← two controllers sharing a path prefix both
 │   │       │                     register; dispatch matches the FULL path; a leaf (no-dep)
 │   │       │                     #[service] resolves through the DI chain
@@ -411,6 +419,125 @@ REGISTRATION order, the rule `rkDispatch` already follows.
 and `.unwrapOr` is not a function on it. `paramOf` takes a TYPED parameter and
 is the form fronts 23 and 26 should use. The same rule bit `parseTable`: a `val`
 bound inside a `loop` lambda needs its annotation (`val f: string[] = …`).
+
+### The registry, and why this front ships a `.mjs` and an `.erl` where front 05 refused to
+
+Front 05 wrote its readers in botopink and shipped no sidecar, for three
+measured reasons: `botopink test` compiles every `test/*.bp` on BOTH rows with
+no per-target gate, so a cell carrying only an `@External.Erlang` form is a
+located node-row diagnostic at its CALL SITE; `runtime.mjs` is frozen, so an
+erlang-only cell has no node twin; and `shipErlSidecars` ships only a sidecar
+whose atom appears in emitted output, so an unreferenced one is skipped
+silently. All three still hold. None of them says "never ship a sidecar" — they
+say **a cell with one host form is a compile error, and a cell nobody names is a
+run-time death**.
+
+This front's work is not front 05's. Front 05's was PURE: document readers, one
+implementation over `std`, and a sidecar would have been a second copy of
+something botopink can do. A REGISTRY is not pure. botopink has no top-level
+mutable state, which is the same reason `runtime.mjs` holds the scan list and
+the router table; and a registered render function is a CLOSURE, which no string
+property table can hold. So the table lives in the host on both rows:
+`src/file_router.mjs` and `src/sidecars/rakun_file_router.erl`.
+
+What makes the shape legal here:
+
+- **Every cell carries both forms.** `rkAppRegisterPage` / `…Layout` /
+  `…Template` / `…Default` / `…Handler`, `rkAppTable`, `rkAppCount`,
+  `rkAppHasRender`, `rkAppRender` and `rkAppReset` each declare an
+  `@External.Node("./file_router.mjs", …)` and an
+  `@External.Erlang("rakun_file_router", …)`. Neither row has a call with no
+  binding, so neither row reds.
+- **`runtime.mjs` is frozen; `file_router.mjs` is this front's own file.** The
+  freeze is on a file, not on the idea of a node host.
+- **The atom is named in emitted output.** `file_router.bp` is compiled and
+  emits `rakun_file_router:register_page(…)`, so `shipErlSidecars` finds and
+  copies `src/sidecars/rakun_file_router.erl` — verified by LOOKING, at
+  `.botopinkbuild/test-out/rakun_file_router.erl`, not by trusting exit 0. The
+  atom is `rakun_file_router` and never `file_router`, because rakun emits
+  `rakun/file_router` and a matching sidecar is skipped in silence.
+
+**"The same matcher compiled twice" is one matcher, not two.** The spec's phrase
+means the botopink matcher compiled to two TARGETS; it does not mean a JS
+matcher beside an erlang one. The two host files hold no grammar, no wire format
+and no matching: each cell is handed the finished `kind|pattern|slot|verb` LINE
+and appends it beside its function, and `table()` joins the lines back. Neither
+host knows the format. That is what makes "the two sides cannot disagree about
+which route a URL is" a property rather than a hope — and it is the same
+conclusion front 05 reached, applied to the half of this front that is pure.
+
+**Table ownership on the BEAM.** An ETS table dies with the process that created
+it, and a registration runs in whatever process loaded the module, so
+`rakun_file_router` creates its tables in a dedicated owner process registered
+under `rakun_app_routes_owner`; a second caller losing the race finds the table
+already there. It deliberately does not reuse `rakun_runtime`'s supervision
+tree: the two sidecars are shipped independently, and a file-convention program
+that never touches the DI container should not start an application to hold four
+rows.
+
+### The four markers
+
+`#[layout(seg)]`, `#[template(seg)]`, `#[page(seg)]` and `#[defaultView(seg)]`
+live in `file_router.bp` because `decorators.bp` is frozen — the same reason
+`#[configurationProperties]` lives in `config.bp`. `default` is a reserved
+keyword, so the `default.bp` marker is `#[defaultView]`: the only name in the
+set that does not match its file. Front 25's verb markers register `route.bp`
+handlers into the same table as `R` records, through `rkAppRegisterHandler<Res>`,
+which is declared here and generic over the response type — so this front never
+learns what a `HandlerResponse` is and front 25 declares no host cell.
+
+Each body `@emit`s the registration, `@emit`s the per-route parameter accessor,
+and then enforces placement, in that order: the `@emit`s run first because a
+failed outcome discards the contributions.
+
+| Written | Refused with |
+|---|---|
+| `#[page]` on a type | `#[page] must annotate a function` |
+| `#[page]` on a fn returning `Element` | `#[page] must annotate a #[@future] fn returning @Future<Element> — every page is async so the render pipeline has one shape to drive` |
+| `#[layout]` on a `#[@future]` fn | `#[layout] must annotate a fn(props: LayoutProps) -> Element — a layout is synchronous, only a page is a @Future` |
+| `#[page()]`, `#[page(1)]` | the automatic argument check, with no code in this front |
+
+Three measurements shape these bodies and one of them is new:
+
+- **A named function used as a VALUE does not lower on the erlang row.**
+  `rkAppPage("blog", blogPostPage)` compiles on node and is
+  `variable 'BlogPostPage' is unbound` on erlang. The markers therefore emit
+  `{ route -> blogPostPage(route) }`, which is the same value, lowers on both,
+  and is what `decorators.bp` already emits for a controller method.
+- **`decl.returnType` carries no type argument.** It is `"Future"` for
+  `-> @Future<Element>`, `"Element"` for `-> Element` and `""` for a type. So a
+  page is checked to BE a `Future` and a layout to be anything that is not one;
+  the required spelling is in the message, which is as close to "naming the
+  required return type" as the reflection allows.
+- **An `@emit`ted module-load `val` lands at the END of the emitted module**,
+  after every hand-written module-level `val`. A registration therefore cannot
+  be snapshotted in the module that hosts it — which is why the markers have
+  their own test file: `botopink test` runs each test FILE in its own process
+  (measured), so `test/file_router_markers_test.bp` never sees the
+  `rkAppReset()` the registry-cell assertions next door need.
+
+### The emitted parameter accessor
+
+`#[page("blog/[slug]")] pub fn blogPostPage(…)` also emits
+
+```bp
+pub fn blogPostPageParams(route: PageContext) -> #(slug: string) {
+    val slug = ctxParam(route, "slug");
+    return #(slug);
+}
+```
+
+A catch-all emits `val slug = ctxRest(route);` and types the field `string[]`; a
+route with no dynamic segment emits `-> #()`. The reads go through `ctxParam` /
+`ctxRest` rather than `route.params.at(name).unwrapOr("")` for the reason
+`paramOf` exists: an inline read off a value whose type was lost lowers to a
+property read and `.unwrapOr` is not a function on it. A consumer therefore
+imports `ctxParam` and `ctxRest` beside the markers, the way a module declaring
+components imports `rkScan` and `rkSingleton`.
+
+The accessors only exist under `botopink test`, never under `botopink check`:
+`check` skips decorator invocation and reports every `@emit`ted name as unbound.
+That is a known gotcha, not this front's.
 
 ## Externalized configuration
 

@@ -47,7 +47,10 @@ sidecar naming rule and what is still blocked.
   groups and slots dropped and the bracket spelling kept, and `slotOf` names the
   slot. The table is `kind|pattern|slot|verb` lines — `parseTable` / `writeTable`
   — and `matchPath` / `layoutChain` read it, one implementation compiled to both
-  targets. Beside the decorator router, not instead of it.
+  targets. `#[layout]`, `#[template]`, `#[page]` and `#[defaultView]` register a
+  route from the app-relative directory they are given, and a `#[page]` also
+  gets an emitted `<name>Params(route)` accessor typed from its bracket
+  segments. Beside the decorator router, not instead of it.
 - **Cycle detection** — `__rkMake_X` brackets construction with `rkEnter`/`rkDone`;
   a cycle A→B→A raises at first construction (runtime — a single decorator has no
   whole-graph view).
@@ -175,6 +178,38 @@ to dot keys (`server.port`) and an array to indexed keys (`a[0]`). A YAML
 construct outside the subset (anchor, alias, flow style, block scalar, tag) is a
 located refusal naming the file and the line, never a silent mis-parse. See
 [`AGENTS.md`](AGENTS.md) § Externalized configuration for the table.
+
+## File-convention routing
+
+`#[restController]` routes by decorator and is untouched. `file_router.bp` is
+the other model — a URL that comes from where a file sits:
+
+```bp
+import {layout, page, PageContext, LayoutProps, ctxParam, rkAppLayout, rkAppPage} from "rakun";
+
+#[layout("")]
+pub fn rootLayout(props: LayoutProps<Element>) -> Element { … }
+
+#[page("blog/[slug]")]
+#[@future]
+pub fn blogPostPage(route: PageContext) -> @Future<Element> {
+    return post(blogPostPageParams(route).slug);
+}
+```
+
+The argument is the APP-RELATIVE DIRECTORY of the file, not its URL: `@Decl`
+carries no source location, so a decorator cannot learn which file it was
+written in, and the CLI (front 50) checks the argument against the real tree
+under `onze.appDir`. `blogPostPageParams` is emitted by `#[page]` — one field
+per bracket segment, `string[]` for a catch-all, `#()` for none.
+
+The registered table crosses the boundary as `kind|pattern|slot|verb` lines in
+registration order — `L` layout, `T` template, `P` page, `D` default, `R` route
+handler, `S` loading, `E` error, `N` not-found. `parseTable`, `matchPath` and
+`layoutChain` read it, one implementation compiled to both targets; the host
+halves (`file_router.mjs`, `sidecars/rakun_file_router.erl`) hold only the
+lines and the render functions and know nothing about the format. Read a bound
+parameter with `paramOf(match, name)`.
 
 ## Loading notes
 
