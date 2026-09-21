@@ -11,6 +11,51 @@
 > passing / 2 failing, the two reds being `{badkey,param}`/`{badkey,query}` in
 > front 04's `server_test.bp`.
 
+- **The bean registry, and why it holds factories** (front 06, step 1).
+  `modules/rakun/src/context.bp` is the first of the container's doors:
+  `#[managed]` stacks under a stereotype and `@emit`s one
+  `rkRegisterBean(type, qualifier, scope, primary, lazy, owner, factory)` line,
+  and the registry stores the FACTORY beside the record. `rkScan` stores a
+  string and nothing turns a string back into a constructor, which is why
+  "resolve by name" could not be built on the scan; a table of factories is what
+  makes resolution, eager initialization and the shutdown pass all reachable
+  from one place. `rkResolve` / `rkResolveNamed` / `rkHasBean` / `rkBeanNames`
+  are the doors; a tie between two candidates with no `#[primary]` RAISES naming
+  both owners rather than picking first-wins, and `rkHasBean` never raises
+  because an ambiguous type is still registered.
+
+  **This front ships both host files, and the measurement is its own.** Front
+  05's config readers were pure, so one botopink implementation answered both
+  rows; what this registry stores is a bean factory, a lifecycle thunk, a
+  listener closure and an exit-code generator — four funs, and no string
+  property table holds a fun. (The 1.0.6-beta sketch that resolved through
+  `list_to_existing_atom("__rkMake_" ++ Name)` could not have run either: an
+  atom is not callable.) So `src/context.mjs` and
+  `src/sidecars/rakun_context.erl` exist, and front 05's three conditions are
+  satisfied rather than waived — every cell carries BOTH forms, `runtime.mjs` is
+  untouched, and the atom was verified by READING
+  `.botopinkbuild/test-out/rakun_context.erl`, not by trusting exit 0.
+
+  **Seven scalars, not the README's five.** The front's Mechanism writes a
+  five-argument `rkRegisterBean` and its step 1 an ETS row of
+  `{Primary, Lazy, Scope, Factory}`; five arguments have no room for the scope,
+  and neither has room for the owner the front's own ambiguity message spells
+  (`two beans of type 'Clock' ('systemClock', 'fixedClock')`). Both are carried
+  rather than dropped.
+
+  **A bean record carries its context path**, so `ctx.child(name)` is a real
+  parent/child chain and not a label: a bean is visible from a path when it was
+  registered at that path or an ancestor, and the nearest registration wins.
+  Front 62's per-request scope and front 72's conditional layer are what will
+  register into a child; nothing in rakun registers anywhere but the root today.
+
+  13 new assertions, green on both rows: `botopink test` 222/222 and
+  `botopink test --target erlang` 213 passing / 9 failing, the nine being a
+  compiler regression in a record field read on erlang that predates this front
+  (`router_test.bp`, `server_test.bp`, `erlang_runtime_test.bp`,
+  `file_router_test.bp`, `overlapping_routes_test.bp` — `{error, badarg}` with an
+  empty RUN LOG), measured at 200/9 on this branch's fork point.
+
 - **The request frame, its epoch and the five phases** (front 62, step 1).
   `modules/rakun/src/request_context.bp` opens the scope every server-side read
   of a cookie or a header goes through: `beginRequest(RequestScope(…))` writes

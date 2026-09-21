@@ -1,0 +1,497 @@
+//// rakun — the container's doors: the bean registry, `Context`, and the
+//// decorators that fill them.
+////
+//// WHY THIS EXISTS. rakun's IoC container works and, until this module, was
+//// unreachable. Constructor injection resolves a field by type through an
+//// emitted `__rkMake_<Type>()` factory (`decorators.bp`), and that was the
+//// entire public surface: a value that is not a field of something could not
+//// be got at, nothing ran at startup or shutdown, and nothing reacted to
+//// anything. `src/rakun.d.bp` had written the intended door down and called it
+//// "not yet implemented". This is the implementation.
+////
+//// WHY THE REGISTRY HOLDS FACTORIES AND NOT NAMES. `rkScan("UserService")`
+//// stores a string, and nothing can turn a string back into a constructor. A
+//// registry holding factories is what makes resolution, eager initialization
+//// and the shutdown pass all possible from one table.
+////
+//// WHY THIS FRONT SHIPS BOTH HOST FILES WHERE FRONT 05 SHIPPED NONE. Front
+//// 05's three measurements still hold and none is violated here: every cell
+//// below carries BOTH forms, so neither row has a call with no binding;
+//// `runtime.mjs` is frozen but `context.mjs` is this front's own file; and the
+//// atom `rakun_context` is named in emitted output, so `shipErlSidecars`
+//// copies it — verified by reading `.botopinkbuild/test-out/rakun_context.erl`,
+//// not by trusting exit 0. What decides the shape is front 22's test, applied
+//// rather than cited: is the thing being stored PURE? A bean FACTORY is a
+//// closure over a constructor, a lifecycle hook is a THUNK, a listener is a
+//// CLOSURE and an exit-code generator is a FUNCTION. No string property table
+//// holds any of the four — measured, not assumed, in § The measurement of
+//// `AGENTS.md`. So the four tables live in the host on both rows, and the
+//// record grammar, the candidate choice, every refusal message and the boot
+//// order are botopink, compiled twice.
+////
+//// `#[managed]` STACKS UNDER A STEREOTYPE rather than replacing it, because
+//// `decorators.bp` is frozen for the milestone and a decorator body cannot
+//// call a sibling function. When `decorators.bp` unfreezes, this body folds
+//// into the six stereotypes and the extra line goes away.
+
+// ── scopes ──────────────────────────────────────────────────────────────────
+//
+// `Singleton` goes through `rkSingleton` and is what constructor injection
+// always gets. `Prototype` calls the constructor on every resolve. `Request`
+// caches in the request process's dictionary, so two resolves inside one
+// request share an instance and two requests do not — nearly free on the BEAM,
+// where a request IS a process. Front 62 owns the per-request accessors; this
+// module ships the scope kind and its storage and defines no accessor.
+
+pub type Scope {
+    Singleton,
+    Prototype,
+    Request,
+}
+
+pub fn scopeName(s: Scope) -> string {
+    return case s {
+        Scope.Singleton { "singleton" }
+        Scope.Prototype { "prototype" }
+        Scope.Request { "request" }
+    };
+}
+
+pub fn scopeOf(name: string) -> Scope {
+    return case name {
+        "singleton" { Scope.Singleton }
+        "prototype" { Scope.Prototype }
+        "request" { Scope.Request }
+        _ { @panic(scopeProblem(name)) }
+    };
+}
+
+// ── the refusals ────────────────────────────────────────────────────────────
+//
+// Each message is a function of its own, for the reason front 62's are: a test
+// reads the words without the halt taking the test down, and every raise site
+// spells the refusal once. Every one of them is pure ASCII — `asserts.throwsWith`
+// catches through `io_lib:format("~p:~p", ...)` on the erlang row, and `~p`
+// renders a binary holding a non-Latin-1 byte as a list of numbers, so a
+// refusal carrying an em dash matches no needle at all.
+
+pub fn scopeProblem(name: string) -> string {
+    return "rakun: '" + name + "' is not a scope - write singleton, prototype or request";
+}
+
+pub fn beanNameProblem() -> string {
+    return "rakun: a bean needs a type name to be registered under";
+}
+
+pub fn beanFieldProblem(what: string, value: string) -> string {
+    return "rakun: a bean's " + what + " may not contain '|' or a newline, and '" + value + "' does";
+}
+
+pub fn duplicateBeanProblem(typeName: string, qualifier: string, first: string, second: string) -> string {
+    val named = if (qualifier == "") "" else " under the qualifier '" + qualifier + "'";
+    return "rakun: two beans of type '" + typeName + "'" + named + " are registered ('" + first + "' and '" + second + "'); give one a distinct #[qualifier]";
+}
+
+pub fn ambiguousBeanProblem(typeName: string, owners: string) -> string {
+    return "rakun: two beans of type '" + typeName + "' (" + owners + ") and neither is #[primary]; resolve by qualifier, or mark one #[primary]";
+}
+
+pub fn twoPrimariesProblem(typeName: string, owners: string) -> string {
+    return "rakun: two beans of type '" + typeName + "' (" + owners + ") are both #[primary]; exactly one may be";
+}
+
+// ── the bean record ─────────────────────────────────────────────────────────
+//
+// `path|type|qualifier|scope|primary|lazy|owner`, the finished line the host is
+// handed. `path` is the context scope the bean was registered into ("" is the
+// root, and `Context.child` is what makes a longer one reachable); `owner` is
+// the declaration the registration came from — the `#[managed]` type, the
+// `#[provides]` function or the `#[configuration]` that `#[imports]`ed it —
+// and it exists because the ambiguity message has to name both candidates.
+//
+// The host never parses this. It appends the line beside the factory, hands
+// back the table, and invokes the factory stored under a line it is given
+// verbatim. Neither host knows the format, which is what makes "the two rows
+// cannot disagree about what the container holds" a property rather than a hope.
+
+pub type Bean(
+    path: string,
+    typeName: string,
+    qualifier: string,
+    scope: string,
+    primary: bool,
+    lazy: bool,
+    owner: string,
+)
+
+fn flag(v: bool) -> string {
+    return if (v) "1" else "0";
+}
+
+pub fn beanLine(b: Bean) -> string {
+    return b.path + "|" + b.typeName + "|" + b.qualifier + "|" + b.scope + "|" + flag(b.primary) + "|" + flag(b.lazy) + "|" + b.owner;
+}
+
+pub fn parseBeans(wire: string) -> Bean[] {
+    var out: Bean[] = [];
+    if (wire == "") return out else {
+        loop (wire.split("\n")) { line ->
+            if (line != "") {
+                val f: string[] = line.split("|");
+                out.push(
+                    Bean(
+                        path: f.at(0).unwrapOr(""),
+                        typeName: f.at(1).unwrapOr(""),
+                        qualifier: f.at(2).unwrapOr(""),
+                        scope: f.at(3).unwrapOr(""),
+                        primary: f.at(4).unwrapOr("0") == "1",
+                        lazy: f.at(5).unwrapOr("0") == "1",
+                        owner: f.at(6).unwrapOr(""),
+                    ),
+                );
+            };
+        };
+        return out;
+    };
+}
+
+// ── the host cells ──────────────────────────────────────────────────────────
+//
+// Every cell carries BOTH forms, which is what makes this shape legal where
+// front 05's was not: `botopink test` compiles every `test/*.bp` on both rows
+// with no per-target gate, so a cell with only an `@External.Erlang` form is a
+// located diagnostic on the commonJS row at its call site. Nothing here is
+// erlang-only.
+
+#[@External.Node("./context.mjs", "beanRegister"),
+  @External.Erlang("rakun_context", "bean_register")]
+pub declare fn rkBeanStore<T>(record: string, factory: fn() -> T) -> i32;
+
+#[@External.Node("./context.mjs", "beanTable"),
+  @External.Erlang("rakun_context", "bean_table")]
+pub declare fn rkBeanTable() -> string;
+
+#[@External.Node("./context.mjs", "beanCount"),
+  @External.Erlang("rakun_context", "bean_count")]
+pub declare fn rkBeanCount() -> i32;
+
+#[@External.Node("./context.mjs", "beanHasRecord"),
+  @External.Erlang("rakun_context", "bean_has_record")]
+pub declare fn rkBeanHasRecord(record: string) -> bool;
+
+// The factory stored under this EXACT line, invoked. botopink chose the line
+// out of `rkBeanTable()`; the host does an equality test and a call.
+#[@External.Node("./context.mjs", "beanInvoke"),
+  @External.Erlang("rakun_context", "bean_invoke")]
+pub declare fn rkBeanInvoke<T>(record: string) -> ?T;
+
+// The same call with the value discarded, for the eager pass: the caller has no
+// type to bind the answer to, and a construction that raises must still raise.
+#[@External.Node("./context.mjs", "beanTouch"),
+  @External.Erlang("rakun_context", "bean_touch")]
+pub declare fn rkBeanTouch(record: string) -> i32;
+
+#[@External.Node("./context.mjs", "beanReset"),
+  @External.Erlang("rakun_context", "bean_reset")]
+pub declare fn rkBeanReset() -> i32;
+
+// `rkSingleton` one scope down. On the BEAM this is the process dictionary, so
+// two concurrent requests are two processes and get their own instance for
+// free; node is single-threaded, so the scope is the bracket the dispatcher
+// opens and `rkRequestScopeEnd` closes.
+#[@External.Node("./context.mjs", "requestScoped"),
+  @External.Erlang("rakun_context", "request_scoped")]
+pub declare fn rkRequestScoped<T>(key: string, build: fn() -> T) -> T;
+
+#[@External.Node("./context.mjs", "requestScopeEnd"),
+  @External.Erlang("rakun_context", "request_scope_end")]
+pub declare fn rkRequestScopeEnd() -> i32;
+
+// ── the test seam ───────────────────────────────────────────────────────────
+//
+// An ordered note log and a counter table. The boot sequence is asserted by
+// registering a listener for every one of the eight events that appends its
+// name here, then comparing the log to the documented order — which catches a
+// reordering a per-event test would not; and "the hook ran exactly once" is a
+// counter or it is nothing. Both are host state for the same reason the
+// registry is: botopink has no top-level mutable state.
+
+#[@External.Node("./context.mjs", "note"),
+  @External.Erlang("rakun_context", "note")]
+pub declare fn rkCtxNote(line: string) -> i32;
+
+#[@External.Node("./context.mjs", "noteLog"),
+  @External.Erlang("rakun_context", "note_log")]
+pub declare fn rkCtxNotes() -> string;
+
+#[@External.Node("./context.mjs", "noteReset"),
+  @External.Erlang("rakun_context", "note_reset")]
+pub declare fn rkCtxNoteReset() -> i32;
+
+#[@External.Node("./context.mjs", "bump"),
+  @External.Erlang("rakun_context", "bump")]
+pub declare fn rkCtxBump(key: string) -> i32;
+
+#[@External.Node("./context.mjs", "counted"),
+  @External.Erlang("rakun_context", "counted")]
+pub declare fn rkCtxCount(key: string) -> i32;
+
+// ── registration ────────────────────────────────────────────────────────────
+//
+// What `#[managed]`, `#[provides]` and `#[imports]` emit. The scalars are
+// named here and the wire record is built here, so the emitted line reads like
+// the declaration it came from and the host stays a table of lines.
+
+pub fn rkRegisterBean<T>(
+    typeName: string,
+    qualifier: string,
+    scope: string,
+    primary: bool,
+    lazy: bool,
+    owner: string,
+    factory: fn() -> T,
+) -> i32 {
+    return rkRegisterBeanAt("", typeName, qualifier, scope, primary, lazy, owner, factory);
+}
+
+// The same registration into a CHILD context. Front 62's per-request scope and
+// front 72's conditional layer are what will reach for it; nothing in this
+// module registers anywhere but the root.
+pub fn rkRegisterBeanAt<T>(
+    path: string,
+    typeName: string,
+    qualifier: string,
+    scope: string,
+    primary: bool,
+    lazy: bool,
+    owner: string,
+    factory: fn() -> T,
+) -> i32 {
+    if (typeName == "") @panic(beanNameProblem());
+    if (unwritable(typeName)) @panic(beanFieldProblem("type name", typeName));
+    if (unwritable(qualifier)) @panic(beanFieldProblem("qualifier", qualifier));
+    if (unwritable(owner)) @panic(beanFieldProblem("owner", owner));
+    val clash = existing(path, typeName, qualifier);
+    if (clash != "") @panic(duplicateBeanProblem(typeName, qualifier, clash, owner));
+    val _s = scopeOf(scope);
+    return rkBeanStore(
+        beanLine(
+            Bean(
+                path: path,
+                typeName: typeName,
+                qualifier: qualifier,
+                scope: scope,
+                primary: primary,
+                lazy: lazy,
+                owner: owner,
+            ),
+        ),
+        factory,
+    );
+}
+
+fn unwritable(value: string) -> bool {
+    val bad = value.contains("|") || value.contains("\n");
+    return bad;
+}
+
+// The owner of an already-registered `(path, type, qualifier)`, or `""`. The
+// duplicate message names both declarations, which is as close to "both
+// declaration sites" as a registration that carries no source location gets.
+fn existing(path: string, typeName: string, qualifier: string) -> string {
+    var owner = "";
+    loop (parseBeans(rkBeanTable())) { b ->
+        val same = b.path == path && b.typeName == typeName;
+        if ((same && b.qualifier == qualifier)) {
+            owner = b.owner;
+        };
+    };
+    return owner;
+}
+
+// ── resolution ──────────────────────────────────────────────────────────────
+//
+// A bean is visible from a context path when it was registered at that path or
+// at an ancestor of it, and the NEAREST registration wins — Spring's
+// parent/child contexts, and what front 62 builds the per-request scope on.
+
+fn visible(rowPath: string, ctxPath: string) -> bool {
+    if (rowPath == "") return true else {
+        val hit = rowPath == ctxPath || ctxPath.startsWith(rowPath + "/");
+        return hit;
+    };
+}
+
+pub fn beansVisible(path: string, typeName: string) -> Bean[] {
+    var near: Bean[] = [];
+    var depth = -1;
+    loop (parseBeans(rkBeanTable())) { b ->
+        if ((b.typeName == typeName && visible(b.path, path))) {
+            val d = b.path.length();
+            if (d > depth) {
+                depth = d;
+                near = [];
+            };
+            if (d == depth) near.push(b);
+        };
+    };
+    return near;
+}
+
+fn ownerList(rows: Bean[]) -> string {
+    var names: string[] = [];
+    loop (rows) { b -> names.push("'" + b.owner + "'"); };
+    return names.join(", ");
+}
+
+// The one record `resolve` will invoke, or `""` when nothing is registered. A
+// tie is an error and never a silent first-wins: two candidates and no
+// `#[primary]` raises naming both, and so does a second `#[primary]`.
+pub fn chooseBean(path: string, typeName: string) -> string {
+    val rows = beansVisible(path, typeName);
+    if (rows.length == 0) return "" else {
+        if (rows.length == 1) return beanLine(rows.at(0).unwrapOr(emptyBean())) else {
+            var primaries: Bean[] = [];
+            loop (rows) { b -> if (b.primary) primaries.push(b); };
+            if (primaries.length == 1) return beanLine(primaries.at(0).unwrapOr(emptyBean())) else {
+                if (primaries.length == 0) @panic(ambiguousBeanProblem(typeName, ownerList(rows)));
+                @panic(twoPrimariesProblem(typeName, ownerList(primaries)));
+            };
+        };
+    };
+}
+
+fn emptyBean() -> Bean {
+    return Bean(path: "", typeName: "", qualifier: "", scope: "", primary: false, lazy: false, owner: "");
+}
+
+pub fn chooseBeanNamed(path: string, typeName: string, qualifier: string) -> string {
+    var found = "";
+    loop (beansVisible(path, typeName)) { b ->
+        if (b.qualifier == qualifier) found = beanLine(b);
+    };
+    return found;
+}
+
+// The programmatic doors, as free functions. `Context` is the record face of
+// the same three, and `rakun.d.bp`'s declaration-only `behavior Context` is
+// what they replace.
+pub fn rkResolve<T>(typeName: string) -> ?T {
+    return rkResolveIn("", typeName);
+}
+
+pub fn rkResolveIn<T>(path: string, typeName: string) -> ?T {
+    val record = chooseBean(path, typeName);
+    if (record == "") return null else return rkBeanInvoke(record);
+}
+
+pub fn rkResolveNamed<T>(typeName: string, qualifier: string) -> ?T {
+    return rkResolveNamedIn("", typeName, qualifier);
+}
+
+pub fn rkResolveNamedIn<T>(path: string, typeName: string, qualifier: string) -> ?T {
+    val record = chooseBeanNamed(path, typeName, qualifier);
+    if (record == "") return null else return rkBeanInvoke(record);
+}
+
+// `has` never raises. An ambiguous type IS registered, and a caller asking
+// whether the container knows about it deserves the answer rather than the
+// halt `resolve` owes it.
+pub fn rkHasBean(typeName: string) -> bool {
+    return rkHasBeanIn("", typeName);
+}
+
+pub fn rkHasBeanIn(path: string, typeName: string) -> bool {
+    return beansVisible(path, typeName).length > 0;
+}
+
+// Registered beans in declaration order, which is `rkScannedNames()` filtered
+// to the `#[managed]` ones plus whatever `#[provides]` and `#[imports]` added.
+// A type registered twice under two qualifiers is named once.
+pub fn rkBeanNames() -> string[] {
+    return rkBeanNamesIn("");
+}
+
+pub fn rkBeanNamesIn(path: string) -> string[] {
+    var names: string[] = [];
+    loop (parseBeans(rkBeanTable())) { b ->
+        if ((visible(b.path, path) && !names.contains(b.typeName))) {
+            names.push(b.typeName);
+        };
+    };
+    return names;
+}
+
+// ── `#[managed]` ────────────────────────────────────────────────────────────
+//
+// The one new type-level decorator, and it STACKS under an existing stereotype
+// exactly the way `#[route]` stacks under `#[restController]`:
+//
+//     #[service]
+//     #[managed]
+//     pub type UserService(repo: UserRepository) { ... }
+//
+// The six stereotypes are frozen for the milestone and a decorator body cannot
+// call a sibling function, so there is no way to extend them from outside; and
+// every capability this front needs — a registered FACTORY, a lifecycle hook, a
+// listener — is something they do not emit. The extra line is the honest price
+// until `decorators.bp` unfreezes, at which point this body folds into the six
+// and the line goes away.
+//
+// THREE RESTRICTIONS SHAPE THIS BODY AND NONE IS NEGOTIABLE, and they are the
+// same three `file_router.bp`'s four markers are written around. A decorator
+// body cannot call a sibling function — the evaluator emits only the decorator
+// function into the eval script. A `//` comment anywhere in the body breaks the
+// flattened emit, so the body is comment-free and the prose lives here. And
+// nothing optional works in a comptime body, so the annotation walk is
+// `forEach` over `decl.annotations` with a `val`-then-assign per reader rather
+// than a chain of bare `if`s, which only the LAST statement of a block may be.
+//
+// THE FACTORY IS A LAMBDA, NOT A BARE NAME. `rkRegisterBean(..., __rkMake_X)`
+// compiles on the node row and is `variable '__rkMake_X' is unbound` on the
+// erlang one: a named function used as a VALUE is not lowered to a `fun name/0`.
+// `{ -> __rkMake_X() }` is the same value and lowers on both.
+
+pub fn managed(comptime decl: @Decl) {
+    var qual = "\"\"";
+    var scopeLit = "\"singleton\"";
+    var isPrimary = "false";
+    var isLazy = "false";
+    decl.annotations.forEach({ a ->
+        val q = if (a.name == "qualifier") a.args.join("") else qual;
+        qual = q;
+        val s = if (a.name == "scope") a.args.join("") else scopeLit;
+        scopeLit = s;
+        val p = if (a.name == "primary") "true" else isPrimary;
+        isPrimary = p;
+        val l = if (a.name == "lazy") "true" else isLazy;
+        isLazy = l;
+    });
+    @emit("val __rkBean_" + decl.name + " = rkRegisterBean(\"" + decl.name + "\", " + qual + ", " + scopeLit + ", " + isPrimary + ", " + isLazy + ", \"" + decl.name + "\", { -> __rkMake_" + decl.name + "() });");
+    if (decl.kind != DeclKind.Type) decl.fail("#[managed] must annotate a type");
+    if (decl.variants.length > 0) decl.fail("#[managed] must annotate a type with fields, not an enum");
+}
+
+// ── the argument-carrying markers ───────────────────────────────────────────
+//
+// `#[qualifier]`, `#[primary]`, `#[lazy]` and `#[scope]` are read by
+// `#[managed]` and by `#[provides]` off `decl.annotations`; on their own they
+// are placement checks, the same split `#[route]` and `#[restController]`
+// already use. A marker that emitted its own line could not see the factory it
+// belongs to.
+
+pub fn qualifier(comptime decl: @Decl, name: string) {
+    if (decl.kind == DeclKind.Field) decl.fail("#[qualifier] must annotate a type or a #[provides] function, not a field");
+}
+
+pub fn primary(comptime decl: @Decl) {
+    if (decl.kind == DeclKind.Field) decl.fail("#[primary] must annotate a type or a #[provides] function, not a field");
+}
+
+pub fn lazy(comptime decl: @Decl) {
+    if (decl.kind == DeclKind.Field) decl.fail("#[lazy] must annotate a type or a #[provides] function, not a field");
+}
+
+pub fn scope(comptime decl: @Decl, name: string) {
+    if (decl.kind == DeclKind.Field) decl.fail("#[scope] must annotate a type or a #[provides] function, not a field");
+}

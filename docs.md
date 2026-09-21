@@ -425,6 +425,84 @@ BEAM, an eager load on node) and a later `memoize` with that key waits for it
 rather than starting a second one. `memoKey` does not hash and refuses a part
 carrying its `|` separator.
 
+## The container: beans, `Context`, lifecycle and events
+
+Constructor injection resolves a field by type and needs no help. Everything
+below is for the value that is *not* a field of something: resolving a bean
+programmatically, running code at startup and shutdown, and publishing or
+observing an application event.
+
+### `#[managed]` — registering a bean
+
+```bp
+import {service, repository} from "rakun";
+import {managed, rkRegisterBean} from "rakun";
+
+#[repository]
+#[managed]
+pub type OrderRepository {
+    pub fn ids(self: Self) -> string[] {
+        return ["o-1", "o-2"];
+    }
+}
+
+#[service]
+#[managed]
+pub type OrderCache(repo: OrderRepository) {
+    pub fn size(self: Self) -> i32 {
+        return self.repo.ids().length;
+    }
+}
+```
+
+`#[managed]` STACKS under a stereotype rather than replacing it — the way
+`#[route]` stacks under `#[restController]` — because the six stereotype
+decorators are frozen for this milestone. A type that carries a stereotype and no
+`#[managed]` is still scanned and still injectable as a field; it is simply not
+in the registry, so `ctx.resolve` will not find it.
+
+The module that declares a `#[managed]` type imports `rkRegisterBean` alongside
+the marker, the same way a `#[service]` module already imports `rkScan`,
+`rkSingleton`, `rkEnter` and `rkDone`: the wiring is `@emit`ted into the
+application's own module and calls those names there.
+
+### Resolving
+
+```bp
+import {rkResolve, rkResolveNamed, rkHasBean, rkBeanNames} from "rakun";
+
+val cache: ?OrderCache = rkResolve("OrderCache");
+val fixed: ?Clock = rkResolveNamed("Clock", "fixed");
+val known = rkHasBean("OrderCache");
+val every = rkBeanNames();
+```
+
+The registry key is a STRING and the type comes from the annotated binding.
+`ctx.resolve<OrderCache>()` is not writable: explicit generic arguments do not
+parse at a call site, and there is no `@typeName<T>()` to recover the name from
+`T`. So `resolve<Foo>("Bar")` type-checks and answers `null` — the two halves are
+not checked against each other, and both are recorded language gaps.
+
+An unregistered type answers `null` and `rkHasBean` answers `false`; neither
+raises. Two beans of one type raise only when an UNQUALIFIED `resolve` cannot
+choose between them:
+
+```
+rakun: two beans of type 'Clock' ('systemClock', 'fixedClock') and neither is
+       #[primary]; resolve by qualifier, or mark one #[primary]
+```
+
+Mark one `#[primary]`, or reach for the one you meant with
+`rkResolveNamed("Clock", "fixed")`.
+
+### Qualifiers, primary and lazy
+
+`#[qualifier("name")]` distinguishes two beans of one type, `#[primary]` marks
+the default for the unqualified lookup, and `#[lazy]` keeps a bean out of the
+eager pass. All three are read off the declaration by `#[managed]` and
+`#[provides]`; on their own they are placement checks, the same split
+`#[getMapping]` and `#[restController]` already use.
+
 ## Loading notes
 
 Unlike `libs/std`, this package is **not** `@embedFile`'d into a `prelude.zig`

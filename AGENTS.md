@@ -1181,6 +1181,125 @@ guessed, and each costs a spelling in `src/config.bp`:
   on the erlang row — which is why `profiles.matches` is a chain of functions
   over a `Stacks` value rather than one loop with inner loops.
 
+## The container's doors
+
+`modules/rakun/src/context.bp`, `src/events.bp` and `src/lifecycle.bp` are what
+makes the IoC container reachable. Before them, constructor injection through an
+emitted `__rkMake_<Type>()` was the container's entire public surface: a value
+that was not a field of something could not be got at, nothing ran at startup or
+shutdown, and nothing reacted to anything.
+
+### The registry holds factories, not names
+
+`rkScan("UserService")` stores a string and nothing can turn a string back into a
+constructor, so "resolve by name" cannot be built on top of the scan. The bean
+registry stores the FACTORY beside the record, and that one decision is what
+makes resolution, eager initialization and the shutdown pass all possible from
+the same table.
+
+### `#[managed]` stacks, it does not replace
+
+The six stereotypes (`#[component]`, `#[service]`, `#[repository]`,
+`#[controller]`, `#[restController]`, `#[configuration]`) are frozen for the
+milestone, and every capability here needs something they do not emit. A rakun
+decorator body also cannot call a sibling function, so there is no way to extend
+them from outside. So front 06 adds ONE type-level decorator that stacks under an
+existing stereotype, exactly the way `#[route]` already stacks under
+`#[restController]`:
+
+```bp
+#[service]
+#[managed]
+pub type UserService(repo: UserRepository) { … }
+```
+
+`#[managed]` is type-level, so it sees `decl.name`, `decl.annotations` and
+`decl.methods` with each method's own annotations — which is everything the bean
+registration, the lifecycle hooks and the listener bindings need, emitted in one
+pass. When `decorators.bp` unfreezes, this body folds into the six stereotypes
+and the extra line goes away. Until then the extra line is the honest price.
+
+### The measurement, not the precedent
+
+Front 05 shipped no sidecar and fronts 22 and 62 shipped both host files, and the
+question that decides it is the same one every time: **is the thing being stored
+pure?** It was measured here rather than argued by analogy, and the answer is
+four values, none of which a string table holds:
+
+| Stored | What it is | Could a `rkSetProp`/`rkProp` string table hold it? |
+|---|---|---|
+| A bean factory | a closure over a constructor, or over `rkSingleton` and a constructor | no — calling it is the point, and a name is not callable (`list_to_existing_atom("__rkMake_" ++ Name)` yields an ATOM, and an atom is not a function) |
+| A `#[postConstruct]`/`#[preDestroy]` hook | a thunk closing over `__rkMake_<Type>()` and a method | no |
+| An `#[eventListener]` binding | a closure taking an `Event` | no |
+| An `#[exitCode]` generator | a function returning `i32` | no |
+
+So the four tables live in the host on both rows — `src/context.mjs` and
+`src/sidecars/rakun_context.erl` — and front 05's three conditions are satisfied
+rather than waived:
+
+- **Every cell carries both forms.** `rkBeanStore`, `rkBeanTable`, `rkBeanCount`,
+  `rkBeanHasRecord`, `rkBeanInvoke`, `rkBeanTouch`, `rkBeanReset`,
+  `rkRequestScoped`, `rkRequestScopeEnd` and the five test-seam cells each
+  declare an `@External.Node("./context.mjs", …)` and an
+  `@External.Erlang("rakun_context", …)`. Neither row has a call with no binding,
+  so neither row reds.
+- **`runtime.mjs` is untouched.** The freeze is on a file, not on the idea of a
+  node host; `context.mjs` is this front's own.
+- **The atom is verified by READING.** `context.bp` emits
+  `rakun_context:bean_register(…)`, so `shipErlSidecars` copies
+  `src/sidecars/rakun_context.erl` — confirmed at
+  `.botopinkbuild/test-out/rakun_context.erl`, never by trusting exit 0. The atom
+  is `rakun_context` and never `context`, because rakun emits `rakun/context` and
+  a matching sidecar is skipped in SILENCE.
+
+**What the hosts do not know.** The bean record's grammar, the choice between two
+candidates, every refusal message, the reverse of the pre-destroy pass and the
+boot-event order are botopink, compiled to both targets. The host is handed a
+finished line and appends it beside its function; `bean_invoke/1` is an equality
+test and a call. Neither host parses a record, compares a qualifier or decides
+which of two beans wins — which is what makes "the two rows cannot disagree about
+what the container holds" a property rather than a hope.
+
+### The bean record
+
+`path|type|qualifier|scope|primary|lazy|owner`, seven fields:
+
+- `path` is the context the bean was registered into. `""` is the root and
+  `ctx.child("request")` is what makes a longer one reachable; a bean is visible
+  from a path when it was registered at that path or an ancestor of it, and the
+  NEAREST registration wins. That is Spring's parent/child contexts and what
+  front 62 builds the per-request scope on.
+- `owner` is the declaration the registration came from — the `#[managed]` type,
+  the `#[provides]` function, or the `#[configuration]` that `#[imports]`ed it.
+  It exists because the ambiguity message has to name both candidates, and a
+  registration carries no source location.
+
+**The registration call takes seven scalars, not the spec's five.** The front's
+README writes `rkRegisterBean(type, qualifier, primary, lazy, factory)` in its
+Mechanism and an ETS row of `{Primary, Lazy, Scope, Factory}` in its step 1 — the
+five-argument call has no room for the third of those four, and neither has room
+for the owner its own ambiguity message spells (`two beans of type 'Clock'
+('systemClock', 'fixedClock')`). Both are added rather than dropped.
+
+### Resolution and the tie
+
+`__rkMake_<FieldType>()` is unique by construction, so constructor injection
+cannot be ambiguous; a tie is only reachable through the registry, from two
+`#[provides]` functions or two `#[bean]` methods producing one type. So
+`rkResolve(typeName)` takes the single candidate, or the single `#[primary]` one,
+and otherwise RAISES naming both owners. A tie is an error and never a silent
+first-wins. `rkHasBean` never raises — an ambiguous type IS registered, and a
+caller asking whether the container knows about it deserves the answer rather
+than the halt `resolve` owes it.
+
+`resolve` takes the type name as a STRING because the type argument is not
+reachable at run time: there is no `@typeName<T>()` and explicit generic
+arguments do not parse at a call site. The type comes from the annotated binding
+— `val repo: ?UserRepository = ctx.resolve("UserRepository");` — and the pairing
+of `T` with the string is unchecked. Both halves are language gaps, recorded in
+the front's README; dropping the generic and returning `any` would lose the type
+everywhere, and the string is the smaller cost.
+
 ## Design at a glance
 
 - **IoC container** — components (`#[component]`/`#[service]`/`#[repository]`/

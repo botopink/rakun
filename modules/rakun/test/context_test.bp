@@ -1,0 +1,204 @@
+//// rakun — the bean registry and the `Context` it is reached through.
+////
+//// Every assertion here runs on BOTH rows: the registry is one botopink
+//// implementation over two host files that answer identically, so there is one
+//// set of assertions and not two.
+////
+//// The `#[managed]` types sit at module level, so the `val`s they emit run at
+//// LOAD, before the first test block — which is why nothing in this file calls
+//// `rkBeanReset()`: it would wipe the registrations the file is about.
+
+import {service, repository, restController, route, getMapping} from "decorators";
+import {rkScan, rkSingleton, rkEnter, rkDone, rkRegisterRoute, rkBuildCount} from "runtime";
+import {Request, Response} from "http";
+import {
+    managed,
+    qualifier,
+    primary,
+    lazy,
+    scope,
+    Bean,
+    Scope,
+    beanLine,
+    parseBeans,
+    scopeName,
+    scopeOf,
+    scopeProblem,
+    ambiguousBeanProblem,
+    duplicateBeanProblem,
+    rkRegisterBean,
+    rkRegisterBeanAt,
+    rkBeanTable,
+    rkBeanCount,
+    rkBeanNames,
+    rkBeanNamesIn,
+    rkResolve,
+    rkResolveIn,
+    rkResolveNamed,
+    rkHasBean,
+    rkHasBeanIn,
+    chooseBean,
+} from "context";
+import {asserts} from "std";
+
+// ── the components under test ───────────────────────────────────────────────
+
+#[repository]
+#[managed]
+pub type OrderRepository {
+    pub fn ids(self: Self) -> string[] {
+        return ["o-1", "o-2", "o-3"];
+    }
+}
+
+#[service]
+#[managed]
+pub type OrderCache(
+    repo: OrderRepository,
+) {
+    pub fn size(self: Self) -> i32 {
+        return self.repo.ids().length;
+    }
+}
+
+// Scanned but NOT `#[managed]`: it proves `beanNames()` is the registry and not
+// the scan list.
+#[service]
+pub type UnregisteredService {
+    pub fn tag(self: Self) -> string {
+        return "u";
+    }
+}
+
+// ── the record grammar ──────────────────────────────────────────────────────
+
+test "rakun context: a bean record round-trips through the wire line" {
+    val b = Bean(
+        path: "",
+        typeName: "Clock",
+        qualifier: "fixed",
+        scope: "singleton",
+        primary: true,
+        lazy: false,
+        owner: "fixedClock",
+    );
+    assert beanLine(b) == "|Clock|fixed|singleton|1|0|fixedClock";
+    val back = parseBeans(beanLine(b));
+    assert back.length == 1;
+    val one = back.at(0);
+    var seen = "";
+    if (one != null) seen = one.typeName + "/" + one.qualifier + "/" + one.owner;
+    assert seen == "Clock/fixed/fixedClock";
+    var wasPrimary = false;
+    if (one != null) wasPrimary = one.primary;
+    assert wasPrimary;
+}
+
+test "rakun context: a scope name round-trips and an unknown one is refused" {
+    assert scopeName(Scope.Singleton) == "singleton";
+    assert scopeName(Scope.Prototype) == "prototype";
+    assert scopeName(Scope.Request) == "request";
+    assert scopeName(scopeOf("prototype")) == "prototype";
+    try asserts.throwsWith({ ->
+        scopeOf("session");
+        0;
+    }, scopeProblem("session"));
+}
+
+// ── step 1: the registry ────────────────────────────────────────────────────
+
+test "rakun context: #[managed] on a #[service] registers exactly one bean" {
+    var mine = 0;
+    loop (parseBeans(rkBeanTable())) { b ->
+        if (b.typeName == "OrderCache") mine = mine + 1;
+    };
+    assert mine == 1;
+    assert rkHasBean("OrderCache");
+    assert rkHasBean("OrderRepository");
+}
+
+test "rakun context: a scanned type that is not #[managed] is not a bean" {
+    assert !rkHasBean("UnregisteredService");
+    assert !rkBeanNames().contains("UnregisteredService");
+}
+
+test "rakun context: beanNames lists registered beans in declaration order" {
+    val names = rkBeanNames();
+    val repo = names.indexOf("OrderRepository");
+    val cache = names.indexOf("OrderCache");
+    assert repo >= 0;
+    assert cache > repo;
+}
+
+test "rakun context: the registered record carries the scope and the flags" {
+    val record = chooseBean("", "OrderCache");
+    assert record == "|OrderCache||singleton|0|0|OrderCache";
+}
+
+test "rakun context: an unregistered type resolves to null and has answers false" {
+    val missing: ?OrderCache = rkResolve("NoSuchBean");
+    var found = false;
+    if (missing != null) found = true;
+    assert !found;
+    assert !rkHasBean("NoSuchBean");
+    assert chooseBean("", "NoSuchBean") == "";
+}
+
+test "rakun context: registering the same type and qualifier twice names both owners" {
+    val _a = rkRegisterBean("DupBean", "", "singleton", false, false, "firstOwner", { -> 1 });
+    try asserts.throwsWith({ ->
+        rkRegisterBean("DupBean", "", "singleton", false, false, "secondOwner", { -> 2 });
+        0;
+    }, duplicateBeanProblem("DupBean", "", "firstOwner", "secondOwner"));
+}
+
+test "rakun context: a resolved bean is the same instance field injection gives" {
+    val cache: ?OrderCache = rkResolve("OrderCache");
+    var size = -1;
+    if (cache != null) size = cache.size();
+    assert size == 3;
+    val direct = __rkMake_OrderCache();
+    assert rkBuildCount("OrderCache") == 1;
+    assert direct.size() == 3;
+}
+
+// ── the parent/child chain ──────────────────────────────────────────────────
+
+test "rakun context: a child path sees the parent's beans and the parent does not see the child's" {
+    val _c = rkRegisterBeanAt("/request", "ScopedOnly", "", "singleton", false, false, "scopedOwner", { -> 7 });
+    assert rkHasBeanIn("/request", "ScopedOnly");
+    assert !rkHasBean("ScopedOnly");
+    assert rkHasBeanIn("/request", "OrderCache");
+    val v: ?i32 = rkResolveIn("/request", "ScopedOnly");
+    assert v.unwrapOr(0) == 7;
+    assert rkBeanNamesIn("/request").contains("ScopedOnly");
+    assert !rkBeanNamesIn("").contains("ScopedOnly");
+}
+
+test "rakun context: the nearest registration of a type wins over an ancestor's" {
+    val _p = rkRegisterBean("Layered", "", "singleton", false, false, "rootOwner", { -> 1 });
+    val _c = rkRegisterBeanAt("/inner", "Layered", "", "singleton", false, false, "innerOwner", { -> 2 });
+    val root: ?i32 = rkResolve("Layered");
+    val inner: ?i32 = rkResolveIn("/inner", "Layered");
+    assert root.unwrapOr(0) == 1;
+    assert inner.unwrapOr(0) == 2;
+}
+
+test "rakun context: two candidates and no #[primary] name both owners" {
+    val _a = rkRegisterBean("Tied", "left", "singleton", false, false, "leftMaker", { -> 1 });
+    val _b = rkRegisterBean("Tied", "right", "singleton", false, false, "rightMaker", { -> 2 });
+    assert rkHasBean("Tied");
+    try asserts.throwsWith({ ->
+        chooseBean("", "Tied");
+        0;
+    }, ambiguousBeanProblem("Tied", "'leftMaker', 'rightMaker'"));
+    val right: ?i32 = rkResolveNamed("Tied", "right");
+    assert right.unwrapOr(0) == 2;
+}
+
+test "rakun context: with one candidate marked #[primary] the unqualified resolve returns it" {
+    val _a = rkRegisterBean("Picked", "left", "singleton", false, false, "leftMaker", { -> 1 });
+    val _b = rkRegisterBean("Picked", "right", "singleton", true, false, "rightMaker", { -> 2 });
+    val v: ?i32 = rkResolve("Picked");
+    assert v.unwrapOr(0) == 2;
+}
