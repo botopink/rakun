@@ -1,0 +1,555 @@
+//// rakun-web — THE CHAIN: ordering, short-circuiting, the two entry points,
+//// `Next`, and the response-header surface.
+////
+//// Every assertion here runs on BOTH rows (`botopink test` and
+//// `botopink test --target erlang`), from this one file. The front's assigned
+//// target is erlang — a filter chain is a server thing — but the rule the
+//// library has enforced since front 04 is that a host cell carries both forms
+//// or it does not exist, and the honest consequence is that the same
+//// assertions answer on both rows.
+////
+//// ORDERING IS THE PROPERTY MOST WORTH TESTING AND THE EASIEST TO TEST BADLY.
+//// The cells below register filters that append their name to the chain's trace
+//// on the way in and on the way out, then assert the WHOLE sequence as one
+//// string — `a>|b>|c>|handler|<c|<b|<a` — rather than asserting each filter
+//// ran. A reordering that per-filter tests would miss shows up immediately.
+////
+//// A raise is asserted with `asserts.throwsWith`, the only way to read a
+//// `@panic` without the halt taking the test down. The body ends in `0;` for
+//// the reason `std/asserts` documents: a closure whose only statement is a
+//// `@panic` does not unify with `void`. Every refusal text is pure ASCII, for
+//// the reason front 62 measured — `~p` renders a binary holding a non-Latin-1
+//// byte as a list of numbers, and a needle would match nothing.
+
+import {asserts} from "std";
+import {Response} from "rakun";
+
+import {
+    Chain,
+    WebRequest,
+    webRequest,
+    retarget,
+    chainNext,
+    runChain,
+    registerFilter,
+    resetChain,
+    chainNames,
+    chainOrders,
+    chainOrdering,
+    duplicateEntryProblem,
+    orderBand,
+    orderRequestId,
+    orderCors,
+    orderProblem,
+    orderMiddleware,
+    orderApplication,
+    sentinelStatus,
+    isSentinel,
+    withHeader,
+    withHeaders,
+    headerValue,
+    headerLines,
+    headerCount,
+    headerNameSet,
+    responseHead,
+    writeCookies,
+    cookieLines,
+    setCookieProblem,
+    headerNameProblem,
+    varyUnion,
+    splitTokens,
+    routeMatches,
+    routeRowPath,
+    routeRowVerb,
+    segments,
+    rkChainSetTerminal,
+    rkTrace,
+    rkTraceLog,
+    rkTraceReset,
+    rkHeaderClear,
+    rkCookieClear,
+    rkChainClearSignals,
+} from "filter";
+import {
+    Next,
+    matcherMatches,
+    checkMatcher,
+    matcherProblem,
+    registerMiddleware,
+    middlewareOwner,
+    middlewareMatcher,
+    middlewareEntryName,
+    twoMiddlewaresProblem,
+    gateByMatcher,
+    skip,
+    normalizePath,
+    middlewareRegistered,
+} from "middleware";
+import {installBuiltins, requestIdHeader, requestIdEntry} from "convention";
+
+// ── the fixtures ────────────────────────────────────────────────────────────
+//
+// A tracing filter, written twice: once as a free function registered by hand
+// (what a built-in does) and once as a `#[filter]` component (what an
+// application writes). The two produce the same trace, which is the claim
+// `#[filter]` and a hand registration are one mechanism.
+
+fn traced(name: string, req: WebRequest, chain: Chain) -> Response {
+    val _in = rkTrace(name + ">");
+    val res: Response = chain.next(req);
+    val _out = rkTrace("<" + name);
+    return res;
+}
+
+fn okTerminal() -> i32 {
+    return rkChainSetTerminal({ method, path, headersWire, queryWire, body ->
+        val _t = rkTrace("handler:" + path);
+        Response.ok("handled " + method + " " + path);
+    });
+}
+
+fn freshChain() -> i32 {
+    val _r = resetChain();
+    val _t = rkTraceReset();
+    return okTerminal();
+}
+
+fn get(path: string) -> Response {
+    return runChain("GET", path, "", "", "");
+}
+
+// ── step 1: the chain ───────────────────────────────────────────────────────
+
+test "rakun-web chain: an empty chain is the terminal alone" {
+    val _f = freshChain();
+    val res: Response = get("/x");
+    assert res.status == 200;
+    assert res.body == "handled GET /x";
+    assert rkTraceLog() == "handler:/x";
+}
+
+test "rakun-web chain: three filters at -10, 0 and 10 run in that order in and the reverse out" {
+    val _f = freshChain();
+    // Registered out of order on purpose: the table is keyed by the ORDER, not
+    // by when the registration ran.
+    val _b = registerFilter("b", 0, { req, chain -> traced("b", req, chain) });
+    val _c = registerFilter("c", 10, { req, chain -> traced("c", req, chain) });
+    val _a = registerFilter("a", -10, { req, chain -> traced("a", req, chain) });
+    val res: Response = get("/x");
+    assert res.status == 200;
+    assert chainOrdering() == "a>b>c";
+    assert rkTraceLog() == "a>|b>|c>|handler:/x|<c|<b|<a";
+}
+
+test "rakun-web chain: two entries at the same order run in registration order" {
+    val _f = freshChain();
+    val _1 = registerFilter("first", 5, { req, chain -> traced("first", req, chain) });
+    val _2 = registerFilter("second", 5, { req, chain -> traced("second", req, chain) });
+    val _r = get("/x");
+    assert chainOrdering() == "first>second";
+    assert rkTraceLog() == "first>|second>|handler:/x|<second|<first";
+}
+
+test "rakun-web chain: a filter that does not call chain.next short-circuits and the handler never runs" {
+    val _f = freshChain();
+    val _g = registerFilter("gate", -10, { req, chain -> Response.withStatus(401, "denied") });
+    val _a = registerFilter("after", 0, { req, chain -> traced("after", req, chain) });
+    val res: Response = get("/x");
+    assert res.status == 401;
+    assert res.body == "denied";
+    // Neither the later filter nor the handler contributed a trace line.
+    assert rkTraceLog() == "";
+}
+
+test "rakun-web chain: a filter may read the response the chain returned and answer a different one" {
+    val _f = freshChain();
+    val _w = registerFilter("wrap", 0, { req, chain ->
+        val inner: Response = chain.next(req);
+        Response.withStatus(inner.status, "[" + inner.body + "]");
+    });
+    val res: Response = get("/x");
+    assert res.status == 200;
+    assert res.body == "[handled GET /x]";
+}
+
+test "rakun-web chain: an entry name is unique" {
+    val _f = freshChain();
+    val _a = registerFilter("dup", 0, { req, chain -> chain.next(req) });
+    try asserts.throwsWith({ ->
+        registerFilter("dup", 1, { req, chain -> chain.next(req) });
+        0;
+    }, duplicateEntryProblem("dup"));
+}
+
+test "rakun-web chain: the order band is one table and every built-in sits in it" {
+    assert orderRequestId() == -400;
+    assert orderCors() == -200;
+    assert orderProblem() == -100;
+    assert orderMiddleware() == -50;
+    assert orderApplication() == 0;
+    assert orderBand().startsWith("-400 request-id");
+    assert orderBand().contains("-200 cors");
+    assert orderBand().contains("-50 middleware");
+    assert orderBand().endsWith("300 server-id");
+    assert orderBand().split("\n").length == 11;
+}
+
+test "rakun-web chain: the registered orders are the ones the entries asked for" {
+    val _f = freshChain();
+    val _a = registerFilter("late", 10, { req, chain -> chain.next(req) });
+    val _b = registerFilter("early", -10, { req, chain -> chain.next(req) });
+    assert chainOrders().join(",") == "-10,10";
+    assert chainNames().join(",") == "early,late";
+}
+
+// ── step 2: `Next` ──────────────────────────────────────────────────────────
+
+test "rakun-web Next: pass() is the status-0 sentinel" {
+    val _f = freshChain();
+    assert Next.pass().status == sentinelStatus();
+    assert sentinelStatus() == 0;
+    assert isSentinel(Next.pass());
+    assert isSentinel(Response.ok("x")) == false;
+}
+
+test "rakun-web Next: redirect answers 307 with Location and the handler never runs" {
+    val _f = freshChain();
+    val _m = registerFilter("gate", orderMiddleware(), { req, chain -> Next.redirect("/login") });
+    val res: Response = get("/dashboard");
+    assert res.status == 307;
+    assert headerValue("location") == "/login";
+    assert rkTraceLog() == "";
+}
+
+test "rakun-web Next: permanentRedirect answers 308" {
+    val _f = freshChain();
+    val _m = registerFilter("gate", orderMiddleware(), { req, chain -> Next.permanentRedirect("/moved") });
+    val res: Response = get("/old");
+    assert res.status == 308;
+    assert headerValue("Location") == "/moved";
+}
+
+test "rakun-web Next: pass() and chain.next(req) produce identical responses" {
+    val _f = freshChain();
+    val _p = registerFilter("passer", orderMiddleware(), { req, chain -> Next.pass() });
+    val passed: Response = get("/same");
+    val _g = freshChain();
+    val _n = registerFilter("nexter", orderMiddleware(), { req, chain -> chain.next(req) });
+    val nexted: Response = get("/same");
+    assert passed.status == nexted.status;
+    assert passed.body == nexted.body;
+}
+
+test "rakun-web Next: rewrite reaches the other handler with the original URL unchanged" {
+    val _r = resetChain();
+    val _t = rkTraceReset();
+    val _s = rkChainSetTerminal({ method, path, headersWire, queryWire, body ->
+        Response.ok("served " + path);
+    });
+    // The filter AFTER the rewrite sees the original `path` and the rewritten
+    // `target`, which is the whole point: a rewrite is invisible to the client
+    // and visible to the router.
+    val _m = registerFilter("rewriter", orderMiddleware(), { req, chain -> Next.rewrite("/other") });
+    val _o = registerFilter("observer", orderApplication(), { req, chain ->
+        val _n = rkTrace("path=" + req.path + " target=" + req.target);
+        chain.next(req);
+    });
+    val res: Response = get("/dashboard");
+    assert res.status == 200;
+    assert res.body == "served /other";
+    assert rkTraceLog() == "path=/dashboard target=/other";
+}
+
+test "rakun-web Next: the status-0 sentinel never reaches the wire" {
+    val _r = resetChain();
+    val _t = rkTraceReset();
+    // No terminal is registered in a fresh host on this row, so the walk runs
+    // off the end with the sentinel still in hand. It must become a real status.
+    val _p = registerFilter("passer", orderMiddleware(), { req, chain -> Next.pass() });
+    val _q = okTerminal();
+    val res: Response = get("/x");
+    assert res.status != 0;
+    assert res.status == 200;
+}
+
+// ── step 2: the matcher ─────────────────────────────────────────────────────
+
+test "rakun-web matcher: an empty matcher matches every path" {
+    assert matcherMatches("", "/");
+    assert matcherMatches("", "/anything/at/all");
+}
+
+test "rakun-web matcher: a literal path matches only itself" {
+    assert matcherMatches("/dashboard", "/dashboard");
+    assert matcherMatches("/dashboard", "/dashboard/x") == false;
+    assert matcherMatches("/dashboard", "/other") == false;
+}
+
+test "rakun-web matcher: :param binds one segment and :path* binds the tail" {
+    assert matcherMatches("/users/:id", "/users/42");
+    assert matcherMatches("/users/:id", "/users/42/edit") == false;
+    assert matcherMatches("/dashboard/:path*", "/dashboard");
+    assert matcherMatches("/dashboard/:path*", "/dashboard/settings");
+    assert matcherMatches("/dashboard/:path*", "/dashboard/a/b/c");
+    assert matcherMatches("/dashboard/:path*", "/other") == false;
+}
+
+test "rakun-web matcher: a grammar front 65 owns is refused, not guessed at" {
+    try asserts.throwsWith({ ->
+        checkMatcher("/dashboard/(.*)");
+        0;
+    }, matcherProblem("/dashboard/(.*)", "(.*)"));
+    try asserts.throwsWith({ ->
+        checkMatcher("/assets/*");
+        0;
+    }, matcherProblem("/assets/*", "*"));
+}
+
+test "rakun-web matcher: a non-matching path skips the entry entirely" {
+    val _f = freshChain();
+    val _m = registerFilter("gated", orderMiddleware(), { req, chain ->
+        if (gateByMatcher(req, "/dashboard/:path*")) traced("gated", req, chain) else skip();
+    });
+    val outside: Response = get("/public");
+    assert outside.status == 200;
+    assert rkTraceLog() == "handler:/public";
+    val _t = rkTraceReset();
+    val inside: Response = get("/dashboard/settings");
+    assert inside.status == 200;
+    assert rkTraceLog() == "gated>|handler:/dashboard/settings|<gated";
+}
+
+// ── step 2: the middleware entry point ──────────────────────────────────────
+//
+// The `#[middleware]` DECORATOR is exercised in `decorators_test.bp`, which
+// never resets the chain: an `@emit`ted module-load `val` lands at the end of
+// the emitted module and cannot be snapshotted in a file that also rebuilds the
+// table. What is asserted here is the entry it produces.
+
+test "rakun-web middleware: it runs after a built-in and before an application filter" {
+    val _f = freshChain();
+    val _b = registerFilter("builtin", orderCors(), { req, chain -> traced("builtin", req, chain) });
+    val _m = registerFilter(middlewareEntryName(), orderMiddleware(), { req, chain -> traced("mw", req, chain) });
+    val _a = registerFilter("app", orderApplication(), { req, chain -> traced("app", req, chain) });
+    val _g = get("/x");
+    assert chainOrdering() == "builtin>middleware>app";
+    assert rkTraceLog() == "builtin>|mw>|app>|handler:/x|<app|<mw|<builtin";
+}
+
+test "rakun-web middleware: the redirect and the same redirect as a filter agree line for line" {
+    val _f = freshChain();
+    val _m = registerFilter(middlewareEntryName(), orderMiddleware(), { req, chain ->
+        if (req.header("authorization") == "") Next.redirect("/login") else chain.next(req);
+    });
+    val asMiddleware: Response = get("/dashboard");
+    val fromMiddleware: string = headerValue("Location");
+    val _g = freshChain();
+    val _x = registerFilter("AuthFilter", orderApplication(), { req, chain ->
+        if (req.header("authorization") == "") Next.redirect("/login") else chain.next(req);
+    });
+    val asFilter: Response = get("/dashboard");
+    assert asMiddleware.status == asFilter.status;
+    assert asMiddleware.body == asFilter.body;
+    assert fromMiddleware == headerValue("Location");
+}
+
+test "rakun-web middleware: two #[middleware] functions fail naming both" {
+    val _f = freshChain();
+    val _a = registerMiddleware("first", "", { req, chain -> chain.next(req) });
+    try asserts.throwsWith({ ->
+        registerMiddleware("second", "", { req, chain -> chain.next(req) });
+        0;
+    }, twoMiddlewaresProblem("first", "second"));
+}
+
+// ── step 3b: `withHeader` ───────────────────────────────────────────────────
+
+test "rakun-web withHeader: one call produces exactly one line" {
+    val _c = rkHeaderClear();
+    val res: Response = withHeader(Response.ok("b"), "X-A", "1");
+    assert headerLines().join("|") == "X-A: 1";
+    assert headerCount() == 1;
+    assert headerValue("x-a") == "1";
+}
+
+test "rakun-web withHeader: a second call with the same name in any case spelling replaces the first" {
+    val _c = rkHeaderClear();
+    val a: Response = withHeader(Response.ok("b"), "X-A", "1");
+    val b: Response = withHeader(a, "x-a", "2");
+    assert headerCount() == 1;
+    assert headerNameSet().join(",") == "x-a";
+    assert headerValue("X-A") == "2";
+    assert headerLines().join("|") == "x-a: 2";
+}
+
+test "rakun-web withHeader: the returned Response is the one passed in" {
+    val _c = rkHeaderClear();
+    val res: Response = Response.withStatus(201, "made");
+    val out: Response = withHeader(res, "X-A", "1");
+    assert out.status == res.status;
+    assert out.body == res.body;
+}
+
+test "rakun-web withHeaders: a list applies in order with the same replace rule" {
+    val _c = rkHeaderClear();
+    val _w = withHeaders(Response.ok("b"), ["X-A", "1", "X-B", "2", "x-a", "3"]);
+    assert headerCount() == 2;
+    assert headerNameSet().join(",") == "x-b,x-a";
+    assert headerValue("X-A") == "3";
+    assert headerValue("X-B") == "2";
+}
+
+test "rakun-web withHeaders: an odd-length list is refused" {
+    val _c = rkHeaderClear();
+    try asserts.throwsWith({ ->
+        withHeaders(Response.ok("b"), ["X-A"]);
+        0;
+    }, "one name has no value");
+}
+
+test "rakun-web withHeader: Vary is unioned, deduplicated, not replaced" {
+    val _c = rkHeaderClear();
+    val a: Response = withHeader(Response.ok("b"), "Vary", "Accept-Encoding");
+    val b: Response = withHeader(a, "Vary", "Origin");
+    val d: Response = withHeader(b, "vary", "origin");
+    assert headerCount() == 1;
+    assert headerValue("Vary") == "Accept-Encoding, Origin";
+    assert varyUnion("", "Origin") == "Origin";
+    assert varyUnion("A, B", "b, C") == "A, B, C";
+    assert splitTokens("  a , ,b ").join("|") == "a|b";
+    assert splitTokens("").length == 0;
+}
+
+test "rakun-web withHeader: Set-Cookie is refused by name, and the list API is named in the refusal" {
+    val _c = rkHeaderClear();
+    try asserts.throwsWith({ ->
+        withHeader(Response.ok("b"), "Set-Cookie", "a=1");
+        0;
+    }, setCookieProblem());
+    try asserts.throwsWith({ ->
+        withHeader(Response.ok("b"), "set-cookie", "a=1");
+        0;
+    }, "writeCookies(blob)");
+    assert headerCount() == 0;
+}
+
+test "rakun-web withHeader: a name that is not a header name is refused" {
+    val _c = rkHeaderClear();
+    try asserts.throwsWith({ ->
+        withHeader(Response.ok("b"), "X-A: bad", "1");
+        0;
+    }, headerNameProblem("X-A: bad"));
+    try asserts.throwsWith({ ->
+        withHeader(Response.ok("b"), "", "1");
+        0;
+    }, headerNameProblem(""));
+}
+
+test "rakun-web cookies: three lines from endRequest are written as three Set-Cookie lines" {
+    val _c = rkHeaderClear();
+    val _k = rkCookieClear();
+    val n: i32 = writeCookies("a=1; Path=/\nb=2; Path=/\nc=3; Path=/");
+    assert n == 3;
+    assert cookieLines().length == 3;
+    val _h = withHeader(Response.ok("b"), "Content-Type", "text/plain");
+    assert responseHead() == "Content-Type: text/plain\nSet-Cookie: a=1; Path=/\nSet-Cookie: b=2; Path=/\nSet-Cookie: c=3; Path=/";
+}
+
+test "rakun-web headers: a front that sets none produces no head at all" {
+    val _c = rkHeaderClear();
+    val _k = rkCookieClear();
+    assert responseHead() == "";
+    assert headerCount() == 0;
+    assert cookieLines().length == 0;
+}
+
+// ── the request-id built-in ─────────────────────────────────────────────────
+
+test "rakun-web request-id: an incoming id is honoured and echoed" {
+    val _f = freshChain();
+    val _c = rkHeaderClear();
+    val _r = registerFilter("request-id", orderRequestId(), { req, chain -> requestIdEntry(req, chain) });
+    val res: Response = runChain("GET", "/x", "x-request-id\tabc-123", "", "");
+    assert res.status == 200;
+    assert headerValue(requestIdHeader()) == "abc-123";
+}
+
+test "rakun-web request-id: a request with none is given one" {
+    val _f = freshChain();
+    val _c = rkHeaderClear();
+    val _r = registerFilter("request-id", orderRequestId(), { req, chain -> requestIdEntry(req, chain) });
+    val res: Response = get("/x");
+    assert res.status == 200;
+    assert headerValue(requestIdHeader()) != "";
+}
+
+test "rakun-web boot: installBuiltins puts the three entries in band order" {
+    val _f = freshChain();
+    val n: i32 = installBuiltins();
+    assert n == 3;
+    assert chainOrdering() == "request-id>cors>problem";
+    assert chainOrders().join(",") == "-400,-200,-100";
+}
+
+// ── the chain's request value ───────────────────────────────────────────────
+
+test "rakun-web request: headers and query read through front 62's wire grammar" {
+    val req: WebRequest = webRequest(
+        "POST",
+        "/api/x",
+        "content-type\tapplication/json\nx-tag\tabc",
+        "q\thi\npage\t2",
+        "{\"a\":1}",
+    );
+    assert req.header("Content-Type") == "application/json";
+    assert req.header("X-TAG") == "abc";
+    assert req.header("absent") == "";
+    assert req.hasHeader("x-tag");
+    assert req.hasHeader("absent") == false;
+    assert req.names().length == 2;
+    assert req.query("q") == "hi";
+    assert req.query("page") == "2";
+    assert req.body == "{\"a\":1}";
+    assert req.path == "/api/x";
+    assert req.target == "/api/x";
+}
+
+test "rakun-web request: retarget moves the dispatch target and nothing else" {
+    val req: WebRequest = webRequest("GET", "/a", "", "", "");
+    val moved: WebRequest = retarget(req, "/b");
+    assert moved.path == "/a";
+    assert moved.target == "/b";
+    assert moved.method == "GET";
+}
+
+test "rakun-web routes: a registered pattern matches by segment with :name bound" {
+    assert routeMatches("/api/users", "/api/users");
+    assert routeMatches("/api/hello/:name", "/api/hello/ana");
+    assert routeMatches("/api/hello/:name", "/api/hello") == false;
+    assert routeMatches("/api/users", "/api/posts") == false;
+    assert routeRowVerb("GET /api/users") == "GET";
+    assert routeRowPath("GET /api/users") == "/api/users";
+    assert routeRowPath("nonsense") == "";
+    assert segments("/a/b/").join(",") == "a,b";
+}
+
+test "rakun-web paths: normalizePath drops a trailing slash but never the root" {
+    assert normalizePath("/") == "/";
+    assert normalizePath("/a/") == "/a";
+    assert normalizePath("/a") == "/a";
+}
+
+// ── the teardown discipline ─────────────────────────────────────────────────
+
+test "rakun-web chain: runChain clears the per-request accumulators first" {
+    val _f = freshChain();
+    val _c = rkHeaderClear();
+    val _s = rkChainClearSignals();
+    // A header left over from the previous request must not survive into the
+    // next one: on a keep-alive connection the serving process is the same one.
+    val _stale = withHeader(Response.ok("b"), "X-Stale", "1");
+    assert headerCount() == 1;
+    val res: Response = get("/x");
+    assert res.status == 200;
+    assert headerCount() == 0;
+}

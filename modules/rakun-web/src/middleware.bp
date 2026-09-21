@@ -1,0 +1,188 @@
+//// rakun-web — the `middleware.bp` convention and `Next`.
+////
+//// Next's `middleware.ts` is a file at the project root exporting `middleware`
+//// and an optional `config`. rakun's is `middleware.bp` exporting a
+//// `#[middleware]`-decorated function. The DECORATOR does the registration; the
+//// FILE NAME is a discovery rule front 22's scanner already honours (it
+//// compiles a root `middleware.bp` whether or not a `pub mod` line names it —
+//// `modules/rakun/test/fixtures/middleware/middleware.bp` is that fixture). So
+//// there is one mechanism and the convention sits on top of it, which is the
+//// whole difference from the 1.0.7 draft's separate invocation inside the SSR
+//// pipeline.
+////
+//// `#[middleware]` registers ONE entry at order −50: after the built-ins,
+//// before an application `#[filter]` at the default 0. Two `#[middleware]`
+//// functions in one build fail naming both — there is one middleware entry
+//// point, and picking one of two silently is exactly the failure mode the chain
+//// is designed to make impossible.
+////
+//// WHY `Next.pass()` AND NOT `Next.next()`. `Chain` already has `next`, and two
+//// `next`s a line apart would be a reading hazard. Calling `chain.next(req)`
+//// and calling `Next.pass()` are the same outcome — the first from inside a
+//// filter that wants the response back, the second from a middleware that does
+//// not.
+
+import {Response} from "rakun";
+import {sub} from "rakun";
+import {WebRequest, Chain, withHeader, segments, registerFilter, orderMiddleware} from "filter";
+import {rkChainPutSignal, sentinelStatus, rkChainNames} from "filter";
+import {rkMetaGet, rkMetaPut} from "filter";
+
+// ── `Next` ──────────────────────────────────────────────────────────────────
+//
+// `pass()` and `rewrite()` return `Response(status: 0, body: "")`. Zero is not a
+// valid HTTP status, so it is a safe in-band sentinel: `chainNext` interprets it
+// and it never reaches the wire. `rewrite` records the new path through the
+// process-local `rewrite` signal rather than smuggling it in a header, so
+// nothing leaks to the client. `redirect` sets `Location` through the reply
+// accumulator and returns a real 307.
+
+pub type Next {
+    pub fn pass() -> Response {
+        return Response(status: 0, body: "");
+    }
+
+    pub fn redirect(url: string) -> Response {
+        return withHeader(Response(status: 307, body: ""), "Location", url);
+    }
+
+    pub fn permanentRedirect(url: string) -> Response {
+        return withHeader(Response(status: 308, body: ""), "Location", url);
+    }
+
+    pub fn rewrite(path: string) -> Response {
+        val _s = rkChainPutSignal("rewrite", path);
+        return Response(status: 0, body: "");
+    }
+}
+
+// ── the matcher ─────────────────────────────────────────────────────────────
+//
+// THE MATCHER GRAMMAR IS FRONT 65'S. Front 07 executes what front 65 compiles
+// and defines no pattern syntax of its own. Front 65 has not landed, so this
+// module executes exactly the three forms front 65's README and `NEXTJS-DOCS.md
+// § 20` name in their own examples — a literal segment, `:param`, and the
+// trailing `:param*` — and REFUSES everything else by name rather than guessing
+// at a semantics front 65 will pick. A glob, a negative lookahead or a
+// character class is a located boot failure saying which front owns it, not a
+// pattern that quietly matches nothing.
+
+pub fn matcherProblem(pattern: string, segment: string) -> string {
+    return "rakun-web: the matcher `" + pattern + "` uses `" + segment
+        + "`, which front 65 owns and front 07 does not execute - front 07 runs "
+        + "a literal segment, `:param` and a trailing `:param*`; a glob, a "
+        + "character class or a negative lookahead needs front 65's compiler";
+}
+
+fn unsupportedSegment(seg: string) -> bool {
+    if (seg.contains("*")) return seg.startsWith(":") == false;
+    if (seg.contains("(")) return true;
+    if (seg.contains("[")) return true;
+    if (seg.contains("?")) return true;
+    if (seg.contains("{")) return true;
+    return false;
+}
+
+pub fn checkMatcher(pattern: string) -> i32 {
+    if (pattern == "") return 0;
+    loop (segments(pattern)) { seg ->
+        if (unsupportedSegment(seg)) @panic(matcherProblem(pattern, seg));
+    };
+    return 0;
+}
+
+// An empty matcher matches every path — an entry with no `#[matcher]` is the
+// Next default, which runs on every request.
+pub fn matcherMatches(pattern: string, path: string) -> bool {
+    if (pattern == "") return true;
+    val _c = checkMatcher(pattern);
+    val want: string[] = segments(path);
+    val have: string[] = segments(pattern);
+    var ok = true;
+    var tail = false;
+    var i = 0;
+    loop (i < have.length) {
+        val seg: string = have.at(i).unwrapOr("");
+        if (seg.startsWith(":") && seg.endsWith("*")) {
+            tail = true;
+        } else {
+            val got: string = want.at(i).unwrapOr("");
+            if (i >= want.length) ok = false;
+            if ((seg.startsWith(":") == false) && (seg != got)) ok = false;
+        };
+        i = i + 1;
+    };
+    // `/dashboard/:path*` matches `/dashboard` and everything under it; without
+    // the tail the segment counts must be equal.
+    if (tail) {
+        if (want.length < have.length - 1) ok = false;
+    } else {
+        if (want.length != have.length) ok = false;
+    };
+    return ok;
+}
+
+// ── registration ────────────────────────────────────────────────────────────
+
+pub fn middlewareEntryName() -> string {
+    return "middleware";
+}
+
+pub fn twoMiddlewaresProblem(first: string, second: string) -> string {
+    return "rakun-web: `" + first + "` is already the build's #[middleware] and `"
+        + second + "` would be a second one - there is ONE middleware entry "
+        + "point, and two of them would have no answer to which runs first";
+}
+
+// The registered middleware's OWNER is kept in the chain's boot-time META
+// table, not in the per-request signal store: registration runs at module load,
+// in whatever process loaded the module, and a per-request slot would be gone
+// by the time the first request arrived. The entry is always called
+// `middleware`, so `registerFilter`'s duplicate-name rule would catch a second
+// one anyway — but that message would name the ENTRY rather than the two
+// functions, and a refusal that cannot name what to delete is half a refusal.
+pub fn registerMiddleware<Rq, Ch>(
+    owner: string,
+    matcher: string,
+    entry: fn(req: Rq, chain: Ch) -> Response,
+) -> i32 {
+    val first: string = rkMetaGet("middleware-owner");
+    if (first != "") @panic(twoMiddlewaresProblem(first, owner));
+    val _c = checkMatcher(matcher);
+    val _o = rkMetaPut("middleware-owner", owner);
+    val _m = rkMetaPut("middleware-matcher", matcher);
+    return registerFilter(middlewareEntryName(), orderMiddleware(), entry);
+}
+
+pub fn middlewareOwner() -> string {
+    return rkMetaGet("middleware-owner");
+}
+
+pub fn middlewareMatcher() -> string {
+    return rkMetaGet("middleware-matcher");
+}
+
+// A non-matching path SKIPS the entry entirely: the wrapper answers the
+// sentinel, which `chainNext` reads as "continue", so the middleware body never
+// runs and the chain behaves as if the entry were not registered.
+pub fn gateByMatcher(req: WebRequest, matcher: string) -> bool {
+    return matcherMatches(matcher, req.target);
+}
+
+pub fn skip() -> Response {
+    return Response(status: sentinelStatus(), body: "");
+}
+
+// The registration the chain carries is always named `middleware`; this reads
+// it back so a test can assert the entry is present without knowing the owner.
+pub fn middlewareRegistered() -> bool {
+    return rkChainNames().contains(middlewareEntryName());
+}
+
+// `sub` is imported for the one place a redirect target has to be trimmed of a
+// trailing slash before it is compared; front 05 owns the helper.
+pub fn normalizePath(path: string) -> string {
+    if (path == "/") return path;
+    if (path.endsWith("/")) return sub(path, 0, path.length() - 1);
+    return path;
+}

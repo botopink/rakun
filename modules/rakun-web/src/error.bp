@@ -1,0 +1,248 @@
+//// rakun-web — RFC 9457 problem details, and what an "exception" is here.
+////
+//// botopink has no exception hierarchy. `throw` is legal only inside a
+//// `#[@result]` function and produces an `Error(e)` VALUE, not a raise
+//// (`libs/std/src/builtins.d.bp:52-54`); `try … catch` works over `@Result`
+//// and nothing else. So `#[exceptionHandler("NotFoundException")]` as the
+//// 1.0.6 draft wrote it has nothing to catch.
+////
+//// What exists on the BEAM is a raise, and this module gives it one shape: a
+//// host cell raises `{rakun_problem, Tag, Detail}`, the error entry runs the
+//// rest of the chain inside a host try/catch, and a registered advice turns a
+//// tag into a `ProblemDetail`. The tag is a STRING, not a type name, and this
+//// file says so rather than pretending otherwise.
+////
+//// WHAT NEVER REACHES A BODY. An untagged raise answers 500 with a correlation
+//// DIGEST and the full reason goes to the log under that digest. There is no
+//// property that puts the reason in the response and no development mode that
+//// changes it: a stack trace on the wire is an information leak whichever
+//// environment asked for it.
+
+import {Response} from "rakun";
+import {rkProp} from "rakun";
+import {WebRequest, Chain, withHeader} from "filter";
+
+// ── the host cells ──────────────────────────────────────────────────────────
+
+#[@External.Node("./chain.mjs", "raiseProblem"),
+  @External.Erlang("rakun_chain", "raise_problem")]
+pub declare fn rkRaiseProblem(tag: string, detail: string) -> i32;
+
+#[@External.Node("./chain.mjs", "runGuarded"),
+  @External.Erlang("rakun_chain", "run_guarded")]
+pub declare fn rkRunGuarded<T>(work: fn() -> T, onProblem: fn(tag: string, detail: string) -> T) -> T;
+
+#[@External.Node("./chain.mjs", "adviceRegister"),
+  @External.Erlang("rakun_chain", "advice_register")]
+pub declare fn rkAdviceRegister<T>(tag: string, owner: string, handler: fn(detail: string) -> T) -> i32;
+
+#[@External.Node("./chain.mjs", "adviceOwner"),
+  @External.Erlang("rakun_chain", "advice_owner")]
+pub declare fn rkAdviceOwner(tag: string) -> string;
+
+#[@External.Node("./chain.mjs", "adviceInvoke"),
+  @External.Erlang("rakun_chain", "advice_invoke")]
+pub declare fn rkAdviceInvoke<T>(tag: string, detail: string) -> ?T;
+
+#[@External.Node("./chain.mjs", "adviceTags"),
+  @External.Erlang("rakun_chain", "advice_tags")]
+pub declare fn rkAdviceTags() -> string;
+
+#[@External.Node("./chain.mjs", "adviceReset"),
+  @External.Erlang("rakun_chain", "advice_reset")]
+pub declare fn rkAdviceReset() -> i32;
+
+#[@External.Node("./chain.mjs", "problemLog"),
+  @External.Erlang("rakun_chain", "problem_log")]
+pub declare fn rkProblemLog() -> string;
+
+#[@External.Node("./chain.mjs", "problemLogReset"),
+  @External.Erlang("rakun_chain", "problem_log_reset")]
+pub declare fn rkProblemLogReset() -> i32;
+
+#[@External.Node("./chain.mjs", "problemDigest"),
+  @External.Erlang("rakun_chain", "problem_digest")]
+pub declare fn rkProblemDigest(text: string) -> string;
+
+#[@External.Node("./chain.mjs", "problemNote"),
+  @External.Erlang("rakun_chain", "problem_note")]
+pub declare fn rkProblemNote(line: string) -> i32;
+
+// ── the record ──────────────────────────────────────────────────────────────
+//
+// The field is `typeUri` and the JSON member is `type`: `type` is a reserved
+// word in enough of the ecosystem to be a bad field name, and RFC 9457 §3.1
+// fixes the member. The mapping is here, once, in `problemJson`.
+
+pub type ProblemDetail(
+    typeUri: string,
+    title: string,
+    status: i32,
+    detail: string,
+    instance: string,
+)
+
+pub fn problemMediaType() -> string {
+    return "application/problem+json";
+}
+
+// RFC 9457 §4.2.1: an absent `type` is `about:blank`, and `title` is then the
+// status reason phrase.
+pub fn blankType() -> string {
+    return "about:blank";
+}
+
+pub fn statusReason(status: i32) -> string {
+    if (status == 400) return "Bad Request";
+    if (status == 401) return "Unauthorized";
+    if (status == 403) return "Forbidden";
+    if (status == 404) return "Not Found";
+    if (status == 405) return "Method Not Allowed";
+    if (status == 406) return "Not Acceptable";
+    if (status == 409) return "Conflict";
+    if (status == 410) return "Gone";
+    if (status == 415) return "Unsupported Media Type";
+    if (status == 422) return "Unprocessable Content";
+    if (status == 429) return "Too Many Requests";
+    if (status == 500) return "Internal Server Error";
+    if (status == 501) return "Not Implemented";
+    if (status == 502) return "Bad Gateway";
+    if (status == 503) return "Service Unavailable";
+    if (status == 504) return "Gateway Timeout";
+    if (status >= 500) return "Server Error";
+    if (status >= 400) return "Client Error";
+    return "";
+}
+
+// The defaults RFC 9457 names, filled in one place so a handler that sets only
+// `detail` still produces a conforming document.
+pub fn problemFor(status: i32, detail: string, instance: string) -> ProblemDetail {
+    return ProblemDetail(
+        typeUri: blankType(),
+        title: statusReason(status),
+        status: status,
+        detail: detail,
+        instance: instance,
+    );
+}
+
+// ── serialization ───────────────────────────────────────────────────────────
+
+pub fn jsonEscape(raw: string) -> string {
+    var out = "";
+    loop (raw.split("")) { ch ->
+        val piece: string = if (ch == "\"") "\\\"" else if (ch == "\\") "\\\\" else if (ch == "\n") "\\n" else if (ch == "\r") "\\r" else if (ch == "\t") "\\t" else ch;
+        out = out + piece;
+    };
+    return out;
+}
+
+pub fn problemJson(p: ProblemDetail) -> string {
+    return "{\"type\":\"" + jsonEscape(p.typeUri)
+        + "\",\"title\":\"" + jsonEscape(p.title)
+        + "\",\"status\":" + p.status.toString()
+        + ",\"detail\":\"" + jsonEscape(p.detail)
+        + "\",\"instance\":\"" + jsonEscape(p.instance)
+        + "\"}";
+}
+
+// The one place a `ProblemDetail` becomes a `Response`: the content type is set
+// here so no caller can forget it.
+pub fn problemResponse(p: ProblemDetail) -> Response {
+    val res: Response = Response.withStatus(p.status, problemJson(p));
+    return withHeader(res, "Content-Type", problemMediaType());
+}
+
+// ── the raise ───────────────────────────────────────────────────────────────
+
+pub fn raiseProblem(tag: string, detail: string) -> i32 {
+    if (tag == "") {
+        @panic("rakun-web: raiseProblem needs a tag - an untagged raise is what "
+            + "the error entry turns into a 500 with a digest, and asking for "
+            + "one deliberately would be asking for an unreadable response");
+    };
+    return rkRaiseProblem(tag, detail);
+}
+
+// ── the advice registry ─────────────────────────────────────────────────────
+
+pub fn duplicateAdviceProblem(tag: string, first: string, second: string) -> string {
+    return "rakun-web: the problem tag `" + tag + "` is already handled by `"
+        + first + "` - `" + second + "` would be the second handler for one tag "
+        + "and only one of them could ever run";
+}
+
+pub fn registerAdvice<T>(tag: string, owner: string, handler: fn(detail: string) -> T) -> i32 {
+    if (tag == "") @panic("rakun-web: an #[exceptionHandler] needs a tag");
+    val first: string = rkAdviceOwner(tag);
+    if (first != "") @panic(duplicateAdviceProblem(tag, first, owner));
+    return rkAdviceRegister(tag, owner, handler);
+}
+
+pub fn adviceTags() -> string[] {
+    val wire: string = rkAdviceTags();
+    if (wire == "") return [];
+    return wire.split("\n");
+}
+
+pub fn resetAdvice() -> i32 {
+    val _l = rkProblemLogReset();
+    return rkAdviceReset();
+}
+
+// ── the error entry ─────────────────────────────────────────────────────────
+//
+// Order −100, with the host's try/catch around `chain.next(req)`:
+//
+//   · a tagged raise → the matching advice's `ProblemDetail`, serialized as
+//     `application/problem+json`;
+//   · an untagged raise → a 500 problem detail carrying a correlation digest,
+//     with the full reason logged under that digest and NEVER in the body;
+//   · a handler-returned `Response` → passed through untouched unless
+//     `rakun.web.problemdetails.enabled=true`, in which case a bare 4xx/5xx
+//     with an EMPTY body is filled in with the standard shape for that status.
+
+pub fn problemDetailsEnabled() -> bool {
+    return rkProp("rakun.web.problemdetails.enabled") == "true";
+}
+
+// A tagged raise nothing registered for is still unmatched, and an unmatched
+// raise answers the same way an untagged one does. The tag and its detail go to
+// the log under the digest; the body carries the digest alone.
+fn unmatched(tag: string, detail: string, instance: string) -> Response {
+    val digest: string = if (tag == "") detail else rkProblemDigest(tag + " " + detail);
+    if (tag != "") {
+        val _n = rkProblemNote(digest + " unmatched problem tag `" + tag + "`: " + detail);
+    };
+    return problemResponse(problemFor(500, "correlation " + digest, instance));
+}
+
+pub fn renderProblem(tag: string, detail: string, instance: string) -> Response {
+    if (tag == "") return unmatched(tag, detail, instance);
+    val hit: ?ProblemDetail = rkAdviceInvoke(tag, detail);
+    val found: ProblemDetail = hit.unwrapOr(problemFor(0, "", ""));
+    if (found.status == 0) return unmatched(tag, detail, instance);
+    return problemResponse(found);
+}
+
+// The pass-through half. A handler's own `Response` WITH A BODY is never
+// rewritten, whatever the property says — filling it in would replace something
+// the application chose to send.
+pub fn fillProblem(res: Response, instance: string) -> Response {
+    if (problemDetailsEnabled() == false) return res;
+    if (res.status < 400) return res;
+    if (res.body != "") return res;
+    return problemResponse(problemFor(res.status, statusReason(res.status), instance));
+}
+
+pub fn errorEntry(req: WebRequest, chain: Chain) -> Response {
+    val res: Response = rkRunGuarded(
+        { -> chain.next(req) },
+        { tag, detail -> renderProblem(tag, detail, req.path) },
+    );
+    return fillProblem(res, req.path);
+}
+
+pub fn problemLog() -> string {
+    return rkProblemLog();
+}

@@ -1,0 +1,583 @@
+//// rakun-web — THE CHAIN. One ordered list of entries between the socket and
+//// the route handler, and the response surface a filter composes with.
+////
+//// WHY THERE IS ONE. The 1.0.6 draft asked for Spring filters and the 1.0.7
+//// draft asked for a Next-style `middleware.bp`. Read side by side they
+//// describe the same thing: something that sees a request before the handler,
+//// may answer it instead, may change it, and sees the response on the way out.
+//// Two pipelines would mean two orderings, a CORS header set in one and
+//// overwritten in the other, and no answer to "does my filter run before the
+//// middleware". `#[filter]` and `#[middleware]` are two ENTRY POINTS into this
+//// one chain, at two default orders, and `convention.bp` says which is which.
+////
+//// WHERE IT HOOKS IN. Front 04's `dispatch_http/5` calls `rakun_chain:run/6`
+//// when this module is in the build and the handler directly when it is not
+//// (`modules/rakun/src/sidecars/rakun_runtime.erl`). That branch is the entire
+//// integration surface; an application without rakun-web pays one
+//// `function_exported/3` per request and gets front 04's behaviour exactly.
+////
+//// WHAT THE CHAIN'S REQUEST VALUE IS, AND WHY IT IS NOT `Request`. rakun's
+//// `Request` is a host-supplied `behavior`, and a method on one does not
+//// dispatch on the erlang row: `req.header("origin")` lowers to a map field
+//// read of `header` followed by a call, which is `{badkey,header}` /
+//// `{badfun, …}` — the same defect that keeps `test/server_test.bp:74,80` red
+//// in the core. A chain that cannot read a header cannot do CORS, so the chain
+//// carries its own RECORD, `WebRequest`, built from the same scalars the
+//// dispatcher already has. Record methods dispatch on both rows. The deviation
+//// from the spec's `Filter.handle(self, req: Request, chain: Chain)` is one
+//// type name and it is written down in `AGENTS.md` beside the measurement.
+
+import {Response} from "rakun";
+import {sub} from "rakun";
+import {headerLookup, headerNames, headerPresent} from "rakun";
+
+// ── the host cells ──────────────────────────────────────────────────────────
+//
+// Both forms, always. The registries and the four per-request accumulators are
+// the host's; the order band, the sentinel rule, the replace-by-name rule, the
+// `Vary` union and every refusal are below, in botopink, compiled twice.
+
+#[@External.Node("./chain.mjs", "register"),
+  @External.Erlang("rakun_chain", "register")]
+pub declare fn rkChainRegister<Rq, Ch>(
+    name: string,
+    order: i32,
+    entry: fn(req: Rq, chain: Ch) -> Response,
+) -> i32;
+
+#[@External.Node("./chain.mjs", "count"),
+  @External.Erlang("rakun_chain", "count")]
+pub declare fn rkChainCount() -> i32;
+
+#[@External.Node("./chain.mjs", "names"),
+  @External.Erlang("rakun_chain", "names")]
+pub declare fn rkChainNames() -> string;
+
+#[@External.Node("./chain.mjs", "orders"),
+  @External.Erlang("rakun_chain", "orders")]
+pub declare fn rkChainOrders() -> string;
+
+#[@External.Node("./chain.mjs", "invoke"),
+  @External.Erlang("rakun_chain", "invoke")]
+pub declare fn rkChainInvoke<Rq, Ch>(index: i32, req: Rq, chain: Ch) -> Response;
+
+#[@External.Node("./chain.mjs", "reset"),
+  @External.Erlang("rakun_chain", "reset")]
+pub declare fn rkChainReset() -> i32;
+
+#[@External.Node("./chain.mjs", "setTerminal"),
+  @External.Erlang("rakun_chain", "set_terminal")]
+pub declare fn rkChainSetTerminal(
+    handler: fn(method: string, path: string, headersWire: string, queryWire: string, body: string) -> Response,
+) -> i32;
+
+#[@External.Node("./chain.mjs", "terminal"),
+  @External.Erlang("rakun_chain", "terminal")]
+pub declare fn rkChainTerminal(
+    method: string,
+    path: string,
+    headersWire: string,
+    queryWire: string,
+    body: string,
+) -> Response;
+
+#[@External.Node("./chain.mjs", "signal"),
+  @External.Erlang("rakun_chain", "signal")]
+pub declare fn rkChainSignal(key: string) -> string;
+
+#[@External.Node("./chain.mjs", "putSignal"),
+  @External.Erlang("rakun_chain", "put_signal")]
+pub declare fn rkChainPutSignal(key: string, value: string) -> i32;
+
+#[@External.Node("./chain.mjs", "clearSignals"),
+  @External.Erlang("rakun_chain", "clear_signals")]
+pub declare fn rkChainClearSignals() -> i32;
+
+#[@External.Node("./chain.mjs", "headerSet"),
+  @External.Erlang("rakun_chain", "header_set")]
+pub declare fn rkHeaderSet(name: string, value: string) -> i32;
+
+#[@External.Node("./chain.mjs", "headerGet"),
+  @External.Erlang("rakun_chain", "header_get")]
+pub declare fn rkHeaderGet(name: string) -> string;
+
+#[@External.Node("./chain.mjs", "headerNames"),
+  @External.Erlang("rakun_chain", "header_names")]
+pub declare fn rkHeaderNames() -> string;
+
+#[@External.Node("./chain.mjs", "headerLines"),
+  @External.Erlang("rakun_chain", "header_lines")]
+pub declare fn rkHeaderLines() -> string;
+
+#[@External.Node("./chain.mjs", "headerClear"),
+  @External.Erlang("rakun_chain", "header_clear")]
+pub declare fn rkHeaderClear() -> i32;
+
+#[@External.Node("./chain.mjs", "cookieAdd"),
+  @External.Erlang("rakun_chain", "cookie_add")]
+pub declare fn rkCookieAdd(line: string) -> i32;
+
+#[@External.Node("./chain.mjs", "cookieLines"),
+  @External.Erlang("rakun_chain", "cookie_lines")]
+pub declare fn rkCookieLines() -> string;
+
+#[@External.Node("./chain.mjs", "cookieClear"),
+  @External.Erlang("rakun_chain", "cookie_clear")]
+pub declare fn rkCookieClear() -> i32;
+
+// The ordering trace: what a filter appends on the way in and on the way out.
+// A test asserts the WHOLE sequence as one string — `a>b>c|handler|c<b<a` —
+// rather than asserting each filter ran, because a reordering that per-filter
+// assertions would miss shows up immediately in the whole string.
+#[@External.Node("./chain.mjs", "trace"),
+  @External.Erlang("rakun_chain", "trace")]
+pub declare fn rkTrace(line: string) -> i32;
+
+#[@External.Node("./chain.mjs", "traceLog"),
+  @External.Erlang("rakun_chain", "trace_log")]
+pub declare fn rkTraceLog() -> string;
+
+#[@External.Node("./chain.mjs", "traceReset"),
+  @External.Erlang("rakun_chain", "trace_reset")]
+pub declare fn rkTraceReset() -> i32;
+
+// The boot-time key/value table. Registration runs at module load, in whatever
+// process loaded the module, so anything a registration records has to outlive
+// that process — the per-request signal store cannot hold it.
+#[@External.Node("./chain.mjs", "metaPut"),
+  @External.Erlang("rakun_chain", "meta_put")]
+pub declare fn rkMetaPut(key: string, value: string) -> i32;
+
+#[@External.Node("./chain.mjs", "metaGet"),
+  @External.Erlang("rakun_chain", "meta_get")]
+pub declare fn rkMetaGet(key: string) -> string;
+
+#[@External.Node("./chain.mjs", "metaReset"),
+  @External.Erlang("rakun_chain", "meta_reset")]
+pub declare fn rkMetaReset() -> i32;
+
+// A fresh per-request identifier. Not a UUID: the chain's request id is a
+// correlation handle and not a token, and a `from "std"` module named by a
+// test file is `undef` on the erlang row. Unique within a node run, which is
+// what a log join needs.
+#[@External.Node("./chain.mjs", "freshId"),
+  @External.Erlang("rakun_chain", "fresh_id")]
+pub declare fn rkFreshId() -> string;
+
+#[@External.Node("./chain.mjs", "setRunner"),
+  @External.Erlang("rakun_chain", "set_runner")]
+pub declare fn rkChainSetRunner(
+    runner: fn(method: string, path: string, headersWire: string, queryWire: string, body: string) -> Response,
+) -> i32;
+
+// ── the order band ──────────────────────────────────────────────────────────
+//
+// Negative is early, positive is late. The built-ins occupy a documented band
+// so a later front registers at a number that already means something, and
+// compression is LATE on purpose: it must see the final body, including one an
+// error handler produced.
+//
+// | −400 request id | −300 security (10) | −250 URL rules (65) | −200 CORS |
+// | −150 API version | −100 problem-detail boundary | −50 `middleware.bp` |
+// | 0 application filters | +100 metrics (11) | +200 compression |
+// | +300 server identification |
+
+pub fn orderRequestId() -> i32 { return -400; }
+pub fn orderSecurity() -> i32 { return -300; }
+pub fn orderUrlRules() -> i32 { return -250; }
+pub fn orderCors() -> i32 { return -200; }
+pub fn orderApiVersion() -> i32 { return -150; }
+pub fn orderProblem() -> i32 { return -100; }
+pub fn orderMiddleware() -> i32 { return -50; }
+pub fn orderApplication() -> i32 { return 0; }
+pub fn orderMetrics() -> i32 { return 100; }
+pub fn orderCompression() -> i32 { return 200; }
+pub fn orderServerId() -> i32 { return 300; }
+
+// The band as one string, so a test asserts the WHOLE table rather than each
+// row, and a reordering shows up immediately.
+pub fn orderBand() -> string {
+    return "-400 request-id\n-300 security\n-250 url-rules\n-200 cors\n"
+        + "-150 api-version\n-100 problem\n-50 middleware\n0 application\n"
+        + "100 metrics\n200 compression\n300 server-id";
+}
+
+// ── the sentinel ────────────────────────────────────────────────────────────
+//
+// `Response` is frozen at `(status, body)` and has no header builder, so a
+// middleware's "continue" and "rewrite" outcomes cannot be expressed as an
+// ordinary response. Zero is not a valid HTTP status, so it is a safe in-band
+// sentinel: the chain interprets it and it never reaches the wire.
+
+pub fn sentinelStatus() -> i32 { return 0; }
+
+pub fn isSentinel(res: Response) -> bool {
+    return res.status == 0;
+}
+
+// ── the chain's request value ───────────────────────────────────────────────
+//
+// `path` is what the client asked for and never changes — a rewrite is
+// invisible to the application. `target` is what the route table is asked
+// about, and it is the only thing `Next.rewrite` moves.
+
+pub type WebRequest(
+    method: string,
+    path: string,
+    target: string,
+    headersWire: string,
+    queryWire: string,
+    body: string,
+) {
+    pub fn header(self: Self, name: string) -> string {
+        return headerLookup(self.headersWire, name);
+    }
+
+    pub fn hasHeader(self: Self, name: string) -> bool {
+        return headerPresent(self.headersWire, name);
+    }
+
+    pub fn names(self: Self) -> string[] {
+        return headerNames(self.headersWire);
+    }
+
+    pub fn query(self: Self, name: string) -> string {
+        return headerLookup(self.queryWire, name);
+    }
+}
+
+// The one constructor a caller should use: `target` starts as `path`, because
+// a request that was never rewritten dispatches to what it asked for.
+pub fn webRequest(
+    method: string,
+    path: string,
+    headersWire: string,
+    queryWire: string,
+    body: string,
+) -> WebRequest {
+    return WebRequest(
+        method: method,
+        path: path,
+        target: path,
+        headersWire: headersWire,
+        queryWire: queryWire,
+        body: body,
+    );
+}
+
+pub fn retarget(req: WebRequest, target: string) -> WebRequest {
+    return WebRequest(
+        method: req.method,
+        path: req.path,
+        target: target,
+        headersWire: req.headersWire,
+        queryWire: req.queryWire,
+        body: req.body,
+    );
+}
+
+// ── the chain ───────────────────────────────────────────────────────────────
+
+pub type Chain(
+    index: i32,
+) {
+    pub fn next(self: Self, req: WebRequest) -> Response {
+        return chainNext(self.index + 1, req);
+    }
+}
+
+pub behavior Filter {
+    fn handle(self: Self, req: WebRequest, chain: Chain) -> Response;
+}
+
+// Entry `i`, or the route handler when `i` is past the end. A filter that does
+// not call `chain.next(req)` short-circuits, which is how a security filter
+// answers 401 without the handler ever running.
+pub fn chainNext(index: i32, req: WebRequest) -> Response {
+    if (index >= rkChainCount()) {
+        return rkChainTerminal(req.method, req.target, req.headersWire, req.queryWire, req.body);
+    };
+    val res: Response = rkChainInvoke(index, req, Chain(index: index));
+    if (res.status != 0) return res;
+    // The sentinel: `Next.pass()` and `Next.rewrite(…)`. A rewrite moves the
+    // dispatch target and nothing else; the signal is consumed here so a later
+    // entry cannot inherit it.
+    val target: string = rkChainSignal("rewrite");
+    val _c = rkChainPutSignal("rewrite", "");
+    val forward: WebRequest = if (target != "") retarget(req, target) else req;
+    return chainNext(index + 1, forward);
+}
+
+// The whole walk, from the socket in. The per-request accumulators are cleared
+// FIRST: on a keep-alive connection the process is the same one that served
+// the previous request, and a reply header that outlived its request is a
+// header written into somebody else's response.
+pub fn runChain(
+    method: string,
+    path: string,
+    headersWire: string,
+    queryWire: string,
+    body: string,
+) -> Response {
+    val _h = rkHeaderClear();
+    val _k = rkCookieClear();
+    val _s = rkChainClearSignals();
+    val res: Response = chainNext(0, webRequest(method, path, headersWire, queryWire, body));
+    // A sentinel that walked off the end of the chain is a chain that answered
+    // "continue" with nobody left to continue to. It must never reach the wire,
+    // so it becomes the terminal's own answer rather than a status 0.
+    if (res.status == 0) return Response.notFound();
+    return res;
+}
+
+// ── registration ────────────────────────────────────────────────────────────
+
+pub fn duplicateEntryProblem(name: string) -> string {
+    return "rakun-web: the chain already carries an entry called `" + name
+        + "` - two entries under one name cannot both be found, and a chain that "
+        + "silently kept the second would be a chain nobody can read";
+}
+
+pub fn registerFilter<Rq, Ch>(
+    name: string,
+    order: i32,
+    entry: fn(req: Rq, chain: Ch) -> Response,
+) -> i32 {
+    if (name == "") @panic("rakun-web: a chain entry must have a name");
+    if (chainNames().indexOf(name) >= 0) @panic(duplicateEntryProblem(name));
+    return rkChainRegister(name, order, entry);
+}
+
+pub fn chainNames() -> string[] {
+    val wire: string = rkChainNames();
+    if (wire == "") return [];
+    return wire.split("\n");
+}
+
+pub fn chainOrders() -> string[] {
+    val wire: string = rkChainOrders();
+    if (wire == "") return [];
+    return wire.split("\n");
+}
+
+// The chain as one string — `a>b>c` — so a test asserts the WHOLE ordering
+// rather than each entry. A reordering that per-entry assertions would miss
+// shows up immediately.
+pub fn chainOrdering() -> string {
+    return chainNames().join(">");
+}
+
+pub fn resetChain() -> i32 {
+    val _t = rkChainReset();
+    val _m = rkMetaReset();
+    val _g = rkTraceReset();
+    val _h = rkHeaderClear();
+    val _k = rkCookieClear();
+    return rkChainClearSignals();
+}
+
+// ── `withHeader`: the response-header surface ───────────────────────────────
+//
+// `Response` is frozen at `(status, body)` with no header field and no builder,
+// and front 04's accumulator is not something a caller composes with. Fronts 18
+// (session cookies), 21 (HAL `Content-Type` and `Link`) and 62 (`endRequest`)
+// all need a composable one, so it lives here and `contracts.md` §5c records it
+// as this front's deliverable.
+//
+// THE SEMANTICS ARE REPLACE-BY-NAME AND EVERY CALLER MUST KNOW IT. A second
+// `withHeader` with the same name replaces the first; it does not append, and
+// the chain never emits two lines for one name. That is right for
+// `Content-Type`, `Location`, `Cache-Control` and every other single-valued
+// header, and it is wrong for exactly two — `Set-Cookie`, which is refused
+// here and goes through the list API, and `Vary`, which is unioned.
+
+// NO DOUBLE QUOTE IN A REFUSAL TEXT. On the erlang row `asserts.throwsWith`
+// reads the `~p` RENDERING of the raised binary, in which a `"` inside the
+// message is escaped to `\"`; on commonJS it reads the raw message. So one
+// needle cannot match both rows if either side carries a quote. Measured, not
+// guessed - `test/middleware_test.bp` failed on exactly this and the probe is
+// in AGENTS.md. Every refusal in this module is written around it, the way
+// front 62's are written around the em dash.
+pub fn setCookieProblem() -> string {
+    return "rakun-web: withHeader with the name Set-Cookie would set ONE cookie "
+        + "and silently drop the rest, because withHeader replaces by name - "
+        + "queue cookies with front 62's cookies().set and let endRequest hand "
+        + "the chain the lines, which writeCookies(blob) writes one per element";
+}
+
+pub fn headerNameProblem(name: string) -> string {
+    return "rakun-web: `" + name + "` is not a header name - a name is a "
+        + "non-empty RFC 9110 token and carries no colon, CR or LF";
+}
+
+fn badHeaderName(name: string) -> bool {
+    if (name == "") return true;
+    if (name.contains(":")) return true;
+    if (name.contains("\n")) return true;
+    if (name.contains("\r")) return true;
+    return name != name.trim();
+}
+
+// The one documented exception to replace-by-name: the CORS entry adds
+// `Origin`, the compression entry adds `Accept-Encoding`, and both must
+// survive. The union is over the comma-separated token set, case-insensitively,
+// keeping the first spelling of each token and the order they arrived in.
+pub fn varyUnion(existing: string, added: string) -> string {
+    var out: string[] = [];
+    var seen: string[] = [];
+    loop (splitTokens(existing)) { t ->
+        if (seen.indexOf(t.toLower()) < 0) {
+            seen.push(t.toLower());
+            out.push(t);
+        };
+    };
+    loop (splitTokens(added)) { t ->
+        if (seen.indexOf(t.toLower()) < 0) {
+            seen.push(t.toLower());
+            out.push(t);
+        };
+    };
+    return out.join(", ");
+}
+
+pub fn splitTokens(raw: string) -> string[] {
+    var out: string[] = [];
+    if (raw.trim() == "") return out;
+    loop (raw.split(",")) { piece ->
+        val t: string = piece.trim();
+        if (t != "") out.push(t);
+    };
+    return out;
+}
+
+// Writes through the accumulator and returns the SAME `Response`, so it chains
+// without a new record type and without touching the frozen one.
+pub fn withHeader(res: Response, name: string, value: string) -> Response {
+    if (badHeaderName(name)) @panic(headerNameProblem(name));
+    if (name.toLower() == "set-cookie") @panic(setCookieProblem());
+    if (name.toLower() == "vary") {
+        val merged: string = varyUnion(rkHeaderGet("Vary"), value);
+        val _v = rkHeaderSet(name, merged);
+        return res;
+    };
+    val _s = rkHeaderSet(name, value);
+    return res;
+}
+
+// The list form, applied in order, with the same replace-by-name rule between
+// its own entries. `#(string, string)[]` is the spec's spelling; a flat
+// `name, value, name, value` array is what a decorator argument can carry and
+// what a caller can write without a tuple literal, so both exist and the pair
+// form is built on the flat one.
+pub fn withHeaders(res: Response, flat: string[]) -> Response {
+    if (flat.length % 2 != 0) {
+        @panic("rakun-web: withHeaders takes name, value, name, value - the list "
+            + "has an odd length, so one name has no value");
+    };
+    var i = 0;
+    loop (i < flat.length) {
+        val _w = withHeader(res, flat.at(i).unwrapOr(""), flat.at(i + 1).unwrapOr(""));
+        i = i + 2;
+    };
+    return res;
+}
+
+pub fn headerValue(name: string) -> string {
+    return rkHeaderGet(name);
+}
+
+pub fn headerLines() -> string[] {
+    val wire: string = rkHeaderLines();
+    if (wire == "") return [];
+    return wire.split("\n");
+}
+
+pub fn headerCount() -> i32 {
+    return headerLines().length;
+}
+
+// The lowercased names, in insertion order — the case-insensitive view a test
+// asserts `x-a` and `X-A` collapsed into one line with.
+pub fn headerNameSet() -> string[] {
+    val wire: string = rkHeaderNames();
+    if (wire == "") return [];
+    return wire.split("\n");
+}
+
+// ── the `Set-Cookie` list ───────────────────────────────────────────────────
+//
+// Front 62's `endRequest()` returns its queued cookies as a `\n`-separated blob
+// of whole lines — a value can never split it, because `serializeCookie`
+// percent-encodes a newline into `%0A`. The chain writes them verbatim, one
+// `Set-Cookie:` per element, and they never touch `withHeader`.
+
+pub fn writeCookies(blob: string) -> i32 {
+    if (blob == "") return 0;
+    var n = 0;
+    loop (blob.split("\n")) { line ->
+        if (line != "") {
+            val _a = rkCookieAdd(line);
+            n = n + 1;
+        };
+    };
+    return n;
+}
+
+pub fn cookieLines() -> string[] {
+    val wire: string = rkCookieLines();
+    if (wire == "") return [];
+    return wire.split("\n");
+}
+
+// The response head as the chain would write it: one `Name: value` line per
+// reply header, then one `Set-Cookie: <line>` per queued cookie. This is the
+// only place the two accumulators meet, and it is a pure function of them.
+pub fn responseHead() -> string {
+    var out: string[] = [];
+    loop (headerLines()) { l -> out.push(l); };
+    loop (cookieLines()) { c -> out.push("Set-Cookie: " + c); };
+    return out.join("\n");
+}
+
+// ── the route table, read for the preflight ─────────────────────────────────
+//
+// `rkRoutePaths()` answers `"GET /api/users, POST /api/x"` in registration
+// order, with `:name` segments in the authored spelling. A preflight for a path
+// with no route must answer 404 and not a permissive 204, so the CORS entry
+// asks this before it answers one.
+
+pub fn routeMatches(pattern: string, path: string) -> bool {
+    val want: string[] = segments(path);
+    val have: string[] = segments(pattern);
+    if (want.length != have.length) return false;
+    var ok = true;
+    var i = 0;
+    loop (i < have.length) {
+        val seg: string = have.at(i).unwrapOr("");
+        val got: string = want.at(i).unwrapOr("");
+        val bound = seg.startsWith(":");
+        if ((bound == false) && (seg != got)) ok = false;
+        i = i + 1;
+    };
+    return ok;
+}
+
+pub fn segments(path: string) -> string[] {
+    var out: string[] = [];
+    loop (path.split("/")) { s -> if (s != "") out.push(s); };
+    return out;
+}
+
+// `sub` is imported so the verb can be split off a `"GET /api/x"` row without a
+// second grammar; front 05 already owns the helper.
+pub fn routeRowPath(row: string) -> string {
+    val space: i32 = row.indexOf(" ");
+    if (space < 0) return "";
+    return sub(row, space + 1, row.length());
+}
+
+pub fn routeRowVerb(row: string) -> string {
+    val space: i32 = row.indexOf(" ");
+    if (space < 0) return "";
+    return sub(row, 0, space);
+}
