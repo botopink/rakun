@@ -70,6 +70,22 @@ import {
     draftSecretProblem,
     equalsConstantTime,
     connection,
+    after,
+    afterPhaseProblem,
+    deferredCount,
+    drainAfter,
+    afterStarted,
+    afterCompleted,
+    afterFailed,
+    afterKilled,
+    afterLog,
+    afterReset,
+    rkReqShareBump,
+    rkReqShareCount,
+    rkReqSharePut,
+    rkReqShareGet,
+    rkReqShareReset,
+    rkReqSleep,
 } from "request_context";
 import {rkSetProp} from "runtime";
 
@@ -684,4 +700,164 @@ test "rakun request: connection() in a strict frame raises" {
 test "rakun request: the draft refusal text names the property" {
     assert draftSecretProblem().contains("rakun.draft.secret");
     assert draftSecretProblem().contains("unsigned bypass");
+}
+
+
+// ── step 5: after() ─────────────────────────────────────────────────────────
+//
+// The deferred child is a different PROCESS on the BEAM, so nothing it computes
+// can come back through a local: it writes the shared ETS scratch and the
+// parent reads it. `drainAfter` is the dispatcher's reap, called once the
+// response is on the wire, and it is what the budget is enforced in.
+
+fn afterScope(phase: RequestPhase) -> RequestScope {
+    return RequestScope(
+        id: "req-after-1",
+        phase: phase,
+        method: "POST",
+        path: "/api/track",
+        query: "",
+        headersWire: "host\texample.com\ncookie\ttheme=dark",
+        strict: false,
+    );
+}
+
+fn cleanSlate() -> i32 {
+    val _a = afterReset();
+    return rkReqShareReset();
+}
+
+test "rakun request: deferred work has not run at endRequest and has run after the drain" {
+    val _z = cleanSlate();
+    val _e = beginRequest(afterScope(RequestPhase.Action));
+    val _a = after({ ->
+        rkReqShareBump("ran");
+        0;
+    });
+    assert deferredCount() == 1;
+    assert rkReqShareCount("ran") == 0;
+    val _b = endRequest();
+    assert afterStarted() == 1;
+    val settled: i32 = drainAfter(5000);
+    assert settled == 1;
+    assert rkReqShareCount("ran") == 1;
+    assert afterCompleted() == 1;
+    assert afterFailed() == 0;
+}
+
+test "rakun request: the deferred child sees the frozen frame under phase After" {
+    val _z = cleanSlate();
+    val _e = beginRequest(afterScope(RequestPhase.Handler));
+    val _a = after({ ->
+        val _p = rkReqSharePut("phase", phaseName(requestPhase()));
+        val _i = rkReqSharePut("id", requestId());
+        val h: Headers = headers();
+        val _hh = rkReqSharePut("host", headerOf(h, "host", ""));
+        val jar: Cookies = cookies();
+        val _c = rkReqSharePut("theme", cookieOf(jar, "theme", ""));
+        0;
+    });
+    val _b = endRequest();
+    val _w = drainAfter(5000);
+    assert rkReqShareGet("phase") == "after";
+    assert rkReqShareGet("id") == "req-after-1";
+    assert rkReqShareGet("host") == "example.com";
+    assert rkReqShareGet("theme") == "dark";
+}
+
+test "rakun request: deferred work outlives the frame" {
+    val _z = cleanSlate();
+    val _e = beginRequest(afterScope(RequestPhase.Action));
+    val _a = after({ ->
+        rkReqSleep(120);
+        rkReqShareBump("slow");
+        0;
+    });
+    val _b = endRequest();
+    assert requestLive() == false;
+    try asserts.throwsWith({ ->
+        requestEpoch();
+        0;
+    }, "request context is not established");
+    assert rkReqShareCount("slow") == 0;
+    val _w = drainAfter(5000);
+    assert rkReqShareCount("slow") == 1;
+}
+
+test "rakun request: a cookie write and a second after() are refused in phase After" {
+    val _z = cleanSlate();
+    val _e = beginRequest(afterScope(RequestPhase.After));
+    val jar: Cookies = cookies();
+    try asserts.throwsWith({ ->
+        jar.set("theme", "light", cookieDefaults());
+        0;
+    }, "never after the response is sent");
+    try asserts.throwsWith({ ->
+        after({ -> 0; });
+        0;
+    }, "after() may not be called from deferred work");
+    val _x = endRequest();
+}
+
+test "rakun request: a deferred function that raises is counted and logged with the request id" {
+    val _z = cleanSlate();
+    val _e = beginRequest(afterScope(RequestPhase.Action));
+    val _a = after({ ->
+        @panic("analytics write blew up");
+        0;
+    });
+    val _b = endRequest();
+    val settled: i32 = drainAfter(5000);
+    assert settled == 1;
+    assert afterFailed() == 1;
+    assert afterCompleted() == 0;
+    assert afterLog().contains("req-after-1") == true;
+    assert afterLog().contains("after: failed") == true;
+}
+
+test "rakun request: a deferred function that outlives the budget is killed and the kill is logged" {
+    val _z = cleanSlate();
+    val _p = rkSetProp("rakun.request.after.timeout", "40");
+    assert afterTimeoutMs() == 40;
+    val _e = beginRequest(afterScope(RequestPhase.Action));
+    val _a = after({ ->
+        rkReqSleep(400);
+        rkReqShareBump("overran");
+        0;
+    });
+    val _b = endRequest();
+    val settled: i32 = drainAfter(5000);
+    assert settled == 1;
+    assert afterKilled() == 1;
+    assert afterLog().contains("after: killed") == true;
+    assert afterLog().contains("req-after-1") == true;
+    val _r = rkSetProp("rakun.request.after.timeout", "");
+    assert afterTimeoutMs() == 30000;
+}
+
+test "rakun request: two deferred thunks both run" {
+    val _z = cleanSlate();
+    val _e = beginRequest(afterScope(RequestPhase.Middleware));
+    val _a = after({ ->
+        rkReqShareBump("two");
+        0;
+    });
+    val _c = after({ ->
+        rkReqShareBump("two");
+        0;
+    });
+    assert deferredCount() == 2;
+    val _b = endRequest();
+    assert afterStarted() == 2;
+    val settled: i32 = drainAfter(5000);
+    assert settled == 2;
+    assert rkReqShareCount("two") == 2;
+}
+
+test "rakun request: after() with no frame raises" {
+    try asserts.throwsWith({ ->
+        after({ -> 0; });
+        0;
+    }, "request context is not established");
+    assert afterPhaseProblem().contains("the response is already written");
 }

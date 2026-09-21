@@ -787,6 +787,40 @@ route says "I am dynamic" without pretending to need a header. `draftBypass()`
 is the one boolean front 60 reads to skip its prerendered entry, and it is the
 only coupling between the two fronts.
 
+### Deferred work — `after()`
+
+`after(work)` pushes a thunk on the frame. `endRequest()` FREEZES a copy of the
+frame under phase `After` and starts the work; the dispatcher writes the
+response and then calls `drainAfter(budget)`, which reaps. A child can still
+read the headers and the cookies of the request it belongs to — that is what
+"frozen copy" means — and can write nothing: `cookies().set` and a second
+`after()` both raise in phase `After`.
+
+**This is the one place the two rows are not the same mechanism, and it is
+stated rather than papered over.** On the BEAM each thunk is a `spawn_monitor`
+child and a child that outlives `rakun.request.after.timeout` is KILLED, the
+kill logged. Node has no process and cannot interrupt a synchronous function: it
+runs each thunk in a try/catch with the same frozen copy installed, and a thunk
+that OVERRAN the budget is counted and logged in the slot the BEAM kills into.
+The counters and the log agree on both rows; the interruption is real on one and
+after the fact on the other, and no assertion claims otherwise.
+
+The Pid/Ref list lives in the parent's dictionary under its OWN key, not in the
+frame — `endRequest` erases the frame and the children outlive it, which is the
+whole point — and the request id is captured at `startDeferred` rather than read
+in the reap, because by the time a child settles the frame is gone and a
+deferred failure with no request to hang it on is a line nobody can act on.
+`afterLog()` is what front 17 reads; until front 17 lands it is a `\n`-separated
+blob of `after: failed <id> <reason>` and `after: killed <id> <budget>` lines.
+
+A deferred child is a different PROCESS, so nothing it computes comes back
+through a local: `rkReqShareBump` / `rkReqShareCount` / `rkReqSharePut` /
+`rkReqShareGet` are the ETS scratch the front's own text names when it says "the
+loader increments an ETS counter". `rkReqSleep` is a BLOCKING sleep —
+`timer:sleep/1` on the BEAM, `Atomics.wait` on node — because front 01's `clock`
+module does not exist yet and the deferred-work assertions need a thunk that is
+still running.
+
 ### Language notes this module is written around
 
 - **A `@panic` message must be pure ASCII.** `asserts.throwsWith` catches

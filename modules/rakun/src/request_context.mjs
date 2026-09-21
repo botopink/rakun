@@ -25,10 +25,15 @@
 let seq = 0; // the epoch source: strictly increasing, never reused
 let frame = null;
 
-// The area deferred work runs in. It deliberately OUTLIVES the frame: a child
+// The area deferred work runs in. It deliberately OUTLIVES the frame: the work
 // runs after `endRequest` erased the key, so its bookkeeping cannot live there.
-let after = null;
-const ticks = new Map(); // named counters a test's loader bumps
+const area = { queued: [], frozen: null, timeout: 0, id: "", log: [] };
+const stats = new Map(); // started · ok · failed · killed
+
+// The shared scratch a deferred child or a memo loader writes where the parent
+// can read it. On the BEAM this is ETS, because a child is a different process;
+// here one Map is the same thing.
+const shared = new Map();
 
 function live() {
   return frame !== null;
@@ -89,4 +94,133 @@ export function queueCookie(name, line) {
 export function cookieBlob() {
   if (!live()) return "";
   return frame.cookies.map((c) => c.line).join("\n");
+}
+
+// ── deferred work ────────────────────────────────────────────────────────────
+//
+// THE ONE PLACE THE TWO ROWS ARE NOT THE SAME MECHANISM, stated plainly. On the
+// BEAM each thunk is a `spawn_monitor` child with a frozen copy of the frame,
+// and a child that outlives the budget is KILLED. Node has no process and
+// cannot interrupt a synchronous function: it runs each thunk in a try/catch
+// with the frozen copy installed, and a thunk that OVERRAN the budget is
+// counted and logged in the same slot the BEAM kills into. The counters and the
+// log agree; the interruption is real on one row and after the fact on the
+// other, and no assertion here claims otherwise.
+
+function bump(name, by) {
+  stats.set(name, (stats.get(name) || 0) + by);
+}
+
+export function defer(work) {
+  if (!live()) return 0;
+  frame.deferred.push(work);
+  return frame.deferred.length;
+}
+
+export function deferCount() {
+  return live() ? frame.deferred.length : 0;
+}
+
+export function startDeferred(timeoutMs) {
+  if (!live()) return 0;
+  const slots = new Map(frame.slots);
+  slots.set("phase", "after");
+  area.frozen = {
+    epoch: frame.epoch,
+    slots,
+    cookies: [],
+    deferred: [],
+    memo: new Map(frame.memo),
+  };
+  area.queued = frame.deferred.slice();
+  area.timeout = timeoutMs;
+  area.id = frame.slots.get("id") || "";
+  bump("started", area.queued.length);
+  return area.queued.length;
+}
+
+export function afterWait(budgetMs) {
+  const jobs = area.queued;
+  area.queued = [];
+  const saved = frame;
+  const deadline = Date.now() + budgetMs;
+  let settled = 0;
+  for (const job of jobs) {
+    frame = area.frozen;
+    const t0 = Date.now();
+    try {
+      job();
+      const spent = Date.now() - t0;
+      const overran = area.timeout > 0 && spent > area.timeout;
+      if (overran) {
+        bump("killed", 1);
+        area.log.push("after: killed " + area.id + " after " + area.timeout + "ms");
+      } else {
+        bump("ok", 1);
+      }
+    } catch (e) {
+      bump("failed", 1);
+      const msg = e && e.message ? e.message : String(e);
+      area.log.push("after: failed " + area.id + " " + msg);
+    }
+    settled += 1;
+    if (Date.now() > deadline) break;
+  }
+  frame = saved;
+  return settled;
+}
+
+export function afterStat(name) {
+  return stats.get(name) || 0;
+}
+
+export function afterLog() {
+  return area.log.join("\n");
+}
+
+export function afterReset() {
+  area.queued = [];
+  area.frozen = null;
+  area.timeout = 0;
+  area.id = "";
+  area.log.length = 0;
+  stats.clear();
+  return 0;
+}
+
+// ── the shared scratch, and a blocking sleep ─────────────────────────────────
+
+export function shareBump(key) {
+  const n = (shared.get(key) || 0) + 1;
+  shared.set(key, n);
+  return n;
+}
+
+export function shareCount(key) {
+  const v = shared.get(key);
+  return typeof v === "number" ? v : 0;
+}
+
+export function sharePut(key, value) {
+  shared.set(key, value);
+  return 0;
+}
+
+export function shareGet(key) {
+  const v = shared.get(key);
+  return typeof v === "string" ? v : "";
+}
+
+export function shareReset() {
+  shared.clear();
+  return 0;
+}
+
+// A BLOCKING sleep, because the deferred-work assertions need a thunk that is
+// still running. `Atomics.wait` is the only synchronous one node has.
+export function sleep(ms) {
+  if (ms > 0) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  }
+  return 0;
 }

@@ -144,6 +144,29 @@
   `botopink test` 187/187; `botopink test --target erlang` 178 passing / 9
   failing, the same nine that are not this front's.
 
+- **`after()` — work that runs once the response is sent** (front 62, step 5).
+  `after(work)` pushes a thunk on the frame; `endRequest()` freezes a copy of
+  the frame under phase `After` and starts the work, and the dispatcher writes
+  the response and then calls `drainAfter(budget)`, which reaps. The child reads
+  the headers and the cookies of the request it belongs to — asserted through an
+  ETS scratch, because on the BEAM it is a different process — and answers
+  `RequestPhase.After`; a cookie write and a second `after()` both raise there.
+  A thunk that raises is counted and logged with the REQUEST ID and never
+  reaches the client, the response being already written; a thunk that outlives
+  `rakun.request.after.timeout` is counted and logged as killed. The frame is
+  gone before the work runs: `requestEpoch()` in the parent raises while a
+  sleeping child is still outstanding.
+
+  **One place the two rows are not the same mechanism, stated rather than
+  papered over.** On the BEAM each thunk is a `spawn_monitor` child and an
+  overrunning child is KILLED. Node has no process and cannot interrupt a
+  synchronous function: it runs each thunk in a try/catch with the same frozen
+  copy installed and counts a thunk that OVERRAN in the slot the BEAM kills
+  into. The counters and the log agree; the interruption is real on one row and
+  after the fact on the other, and no assertion claims otherwise. Measured:
+  `botopink test` 195/195; `botopink test --target erlang` 186 passing / 9
+  failing, the same nine that are not this front's.
+
 - **The route table crosses the boundary, and one matcher reads it on both
   rows** (front 22, steps 3 and 4). `RouteEntry(kind, pattern, slot, verb)`
   writes as `kind|pattern|slot|verb`, one record per line in registration order,

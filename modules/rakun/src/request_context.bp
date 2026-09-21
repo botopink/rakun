@@ -146,6 +146,73 @@ pub declare fn rkReqQueueCookie(name: string, line: string) -> i32;
   @External.Erlang("rakun_request_context", "cookie_blob")]
 pub declare fn rkReqCookieBlob() -> string;
 
+// ── deferred work: the host cells ───────────────────────────────────────────
+//
+// `defer` holds a THUNK, which is the second half of why this front ships host
+// files at all: no string table holds a closure. `startDeferred` freezes the
+// frame and starts the work; `afterWait` reaps it and enforces the budget. The
+// dispatcher calls both, in that order, around writing the response.
+
+#[@External.Node("./request_context.mjs", "defer"),
+  @External.Erlang("rakun_request_context", "defer")]
+pub declare fn rkReqDefer(work: fn() -> i32) -> i32;
+
+#[@External.Node("./request_context.mjs", "deferCount"),
+  @External.Erlang("rakun_request_context", "defer_count")]
+pub declare fn rkReqDeferCount() -> i32;
+
+#[@External.Node("./request_context.mjs", "startDeferred"),
+  @External.Erlang("rakun_request_context", "start_deferred")]
+pub declare fn rkReqStartDeferred(timeoutMs: i32) -> i32;
+
+#[@External.Node("./request_context.mjs", "afterWait"),
+  @External.Erlang("rakun_request_context", "after_wait")]
+pub declare fn rkReqAfterWait(budgetMs: i32) -> i32;
+
+#[@External.Node("./request_context.mjs", "afterStat"),
+  @External.Erlang("rakun_request_context", "after_stat")]
+pub declare fn rkReqAfterStat(name: string) -> i32;
+
+#[@External.Node("./request_context.mjs", "afterLog"),
+  @External.Erlang("rakun_request_context", "after_log")]
+pub declare fn rkReqAfterLog() -> string;
+
+#[@External.Node("./request_context.mjs", "afterReset"),
+  @External.Erlang("rakun_request_context", "after_reset")]
+pub declare fn rkReqAfterReset() -> i32;
+
+// The shared scratch. A deferred child is a different PROCESS on the BEAM, so a
+// counter it bumps cannot live in either dictionary; this is the ETS the front's
+// own text names when it says "the loader increments an ETS counter".
+
+#[@External.Node("./request_context.mjs", "shareBump"),
+  @External.Erlang("rakun_request_context", "share_bump")]
+pub declare fn rkReqShareBump(key: string) -> i32;
+
+#[@External.Node("./request_context.mjs", "shareCount"),
+  @External.Erlang("rakun_request_context", "share_count")]
+pub declare fn rkReqShareCount(key: string) -> i32;
+
+#[@External.Node("./request_context.mjs", "sharePut"),
+  @External.Erlang("rakun_request_context", "share_put")]
+pub declare fn rkReqSharePut(key: string, value: string) -> i32;
+
+#[@External.Node("./request_context.mjs", "shareGet"),
+  @External.Erlang("rakun_request_context", "share_get")]
+pub declare fn rkReqShareGet(key: string) -> string;
+
+#[@External.Node("./request_context.mjs", "shareReset"),
+  @External.Erlang("rakun_request_context", "share_reset")]
+pub declare fn rkReqShareReset() -> i32;
+
+// A BLOCKING sleep. Front 01's `clock` module does not exist yet and the
+// deferred-work and single-flight assertions need a thunk that is still
+// running; `timer:sleep/1` on the BEAM and `Atomics.wait` on node are the two
+// synchronous ones there are.
+#[@External.Node("./request_context.mjs", "sleep"),
+  @External.Erlang("rakun_request_context", "sleep")]
+pub declare fn rkReqSleep(ms: i32) -> i32;
+
 // ── the refusals ────────────────────────────────────────────────────────────
 //
 // Each message is a function of its own, for the reason `durationProblem` is:
@@ -191,9 +258,14 @@ pub fn beginRequest(scope: RequestScope) -> i64 {
     return epoch;
 }
 
+// The dispatcher contract is three lines and this is the middle of them: the
+// blob is read, the deferred work is STARTED with a frozen copy of the frame,
+// and only then is the key erased. The work is reaped by `drainAfter()` once
+// the response is on the wire.
 pub fn endRequest() -> string {
     val _d = demand("endRequest()");
     val blob: string = rkReqCookieBlob();
+    val _s = rkReqStartDeferred(afterTimeoutMs());
     val _e = rkReqEnd();
     return blob;
 }
@@ -818,4 +890,67 @@ pub fn draftBypass() -> bool {
 pub fn connection() -> i32 {
     val _d = demand("connection()");
     return markDynamic("connection");
+}
+
+// ── after() ─────────────────────────────────────────────────────────────────
+//
+// `after(work)` schedules work to run once the response is sent. On the BEAM
+// each thunk is a `spawn_monitor` child holding a FROZEN copy of the frame
+// under phase `After`, so it can still read the headers and the cookies of the
+// request it belongs to and can write nothing. On node there is no process and
+// no way to interrupt a synchronous function: the thunk runs in a try/catch
+// with the same frozen copy installed, and a thunk that OVERRAN the budget is
+// counted and logged in the slot the BEAM kills into. That is the one place the
+// two rows are not the same mechanism, and no assertion here claims otherwise.
+
+pub fn afterPhaseProblem() -> string {
+    return "rakun request: after() may not be called from deferred work - the response "
+        + "is already written, so a second round of deferred work would run against a "
+        + "request nobody is waiting on";
+}
+
+pub fn after(work: fn() -> i32) -> i32 {
+    val _d = demand("after()");
+    if (rkReqSlot("phase") == "after") @panic(afterPhaseProblem());
+    return rkReqDefer(work);
+}
+
+pub fn deferredCount() -> i32 {
+    val _d = demand("deferredCount()");
+    return rkReqDeferCount();
+}
+
+// Called by the dispatcher AFTER the response is on the wire. Reaps every child
+// started by `endRequest`, enforcing `rakun.request.after.timeout` per child;
+// answers how many settled. Nothing else in a connection process would reap
+// them, so this is part of the contract rather than a test seam.
+pub fn drainAfter(budgetMs: i32) -> i32 {
+    return rkReqAfterWait(budgetMs);
+}
+
+pub fn afterStarted() -> i32 {
+    return rkReqAfterStat("started");
+}
+
+pub fn afterCompleted() -> i32 {
+    return rkReqAfterStat("ok");
+}
+
+pub fn afterFailed() -> i32 {
+    return rkReqAfterStat("failed");
+}
+
+pub fn afterKilled() -> i32 {
+    return rkReqAfterStat("killed");
+}
+
+// What front 17 is handed: one line per deferred failure or kill, each carrying
+// the REQUEST ID, because a deferred failure with no request to hang it on is a
+// line nobody can act on.
+pub fn afterLog() -> string {
+    return rkReqAfterLog();
+}
+
+pub fn afterReset() -> i32 {
+    return rkReqAfterReset();
 }
