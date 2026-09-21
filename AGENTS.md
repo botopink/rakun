@@ -119,6 +119,20 @@ rakun/
 │   │   │   ├── sidecars/rakun_ssr.erl ← the same cells on the BEAM, in the serving
 │   │   │   │                    process's dictionary; `all/1` spawns one monitored
 │   │   │   │                    child per thunk, because `@Future` is eager there
+│   │   │   ├── autoconfig_registry.bp ← THE AUTO-CONFIGURATION SEAM (§ The
+│   │   │   │                    auto-configuration pass): the host cells behind the
+│   │   │   │                    registration table, plus the `botopink.json`
+│   │   │   │                    dependency read `#[conditionalOnModule]` asks
+│   │   │   ├── autoconfig.mjs ← the registration table, node half: four strings
+│   │   │   │                    per row and one decision. Knows no grammar
+│   │   │   ├── sidecars/rakun_autoconfig.erl ← the same table on the BEAM, in ETS
+│   │   │   │                    behind a dedicated owner process
+│   │   │   ├── conditions.bp  ← the five condition markers, the `M|P|B|X|F` wire
+│   │   │   │                    format and the ONE evaluator that answers a record
+│   │   │   ├── autoconfig.bp  ← `#[autoConfiguration]`, the topological sort, the
+│   │   │   │                    apply pass, the gate and the four application calls
+│   │   │   ├── condition_report.bp ← the three-block render: applied, not applied,
+│   │   │   │                    excluded, each failure naming the value observed
 │   │   │   ├── bootstrap.bp   ← `Rakun` (concrete type): `Rakun.run(app)` starts `rkServe`
 │   │   │   └── rakun.d.bp     ← the declaration module. EMPTY since front 06: it
 │   │   │                        carried a declaration-only `behavior Context`,
@@ -158,6 +172,12 @@ rakun/
 │   │       │                     walker, the composition order, the payload round
 │   │       │                     trip, the chunk protocol and the two entry points.
 │   │       │                     Every cell runs on BOTH rows
+│   │       ├── conditions_test.bp ← front 72's COMPTIME half: the exact blob each
+│   │       │                     annotation set produces, read straight back out of
+│   │       │                     the host table, and the evaluator letter by letter
+│   │       ├── autoconfig_test.bp ← front 72's RUN-TIME half: the sort, the ordered
+│   │       │                     `#[conditionalOnMissingBean]` answer, the gate, both
+│   │       │                     exclusion channels, idempotence and the report
 │   │       └── erlang_runtime_test.bp ← the host cells named DIRECTLY (no decorator):
 │   │                             scan order · singleton/build count · the parseInt rule ·
 │   │                             route order · the `Response` round-trip shape. The same
@@ -239,7 +259,15 @@ Front 06 appended `pub mod events; pub mod lifecycle; pub mod context;` to the
 tree and the matching entries to `files`, in that order and reordering nothing:
 `context` imports both siblings (the boot sequence publishes the eight events and
 runs the post pass), and the `files` ORDER is a dependency order a consumer's
-build reads literally. rakun declares **no dependencies**: the HTTP transport
+build reads literally. Front 72 appended `pub mod autoconfig_registry; pub mod conditions; pub mod
+autoconfig; pub mod condition_report;` and the matching `files` entries, in that
+order and reordering nothing: `conditions` imports `autoconfig_registry`,
+`autoconfig` imports both, `condition_report` imports all three — and
+`conditions` also imports `context` (front 06's `rkBeanNames` is half the answer
+to `#[conditionalOnBean]`), which is why the four sit after it rather than beside
+`runtime`.
+
+rakun declares **no dependencies**: the HTTP transport
 `Rakun.run` starts is `serve` in its own `runtime.mjs` (bound as `rkServe`), so a
 consumer declares only `rakun`. (It used to name a `server` library that exists in
 no repository — `botopink check` failed with `LibNotFound` before reading rakun's
@@ -255,8 +283,14 @@ not fix a no-op key. Front 04 built the erlang host module (§ The erlang host m
 **not** widen `targets`, and every front since has made the same call for the same reason:
 a red on that axis would move into the gate rather than be fixed by the widening.
 
-**Measured 2026-09-21, with front 06 in the tree:** `botopink test` is 267/267 and
-`botopink test --target erlang` is 265 passing / 2 failing. The two are front 04's own
+**Measured 2026-09-21, with front 72 in the tree** (the pinned compiler
+`2e6bb4ac`, summed over every module summary — `botopink test` prints one per
+module, so the LAST line is the last module's count and never the run's total):
+`botopink test` is **346 / 0** and `botopink test --target erlang` is **344
+passing / 2 failing**. Front 72 added 44 cells and moved neither red. The
+baseline it measured before starting was 302 / 0 and 300 / 2. (Front 06 measured
+267/267 and 265/2 on the same two reds; the numbers grew with the suite, not
+with the failures.) The two are front 04's own
 `request/6` (`{badkey,param}` / `{badkey,query}`) — the map it builds carries `method`,
 `path`, `params`, `query`, `headers` and `body` but no member funs, so `req.param("name")`
 dispatches and finds nothing. That is the one thing left between the erlang row and
@@ -2110,6 +2144,221 @@ The module atom may not be `ssr`: rakun emits `rakun/ssr`, and `shipErlSidecars`
 skips a qualifier matching a module this build emitted — silently. Every rakun
 sidecar is `rakun_<name>.erl`.
 
+## The auto-configuration pass
+
+`modules/rakun/src/autoconfig.bp`, `conditions.bp`, `condition_report.bp` and
+`autoconfig_registry.bp` are front 72: conditional registration, ordered, with a
+report of every decision.
+
+**Why it exists.** Every stereotype in `decorators.bp` is unconditional — a type
+carrying one is registered, always, in every application, on every profile. That
+is what makes a framework module impossible to ship: `rakun-data` wanting to
+provide a default `DataSource` can either mark it `#[component]` and build it in
+every application that pulls the module in, including the ones that already
+declare their own and the ones that have no database, or not mark it and have
+every application write the wiring by hand. "Add the module, it configures
+itself" is the promise that separates Spring Boot from Spring.
+
+### The surface
+
+| Marker | Sits on | Record |
+|---|---|---|
+| `#[autoConfiguration]` | a record-shaped `type` | — (it reads the rest) |
+| `#[conditionalOnModule(name)]` | type or `#[bean]` method | `M\|<name>` |
+| `#[conditionalOnProperty(key, having)]` | type or `#[bean]` method | `P\|<key>\|<having>` |
+| `#[conditionalOnBean(typeName)]` | type or `#[bean]` method | `B\|<typeName>` |
+| `#[conditionalOnMissingBean(typeName)]` | type or `#[bean]` method | `X\|<typeName>` |
+| `#[profile(name)]` | type or `#[bean]` method | `F\|<name>` |
+| `#[autoConfigureBefore(name)]` / `#[autoConfigureAfter(name)]` | an `#[autoConfiguration]` type | the two order lists |
+
+Records are joined with `;`, fields with `|`; neither may appear in a module
+name, a property key or value, a type name or a profile name, and every marker
+refuses one at COMPTIME rather than emitting a blob that cannot be parsed back.
+Conditions are conjunctive and there is no `anyOf`, no expression language and
+no escape hatch: a configuration that needs a disjunction splits into two, which
+is also the form that reads correctly in the report.
+
+The application calls `autoConfigure()` — or `autoConfigureExcept(names)` — once,
+before `Rakun.run`, reads `isAutoConfigured(name)` and prints or serves
+`autoConfigurationReport()` (`rkAutoReport()` under its seam name, which is what
+front 11 hands back at `/actuator/conditions`).
+
+### Where the pass is called from, and why that is a narrowing
+
+`bootstrap.bp` is frozen for the milestone, so `Rakun.run` cannot run the pass.
+The application writes the line:
+
+```bp
+val _ = autoConfigure();
+Rakun.run(App(port: 8080, basePath: "/api"));
+```
+
+The alternative — applying lazily on the first `rkAutoMatched` read — would make
+the result depend on which component happened to be resolved first, which is
+exactly the ordering bug the sort exists to prevent. Until `bootstrap.bp`
+unfreezes the line is explicit, and the report says plainly when it was never
+called instead of printing an empty table.
+
+### Sort first, then evaluate
+
+`rkAutoApply/1` builds the edge set, topologically sorts it and only then walks
+the sorted list evaluating conditions. Three sources of edges: `after` is
+`B -> A`, `before` is `A -> B`, and a `#[bean]` method is always after the
+configuration that owns it. An ordering annotation names a CONFIGURATION and a
+configuration's beans belong to it, so each named configuration expands to
+itself plus every entry it owns — otherwise "after `RakunCoreAutoConfiguration`"
+would put `A` before that configuration's beans and `#[conditionalOnMissingBean]`
+would see the owner applied and the bean it provides still missing. The walk is
+Kahn's with ties broken by REGISTRATION order, so the report is stable across
+runs. An edge naming an unregistered configuration is dropped, not refused
+(Spring's `@AutoConfigureAfter` routinely names a class that is not present); a
+cycle is a startup failure naming its members.
+
+`test/autoconfig_test.bp` asserts the ORDERED answer twice — once through real
+annotations, once through a synthetic pair registered in the wrong order with
+and without the `after` — so deleting the sort reds ten cells rather than one.
+
+### What an entry PROVIDES is a cell, not a record letter
+
+A `#[bean]` method emits a factory; it does not call `rkScan` and does not
+register a bean, so an applied configuration would be invisible to a later one
+asking whether anybody had already supplied a `MailSender`. Each entry therefore
+also declares what it contributes, through `rkAutoProvides(name, typeName)` — a
+configuration provides itself, a `#[bean]` method its return type — and the apply
+pass adds it to the registered set the moment the entry matches. It is a
+separate cell and not a sixth record letter because `rkAutoConditions(name)` has
+to answer the blob the annotations produced, VERBATIM, or it stops being the
+comptime half's assertion point.
+
+`B|`/`X|` are then answered by three sources at once: front 04's
+`rkScannedNames()`, front 06's `rkBeanNames()` and the provides of the entries
+applied so far in this pass.
+
+### The gate, and the one thing it cannot reach
+
+A bean factory of an unmatched configuration RAISES when called, naming the
+configuration and the condition that failed; it does not return a half-built
+value, and a pass that never ran is its own refusal, because "nothing matched"
+and "nobody asked" are different answers.
+
+`#[autoConfiguration]` emits its own `#[bean]` factories, so the gate goes
+inside them. `#[profile]` on an ordinary `#[service]` cannot do that:
+`decorators.bp` is frozen and its stereotypes emit `__rkMake_<Type>()`
+unconditionally. **The narrowing:** the marker leaves the component UNBUILT — the
+factory is lazy, nothing calls it at module load and `rkBuildCount` stays 0 — and
+emits `__rkAutoGated_<Type>()` beside it, which raises with the diagnosis instead
+of building. When `decorators.bp` unfreezes the gate moves into the factory and
+the accessor goes away. The alternative would have been a second
+`pub fn __rkMake_<Type>` definition, which is a duplicate the node row accepts
+silently (front 06 § `#[provides]` measured the same thing).
+
+### Exclusion: two channels, one resolution path
+
+`rakun.autoconfigure.exclude` (read through front 05's table, comma-separated or
+indexed) and `autoConfigureExcept(names)` union into `rkAutoApply/1`'s single
+argument; the report recovers the channel by re-reading the property. An excluded
+name that matches no registered configuration is a startup FAILURE listing the
+registered names, not a warning: a typo in an exclusion disables nothing and
+leaves the developer believing they turned something off. An excluded entry's
+conditions are not evaluated at all.
+
+### The report
+
+Three blocks — applied, not applied, excluded — walked in the SORTED order, each
+failed row naming the first failing record AND the value observed. "did not
+match: `P|rakun.mail.host|*`" is a restatement of the source; "did not match:
+`P|rakun.mail.host|*` - the property is empty" is a diagnosis. Only the first
+failing condition is reported, because evaluation short-circuits there and
+claiming anything about the rest would be a guess. `rakun.main.debug=true` prints
+it at boot; `false` prints nothing and `rkAutoReport()` still answers the full
+table — the switch is over the printing, never over the data.
+
+### Why the host is a table and nothing else
+
+Front 06's measurement decides the split, applied rather than cited: is the thing
+being stored a FUN? It stores a bean factory, a lifecycle thunk, a listener
+closure and an exit-code generator, no string table holds a fun, so its grammar
+stayed in botopink and only its table crossed. Here NOTHING is a fun — four
+strings per registration and one decision per name — so the host is an
+append-only table and nothing more. The blob grammar, the sort, the evaluator,
+every refusal text and the rendered report are botopink, compiled twice. A front
+that needs a new KIND of condition adds a record letter and a branch in
+`conditions.bp`'s `evaluateRecord`; it does not add a second registry and it does
+not write the branch twice in two host languages.
+
+The `#[conditionalOnModule]` manifest read is botopink for the same reason: it is
+`std`'s `fs.readText` plus a scanner over `botopink.json`'s `dependencies`, which
+normalises BOTH on-disk shapes (`["rakun"]` and `{"rakun": {…}}`) exactly as
+`compiler-cli/src/cli/config.zig` does, with fixtures under
+`test/fixtures/autoconfig/` asserting each. A manifest that cannot be read is a
+REFUSAL, not a `false`: "this module is not a dependency" and "I could not find
+out" are different answers, and a condition that silently takes the second for
+the first turns every `#[conditionalOnModule]` in the build off without saying so.
+
+The module atom may not be `autoconfig`: rakun emits `rakun/autoconfig`, and
+`shipErlSidecars` skips a qualifier matching a module this build emitted —
+silently. Every rakun sidecar is `rakun_<name>.erl`.
+
+### Why this front ships BOTH host files where its spec said erlang only
+
+The spec (`specs/1.0.10-beta/03-rakun/72-rakun-auto-configuration/README.md`
+§ Test plan) declares the host cells `@External.Erlang`-only and says "the tests
+are declared erlang-only and the lib test runner is told so". Measured against
+the pinned compiler: **there is no per-file target gate.** `botopink test`
+compiles every `test/*.bp` on BOTH rows with no per-target switch
+(`compiler-cli/src/cli/test_cmd.zig`), and the only target whitelist is per-LIB —
+`botopink.json`'s `targets`, read by `lib-test-runner/src/discovery.zig`. rakun
+core declares `targets: ["commonJS"]`, so an erlang-only test file would (a) red
+the commonJS row at the first call to a cell with no node form and (b) never run
+in the gate at all, which runs only the commonJS cell. Both halves are shipped,
+which is front 06's precedent and its reason: every cell carries both forms, so
+neither row has a call with no binding.
+
+### Language notes this module is written around
+
+Everything here is measured against the pinned compiler, smallest program, both
+rows.
+
+- **`from` is a reserved word and may not name a field or a parameter.**
+  `pub type Edge(from: string, to: string)` is `error[field-needs-name]: a field
+  with no name`, and `fn openerAfter(s: string, from: i32)` is `this token cannot
+  appear here — unexpected \`from\``. The edge record spells its ends `earlier`
+  and `later`.
+- **`println`/`print` have no erlang lowering, and the failure lands nowhere near
+  the cause.** `libs/std/src/builtins.d.bp:12-16` declares both; the commonJS row
+  runs them, and the erlang row emits a bare local call. The smallest program is
+  one module with `pub fn tag() -> string { return "sink"; }` beside
+  `pub fn shout(line: string) -> i32 { println(line); return 1; }` and one test
+  calling `tag()`: commonJS `1 passed, 0 failed`, erlang
+  `FAIL ({error,undef}) at sink_test.bp:3`. `erlc` refuses the module with
+  `function println/1 undefined`, the test runner's `__bp_load_siblings/0`
+  compiles every `.erl` beside the script and SKIPS a failure silently
+  (`codegen/erlang.zig`, the loader's `_ -> ok`), so the whole module is absent
+  and every function in it answers `undef` — pointing at the caller, never at the
+  print. Until it is closed the report prints through `rkAutoPrint`, a cell of
+  this front's own with both forms.
+- **`a.args` carries the SOURCE TEXT of a decorator argument, quotes included,
+  and `decl.annotations` includes the marker's own annotation.** Measured with a
+  throwaway marker: a type carrying `#[probe] #[probeArg("rakun.mail.host", "*")]
+  #[probeMark]` reflects `probe,probeArg,probeMark` and args
+  `["rakun.mail.host"~"*"]`. So a literal is unwrapped with
+  `.split("\"").join("")`, an argument is read with `.slice(i, i + 1).join("")`
+  (`.at(i)` returns `?T` and is undefined in the eval script), and the "two
+  `#[profile]` markers on one type" check counts every `profile` on the
+  declaration.
+- **`@emit("")` emits nothing**, which is what makes a conditional contribution
+  expressible without a dummy line in the `else` branch. `#[managed]` relies on
+  the same.
+- **A nested closure may write a `var` of the enclosing decorator body**, two
+  levels deep — the method walk accumulates a separator violation from inside
+  `m.annotations.forEach` into the body's own `bad`.
+
+### What front 11 consumes from this front
+
+`rkAutoReport()` — verbatim — for `/actuator/conditions`, plus
+`reportStateOf(name)` / `reportReasonOf(name)` / `reportNames()` when it wants
+the same decision as structured members rather than as a block. There is one
+producer; a second renderer would be a second answer.
 ## The filter chain — `modules/rakun-web/`
 
 `modules/rakun-web/` is the member front 07 fills, and it is the first member
@@ -2117,12 +2366,15 @@ besides the core with real code and its own tests. One ordered chain sits
 between the socket and the route handler; everything cross-cutting in track B
 enters through it and through nothing else.
 
-**Measured 2026-09-21 against compiler `2e6bb4ac`, with front 07 in the tree:**
-`botopink test` (the member's own target, erlang) is **83/83** and
-`botopink test --target commonJS` is **83/83**. `modules/rakun` is unchanged —
-302/302 on commonJS, 300 passing / 2 failing on erlang, the two still front 04's
-`server_test.bp:74,80`. Before this front the member had no `test/` directory at
-all, so `botopink-lang/scripts/restricted-targets.txt`'s line
+**Measured 2026-09-21 against compiler `2e6bb4ac`, with front 07 AND front 72 in
+the tree:** `botopink test` (the member's own target, erlang) is **83/83** and
+`botopink test --target commonJS` is **83/83**. `modules/rakun` is untouched by
+this front and reads what front 72 left — 346/346 on commonJS, 344 passing / 2
+failing on erlang, the two still front 04's `server_test.bp:74,80`. (Front 07
+was written against the pre-72 core, where the same two cells were the only
+reds at 302/300; neither count is this front's and neither moved because of
+it.) Before this front the member had no `test/` directory at all, so
+`botopink-lang/scripts/restricted-targets.txt`'s line
 `rakun-web commonJS 0 03-rakun/F07` keeps its pinned `0` and loses its reason:
 "no tests yet" is now "83 tests, all green".
 

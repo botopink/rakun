@@ -1,0 +1,451 @@
+//// rakun — the condition set: the five markers, the wire format they compile
+//// to, and the one evaluator that answers them.
+////
+//// ── THE CONDITION BLOB ──────────────────────────────────────────────────────
+////
+//// A decorator body can emit one string literal per `@emit`, and `json.bp` is
+//// `string -> @Result<string, string>` with no structured walker, so JSON would
+//// have to be re-parsed by hand on the far side. The conditions therefore
+//// travel as a line-oriented blob — the same choice front 22 made for the route
+//// table and for the same reason. Records are joined with `;`, fields with `|`:
+////
+////     M|rakun-data          the named module is a declared dependency
+////     P|rakun.mail.host|*   the property is set; `*` is "any non-empty value",
+////                           anything else is an exact match
+////     B|DataSource          a component of this name is registered
+////     X|DataSource          no component of this name is registered
+////     F|prod                the named profile is active
+////
+//// Neither `;` nor `|` may appear in a module name, a property key, a property
+//// value, a type name or a profile name, and every marker below rejects one at
+//// COMPTIME, at the annotation, rather than emitting a blob that cannot be
+//// parsed back.
+////
+//// WHAT AN ENTRY PROVIDES IS NOT A RECORD OF THIS BLOB, and the reason is worth
+//// stating because the alternative was tried first. A `#[bean]` method emits a
+//// factory; it does not call `rkScan` and does not register a bean, so an
+//// APPLIED configuration would be invisible to a later configuration asking
+//// whether anybody had already supplied a `MailSender` — which would make
+//// `#[conditionalOnMissingBean]` answer a question nobody asked. The entry
+//// therefore also declares the type it contributes, through
+//// `rkAutoProvides(name, typeName)`, and the apply pass adds it to the
+//// registered set the moment the entry matches — which is the whole reason the
+//// sort happens before the evaluation. It is a SEPARATE cell and not a sixth
+//// record letter because `rkAutoConditions` has to answer the blob the
+//// annotations produced, verbatim, or it stops being the comptime half's
+//// assertion point.
+////
+//// ── CONJUNCTION, AND NOTHING ELSE ──────────────────────────────────────────
+////
+//// Several conditions on one declaration are conjunctive. There is no `anyOf`,
+//// no `@ConditionalOnExpression` and no escape hatch: a configuration that
+//// needs a disjunction splits into two configurations, which is also the form
+//// that reads correctly in the report.
+////
+//// ── WHAT A MARKER DOES AND DOES NOT DO ─────────────────────────────────────
+////
+//// Each marker below enforces PLACEMENT and nothing else. `#[autoConfiguration]`
+//// reads the markers off `decl.annotations`, and a `#[bean]` method's off
+//// `decl.methods[i].annotations`, and serialises both. A decorator body cannot
+//// call a sibling function — `decorator_eval` emits only the decorator function
+//// into the eval script — so the serialisation loop is inlined in
+//// `autoconfig.bp` and the placement rule is repeated in each body here. That
+//// duplication is the same one `decorators.bp` carries for the six stereotypes,
+//// for the same reason.
+////
+//// A condition marker with no registration to belong to is a silent no-op, so
+//// every one of them REFUSES that placement: a condition must sit beside
+//// `#[autoConfiguration]`, a stereotype, `#[managed]`, or `#[bean]` on a method.
+////
+//// Reached via `from "rakun"`; see ../AGENTS.md § The auto-configuration pass.
+
+import {rkProp, rkScannedNames} from "runtime";
+import {active} from "profiles";
+import {rkBeanNames} from "context";
+import {rkModulePresent, moduleList} from "autoconfig_registry";
+
+// ── the record letters ──────────────────────────────────────────────────────
+
+pub fn moduleRecord() -> string {
+    return "M";
+}
+
+pub fn propertyRecord() -> string {
+    return "P";
+}
+
+pub fn beanRecord() -> string {
+    return "B";
+}
+
+pub fn missingBeanRecord() -> string {
+    return "X";
+}
+
+pub fn profileRecord() -> string {
+    return "F";
+}
+
+pub fn anyValue() -> string {
+    return "*";
+}
+
+// ── reading one record ──────────────────────────────────────────────────────
+
+pub fn recordField(rec: string, i: i32) -> string {
+    return rec.split("|").at(i).unwrapOr("");
+}
+
+pub fn recordKind(rec: string) -> string {
+    return recordField(rec, 0);
+}
+
+pub fn splitBlob(blob: string) -> string[] {
+    var out: string[] = [];
+    if (blob == "") {
+        return out;
+    };
+    loop (blob.split(";")) { r -> if (r != "") out.push(r); };
+    return out;
+}
+
+// ── the profile set ─────────────────────────────────────────────────────────
+//
+// Front 05 owns the set (`rakun.profiles.active`, `.include`, `.default` and
+// the groups, resolved into `rakun.profiles.resolved`); this front reads it and
+// defines none of it. What it adds is the one thing the report needs: when
+// nothing is active, `#[profile]` is answered against front 05's DEFAULT
+// profile, and the row says which of the two it was answered against rather
+// than printing a list whose origin the reader has to guess.
+
+pub fn defaultProfiles() -> string[] {
+    val raw = rkProp("rakun.profiles.default");
+    if (raw == "") {
+        return ["default"];
+    };
+    var out: string[] = [];
+    loop (raw.split(",")) { p -> if (p.trim() != "") out.push(p.trim()); };
+    if (out.length == 0) {
+        return ["default"];
+    };
+    return out;
+}
+
+pub fn activeProfiles() -> string[] {
+    val a = active();
+    if (a.length > 0) {
+        return a;
+    };
+    return defaultProfiles();
+}
+
+pub fn profilesAreDefaulted() -> bool {
+    return active().length == 0;
+}
+
+pub fn profileObserved() -> string {
+    val names = activeProfiles().join(",");
+    if (profilesAreDefaulted()) {
+        return "no profile is active; the default profile is '" + names + "'";
+    };
+    return "active profiles: " + names;
+}
+
+// ── the registered set ──────────────────────────────────────────────────────
+//
+// Three sources, one answer. `rkScannedNames()` is front 04's flat ordered list
+// of every stereotype-marked component; `rkBeanNames()` is front 06's registry,
+// which is the richer presence query this front's README said it would consume
+// the moment it existed; `provided` is what the auto-configurations applied
+// SO FAR in this pass contribute. The third is the ordered half —
+// `#[conditionalOnMissingBean]` sees the state as of its own position in the
+// sorted order, which is why the sort comes first.
+
+pub fn registeredNames(provided: string[]) -> string[] {
+    var out: string[] = [];
+    val scanned = rkScannedNames();
+    if (scanned != "") {
+        loop (scanned.split(",")) { n -> if (n != "") out.push(n); };
+    };
+    loop (rkBeanNames()) { n -> if (n != "") out.push(n); };
+    loop (provided) { n -> if (n != "") out.push(n); };
+    return out;
+}
+
+fn holds(xs: string[], name: string) -> bool {
+    var found = false;
+    loop (xs) { x -> if (x == name) found = true; };
+    return found;
+}
+
+// ── the verdict ─────────────────────────────────────────────────────────────
+//
+// `record` and `observed` are the two halves of a useful report row. "did not
+// match: `P|rakun.mail.host|*`" is a restatement of the source; "did not match:
+// `P|rakun.mail.host|*` - the property is empty" is a diagnosis.
+
+pub type Verdict(
+    ok: bool,
+    record: string,
+    observed: string,
+)
+
+fn pass(rec: string) -> Verdict {
+    return Verdict(ok: true, record: rec, observed: "");
+}
+
+fn refuse(rec: string, observed: string) -> Verdict {
+    return Verdict(ok: false, record: rec, observed: observed);
+}
+
+pub fn unknownRecordProblem(rec: string) -> string {
+    return "rakun: '" + rec + "' is not a condition record - the letters are M (module), P (property), B (bean), X (missing bean) and F (profile)";
+}
+
+// ONE evaluator, compiled to both targets. A front that needs a new KIND of
+// condition adds a record letter and a branch HERE — not a second registry and
+// not a second copy in two host languages.
+pub fn evaluateRecord(rec: string, provided: string[]) -> Verdict {
+    val kind = recordKind(rec);
+    if (kind == moduleRecord()) {
+        val name = recordField(rec, 1);
+        if (rkModulePresent(name)) {
+            return pass(rec);
+        };
+        val deps = moduleList().join(",");
+        val seen = if (deps == "") "the manifest declares no dependencies" else "declared dependencies: " + deps;
+        return refuse(rec, seen);
+    };
+    if (kind == propertyRecord()) {
+        val key = recordField(rec, 1);
+        val want = recordField(rec, 2);
+        val got = rkProp(key);
+        if (want == anyValue()) {
+            if (got != "") {
+                return pass(rec);
+            };
+            return refuse(rec, "the property is empty");
+        };
+        if (got == want) {
+            return pass(rec);
+        };
+        val seen = if (got == "") "the property is empty" else "the property is '" + got + "'";
+        return refuse(rec, seen);
+    };
+    if (kind == beanRecord()) {
+        val name = recordField(rec, 1);
+        if (holds(registeredNames(provided), name)) {
+            return pass(rec);
+        };
+        return refuse(rec, "no bean named '" + name + "' is registered");
+    };
+    if (kind == missingBeanRecord()) {
+        val name = recordField(rec, 1);
+        if (holds(registeredNames(provided), name) == false) {
+            return pass(rec);
+        };
+        return refuse(rec, "a bean named '" + name + "' is already registered");
+    };
+    if (kind == profileRecord()) {
+        val name = recordField(rec, 1);
+        if (holds(activeProfiles(), name)) {
+            return pass(rec);
+        };
+        return refuse(rec, profileObserved());
+    };
+    @panic(unknownRecordProblem(rec));
+}
+
+// Short-circuit: the FIRST failing record wins and the rest are never
+// evaluated. The report says so rather than implying the rest passed, and the
+// acceptance that an excluded configuration's property read never happens falls
+// out of the same rule applied one level up.
+pub fn evaluateBlob(blob: string, provided: string[]) -> Verdict {
+    var out = Verdict(ok: true, record: "", observed: "");
+    loop (splitBlob(blob)) { r ->
+        if (out.ok) {
+            out = evaluateRecord(r, provided);
+        };
+    };
+    return out;
+}
+
+// ── the markers ─────────────────────────────────────────────────────────────
+//
+// Six near-identical bodies. A decorator body cannot call a sibling function,
+// so the companion check and the separator check are written out in each one —
+// the same duplication `decorators.bp` carries for the six stereotypes.
+//
+// `havingValue` has no default, because a declared parameter default is never
+// applied at a call site, so `#[conditionalOnProperty("rakun.mail.host", "*")]`
+// spells out the `"*"` where Spring writes nothing. A type is named by a STRING
+// rather than by the type itself, because a decorator argument is an ordinary
+// value and there is no type-of-type; Spring reaches the same spelling from the
+// other direction with `excludeName`. Both are language gaps and both are
+// recorded in the front's README.
+
+pub fn conditionalOnModule(comptime decl: @Decl, moduleName: string) {
+    var companion = false;
+    decl.annotations.forEach({ a ->
+        val ok = a.name == "autoConfiguration" || a.name == "bean" || a.name == "component" || a.name == "service" || a.name == "repository" || a.name == "controller" || a.name == "restController" || a.name == "configuration" || a.name == "managed";
+        val c = if (ok) true else companion;
+        companion = c;
+    });
+    val onType = decl.kind == DeclKind.Type;
+    val onMethod = decl.kind == DeclKind.Method;
+    val dirty = moduleName.indexOf(";") >= 0 || moduleName.indexOf("|") >= 0;
+    if (onType == false && onMethod == false) decl.fail("#[conditionalOnModule] must annotate a type (an #[autoConfiguration] or a stereotype) or a #[bean] method");
+    if (onType && decl.variants.length > 0) decl.fail("#[conditionalOnModule] must annotate a type with fields, not an enum");
+    if (companion == false) decl.fail("#[conditionalOnModule] needs #[autoConfiguration], a stereotype or #[bean] on the same declaration - a condition that belongs to no registration is read by nothing and would be a silent no-op");
+    if (dirty) decl.fail("#[conditionalOnModule]: a module name may not contain ';' or '|' - those are the condition blob's record and field separators");
+}
+
+pub fn conditionalOnProperty(comptime decl: @Decl, key: string, havingValue: string) {
+    var companion = false;
+    decl.annotations.forEach({ a ->
+        val ok = a.name == "autoConfiguration" || a.name == "bean" || a.name == "component" || a.name == "service" || a.name == "repository" || a.name == "controller" || a.name == "restController" || a.name == "configuration" || a.name == "managed";
+        val c = if (ok) true else companion;
+        companion = c;
+    });
+    val onType = decl.kind == DeclKind.Type;
+    val onMethod = decl.kind == DeclKind.Method;
+    val dirty = key.indexOf(";") >= 0 || key.indexOf("|") >= 0 || havingValue.indexOf(";") >= 0 || havingValue.indexOf("|") >= 0;
+    if (onType == false && onMethod == false) decl.fail("#[conditionalOnProperty] must annotate a type (an #[autoConfiguration] or a stereotype) or a #[bean] method");
+    if (onType && decl.variants.length > 0) decl.fail("#[conditionalOnProperty] must annotate a type with fields, not an enum");
+    if (companion == false) decl.fail("#[conditionalOnProperty] needs #[autoConfiguration], a stereotype or #[bean] on the same declaration - a condition that belongs to no registration is read by nothing and would be a silent no-op");
+    if (key == "") decl.fail("#[conditionalOnProperty]: the key may not be empty");
+    if (dirty) decl.fail("#[conditionalOnProperty]: a key or a value may not contain ';' or '|' - those are the condition blob's record and field separators");
+}
+
+pub fn conditionalOnBean(comptime decl: @Decl, typeName: string) {
+    var companion = false;
+    decl.annotations.forEach({ a ->
+        val ok = a.name == "autoConfiguration" || a.name == "bean" || a.name == "component" || a.name == "service" || a.name == "repository" || a.name == "controller" || a.name == "restController" || a.name == "configuration" || a.name == "managed";
+        val c = if (ok) true else companion;
+        companion = c;
+    });
+    val onType = decl.kind == DeclKind.Type;
+    val onMethod = decl.kind == DeclKind.Method;
+    val dirty = typeName.indexOf(";") >= 0 || typeName.indexOf("|") >= 0;
+    if (onType == false && onMethod == false) decl.fail("#[conditionalOnBean] must annotate a type (an #[autoConfiguration] or a stereotype) or a #[bean] method");
+    if (onType && decl.variants.length > 0) decl.fail("#[conditionalOnBean] must annotate a type with fields, not an enum");
+    if (companion == false) decl.fail("#[conditionalOnBean] needs #[autoConfiguration], a stereotype or #[bean] on the same declaration - a condition that belongs to no registration is read by nothing and would be a silent no-op");
+    if (typeName == "") decl.fail("#[conditionalOnBean]: the type name may not be empty");
+    if (dirty) decl.fail("#[conditionalOnBean]: a type name may not contain ';' or '|' - those are the condition blob's record and field separators");
+}
+
+pub fn conditionalOnMissingBean(comptime decl: @Decl, typeName: string) {
+    var companion = false;
+    decl.annotations.forEach({ a ->
+        val ok = a.name == "autoConfiguration" || a.name == "bean" || a.name == "component" || a.name == "service" || a.name == "repository" || a.name == "controller" || a.name == "restController" || a.name == "configuration" || a.name == "managed";
+        val c = if (ok) true else companion;
+        companion = c;
+    });
+    val onType = decl.kind == DeclKind.Type;
+    val onMethod = decl.kind == DeclKind.Method;
+    val dirty = typeName.indexOf(";") >= 0 || typeName.indexOf("|") >= 0;
+    if (onType == false && onMethod == false) decl.fail("#[conditionalOnMissingBean] must annotate a type (an #[autoConfiguration] or a stereotype) or a #[bean] method");
+    if (onType && decl.variants.length > 0) decl.fail("#[conditionalOnMissingBean] must annotate a type with fields, not an enum");
+    if (companion == false) decl.fail("#[conditionalOnMissingBean] needs #[autoConfiguration], a stereotype or #[bean] on the same declaration - a condition that belongs to no registration is read by nothing and would be a silent no-op");
+    if (typeName == "") decl.fail("#[conditionalOnMissingBean]: the type name may not be empty");
+    if (dirty) decl.fail("#[conditionalOnMissingBean]: a type name may not contain ';' or '|' - those are the condition blob's record and field separators");
+}
+
+// `#[profile("prod")]` is the same machinery pointed at an ordinary component
+// rather than at an auto-configuration, which is the point of folding it in
+// here: a second conditional mechanism with its own report would be two ways to
+// answer one question.
+//
+// WHO EMITS WHAT. On an `#[autoConfiguration]` or a `#[bean]` method this
+// marker emits NOTHING: that body already reads every condition off the
+// declaration and serialises one registration, and a second one would double
+// the row. On an ordinary stereotype it emits both halves itself — the
+// registration (`F|<name>` plus the `V|<Type>` saying what the component
+// contributes when it is applied) and a GATED accessor.
+//
+// WHY A GATED ACCESSOR AND NOT A GATED FACTORY. `decorators.bp` is frozen for
+// the milestone and its stereotypes emit `__rkMake_<Type>()` unconditionally,
+// so this marker cannot put the gate inside the factory the way
+// `#[autoConfiguration]` does for its `#[bean]` methods. What it can do is
+// leave the component UNBUILT — the factory is lazy, nothing calls it at module
+// load, and `rkBuildCount` stays 0 — and offer `__rkAutoGated_<Type>()`, which
+// raises with the diagnosis instead of building when the profile is not active.
+// When `decorators.bp` unfreezes the gate moves into the factory and this
+// accessor goes away. The narrowing is recorded in ../AGENTS.md rather than
+// hidden.
+//
+// TWO `#[profile]` MARKERS ON ONE TYPE ARE CONJUNCTIVE AND THEREFORE
+// UNSATISFIABLE — a value cannot be in two profiles at once and `&` is the only
+// combinator this front has. It is rejected here rather than left to produce a
+// configuration that can never be applied. `decl.annotations` carries the
+// marker's own annotation as well as its siblings (measured), so the count is
+// of every `profile` on the declaration and two of them is two.
+pub fn profile(comptime decl: @Decl, name: string) {
+    var companion = false;
+    var seen = 0;
+    var owned = false;
+    decl.annotations.forEach({ a ->
+        val ok = a.name == "component" || a.name == "service" || a.name == "repository" || a.name == "controller" || a.name == "restController" || a.name == "configuration" || a.name == "managed";
+        val c = if (ok || a.name == "autoConfiguration" || a.name == "bean") true else companion;
+        companion = c;
+        val n = if (a.name == "profile") seen + 1 else seen;
+        seen = n;
+        val o = if (a.name == "autoConfiguration" || a.name == "bean") true else owned;
+        owned = o;
+    });
+    val onType = decl.kind == DeclKind.Type;
+    val onMethod = decl.kind == DeclKind.Method;
+    val dirty = name.indexOf(";") >= 0 || name.indexOf("|") >= 0;
+    val mine = onType && owned == false && companion && seen < 2 && dirty == false && name != "";
+    val regLine = if (mine) "val __rkAutoP_" + decl.name + " = rkAutoRegister(\"" + decl.name + "\", \"F|" + name + "\", \"\", \"\");" else "";
+    @emit(regLine);
+    val provLine = if (mine) "val __rkAutoQ_" + decl.name + " = rkAutoProvides(\"" + decl.name + "\", \"" + decl.name + "\");" else "";
+    @emit(provLine);
+    val gateLine = if (mine) "pub fn __rkAutoGated_" + decl.name + "() -> " + decl.name + " { val _g = rkAutoGate(\"" + decl.name + "\"); return __rkMake_" + decl.name + "(); }" else "";
+    @emit(gateLine);
+    if (onType == false && onMethod == false) decl.fail("#[profile] must annotate a type (an #[autoConfiguration] or a stereotype) or a #[bean] method");
+    if (onType && decl.variants.length > 0) decl.fail("#[profile] must annotate a type with fields, not an enum");
+    if (companion == false) decl.fail("#[profile] needs #[autoConfiguration], a stereotype or #[bean] on the same declaration - a condition that belongs to no registration is read by nothing and would be a silent no-op");
+    if (name == "") decl.fail("#[profile]: the profile name may not be empty");
+    if (dirty) decl.fail("#[profile]: a profile name may not contain ';' or '|' - those are the condition blob's record and field separators");
+    if (seen > 1) decl.fail("two #[profile] markers on one declaration are conjunctive and therefore unsatisfiable - a value is never in two profiles at once. Use one marker, and split the declaration if it really belongs to two profiles");
+}
+
+// ── ordering ────────────────────────────────────────────────────────────────
+//
+// `#[autoConfigureBefore]`/`#[autoConfigureAfter]` name another configuration.
+// The name is a string for the same reason a bean's type is: a decorator
+// argument is an ordinary value. An edge naming a configuration that is not
+// registered is DROPPED by the apply pass rather than refused — Spring's
+// `@AutoConfigureAfter` routinely names a class that is not on the classpath,
+// and refusing would make a module impossible to ship against an optional peer.
+
+pub fn autoConfigureBefore(comptime decl: @Decl, typeName: string) {
+    var companion = false;
+    decl.annotations.forEach({ a ->
+        val ok = a.name == "autoConfiguration";
+        val c = if (ok) true else companion;
+        companion = c;
+    });
+    val dirty = typeName.indexOf(",") >= 0 || typeName.indexOf(";") >= 0 || typeName.indexOf("|") >= 0;
+    if (decl.kind != DeclKind.Type) decl.fail("#[autoConfigureBefore] must annotate a type (an #[autoConfiguration])");
+    if (decl.variants.length > 0) decl.fail("#[autoConfigureBefore] must annotate a type with fields, not an enum");
+    if (companion == false) decl.fail("#[autoConfigureBefore] needs #[autoConfiguration] on the same declaration - ordering a registration that does not exist is a silent no-op");
+    if (typeName == "") decl.fail("#[autoConfigureBefore]: the configuration name may not be empty");
+    if (dirty) decl.fail("#[autoConfigureBefore]: a configuration name may not contain ',', ';' or '|' - those separate the entries of the order lists and of the condition blob");
+}
+
+pub fn autoConfigureAfter(comptime decl: @Decl, typeName: string) {
+    var companion = false;
+    decl.annotations.forEach({ a ->
+        val ok = a.name == "autoConfiguration";
+        val c = if (ok) true else companion;
+        companion = c;
+    });
+    val dirty = typeName.indexOf(",") >= 0 || typeName.indexOf(";") >= 0 || typeName.indexOf("|") >= 0;
+    if (decl.kind != DeclKind.Type) decl.fail("#[autoConfigureAfter] must annotate a type (an #[autoConfiguration])");
+    if (decl.variants.length > 0) decl.fail("#[autoConfigureAfter] must annotate a type with fields, not an enum");
+    if (companion == false) decl.fail("#[autoConfigureAfter] needs #[autoConfiguration] on the same declaration - ordering a registration that does not exist is a silent no-op");
+    if (typeName == "") decl.fail("#[autoConfigureAfter]: the configuration name may not be empty");
+    if (dirty) decl.fail("#[autoConfigureAfter]: a configuration name may not contain ',', ';' or '|' - those separate the entries of the order lists and of the condition blob");
+}

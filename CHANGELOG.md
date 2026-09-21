@@ -26,8 +26,10 @@
   it, and the error shape everything above it produces. **83 cells, green on
   both rows** (`botopink test` on the member's own erlang target and
   `botopink test --target commonJS`), where the member had no `test/` directory
-  at all before. `modules/rakun` is untouched and unchanged — 302/302 commonJS,
-  300/2 erlang, the two reds still front 04's `server_test.bp:74,80`.
+  at all before. `modules/rakun` is untouched by this front: with front 72 also
+  in the tree it reads 346/346 commonJS and 344 passing / 2 failing erlang, the
+  two reds still front 04's `server_test.bp:74,80`. (Front 07 was written
+  against the pre-72 core, 302/300 with the same two reds.)
 
   **One chain, two entry points.** `#[filter]` on a component registers one
   entry ordered by `#[order]`; `#[middleware]` on a `pub fn` registers exactly
@@ -99,6 +101,83 @@
   and not on front 76 — step 2 of its sequence closes the listening socket, and
   that socket lives in `rakun_runtime.erl` under `modules/rakun/`, which front 07
   does not own. `AGENTS.md` § What front 07 did NOT reach carries the table.
+- **Auto-configuration: conditional registration, ordered, with a report**
+  (front 72). `src/autoconfig.bp`, `src/conditions.bp`, `src/condition_report.bp`,
+  `src/autoconfig_registry.bp`, `src/autoconfig.mjs`,
+  `src/sidecars/rakun_autoconfig.erl`, `test/conditions_test.bp`,
+  `test/autoconfig_test.bp`, fixtures under `test/fixtures/autoconfig/`.
+
+  `#[autoConfiguration]` plus five condition markers — `#[conditionalOnModule]`,
+  `#[conditionalOnProperty]`, `#[conditionalOnBean]`, `#[conditionalOnMissingBean]`,
+  `#[profile]` — and the two ordering markers `#[autoConfigureBefore]`/`After`.
+  The conditions compile to a `;`-joined blob of `M|P|B|X|F` records, one
+  registration per annotated declaration (`Type` for a configuration,
+  `Type.method` for a `#[bean]` method), and the application runs the pass with
+  `autoConfigure()` before `Rakun.run` — `bootstrap.bp` is frozen, so the line is
+  explicit and the report says plainly when it was never called.
+
+  **The pass sorts before it evaluates**, and that is the whole point rather than
+  a detail: an ordering annotation names a configuration AND the beans it owns,
+  so `#[conditionalOnMissingBean("DataSource")]` sees the state as of its own
+  position instead of as of module load order. Kahn's walk with ties broken by
+  registration order, an edge naming an unregistered configuration dropped (as
+  Spring's does), a cycle a startup failure naming its members. Deleting the sort
+  reds ten cells.
+
+  **Two exclusion channels, one resolution path.**
+  `rakun.autoconfigure.exclude` through front 05's table and
+  `autoConfigureExcept(names)` union into one argument; an exclusion naming no
+  registered configuration HALTS and lists the registered names, because a typo
+  in an exclusion disables nothing and leaves the developer believing they turned
+  something off. An excluded entry's conditions are not evaluated at all.
+
+  **The report is a value, not a log line.** Three blocks — applied, not applied,
+  excluded — walked in the sorted order, each failed row naming the FIRST failing
+  record and the value observed ("did not match: `P|rakun.mail.host|*` - the
+  property is empty"), because a restatement of the source is not a diagnosis.
+  `rakun.main.debug` gates the printing and never the data, and front 11 serves
+  the same string at `/actuator/conditions` with no further work here.
+
+  **`#[profile]` on an ordinary `#[service]` is the same machinery, with one
+  narrowing.** `decorators.bp` is frozen and its stereotypes emit
+  `__rkMake_<Type>()` unconditionally, so the marker cannot gate the factory: it
+  leaves the component unbuilt (`rkBuildCount` stays 0) and emits
+  `__rkAutoGated_<Type>()`, which raises with the diagnosis. It goes away when
+  `decorators.bp` unfreezes.
+
+  **The host is a table and nothing else.** Front 06's measurement, applied: it
+  stores four kinds of FUN, so its grammar stayed in botopink; here nothing is a
+  fun, so the blob grammar, the sort, the evaluator, every refusal and the
+  renderer are botopink compiled twice, and the two host files append a row and
+  answer a lookup. The manifest read behind `#[conditionalOnModule]` is botopink
+  too — `std`'s `fs.readText` plus a scanner that normalises both on-disk shapes
+  of `dependencies`; a manifest that cannot be read is a refusal, not a `false`.
+
+  **Deviation from the front's README, reported rather than hidden.** The spec
+  declares the host cells `@External.Erlang`-only and the tests "erlang-only,
+  and the lib test runner is told so". There is no per-file target gate:
+  `botopink test` compiles every `test/*.bp` on both rows
+  (`compiler-cli/src/cli/test_cmd.zig`) and the only whitelist is per-LIB
+  (`botopink.json` `targets`, `lib-test-runner/src/discovery.zig`), which for
+  rakun core is `["commonJS"]` — so erlang-only tests would red the node row and
+  never run in the gate. Both host halves ship, front 06's precedent.
+
+  **Two compiler defects met and NOT worked around in library source.**
+  (1) `from` is a reserved word and may not name a field or a parameter —
+  `pub type Edge(from: string, to: string)` is `error[field-needs-name]`.
+  (2) `println`/`print` (`libs/std/src/builtins.d.bp:12-16`) have no erlang
+  lowering: the emitted module calls a bare local `println/1`, `erlc` refuses it,
+  and the test runner's `__bp_load_siblings/0` skips a module that fails to
+  compile SILENTLY — so every function of that module answers `{error,undef}`,
+  pointing at the caller rather than at the print. Smallest program and both rows
+  in AGENTS.md § The auto-configuration pass. The report prints through
+  `rkAutoPrint`, a cell of this front's own carrying both forms.
+
+  **Counts** (pinned compiler `2e6bb4ac`, summed over every module summary):
+  before 302 / 0 on commonJS and 300 passing / 2 failing on erlang; after
+  **346 / 0** and **344 passing / 2 failing**. The two erlang reds are front 04's
+  own `server_test.bp:74,80` (`{badkey,param}` / `{badkey,query}`) and the
+  restricted-targets ledger's count is unchanged in both directions.
 
 - **The consumer proof** (front 23). `examples/rakun-ssr/` is a new workspace
   member that reaches the whole front through `from "rakun"` — the

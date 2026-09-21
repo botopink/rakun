@@ -60,6 +60,13 @@ sidecar naming rule and what is still blocked.
   the `rakun.main.*` / `rakun.server.*` boot and tuning keys, and a
   startup-failure table that names the port, the transport or the construction
   stack before the node halts. See [`./AGENTS.md`](AGENTS.md) § The server half.
+- **Auto-configuration** — `#[autoConfiguration]` plus `#[conditionalOnModule]`,
+  `#[conditionalOnProperty]`, `#[conditionalOnBean]`,
+  `#[conditionalOnMissingBean]` and `#[profile]`: a configuration registers only
+  when every condition on it holds, `#[autoConfigureBefore]`/`After` order the
+  survivors through a real topological sort, and `autoConfigurationReport()`
+  says what was applied, what was not and why. "Add the module, it configures
+  itself." See § Auto-configuration.
 - **Bootstrap** — `Rakun.run(App(port: 8080, basePath: "/api"))` reads the host
   router and starts the node `http` server (`rkServe`), dispatching every live
   request to the handler.
@@ -962,6 +969,109 @@ eager pass. All three are read off the declaration by `#[managed]` and
 `#[provides]`; on their own they are placement checks, the same split
 `#[getMapping]` and `#[restController]` already use.
 
+## Auto-configuration
+
+A `rakun-*` module ships a configuration that wires itself only when it should.
+
+```bp
+import {autoConfiguration, conditionalOnModule, conditionalOnProperty} from "rakun";
+import {conditionalOnMissingBean, autoConfigureAfter, profile} from "rakun";
+import {bean, value, service} from "rakun";
+import {rkScan, rkSingleton, rkEnter, rkDone, rkProp, rkPropInt} from "rakun";
+import {rkAutoRegister, rkAutoProvides, rkAutoGate} from "rakun";
+
+#[autoConfiguration]
+#[conditionalOnModule("rakun-mail")]
+#[conditionalOnProperty("rakun.mail.host", "*")]
+#[autoConfigureAfter("RakunCoreAutoConfiguration")]
+pub type RakunMailAutoConfiguration(
+    #[value("rakun.mail.host")] host: string,
+    #[value("rakun.mail.port")] port: i32,
+) {
+    #[bean]
+    #[conditionalOnMissingBean("MailSender")]
+    pub fn mailSender(self: Self) -> MailSender {
+        return MailSender(host: self.host, port: self.port);
+    }
+}
+```
+
+The markers are conjunctive and read top to bottom; `"*"` on a property means
+"set and non-empty" and is spelled out because a declared parameter default is
+never applied at a call site. A type is named by a STRING because a decorator
+argument is an ordinary value and there is no type-of-type — the same spelling
+Spring reaches with `excludeName`. There is no `anyOf` and no expression
+language: a configuration that needs a disjunction splits into two, which is
+also the form that reads correctly in the report.
+
+The application runs the pass itself, once, before `Rakun.run` — `bootstrap.bp`
+is frozen for the milestone, so the line is explicit:
+
+```bp
+fn main() {
+    val _ = autoConfigure();
+    Rakun.run(App(port: 8080, basePath: "/api"));
+}
+```
+
+`autoConfigure()` sorts every registration, evaluates each in that order and
+records the decision. It is idempotent: a second call re-evaluates nothing.
+`isAutoConfigured("RakunMailAutoConfiguration")` answers whether one matched, and
+a bean factory of a configuration that did not RAISES when called, naming the
+configuration and the condition that failed — it never returns a half-built
+value, and calling one before `autoConfigure()` raises too, because "nothing
+matched" and "nobody asked" are different answers.
+
+### Excluding a configuration
+
+Two channels, one list: the property `rakun.autoconfigure.exclude` (comma
+separated, read through the configuration table) and
+`autoConfigureExcept(["RakunMailAutoConfiguration"])`. Their union is what is
+excluded. A name that matches no registered configuration HALTS the startup and
+lists the registered names — a typo in an exclusion otherwise disables nothing
+and leaves you believing you turned something off.
+
+### The report
+
+```
+rakun auto-configuration
+
+Applied (2):
+  RakunCoreAutoConfiguration
+  RakunCoreAutoConfiguration.demoClock
+
+Not applied (2):
+  RakunMailAutoConfiguration: did not match: P|rakun.mail.host|* - the property is empty
+  RakunMailAutoConfiguration.mailSender: the configuration 'RakunMailAutoConfiguration' it belongs to was not applied
+
+Excluded (0):
+```
+
+`autoConfigurationReport()` returns it; `printConditionReport()` writes it at
+boot when `rakun.main.debug=true` and writes nothing when it is not — the switch
+is over the printing, never over the data. Only the FIRST failing condition of a
+configuration is reported, because evaluation short-circuits there.
+
+### `#[profile]` on an ordinary component
+
+```bp
+#[service]
+#[profile("prod")]
+pub type MailAuditService(
+    sender: MailSender,
+)
+```
+
+Same machinery, same report: off its profile the component is left unbuilt and
+appears in the "not applied" block with `F|prod` and the active set as the value
+observed. The profile SET itself is the configuration layer's
+(`rakun.profiles.active`, `.include`, `.default`, groups); this reads it. Two
+`#[profile]` markers on one declaration are conjunctive and therefore
+unsatisfiable, and are refused at compile time.
+
+Because the stereotypes' `__rkMake_<Type>()` is frozen for this milestone, a
+profile-gated component is reached through the emitted `__rkAutoGated_<Type>()`
+when you want the refusal rather than the value.
 
 ## The filter chain (`from "rakun-web"`)
 

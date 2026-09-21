@@ -1,0 +1,124 @@
+//// rakun — the condition report: what auto-configured, what did not, and why.
+////
+//// WHY IT IS A VALUE AND NOT A LOG LINE. Spring's `--debug` prints which
+//// auto-configurations matched, which did not and the reason for each, and the
+//// actuator serves the same data at `conditions`. Without it, conditional
+//// registration is a black box: a bean that was never created is
+//// indistinguishable from a bean that was created and then overwritten, and the
+//// developer's only tool is deleting code until something changes.
+////
+//// `rkAutoReport()` renders the table into one string. `printConditionReport()`
+//// is the `--debug` analogue — it writes that string at boot when
+//// `rakun.main.debug` is true and writes nothing when it is not. Front 11 hands
+//// the same string back at `/actuator/conditions` with no further work here.
+//// ONE producer, two consumers; a second renderer would be a second answer.
+////
+//// WHAT A ROW SAYS. "did not match: `P|rakun.mail.host|*`" is a restatement of
+//// the source. "did not match: `P|rakun.mail.host|*` - the property is empty"
+//// is a diagnosis, and the difference is the whole reason the report exists.
+//// Only the FIRST failing condition of a configuration is reported, because
+//// evaluation short-circuits there and claiming anything about the rest would
+//// be a guess.
+////
+//// STABILITY. The rows are walked in the SORTED order the apply pass recorded,
+//// not in a hash order and not in registration order, so the same inputs render
+//// the same report on every run and on both targets.
+////
+//// EVERY REGISTERED NAME APPEARS IN EXACTLY ONE OF THE THREE BLOCKS. A name
+//// with no decision at all is impossible once the pass has run — the walk is
+//// over the sorted order, which is every registered name — and before it has
+//// run the report says so instead of printing an empty table.
+////
+//// Reached via `from "rakun"`; see ../AGENTS.md § The auto-configuration pass.
+
+import {rkPropBool} from "config";
+import {rkAutoNames, rkAutoState, rkAutoReason, rkAutoSealed, rkAutoOrder, rkAutoPrint} from "autoconfig_registry";
+import {appliedState, skippedState, excludedState, registeredList, splitList} from "autoconfig";
+
+pub fn reportTitle() -> string {
+    return "rakun auto-configuration";
+}
+
+pub fn debugKey() -> string {
+    return "rakun.main.debug";
+}
+
+pub fn notAppliedLine() -> string {
+    return "not applied - autoConfigure() has not been called";
+}
+
+fn rowsFor(order: string[], state: string) -> string[] {
+    var out: string[] = [];
+    loop (order) { n -> if (rkAutoState(n) == state) out.push(row(n, state)); };
+    return out;
+}
+
+fn row(name: string, state: string) -> string {
+    val reason = rkAutoReason(name);
+    if (state == appliedState()) {
+        return "  " + name;
+    };
+    return "  " + name + ": " + reason;
+}
+
+fn block(heading: string, rows: string[]) -> string {
+    return heading + " (" + rows.length + "):\n" + rows.join("\n");
+}
+
+// The whole decision table, rendered. The order is the apply pass's sorted
+// order; a registration that somehow carries no decision is listed under "not
+// applied" with that said plainly rather than dropped.
+pub fn rkAutoReport() -> string {
+    val known = registeredList();
+    if (rkAutoSealed() == false) {
+        return reportTitle() + "\n\n" + notAppliedLine() + "\n" + known.length + " registered, none evaluated";
+    };
+    val order = splitList(rkAutoOrder());
+    val applied = rowsFor(order, appliedState());
+    val skipped = rowsFor(order, skippedState());
+    val excluded = rowsFor(order, excludedState());
+    return reportTitle() + "\n\n" + block("Applied", applied) + "\n\n" + block("Not applied", skipped) + "\n\n" + block("Excluded", excluded);
+}
+
+// The application's name for the same string. The front's interface names both
+// — `autoConfigurationReport()` beside `autoConfigure`, `autoConfigureExcept`
+// and `isAutoConfigured` in the application surface, and `rkAutoReport()` as
+// the seam front 11 serves `/actuator/conditions` from. One producer; this is
+// the other name for it, not a second renderer.
+pub fn autoConfigurationReport() -> string {
+    return rkAutoReport();
+}
+
+// The `--debug` analogue. `rakun.main.debug=false` prints nothing and
+// `rkAutoReport()` still answers the full table — the switch is over the
+// printing, never over the data.
+pub fn printConditionReport() -> i32 {
+    if (rkPropBool(debugKey(), false) == false) {
+        return 0;
+    };
+    return rkAutoPrint(rkAutoReport());
+}
+
+// The one line a row of the report is, exposed so front 11 can render the same
+// decision as a JSON member without re-deriving it and without a second
+// vocabulary for the three states.
+pub fn reportStateOf(name: string) -> string {
+    if (rkAutoSealed() == false) {
+        return "";
+    };
+    return rkAutoState(name);
+}
+
+pub fn reportReasonOf(name: string) -> string {
+    if (rkAutoSealed() == false) {
+        return notAppliedLine();
+    };
+    return rkAutoReason(name);
+}
+
+pub fn reportNames() -> string[] {
+    if (rkAutoSealed()) {
+        return splitList(rkAutoOrder());
+    };
+    return splitList(rkAutoNames());
+}
