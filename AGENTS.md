@@ -58,10 +58,16 @@ rakun/
 │   │   │   ├── runtime.mjs    ← host runtime: the mutable seams (scan list · singleton cache ·
 │   │   │   │                    cycle guard · config props · router table + dispatch/dispatchHttp)
 │   │   │   │                    + the node `http` transport (`serve`)
-│   │   │   ├── runtime.bp     ← `#[@External.Node]` decls binding the `runtime.mjs` seams
-│   │   │   │                    (`rkScan`/`rkSingleton`/`rkEnter`/`rkDone`/`rkProp`/
-│   │   │   │                    `rkRegisterRoute`/`rkDispatch`/`rkDispatchHttp`/`rkServe`/…); sibling
-│   │   │   │                    `./runtime.mjs` shipped next to the emitted module (G2)
+│   │   │   ├── runtime.bp     ← the host cells, each carrying BOTH an `@External.Node` and an
+│   │   │   │                    `@External.Erlang` form (`rkScan`/`rkSingleton`/`rkEnter`/
+│   │   │   │                    `rkDone`/`rkProp`/`rkRegisterRoute`/`rkDispatch`/
+│   │   │   │                    `rkDispatchHttp`/`rkServe`/…); sibling `./runtime.mjs` shipped
+│   │   │   │                    next to the emitted module (G2)
+│   │   │   ├── sidecars/
+│   │   │   │   └── rakun_runtime.erl ← THE ERLANG HOST MODULE (§ The erlang host module):
+│   │   │   │                    the `application` + supervision tree + ETS tables behind
+│   │   │   │                    every `@External.Erlang` cell. Shipped by
+│   │   │   │                    `shipErlSidecars`; the atom may not be `runtime`
 │   │   │   ├── decorators.bp  ← the markers AS comptime decorator fns: placement rules +
 │   │   │   │                    the DI/router/scope/bean wiring they `@emit`
 │   │   │   ├── bootstrap.bp   ← `Rakun` (concrete type): `Rakun.run(app)` starts `rkServe`
@@ -72,9 +78,13 @@ rakun/
 │   │       ├── scopes_test.bp ← singleton scope (diamond) · `#[value]` · `#[bean]` (F2-scopes)
 │   │       ├── server_test.bp ← the live HTTP dispatch pipeline (`rkDispatchHttp`): path
 │   │       │                     param · query/header/body · 200/404 (F5)
-│   │       └── overlapping_routes_test.bp ← two controllers sharing a path prefix both
-│   │                             register; dispatch matches the FULL path; a leaf (no-dep)
-│   │                             #[service] resolves through the DI chain
+│   │       ├── overlapping_routes_test.bp ← two controllers sharing a path prefix both
+│   │       │                     register; dispatch matches the FULL path; a leaf (no-dep)
+│   │       │                     #[service] resolves through the DI chain
+│   │       └── erlang_runtime_test.bp ← the host cells named DIRECTLY (no decorator):
+│   │                             scan order · singleton/build count · the parseInt rule ·
+│   │                             route order · the `Response` round-trip shape. The same
+│   │                             assertions on BOTH rows — green on commonJS and on erlang
 │   └── rakun-<area>/  ← the thirteen scaffolds (actuator · cache · client · data · hateoas ·
 │                        logging · messaging · scheduling · security · session · test ·
 │                        validation · web): `botopink.json` (files [root.bp] · targets per
@@ -114,23 +124,94 @@ member inherits when it declares none — and a member may only **restrict** it,
 `["commonJS"]` is a restriction and dropping it would widen the core's matrix to a red erlang cell,
 not fix a no-op key. Front 04 (the erlang runtime) is what adds `erlang` to the core.
 
-`erlang` stays out of it for a reason that is rakun's, not the compiler's:
-every `rk*` host cell in `modules/rakun/src/runtime.bp` carries an `@External.Node` form and
-no erlang one, so an erlang run stops at `function rkScan/1 undefined`
-(re-measured 2026-09-18 — only `http.bp`'s single test, which touches no host
-cell, passes). emilia's and onze's host cells each fit one inline
-`@External.Erlang` expression over the process dictionary; rakun's DI graph,
-router and HTTP server are 231 lines of `runtime.mjs` that do not. The way out
-is a library shipping an `.erl` host module beside its `.mjs` sidecar.
+## The erlang host module
 
-**That is no longer blocked on the CLI.** `libs.shipErlSidecars`
-(`compiler-cli/src/cli/libs.zig:564`) is `shipMjsSidecars`' erlang counterpart:
-it reads the `atom:atom(` qualifiers out of the emitted erlang and copies the
-host `<atom>.erl` a lib keeps in `src/sidecars/` or `src/` into the output. It
-is wired into `botopink test` (`test_cmd.zig:194`). What is left is rakun's own
-work — writing the 231 lines as an `.erl` module and putting `@External.Erlang`
-on the 17 host cells — plus the `build.zig` call site, which is still open and
-belongs to the compiler, not here.
+`modules/rakun/src/sidecars/rakun_runtime.erl` is the erlang twin of
+`runtime.mjs`. Every host cell in `runtime.bp` now carries two forms —
+`@External.Node("./runtime.mjs", "<camelCase>")` and
+`@External.Erlang("rakun_runtime", "<snake_case>")` — and the two answer
+identically: `test/erlang_runtime_test.bp` is one set of assertions run on both
+rows, which is the only statement worth making about a port.
+
+**The module atom may not be `runtime`.** `shipErlSidecars`
+(`compiler-cli/src/cli/libs.zig`) reads the `atom:fun(` qualifiers out of the
+emitted erlang, skips any atom matching a module *this build emitted*, and copies
+the rest from `<lib>/src/sidecars/<atom>.erl`. rakun emits `rakun/runtime`, whose
+basename is `runtime`, so a sidecar called `runtime.erl` is skipped — and the skip
+is SILENT: the build exits 0 and the program dies at run time with
+`undefined function runtime:scan/1`. Every rakun sidecar is therefore
+`src/sidecars/rakun_<name>.erl`, and a change here is verified by looking inside
+the output directory (`.botopinkbuild/test-out/rakun_runtime.erl`), never by
+trusting the exit code. The same rule names the cowboy adapter seam
+`src/sidecars/rakun_cowboy.erl` if it is ever built.
+
+**One module, three OTP roles.** `shipErlSidecars` copies a sidecar only when its
+atom appears in emitted botopink output, so `rakun_sup`, `rakun_registry` and
+`rakun_conn_sup` — which botopink code never names — could not be separate files:
+they would never be shipped. They are registered *names*, not modules. `?MODULE`
+is the callback module for the application, the supervisors and the table-owning
+`gen_server`, and `init/1` dispatches on its argument. Only
+`-behaviour(application)` is declared: adding the other two makes `erlc` emit
+`conflicting behaviours ... init/1`, which `-Werror` turns into a failure.
+
+| rakun concern | OTP piece | Why |
+|---|---|---|
+| The runtime as a startable unit | `application` (`rakun`) | `application:start/1` is the only thing that gives the ETS tables an owner that outlives a request. There is no `rakun.app` file — a sidecar is compiled by `compile:file/2` at run time — so the spec is loaded from a term by `ensure_started/0` |
+| Keeping the tables alive | `supervisor` (`rakun_sup`, `one_for_one`) | A crash must not take the singleton cache with it |
+| Owning the ETS tables | `gen_server` (`rakun_registry`) | ETS tables die with their owning process; this is the owner that never exits, and a restart recreates them EMPTY rather than leaving dangling ones |
+| Scan list · singleton cache · build counts · property map · route table | ETS (`named_table, public, read_concurrency`) | The node `Map`/array equivalents; a request process reads without a message round trip |
+| Cycle guard | process dictionary | Per-process on the BEAM *is* per-construction, which is the scope node gets by accident from being single-threaded |
+
+`ensure_started/0` is the first line of every cell and costs one `ets:whereis/1`
+on the warm path.
+
+### Rules the two rows share
+
+- `prop/1` answers `""` for an absent key and `prop_int/1` answers `0` for an
+  absent or unparsable one. `prop_int/1` is `parseInt(v, 10)` — a LEADING integer
+  wins, so `"12abc"` is `12` on both rows. `#[value("key")]` must not mean two
+  things on two targets.
+- `scanned_names/0` answers in declaration order (an `ordered_set` on a monotonic
+  sequence), not sorted and not a set.
+- `singleton/2` inserts with `ets:insert_new/2`: two request processes that miss
+  the cache at the same instant keep ONE instance, the loser discarding its value.
+  `build_count/1` is then 1 or 2 — never a function of the number of readers.
+- The router walks in registration order and takes the first route whose verb,
+  segment count and every segment match (`:name` binding a path parameter).
+  Registration order decides between two routes that both match, on both rows.
+- `dispatch_http/5` carries THE ONE HOOK later fronts hang off:
+  `rakun_chain:run/6` when `rakun_web` is in the build, the handler directly when
+  it is not. `Rakun.run` is frozen and hardcodes this dispatcher, so front 07's
+  filter chain, CORS, compression, error handling and API versioning all enter
+  here — and front 10's security filter and front 11's request metrics enter
+  through front 07's chain, not through a second hook.
+
+### Blocked — two erlang-backend gaps, neither rakun's
+
+Both are in `botopink-lang`'s erlang emitter and neither can be worked around
+from this repository. They are why `botopink.json` does not yet list `erlang`.
+
+1. **A module-level `val` with a side effect never runs.** The component
+   decorators `@emit` `val __rkScan_<Type> = rkScan("<Type>");` and
+   `val __rkRoute_<Type>_<m> = rkRegisterRoute(…);` — module-load
+   self-registration, which is what the node row does. On the erlang row a named
+   module-level `val` is emitted as a 0-arity function that is called on each
+   READ (`codegen/erlang.zig`, `topValForms`), and nothing reads these; the
+   `'_botopink_main'/0` wrapper that would evaluate `_`-named top-level
+   statements is not emitted in test mode at all. The evidence is in the output:
+   `Warning: function '__rkScan_GreetRepo'/0 is unused`. So on erlang no
+   component is scanned and no route is registered, and `di_test.bp`,
+   `router_test.bp` and `overlapping_routes_test.bp` fail their registration
+   assertions. `test/erlang_runtime_test.bp` therefore registers inside a test
+   block rather than at module level.
+2. **A method on a host-supplied `behavior` value does not dispatch.**
+   `req.param("name")` where `req: Request` (a `behavior` with no in-module
+   implementor — the host builds the value) lowers to a bare LOCAL call
+   `param(Req, <<"name">>)`, which is undefined in the emitting module:
+   `server_test.erl:57:40: function param/2 undefined`. `server_test.bp` does not
+   compile on the erlang row because of it. The erlang `request/6` map already
+   carries `method`, `path`, `params`, `query`, `headers` and `body`, so closing
+   the gap is an emitter change, not a runtime one.
 
 ## Design at a glance
 

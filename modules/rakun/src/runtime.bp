@@ -1,11 +1,23 @@
 //// rakun — runtime surface (host-backed): the DI container + router seams.
 ////
-//// These `declare fn`s map to `runtime.mjs` (see it for the rationale: botopink
-//// has no top-level mutable state, so the scan registry / DI cache / router live
-//// in the host). The `#[@External.Node]` path is the SIBLING `./runtime.mjs`: the CLI
-//// ships the runtime `.mjs` next to every emitted module (G2 — both the lib's own
+//// These `declare fn`s map to a host module per target (see `runtime.mjs` for the
+//// rationale: botopink has no top-level mutable state, so the scan registry / DI
+//// cache / router live in the host). Each cell carries BOTH forms and the two
+//// answer identically — `test/erlang_runtime_test.bp` is the same assertions on
+//// both rows.
+////
+//// `#[@External.Node]` names the SIBLING `./runtime.mjs`: the CLI ships the
+//// runtime `.mjs` next to every emitted module (G2 — both the lib's own
 //// `botopink test` output and a consumer's `botopink build` output), so the
-//// `require("./runtime.mjs")` resolves in either tree. These decls are the seam.
+//// `require("./runtime.mjs")` resolves in either tree.
+////
+//// `#[@External.Erlang]` names the module atom `rakun_runtime`, shipped from
+//// `./sidecars/rakun_runtime.erl` by `shipErlSidecars`. The atom is NOT
+//// `runtime`: `shipErlSidecars` skips a qualifier matching a module the build
+//// emitted, rakun emits `rakun/runtime`, and the skip is silent — the build
+//// would exit 0 and the program would die with `undefined function
+//// runtime:scan/1`. The name mapping is camelCase → snake_case, the only place
+//// the two hosts differ in spelling.
 ////
 //// `pub` so a module compiled with rakun can reference them from the
 //// self-registering `val`s the decorators `@emit`. Reached via `from "rakun"`.
@@ -16,23 +28,28 @@ import {Response} from "http"; // sibling module — the handler type
 // ── component scan ──────────────────────────────────────────────────────────
 // A component decorator emits `val _ = rkScan("TypeName");` at module load.
 
-#[@External.Node("./runtime.mjs", "scan")]
+#[@External.Node("./runtime.mjs", "scan"),
+  @External.Erlang("rakun_runtime", "scan")]
 pub declare fn rkScan(name: string) -> i32;
 
-#[@External.Node("./runtime.mjs", "scannedNames")]
+#[@External.Node("./runtime.mjs", "scannedNames"),
+  @External.Erlang("rakun_runtime", "scanned_names")]
 pub declare fn rkScannedNames() -> string;
 
-#[@External.Node("./runtime.mjs", "scannedCount")]
+#[@External.Node("./runtime.mjs", "scannedCount"),
+  @External.Erlang("rakun_runtime", "scanned_count")]
 pub declare fn rkScannedCount() -> i32;
 
 // ── dependency-cycle guard ──────────────────────────────────────────────────
 // A component factory brackets its construction with `rkEnter`/`rkDone`; a cycle
 // makes `rkEnter` raise at first construction (see runtime.mjs).
 
-#[@External.Node("./runtime.mjs", "enter")]
+#[@External.Node("./runtime.mjs", "enter"),
+  @External.Erlang("rakun_runtime", "enter")]
 pub declare fn rkEnter(name: string) -> i32;
 
-#[@External.Node("./runtime.mjs", "done")]
+#[@External.Node("./runtime.mjs", "done"),
+  @External.Erlang("rakun_runtime", "done")]
 pub declare fn rkDone(name: string) -> i32;
 
 // ── singleton scope ─────────────────────────────────────────────────────────
@@ -42,10 +59,12 @@ pub declare fn rkDone(name: string) -> i32;
 // emitted factory stays typed at `-> Type`. `rkBuildCount` reports how many
 // times a type's constructor actually ran (1 for a singleton) — the scope assert.
 
-#[@External.Node("./runtime.mjs", "singleton")]
+#[@External.Node("./runtime.mjs", "singleton"),
+  @External.Erlang("rakun_runtime", "singleton")]
 pub declare fn rkSingleton<T>(name: string, build: fn() -> T) -> T;
 
-#[@External.Node("./runtime.mjs", "buildCount")]
+#[@External.Node("./runtime.mjs", "buildCount"),
+  @External.Erlang("rakun_runtime", "build_count")]
 pub declare fn rkBuildCount(name: string) -> i32;
 
 // ── property injection (`#[value("key")]`) ──────────────────────────────────
@@ -53,13 +72,16 @@ pub declare fn rkBuildCount(name: string) -> i32;
 // `rkProp` reads a string property, `rkPropInt` the same parsed as an `i32`, so
 // the emitted constructor argument is typed to the field.
 
-#[@External.Node("./runtime.mjs", "setProp")]
+#[@External.Node("./runtime.mjs", "setProp"),
+  @External.Erlang("rakun_runtime", "set_prop")]
 pub declare fn rkSetProp(key: string, value: string) -> i32;
 
-#[@External.Node("./runtime.mjs", "prop")]
+#[@External.Node("./runtime.mjs", "prop"),
+  @External.Erlang("rakun_runtime", "prop")]
 pub declare fn rkProp(key: string) -> string;
 
-#[@External.Node("./runtime.mjs", "propInt")]
+#[@External.Node("./runtime.mjs", "propInt"),
+  @External.Erlang("rakun_runtime", "prop_int")]
 pub declare fn rkPropInt(key: string) -> i32;
 
 // ── router ──────────────────────────────────────────────────────────────────
@@ -73,20 +95,24 @@ pub declare fn rkPropInt(key: string) -> i32;
 // would expand it structurally, and a structural interface does not unify with a
 // nominal `Request` parameter — so the generic seam is what keeps the wiring typed.
 
-#[@External.Node("./runtime.mjs", "registerRoute")]
+#[@External.Node("./runtime.mjs", "registerRoute"),
+  @External.Erlang("rakun_runtime", "register_route")]
 pub declare fn rkRegisterRoute<Req>(
     verb: string,
     path: string,
     handler: fn(req: Req) -> Response,
 ) -> i32;
 
-#[@External.Node("./runtime.mjs", "routeCount")]
+#[@External.Node("./runtime.mjs", "routeCount"),
+  @External.Erlang("rakun_runtime", "route_count")]
 pub declare fn rkRouteCount() -> i32;
 
-#[@External.Node("./runtime.mjs", "routePaths")]
+#[@External.Node("./runtime.mjs", "routePaths"),
+  @External.Erlang("rakun_runtime", "route_paths")]
 pub declare fn rkRoutePaths() -> string;
 
-#[@External.Node("./runtime.mjs", "dispatch")]
+#[@External.Node("./runtime.mjs", "dispatch"),
+  @External.Erlang("rakun_runtime", "dispatch")]
 pub declare fn rkDispatch(verb: string, path: string) -> Response;
 
 // The real-server dispatch seam: `rkServe` hands a socket request here as
@@ -94,7 +120,8 @@ pub declare fn rkDispatch(verb: string, path: string) -> Response;
 // build a LIVE `Request` (query/header/body populated), run the handler, and
 // return its `Response`. `Rakun.run` passes a closure over this to the server.
 
-#[@External.Node("./runtime.mjs", "dispatchHttp")]
+#[@External.Node("./runtime.mjs", "dispatchHttp"),
+  @External.Erlang("rakun_runtime", "dispatch_http")]
 pub declare fn rkDispatchHttp(
     verb: string,
     path: string,

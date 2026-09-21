@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+- **The host runtime runs on the BEAM** (1.0.10-beta front 04, steps 1-4).
+  `modules/rakun/src/sidecars/rakun_runtime.erl` is the erlang twin of
+  `runtime.mjs`: an `application` whose `rakun_sup` supervises the
+  `rakun_registry` `gen_server` that owns five `named_table, public,
+  {read_concurrency, true}` ETS tables (scan list, singleton cache, build
+  counts, property map, route table), with the dependency-cycle guard in the
+  process dictionary. There is no `rakun.app` file — a sidecar is compiled at
+  run time by `__bp_load_siblings/0` — so the spec is loaded from a term, which
+  is what makes `application:start(rakun)` available in a plain
+  `botopink test --target erlang` run. Fifteen of the sixteen cells in
+  `src/runtime.bp` gained an `@External.Erlang("rakun_runtime", "<snake_case>")`
+  form beside their node one (`rkServe` follows with the acceptor).
+  The module atom is `rakun_runtime`, never `runtime`: `shipErlSidecars` skips
+  an atom matching a module the build emitted, rakun emits `rakun/runtime`, and
+  the skip is SILENT. Measured: `botopink test` 31/31 (was 17/17);
+  `botopink test --target erlang` 21 passing (was 1) and
+  `.botopinkbuild/test-out/rakun_runtime.erl` present. The six erlang reds that
+  remain are two erlang-BACKEND gaps, recorded in `AGENTS.md` § Blocked;
+  `botopink.json` keeps `targets: ["commonJS"]` until they close.
+
+- **`test/erlang_runtime_test.bp`** names the host cells directly instead of
+  reaching them through the decorators, so it covers what the older five cannot:
+  declaration order in the scan registry, the `parseInt` rule behind
+  `#[value("key")]` (`"12abc"` is `12` on BOTH rows), registration order between
+  two matching routes, and the shape `Response` lowers to when it round-trips
+  through a host call. Fourteen assertions, identical on commonJS and erlang.
+
 - **The repository is a workspace** (`02-packaging` step 2; decisions 75 and 76 of
   1.0.10-beta). `botopink.json` at the root is `{ name, version, description, targets
   [commonJS, erlang], workspaces ["modules/*", "examples/*"] }` — no `src`, `files`, `target` or

@@ -10,8 +10,16 @@ injection container paired with a declarative web layer, plus a real bootstrap
 that starts an HTTP server. It is **opt-in** — reached via `from "rakun"` and
 never auto-loaded into the type environment. **The compiler core knows nothing
 about rakun** — every behaviour is plain botopink (`@Decl` reflection + comptime
-decorator bodies + `@emit`) over a host runtime (`runtime.mjs`), which also
-carries the node `http` transport (`serve`, bound as `rkServe`).
+decorator bodies + `@emit`) over a host runtime, which also carries the HTTP
+transport.
+
+There are **two host runtimes and one contract**. `src/runtime.mjs` answers the
+node row; `src/sidecars/rakun_runtime.erl` answers the erlang row with an OTP
+application, a supervised table owner and ETS. Every cell in `src/runtime.bp`
+carries both forms, and `test/erlang_runtime_test.bp` is one set of assertions
+run on both — the port is only worth as much as that file being green twice.
+See [`./AGENTS.md`](AGENTS.md) § The erlang host module for the OTP shape, the
+sidecar naming rule and what is still blocked.
 
 ## What it provides
 

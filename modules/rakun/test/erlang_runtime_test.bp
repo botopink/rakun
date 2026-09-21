@@ -1,0 +1,171 @@
+// rakun — the host runtime cells, driven directly, on BOTH rows.
+//
+// Run by `botopink test` (node, through `src/runtime.mjs`) and by
+// `botopink test --target erlang` (the BEAM, through
+// `src/sidecars/rakun_runtime.erl`). Every assertion below is the SAME
+// assertion on both rows: front 04's claim is not "rakun has an Erlang runtime
+// too", it is "a test written once answers the same on both", so a row-specific
+// expectation would defeat the point.
+//
+// The five older test files drive the cells through the decorators' `@emit`ted
+// wiring. This one names them, which is why it reaches what those cannot: the
+// host contract itself — declaration order, the parseInt rule behind
+// `#[value]`, registration order between two matching routes, and the shape
+// `Response` lowers to when it makes a round trip through a host call.
+//
+// The cells are imported by name because there is no decorator here to splice
+// them in.
+
+import {Request, Response};
+import {rkScan, rkScannedNames, rkScannedCount};
+import {rkEnter, rkDone, rkSingleton, rkBuildCount};
+import {rkSetProp, rkProp, rkPropInt};
+import {rkRegisterRoute, rkRouteCount, rkRoutePaths, rkDispatch, rkDispatchHttp};
+
+// A value the singleton cache hands back, so "the same instance" is observable
+// through a method rather than through identity (which `==` does not give).
+type Widget(
+    tag: string,
+) {
+    pub fn label(self: Self) -> string {
+        return "w:" + self.tag;
+    }
+}
+
+// The construction a component factory performs: bracketed with the cycle
+// guard, exactly as `#[service]` `@emit`s it.
+fn buildWidget() -> Widget {
+    val _e = rkEnter("Widget");
+    val w = Widget(tag: "one");
+    val _d = rkDone("Widget");
+    return w;
+}
+
+// ── component scan ───────────────────────────────────────────────────────────
+
+test "rakun runtime: the scan registry keeps declaration order" {
+    val _a = rkScan("Alpha");
+    val _b = rkScan("Beta");
+    val _c = rkScan("Gamma");
+    // Not a set and not sorted: the order components were scanned in.
+    assert rkScannedNames() == "Alpha,Beta,Gamma";
+    assert rkScannedCount() == 3;
+}
+
+// ── singleton scope + cycle guard ────────────────────────────────────────────
+
+test "rakun runtime: a singleton is built once however often it is resolved" {
+    val a = rkSingleton("Widget", { -> buildWidget() });
+    val b = rkSingleton("Widget", { -> buildWidget() });
+    val c = rkSingleton("Widget", { -> buildWidget() });
+    // `rkBuildCount` counts constructor runs, not resolves.
+    assert rkBuildCount("Widget") == 1;
+    assert a.label() == "w:one";
+    assert b.label() == "w:one";
+    assert c.label() == "w:one";
+}
+
+test "rakun runtime: a type that was never constructed has no build count" {
+    assert rkBuildCount("NeverBuilt") == 0;
+}
+
+// ── properties (the storage behind `#[value("key")]`) ────────────────────────
+
+test "rakun runtime: an absent property reads empty, never undefined" {
+    assert rkProp("rk.absent") == "";
+    assert rkPropInt("rk.absent") == 0;
+}
+
+test "rakun runtime: propInt is parseInt, and unparsable is zero" {
+    val _p = rkSetProp("rk.port", "8080");
+    val _n = rkSetProp("rk.name", "rakun");
+    val _x = rkSetProp("rk.nonsense", "not a number");
+    val _m = rkSetProp("rk.mixed", "12abc");
+    assert rkProp("rk.name") == "rakun";
+    assert rkPropInt("rk.port") == 8080;
+    assert rkPropInt("rk.nonsense") == 0;
+    // `runtime.mjs` reads this with `parseInt(v, 10)`, which takes the leading
+    // integer. The erlang row answers the same number rather than a tidier one:
+    // `#[value("key")]` must not mean two things on two targets.
+    assert rkPropInt("rk.mixed") == 12;
+}
+
+test "rakun runtime: a later write to a key replaces the earlier one" {
+    val _1 = rkSetProp("rk.once", "first");
+    val _2 = rkSetProp("rk.once", "second");
+    assert rkProp("rk.once") == "second";
+}
+
+// ── router ───────────────────────────────────────────────────────────────────
+//
+// Registered inside the first router test rather than at module level: a
+// module-level `val` is a load-time side effect on node and a never-called
+// 0-arity function on the BEAM, so registering there would silently register
+// nothing on the erlang row (see AGENTS.md § Blocked).
+
+test "rakun runtime: routes register in order and report their paths" {
+    val _1 = rkRegisterRoute("GET", "/probe/one", { req -> Response.ok("one") });
+    val _2 = rkRegisterRoute("GET", "/probe/:name", { req -> Response.ok("bound") });
+    val _3 = rkRegisterRoute("GET", "/probe/two", { req -> Response.ok("two") });
+    val _4 = rkRegisterRoute("POST", "/probe/one", { req -> Response.created("posted") });
+    assert rkRouteCount() == 4;
+    assert rkRoutePaths() == "GET /probe/one, GET /probe/:name, GET /probe/two, POST /probe/one";
+}
+
+test "rakun runtime: a Response survives the round trip through a host call" {
+    // This is the shape test. `rkDispatch` hands the handler's `Response` back
+    // across the host boundary; if the record ever lowers to something else,
+    // this breaks here rather than somewhere unrelated.
+    val resp = rkDispatch("GET", "/probe/one");
+    assert resp.status == 200;
+    assert resp.body == "one";
+}
+
+test "rakun runtime: a path parameter segment matches" {
+    val resp = rkDispatch("GET", "/probe/anything");
+    assert resp.status == 200;
+    assert resp.body == "bound";
+}
+
+test "rakun runtime: registration order decides between two matching routes" {
+    // `/probe/two` matches both the `:name` route and its own; the one
+    // registered first wins, on both rows.
+    val resp = rkDispatch("GET", "/probe/two");
+    assert resp.status == 200;
+    assert resp.body == "bound";
+}
+
+test "rakun runtime: the verb is part of the match" {
+    val resp = rkDispatch("POST", "/probe/one");
+    assert resp.status == 201;
+    assert resp.body == "posted";
+}
+
+test "rakun runtime: an unmatched path is a 404 with an empty body" {
+    val resp = rkDispatch("GET", "/nothing/here");
+    assert resp.status == 404;
+    assert resp.body == "";
+
+    // A path that is only a PREFIX of a route is not a match either.
+    assert rkDispatch("GET", "/probe").status == 404;
+}
+
+test "rakun runtime: dispatchHttp is the same router over the wire scalars" {
+    val resp = rkDispatchHttp("GET", "/probe/one", "{\"X-Tag\":\"abc\"}", "{\"q\":\"hi\"}", "");
+    assert resp.status == 200;
+    assert resp.body == "one";
+
+    val posted = rkDispatchHttp("POST", "/probe/one", "{}", "{}", "payload");
+    assert posted.status == 201;
+    assert posted.body == "posted";
+
+    assert rkDispatchHttp("GET", "/nothing/here", "{}", "{}", "").status == 404;
+}
+
+test "rakun runtime: dispatchHttp survives malformed header and query JSON" {
+    // `runtime.mjs` answers `{}` for anything that does not parse to an object;
+    // the erlang row does the same rather than crashing the request.
+    val resp = rkDispatchHttp("GET", "/probe/one", "not json", "", "");
+    assert resp.status == 200;
+    assert resp.body == "one";
+}
