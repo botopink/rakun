@@ -12,9 +12,26 @@ plain botopink + a host runtime, on the generic annotation-processor mechanism
 
 ## Install
 
-```bp
-import {service, restController, get, post, value, bean, configuration} from "rakun";
+Inside the botopink ecosystem a project depends on the core member by path or, as a sibling
+member of this workspace, with `{ "workspace": true }`; outside it, on the git form after a release:
+
+```json
+"dependencies": { "rakun": { "git": "https://github.com/botopink/rakun.git", "branch": "feat" } }
 ```
+
+```bp
+import {service, restController, getMapping, postMapping, value, bean, configuration} from "rakun";
+```
+
+## Layout
+
+`repository/rakun/botopink.json` is a **workspace** (`"workspaces": ["modules/*", "examples/*"]`,
+decision 75 of 1.0.10-beta): it compiles nothing and ships nothing. The core is the member
+[`modules/rakun/`](modules/rakun/) — `from "rakun"` resolves to it — beside one member per Spring
+Boot starter under [`modules/`](modules/README.md) (`rakun-web`, `rakun-data`, `rakun-security`, …,
+thirteen scaffolds today, thirteen more planned) and the runnable example
+[`examples/rakun/`](examples/rakun/) (member `rakun-example`). `botopink test` runs inside a member,
+never at the root.
 
 ## Quick example
 

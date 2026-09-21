@@ -1,7 +1,7 @@
 # rakun — Spring-style application framework
 
-> Path: `repository/rakun/`
-> Sibling (AGENTS): [`./AGENTS.md`](AGENTS.md)
+> Path: `repository/rakun/` (a workspace) · core: `repository/rakun/modules/rakun/`
+> Sibling (AGENTS): [`./AGENTS.md`](AGENTS.md) · Members: [`./modules/README.md`](modules/README.md)
 > Parent (workspace): [`../AGENTS.md`](../AGENTS.md)
 > Spec: [`../../tasks/v0.beta.5/specs/rakun.md`](../../tasks/v0.beta.5/specs/rakun.md)
 
@@ -104,7 +104,15 @@ field). See the runnable end-to-end app under
 
 Unlike `libs/std`, this package is **not** `@embedFile`'d into a `prelude.zig`
 and is **not** wired into `build.zig`. It is an **application-level** lib reached
-via `from "rakun"`, opted into per project. rakun has no library dependencies:
+via `from "rakun"`, opted into per project. `repository/rakun/botopink.json` is a
+**workspace** (decision 75): `from "rakun"` resolves to the member
+`modules/rakun/` — whose `files` (`root`, `http`, `runtime`, `decorators`,
+`bootstrap`, `rakun.d`) is exactly what a consumer sees — and never to the
+umbrella, which ships nothing. A sibling member or an example inside the
+workspace depends on it with `{ "rakun": { "workspace": true } }`; a project
+elsewhere in the ecosystem with `{ "path": "…/modules/rakun" }`; a consumer
+outside it with the git form (`{ "git": …, "branch": "feat" }`) — the object
+form is the only one (decision 76). rakun has no library dependencies:
 the HTTP transport `Rakun.run` starts is its own `runtime.mjs` `serve`, over node's
 `http` module (commonJS only). The runtime `.mjs` files are shipped
 next to the emitted modules by the CLI (**G2**), so a consumer build resolves

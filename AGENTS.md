@@ -31,52 +31,73 @@ value types + the `Request` behavior are real emitted code (`http.bp`);
 
 ## Tree
 
+The repository is a **workspace** (decision 75 of 1.0.10-beta): the root `botopink.json` declares
+members and is never a package — no `src`, `files`, `entry` or `dependencies`; `botopink build/test`
+there is the located refusal `botopink.json is a workspace, not a package — run this command inside
+one of its members: …`. Every `modules/*/` and `examples/*/` holding a `botopink.json` is a member,
+named by its own manifest. The **core is the member `modules/rakun/`**; `from "rakun"` resolves to it.
+
 ```text
 rakun/
 ├── AGENTS.md          ← you are here
 ├── docs.md            ← what this lib provides + Spring mapping + loading notes
-├── botopink.json      ← package metadata (target: commonJS; targets: [commonJS]
-│                        lib-test whitelist; no dependencies; files: http ·
-│                        runtime · decorators · bootstrap · rakun.d)
-├── src/
-│   ├── root.bp        ← module-tree root: `pub mod decorators; http; runtime; bootstrap;`
-│   ├── http.bp        ← concrete, emitted: `HttpMethod` enum-shaped type · `Response` type
-│   │                    (builders) · `App` config · `Request` behavior
-│   ├── runtime.mjs    ← host runtime: the mutable seams (scan list · singleton cache ·
-│   │                    cycle guard · config props · router table + dispatch/dispatchHttp)
-│   │                    + the node `http` transport (`serve`)
-│   ├── runtime.bp     ← `#[@External.Node]` decls binding the `runtime.mjs` seams
-│   │                    (`rkScan`/`rkSingleton`/`rkEnter`/`rkDone`/`rkProp`/
-│   │                    `rkRegisterRoute`/`rkDispatch`/`rkDispatchHttp`/`rkServe`/…); sibling
-│   │                    `./runtime.mjs` shipped next to the emitted module (G2)
-│   ├── decorators.bp  ← the markers AS comptime decorator fns: placement rules +
-│   │                    the DI/router/scope/bean wiring they `@emit`
-│   ├── bootstrap.bp   ← `Rakun` (concrete type): `Rakun.run(app)` starts `rkServe`
-│   └── rakun.d.bp     ← declaration-only: the `Context` IoC behavior (future)
-└── test/
-    ├── di_test.bp     ← placement + component scan
-    ├── router_test.bp ← DI chain + router dispatch (200 / 404) end to end
-    ├── scopes_test.bp ← singleton scope (diamond) · `#[value]` · `#[bean]` (F2-scopes)
-    ├── server_test.bp ← the live HTTP dispatch pipeline (`rkDispatchHttp`): path
-    │                     param · query/header/body · 200/404 (F5)
-    └── overlapping_routes_test.bp ← two controllers sharing a path prefix both
-                          register; dispatch matches the FULL path; a leaf (no-dep)
-                          #[service] resolves through the DI chain
-└── modules/           ← 1.0.6-beta scaffolding: one package per Spring Boot starter
-    ├── README.md      ← the module ↔ starter map and the shared-container rules
-    └── rakun-<area>/  ← `botopink.json` (depends on `rakun` via `path: ../../`) +
-                          `src/root.bp` placeholder; contents land per front
-                          (`specs/1.0.6-beta/`). Not in the lib-test whitelist yet
+├── botopink.json      ← WORKSPACE: name rakun · version · targets [commonJS, erlang] (the default
+│                        every member inherits and may only restrict) · workspaces
+│                        ["modules/*", "examples/*"]. Nothing importable from it.
+├── modules/
+│   ├── README.md      ← the member table (14 today, 13 planned with their fronts), the
+│   │                    module ↔ Spring starter map, how to add a member
+│   ├── rakun/         ← THE CORE — what `from "rakun"` gives a consumer
+│   │   ├── botopink.json  name rakun · entry root.bp · target commonJS · targets [commonJS]
+│   │   │                    (erlang joins with front 04) · files: root · http · runtime ·
+│   │   │                    decorators · bootstrap · rakun.d · no dependencies
+│   │   ├── src/
+│   │   │   ├── root.bp        ← module-tree root: `pub mod decorators; http; runtime; bootstrap;`
+│   │   │   ├── http.bp        ← concrete, emitted: `HttpMethod` enum-shaped type · `Response` type
+│   │   │   │                    (builders) · `App` config · `Request` behavior
+│   │   │   ├── runtime.mjs    ← host runtime: the mutable seams (scan list · singleton cache ·
+│   │   │   │                    cycle guard · config props · router table + dispatch/dispatchHttp)
+│   │   │   │                    + the node `http` transport (`serve`)
+│   │   │   ├── runtime.bp     ← `#[@External.Node]` decls binding the `runtime.mjs` seams
+│   │   │   │                    (`rkScan`/`rkSingleton`/`rkEnter`/`rkDone`/`rkProp`/
+│   │   │   │                    `rkRegisterRoute`/`rkDispatch`/`rkDispatchHttp`/`rkServe`/…); sibling
+│   │   │   │                    `./runtime.mjs` shipped next to the emitted module (G2)
+│   │   │   ├── decorators.bp  ← the markers AS comptime decorator fns: placement rules +
+│   │   │   │                    the DI/router/scope/bean wiring they `@emit`
+│   │   │   ├── bootstrap.bp   ← `Rakun` (concrete type): `Rakun.run(app)` starts `rkServe`
+│   │   │   └── rakun.d.bp     ← declaration-only: the `Context` IoC behavior (future)
+│   │   └── test/
+│   │       ├── di_test.bp     ← placement + component scan
+│   │       ├── router_test.bp ← DI chain + router dispatch (200 / 404) end to end
+│   │       ├── scopes_test.bp ← singleton scope (diamond) · `#[value]` · `#[bean]` (F2-scopes)
+│   │       ├── server_test.bp ← the live HTTP dispatch pipeline (`rkDispatchHttp`): path
+│   │       │                     param · query/header/body · 200/404 (F5)
+│   │       └── overlapping_routes_test.bp ← two controllers sharing a path prefix both
+│   │                             register; dispatch matches the FULL path; a leaf (no-dep)
+│   │                             #[service] resolves through the DI chain
+│   └── rakun-<area>/  ← the thirteen scaffolds (actuator · cache · client · data · hateoas ·
+│                        logging · messaging · scheduling · security · session · test ·
+│                        validation · web): `botopink.json` (files [root.bp] · targets per
+│                        `specs/1.0.10-beta/03-rakun/modules.md` § Targets · dependencies
+│                        { "rakun": { "workspace": true } }) + a two-comment `src/root.bp`;
+│                        contents land per front
+├── examples/
+│   └── rakun/         ← member `rakun-example` (an application: entry main.bp, target commonJS,
+│                        depends on `rakun` via { "workspace": true }); the sixty-second app
+└── scripts/git-hooks/ ← the pre-commit gate (§ Local gate): `botopink test` per module member,
+                         `botopink build` per example
 ```
 
 ## Module tree (`root.bp`)
 
-`src/root.bp` is the explicit module-tree root — the package builds from it, not
+`modules/rakun/src/root.bp` is the explicit module-tree root — the core builds from it, not
 a deprecated blind `src/` scan. It declares the four compiled modules
 `pub mod decorators; pub mod http; pub mod runtime; pub mod bootstrap;` (all
 public surface, reached via `from "rakun"`; the `@emit`ted wiring imports the
 runtime fns by name). The declaration module `rakun.d.bp` (the future `Context`
-behavior) is **not** in the tree: it is wired through `botopink.json` `files`.
+behavior) is **not** in the tree: it is wired through the core's `botopink.json` `files`
+(`modules/rakun/botopink.json`), which also lists `root.bp` first — decision 75's rule that a
+library member lists every module a consumer may import, or it `ships nothing`.
 `.d.bp` modules are not resolved by `mod` paths (the resolver follows only
 `<name>.bp` / `<name>/mod.bp`), mirroring how `libs/std` keeps its ambient `.d.bp`
 out of `root.bp`. rakun declares **no dependencies**: the HTTP transport
@@ -85,14 +106,16 @@ consumer declares only `rakun`. (It used to name a `server` library that exists 
 no repository — `botopink check` failed with `LibNotFound` before reading rakun's
 source.)
 
-`botopink.json` carries both target keys on purpose: `"target": "commonJS"` is
+The core's `botopink.json` carries both target keys on purpose: `"target": "commonJS"` is
 the build target the CLI reads (`config.zig`), and `"targets": ["commonJS"]` is
-the per-lib whitelist `botopink-lib-test` reads (`lib-test-runner/src/discovery.zig`)
-to skip the erlang/beam cells. Dropping `"targets"` would widen the lib-test
-matrix, not fix a no-op key.
+the per-member whitelist `botopink-lib-test` reads (`lib-test-runner/src/discovery.zig`)
+to skip the erlang/beam cells. The workspace's `targets` is `["commonJS", "erlang"]` — the default a
+member inherits when it declares none — and a member may only **restrict** it, so the core's
+`["commonJS"]` is a restriction and dropping it would widen the core's matrix to a red erlang cell,
+not fix a no-op key. Front 04 (the erlang runtime) is what adds `erlang` to the core.
 
 `erlang` stays out of it for a reason that is rakun's, not the compiler's:
-every `rk*` host cell in `src/runtime.bp` carries an `@External.Node` form and
+every `rk*` host cell in `modules/rakun/src/runtime.bp` carries an `@External.Node` form and
 no erlang one, so an erlang run stops at `function rkScan/1 undefined`
 (re-measured 2026-09-18 — only `http.bp`'s single test, which touches no host
 cell, passes). emilia's and onze's host cells each fit one inline
@@ -163,7 +186,10 @@ belongs to the compiler, not here.
 
 `.github/workflows/test.yml` runs `zig build test-libs -- --lib rakun
 --target <t>` for `{commonJS, erlang, beam}` on `ubuntu-22.04` +
-`macos-14`, plus `commonJS` on `windows-2022`. No `wasm` cell —
+`macos-14`, plus `commonJS` on `windows-2022`. Under the workspace, `--lib rakun`
+restricts the runner to the **core member** (the umbrella has no row); without
+`--lib` the runner discovers every member of the workspace — one row each,
+the scaffolds as compile-only `–` cells and the example as an application. No `wasm` cell —
 rakun's server surface targets node + the BEAM. The `erlang` rows keep
 `allow_fail: true` (see the `botopink.json` note above for what actually blocks
 them). `BOTOPINK_LANG_REF` repo variable pins a specific botopink-lang ref
@@ -200,8 +226,12 @@ git config core.hooksPath scripts/git-hooks
 ```
 
 `core.hooksPath` is per clone and applies to every worktree of it. The
-gate checks staged files for conflict markers, then runs `botopink test`
-over `src/` + `test/`. The compiler binary is located via (in order)
+gate checks staged files for conflict markers, then — because the root
+`botopink.json` is a workspace — runs `botopink test` **inside every
+`modules/*/` that holds a `botopink.json`**, each on its own manifest
+target (`erl` and `node` on `PATH`); a red member fails the gate and names
+the re-run command. (A root manifest without `"workspaces"` keeps the old
+single `botopink test` over `src/` + `test/`.) The compiler binary is located via (in order)
 `$BOTOPINK_BIN`, the nearest ancestor
 `repository/botopink-lang/zig-out/bin/botopink`, then `$PATH`. If none
 resolve, the gate prints a yellow warning and exits 0 — CI runs the full
@@ -216,7 +246,8 @@ into a throwaway `--out`); CI runs the same function once per workflow.
 that builds, or a listed path that no longer exists, fails the gate too.
 When a fix makes an example build, delete its line in the same commit. The list may be absent,
 empty or hold only `#` comments — each means no example is allowed to fail.
-`examples/rakun` builds; nothing is listed. It also **runs**: `botopink run`
+`examples/rakun` (member `rakun-example`, depending on `rakun` through
+`{ "workspace": true }`) builds; nothing is listed. It also **runs**: `botopink run`
 inside it serves `GET /api/users/` → `ana, bob, cleo`, `GET /api/users/ana` →
 `Hello, ana!`, `GET /api/posts/` → `hello world | rakun rocks`,
 `POST /api/posts/` → 201 `created: hi` and `GET /api/nope` → 404, which is what
