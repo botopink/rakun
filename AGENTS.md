@@ -1301,6 +1301,47 @@ and `val ctx = __rkMake_Context();` both lose the optional's payload type (the
 receiver). Every call site in `test/context_test.bp` writes
 `val ctx: Context = __rkMake_Context();`, and that is not style.
 
+### Lifecycle: the markers check placement, `#[managed]` does the wiring
+
+`#[postConstruct]` and `#[preDestroy]` emit NOTHING. A method-level `@Decl`
+carries no owner and no parameter list — `Decl` exposes `kind`, `name`,
+`returnType` and `annotations`, and `Param` lives only on the `Method` entries of
+a TYPE decl — so a method marker cannot name the factory of the type it sits in.
+The 1.0.6-beta draft's `rkRegisterLifecycle("<decl.name>", …)` inside a
+`#[postConstruct]` body would have registered the METHOD's name as the
+component's. `#[managed]` is the only decl that sees both a method and its owner,
+so it emits the registrations, exactly as `#[restController]` does for
+`#[getMapping]`.
+
+`rkRegisterLifecycle` takes the METHOD as well as the owner, where the front's
+README writes `rkRegisterLifecycle(name, "post"/"pre", order, fn)`: its own
+step 4 requires a failing hook to be reported "naming the component AND the
+method", and four arguments have room for only the first. Nothing in front 06
+emits a non-zero `order`; front 72's conditional layer is what will.
+
+`post` runs in registration order (dependency order — a component is registered
+after the components it was constructed from) and `pre` in reverse. The post pass
+marks an entry DONE, so "exactly once for a singleton, no matter how many sites
+resolve it" is a property of the pass and not of the caller. The post pass is not
+tolerant: the first raise stops the boot naming the component and the method. The
+pre pass is tolerant and logs, because a component that fails to close must not
+keep the ones after it open.
+
+### A type NAME is node-global on the erlang row
+
+`botopink test` runs each test FILE in its own process on the node row and in ONE
+node on the erlang row, where `rkSingleton`'s cache is a node-global ETS table
+keyed by the type name. So two test files declaring a type of the same name are a
+real collision there: the second `__rkMake_Clock()` finds the first file's
+instance in the cache and hands it back, and the caller's method call on a
+foreign record is `{error, undef}`.
+
+Measured while writing front 06 step 3: `overlapping_routes_test.bp` and
+`scopes_test.bp` each already declare a `Clock`, a third one in
+`test/context_test.bp` turned both of their cells red, and the node row showed
+nothing. Every type a test file declares is named for that file
+(`ZoneClock`, `OrderCache`, `WarmCache`), and that is not style.
+
 ### Resolution and the tie
 
 `__rkMake_<FieldType>()` is unique by construction, so constructor injection

@@ -42,7 +42,27 @@ import {
     Context,
     childNameProblem,
     __rkMake_Context,
+    rkCtxNote,
+    rkCtxNotes,
+    rkCtxNoteReset,
+    rkCtxBump,
+    rkCtxCount,
 } from "context";
+import {
+    postConstruct,
+    preDestroy,
+    Hook,
+    hookLine,
+    parseHooks,
+    rkRegisterLifecycle,
+    rkLifecycleTable,
+    rkLifecycleReset,
+    lifecycleHooks,
+    runPostConstruct,
+    runPreDestroy,
+    postConstructProblem,
+    lifecyclePhaseProblem,
+} from "lifecycle";
 import {asserts} from "std";
 
 // ── the components under test ───────────────────────────────────────────────
@@ -79,20 +99,20 @@ pub type UnregisteredService {
 test "rakun context: a bean record round-trips through the wire line" {
     val b = Bean(
         path: "",
-        typeName: "Clock",
+        typeName: "ZoneClock",
         qualifier: "fixed",
         scope: "singleton",
         primary: true,
         lazy: false,
-        owner: "fixedClock",
+        owner: "fixedZoneClock",
     );
-    assert beanLine(b) == "|Clock|fixed|singleton|1|0|fixedClock";
+    assert beanLine(b) == "|ZoneClock|fixed|singleton|1|0|fixedZoneClock";
     val back = parseBeans(beanLine(b));
     assert back.length == 1;
     val one = back.at(0);
     var seen = "";
     if (one != null) seen = one.typeName + "/" + one.qualifier + "/" + one.owner;
-    assert seen == "Clock/fixed/fixedClock";
+    assert seen == "ZoneClock/fixed/fixedZoneClock";
     var wasPrimary = false;
     if (one != null) wasPrimary = one.primary;
     assert wasPrimary;
@@ -256,7 +276,7 @@ test "rakun context: Context is not a bean of its own registry and is not in the
 // The README's acceptance reads "ctx.beanNames() matches rkScannedNames()
 // filtered to #[managed] types". That is true of `#[managed]` and false of the
 // front's own `#[provides]`: a provided bean's TYPE is never scanned, because
-// the scan registers component declarations and `Clock` is not one. The
+// the scan registers component declarations and `ZoneClock` is not one. The
 // registry is not a filter over the scan; it is its own table, and this
 // asserts both halves.
 test "rakun context: beanNames is the registry, not a filter over the scan list" {
@@ -267,8 +287,8 @@ test "rakun context: beanNames is the registry, not a filter over the scan list"
     assert ctx.beanNames().contains("ContextHolder");
     assert scanned.contains("UnregisteredService");
     assert !ctx.beanNames().contains("UnregisteredService");
-    assert ctx.beanNames().contains("Clock");
-    assert !scanned.contains("Clock");
+    assert ctx.beanNames().contains("ZoneClock");
+    assert !scanned.contains("ZoneClock");
 }
 
 test "rakun context: a child context finds a bean registered only in the parent" {
@@ -299,7 +319,13 @@ test "rakun context: a child needs a name and the name may not carry a separator
 
 // ── step 3: `#[provides]`, qualifiers and primary ───────────────────────────
 
-pub type Clock(
+// NOT `Clock`: `overlapping_routes_test.bp` and `scopes_test.bp` each already
+// declare one, and on the ERLANG row every test file shares one node and one
+// `rkSingleton` ETS cache — so a type NAME repeated across test files is a real
+// collision, and the loser's record reaches the winner's methods as
+// `{error, undef}`. The node row runs each file in its own process and shows
+// nothing. Measured while writing step 3.
+pub type ZoneClock(
     zone: string,
 ) {
     pub fn stamp(self: Self) -> string {
@@ -308,18 +334,18 @@ pub type Clock(
 }
 
 // The #[primary] one owns `__rkMake_Clock`, so an unqualified field of type
-// `Clock` gets it and the unqualified `resolve` answers the same instance.
+// `ZoneClock` gets it and the unqualified `resolve` answers the same instance.
 #[provides]
 #[qualifier("system")]
 #[primary]
-pub fn systemClock() -> Clock {
-    return Clock(zone: "UTC");
+pub fn systemZoneClock() -> ZoneClock {
+    return ZoneClock(zone: "UTC");
 }
 
 #[provides]
 #[qualifier("fixed")]
-pub fn fixedClock() -> Clock {
-    return Clock(zone: "fixed");
+pub fn fixedZoneClock() -> ZoneClock {
+    return ZoneClock(zone: "fixed");
 }
 
 // No qualifier at all: this one owns `__rkMake_Ledger` by being the only
@@ -355,9 +381,9 @@ pub fn coolDye() -> Dye {
 #[service]
 #[managed]
 pub type Stamper(
-    // Unqualified, so the #[primary] Clock wins — and it is the same instance
+    // Unqualified, so the #[primary] ZoneClock wins — and it is the same instance
     // the registry hands back.
-    clock: Clock,
+    clock: ZoneClock,
     ledger: Ledger,
 ) {
     pub fn stamp(self: Self) -> string {
@@ -368,16 +394,16 @@ pub type Stamper(
 test "rakun context: #[provides] makes the return type injectable by type" {
     val s = __rkMake_Stamper();
     assert s.stamp() == "main<now@UTC>";
-    assert rkHasBean("Clock");
+    assert rkHasBean("ZoneClock");
     assert rkHasBean("Ledger");
 }
 
 test "rakun context: two #[provides] of one type are told apart by qualifier" {
     val ctx: Context = __rkMake_Context();
-    val fixed: ?Clock = ctx.resolveNamed("Clock", "fixed");
+    val fixed: ?ZoneClock = ctx.resolveNamed("ZoneClock", "fixed");
     var fz = "";
     if (fixed != null) fz = fixed.zone;
-    val system: ?Clock = ctx.resolveNamed("Clock", "system");
+    val system: ?ZoneClock = ctx.resolveNamed("ZoneClock", "system");
     var sz = "";
     if (system != null) sz = system.zone;
     assert fz == "fixed";
@@ -386,12 +412,12 @@ test "rakun context: two #[provides] of one type are told apart by qualifier" {
 
 test "rakun context: with one #[provides] marked #[primary] the unqualified resolve returns it" {
     val ctx: Context = __rkMake_Context();
-    val any: ?Clock = ctx.resolve("Clock");
+    val any: ?ZoneClock = ctx.resolve("ZoneClock");
     var zone = "";
     if (any != null) zone = any.zone;
     assert zone == "UTC";
     // The same instance field injection gives: `__rkMake_Clock` is the primary
-    // provider's own factory, so there is one `rkSingleton("Clock", ...)` cell.
+    // provider's own factory, so there is one `rkSingleton("ZoneClock", ...)` cell.
     val injected = __rkMake_Stamper();
     assert injected.clock.zone == "UTC";
 }
@@ -419,4 +445,119 @@ test "rakun context: a qualified provider caches per qualifier, not per type" {
     if (b != null) bh = b.hue;
     assert ah == "amber";
     assert bh == "slate";
+}
+
+// ── step 4: lifecycle ───────────────────────────────────────────────────────
+//
+// These blocks are ORDER-DEPENDENT and deliberately so: the `#[managed]` hooks
+// below are registered at module LOAD, the post pass marks an entry done rather
+// than leaving that to the caller, and `rkLifecycleReset()` wipes the table. So
+// the two blocks that read and run the emitted hooks come first, and every block
+// after them resets and registers its own.
+
+#[service]
+#[managed]
+pub type WarmCache(
+    repo: OrderRepository,
+) {
+    #[postConstruct]
+    pub fn warm(self: Self) {
+        val n = self.repo.ids().length;
+        val _b = rkCtxBump("WarmCache.warm");
+        val _s = rkCtxBump("warmSaw" + n.toString());
+    }
+
+    #[preDestroy]
+    pub fn close(self: Self) {
+        val _b = rkCtxBump("WarmCache.close");
+    }
+}
+
+test "rakun lifecycle: #[managed] emits one registration per marked method" {
+    val post = lifecycleHooks("post");
+    var sawWarm = false;
+    loop (post) { h ->
+        if ((h.owner == "WarmCache" && h.method == "warm")) sawWarm = true;
+    };
+    val pre = lifecycleHooks("pre");
+    var sawClose = false;
+    loop (pre) { h ->
+        if ((h.owner == "WarmCache" && h.method == "close")) sawClose = true;
+    };
+    assert sawWarm;
+    assert sawClose;
+    assert hookLine(Hook(owner: "WarmCache", method: "warm", phase: "post", order: 0)) == "WarmCache|warm|post|0";
+}
+
+test "rakun lifecycle: the post pass runs a hook exactly once and it sees its dependencies" {
+    val _r = runPostConstruct();
+    assert rkCtxCount("WarmCache.warm") == 1;
+    // It reached the injected repository: three ids, counted inside the hook.
+    assert rkCtxCount("warmSaw3") == 1;
+    // A second pass is a no-op: the entry is marked done, so "exactly once for a
+    // singleton, no matter how many sites resolve it" is a property of the pass
+    // and not of the caller.
+    val _again = runPostConstruct();
+    assert rkCtxCount("WarmCache.warm") == 1;
+}
+
+test "rakun lifecycle: the pre pass runs in reverse registration order" {
+    val _z = rkLifecycleReset();
+    val _n = rkCtxNoteReset();
+    val _a = rkRegisterLifecycle("First", "close", "pre", 0, { -> rkCtxNote("First") });
+    val _b = rkRegisterLifecycle("Second", "close", "pre", 0, { -> rkCtxNote("Second") });
+    val _c = rkRegisterLifecycle("Third", "close", "pre", 0, { -> rkCtxNote("Third") });
+    val failed = runPreDestroy();
+    assert failed == "";
+    assert rkCtxNotes() == "Third\nSecond\nFirst";
+}
+
+test "rakun lifecycle: the post pass runs in registration order" {
+    val _z = rkLifecycleReset();
+    val _n = rkCtxNoteReset();
+    val _a = rkRegisterLifecycle("First", "warm", "post", 0, { -> rkCtxNote("First") });
+    val _b = rkRegisterLifecycle("Second", "warm", "post", 0, { -> rkCtxNote("Second") });
+    val _r = runPostConstruct();
+    assert rkCtxNotes() == "First\nSecond";
+}
+
+test "rakun lifecycle: an explicit order runs ahead of registration order" {
+    val _z = rkLifecycleReset();
+    val _n = rkCtxNoteReset();
+    val _a = rkRegisterLifecycle("Late", "warm", "post", 5, { -> rkCtxNote("Late") });
+    val _b = rkRegisterLifecycle("Early", "warm", "post", 1, { -> rkCtxNote("Early") });
+    val _r = runPostConstruct();
+    assert rkCtxNotes() == "Early\nLate";
+}
+
+test "rakun lifecycle: a #[postConstruct] that raises fails the boot naming both" {
+    val _z = rkLifecycleReset();
+    val _n = rkCtxNoteReset();
+    val _a = rkRegisterLifecycle("Broken", "warm", "post", 0, { -> @panic("boom") });
+    val _b = rkRegisterLifecycle("After", "warm", "post", 0, { -> rkCtxNote("After") });
+    try asserts.throwsWith({ ->
+        runPostConstruct();
+        0;
+    }, postConstructProblem("Broken.warm"));
+    // Not tolerant: the pass stopped, so the hook behind it did not run.
+    assert rkCtxNotes() == "";
+}
+
+test "rakun lifecycle: a #[preDestroy] that raises is logged and the rest still run" {
+    val _z = rkLifecycleReset();
+    val _n = rkCtxNoteReset();
+    val _a = rkRegisterLifecycle("First", "close", "pre", 0, { -> rkCtxNote("First") });
+    val _b = rkRegisterLifecycle("Broken", "close", "pre", 0, { -> @panic("boom") });
+    val _c = rkRegisterLifecycle("Third", "close", "pre", 0, { -> rkCtxNote("Third") });
+    val failed = runPreDestroy();
+    assert failed == "Broken.close";
+    // Reverse order, and the raise took neither neighbour with it.
+    assert rkCtxNotes() == "Third\nFirst";
+}
+
+test "rakun lifecycle: a phase that is not post or pre is refused" {
+    try asserts.throwsWith({ ->
+        rkRegisterLifecycle("X", "m", "during", 0, { -> 1 });
+        0;
+    }, lifecyclePhaseProblem("during"));
 }

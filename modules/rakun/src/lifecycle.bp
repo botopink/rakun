@@ -1,0 +1,204 @@
+//// rakun — lifecycle: `#[postConstruct]`, `#[preDestroy]` and `#[exitCode]`.
+////
+//// WHY THE MARKERS EMIT NOTHING. `#[postConstruct]` and `#[preDestroy]` are
+//// PLACEMENT CHECKS ONLY. A method-level `@Decl` carries no owner and no
+//// parameter list — `Decl` exposes `kind`, `name`, `returnType` and
+//// `annotations`, and `Param` lives only on the `Method` entries inside a TYPE
+//// decl — so a method marker cannot name the factory of the type it sits in
+//// and cannot write its own registration. The 1.0.6-beta draft's
+//// `rkRegisterLifecycle("<decl.name>", ...)` inside a `#[postConstruct]` body
+//// would have registered the METHOD's name as the component's.
+////
+//// So the wiring is emitted by the type-level `#[managed]`, which does see
+//// `decl.methods` with each method's own annotations. This is not a workaround,
+//// it is the split the library already uses: `#[getMapping]` checks placement
+//// and `#[restController]` does the wiring.
+////
+//// ORDERING. `post` runs in registration order, which is dependency order
+//// because a component is registered after the components it was constructed
+//// from. `pre` runs in REVERSE registration order for the same reason. Both
+//// passes also honour an explicit `order` ahead of registration order; nothing
+//// in front 06 emits a non-zero one, and front 72's conditional layer is what
+//// will.
+////
+//// A `#[postConstruct]` RUNS EXACTLY ONCE for a singleton however many sites
+//// resolve it, because the pass marks an entry done rather than leaving that to
+//// the caller. A `#[postConstruct]` that raises stops the boot naming the
+//// component and the method; a `#[preDestroy]` that raises is logged and the
+//// remaining ones still run, because a component that fails to close must not
+//// keep the ones after it open.
+
+// `toI32` is front 05's `parseInt(v, 10)` rule, reached through a `pub fn` in
+// `src/` rather than spelled a second time — `request_context.bp` imports
+// `charOf`/`sub` from the same module for the same reason.
+import {toI32} from "config";
+
+// ── the host cells ──────────────────────────────────────────────────────────
+//
+// Every cell carries BOTH forms; see `context.bp`'s docblock for why this front
+// ships host files where front 05 shipped none. The tables live beside the bean
+// registry in `context.mjs` / `sidecars/rakun_context.erl`: one sidecar, because
+// `shipErlSidecars` copies per ATOM named in emitted output and three atoms
+// would be three files to keep in step.
+
+#[@External.Node("./context.mjs", "lifecycleRegister"),
+  @External.Erlang("rakun_context", "lifecycle_register")]
+pub declare fn rkLifecycleStore<R>(record: string, run: fn() -> R) -> i32;
+
+#[@External.Node("./context.mjs", "lifecycleTable"),
+  @External.Erlang("rakun_context", "lifecycle_table")]
+pub declare fn rkLifecycleTable() -> string;
+
+// Run every not-yet-run entry of `phase`, answering the `owner|method` of each
+// that raised, `\n`-separated. `tolerant` decides whether the pass stops at the
+// first failure. The host runs and catches; the MESSAGE is written here.
+#[@External.Node("./context.mjs", "lifecycleRun"),
+  @External.Erlang("rakun_context", "lifecycle_run")]
+pub declare fn rkLifecycleRun(phase: string, tolerant: bool) -> string;
+
+#[@External.Node("./context.mjs", "lifecycleReset"),
+  @External.Erlang("rakun_context", "lifecycle_reset")]
+pub declare fn rkLifecycleReset() -> i32;
+
+// ── the refusals ────────────────────────────────────────────────────────────
+
+pub fn lifecyclePhaseProblem(phase: string) -> string {
+    return "rakun: '" + phase + "' is not a lifecycle phase - write post or pre";
+}
+
+pub fn lifecycleFieldProblem(what: string, value: string) -> string {
+    return "rakun: a lifecycle hook's " + what + " may not contain '|' or a newline, and '" + value + "' does";
+}
+
+pub fn postConstructProblem(who: string) -> string {
+    return "rakun: the #[postConstruct] " + who + " raised; the boot stops here rather than serving a half-built component";
+}
+
+pub fn preDestroyProblem(who: string) -> string {
+    return "rakun: the #[preDestroy] " + who + " raised; shutdown continues with the remaining hooks";
+}
+
+// ── the hook record ─────────────────────────────────────────────────────────
+//
+// `owner|method|phase|order`. The host reads two positions out of it — field 3
+// to group by phase and field 4 to sort — and nothing else; it does not know
+// what a phase means, which pass reverses, or that `owner` is a type name.
+
+pub type Hook(
+    owner: string,
+    method: string,
+    phase: string,
+    order: i32,
+)
+
+pub fn hookLine(h: Hook) -> string {
+    return h.owner + "|" + h.method + "|" + h.phase + "|" + h.order.toString();
+}
+
+pub fn parseHooks(wire: string) -> Hook[] {
+    var out: Hook[] = [];
+    if (wire == "") return out else {
+        loop (wire.split("\n")) { line ->
+            if (line != "") {
+                val f: string[] = line.split("|");
+                out.push(
+                    Hook(
+                        owner: f.at(0).unwrapOr(""),
+                        method: f.at(1).unwrapOr(""),
+                        phase: f.at(2).unwrapOr(""),
+                        order: toI32(f.at(3).unwrapOr("0")),
+                    ),
+                );
+            };
+        };
+        return out;
+    };
+}
+
+// ── registration ────────────────────────────────────────────────────────────
+//
+// What `#[managed]` emits, one line per marked method. The signature carries the
+// METHOD as well as the owner, where the front's README writes
+// `rkRegisterLifecycle(name, "post"/"pre", order, fn)`: its own step 4 requires
+// a failing hook to be reported "naming the component AND the method", and four
+// arguments have room for only the first.
+
+pub fn rkRegisterLifecycle<R>(
+    owner: string,
+    method: string,
+    phase: string,
+    order: i32,
+    run: fn() -> R,
+) -> i32 {
+    val known = phase == "post" || phase == "pre";
+    if (!known) @panic(lifecyclePhaseProblem(phase));
+    if (unwritable(owner)) @panic(lifecycleFieldProblem("owner", owner));
+    if (unwritable(method)) @panic(lifecycleFieldProblem("method", method));
+    return rkLifecycleStore(hookLine(Hook(owner: owner, method: method, phase: phase, order: order)), run);
+}
+
+fn unwritable(value: string) -> bool {
+    val bad = value.contains("|") || value.contains("\n");
+    return bad;
+}
+
+// ── the two passes ──────────────────────────────────────────────────────────
+
+// The post-construct pass. Not tolerant: the first hook that raises stops it and
+// the boot fails, naming the component and the method. A half-built component is
+// worse than a refused boot.
+pub fn runPostConstruct() -> i32 {
+    val failed = rkLifecycleRun("post", false);
+    if (failed != "") @panic(postConstructProblem(describe(failed)));
+    return ranCount("post");
+}
+
+// The pre-destroy pass, in reverse registration order. TOLERANT: a hook that
+// raises is logged with its owner and the remaining ones still run, because a
+// component that fails to close must not keep the ones after it open. Answers
+// the `owner.method` of each failure, `", "`-separated, for the caller to log.
+pub fn runPreDestroy() -> string {
+    val failed = rkLifecycleRun("pre", true);
+    if (failed == "") return "" else {
+        val who = describe(failed);
+        @print(preDestroyProblem(who));
+        return who;
+    };
+}
+
+fn describe(failed: string) -> string {
+    var names: string[] = [];
+    loop (parseHooks(failed)) { h -> names.push(h.owner + "." + h.method); };
+    return names.join(", ");
+}
+
+fn ranCount(phase: string) -> i32 {
+    var n = 0;
+    loop (parseHooks(rkLifecycleTable())) { h ->
+        if (h.phase == phase) n = n + 1;
+    };
+    return n;
+}
+
+// The hooks registered for a phase, in registration order — what an actuator
+// endpoint and front 07's shutdown both read.
+pub fn lifecycleHooks(phase: string) -> Hook[] {
+    var out: Hook[] = [];
+    loop (parseHooks(rkLifecycleTable())) { h ->
+        if (h.phase == phase) out.push(h);
+    };
+    return out;
+}
+
+// ── the markers ─────────────────────────────────────────────────────────────
+//
+// Placement only, for the reason in the docblock: a method `@Decl` carries no
+// owner, so a marker here cannot name the factory whose method it is.
+
+pub fn postConstruct(comptime decl: @Decl) {
+    if (decl.kind != DeclKind.Method) decl.fail("#[postConstruct] must annotate a method of a #[managed] type - the registration is emitted by #[managed], which is the only decl that can see both the method and its owner");
+}
+
+pub fn preDestroy(comptime decl: @Decl) {
+    if (decl.kind != DeclKind.Method) decl.fail("#[preDestroy] must annotate a method of a #[managed] type - the registration is emitted by #[managed], which is the only decl that can see both the method and its owner");
+}

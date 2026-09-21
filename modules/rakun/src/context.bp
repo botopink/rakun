@@ -517,6 +517,11 @@ pub fn __rkMake_Context() -> Context {
 // `forEach` over `decl.annotations` with a `val`-then-assign per reader rather
 // than a chain of bare `if`s, which only the LAST statement of a block may be.
 //
+// WHAT IT EMITS. One `rkRegisterBean` line, plus one `rkRegisterLifecycle` line
+// per method carrying `#[postConstruct]` or `#[preDestroy]`. `#[managed]` is the
+// only decl that sees BOTH a method and its owner: a method-level `@Decl` has no
+// owner and no parameter list, so the method markers can only check placement.
+//
 // THE FACTORY IS A LAMBDA, NOT A BARE NAME. `rkRegisterBean(..., __rkMake_X)`
 // compiles on the node row and is `variable '__rkMake_X' is unbound` on the
 // erlang one: a named function used as a VALUE is not lowered to a `fun name/0`.
@@ -538,6 +543,14 @@ pub fn managed(comptime decl: @Decl) {
         isLazy = l;
     });
     @emit("val __rkBean_" + decl.name + " = rkRegisterBean(\"" + decl.name + "\", " + qual + ", " + scopeLit + ", " + isPrimary + ", " + isLazy + ", \"" + decl.name + "\", { -> __rkMake_" + decl.name + "() });");
+    decl.methods.forEach({ m ->
+        var phase = "";
+        m.annotations.forEach({ a ->
+            val ph = if (a.name == "postConstruct") "post" else if (a.name == "preDestroy") "pre" else phase;
+            phase = ph;
+        });
+        if (phase != "") @emit("val __rkLc_" + decl.name + "_" + m.name + " = rkRegisterLifecycle(\"" + decl.name + "\", \"" + m.name + "\", \"" + phase + "\", 0, { -> __rkMake_" + decl.name + "()." + m.name + "() });");
+    });
     if (decl.kind != DeclKind.Type) decl.fail("#[managed] must annotate a type");
     if (decl.variants.length > 0) decl.fail("#[managed] must annotate a type with fields, not an enum");
 }

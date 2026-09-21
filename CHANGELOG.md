@@ -11,6 +11,31 @@
 > passing / 2 failing, the two reds being `{badkey,param}`/`{badkey,query}` in
 > front 04's `server_test.bp`.
 
+- **Lifecycle: `#[postConstruct]` and `#[preDestroy]`** (front 06, step 4).
+  `modules/rakun/src/lifecycle.bp`. The two markers are PLACEMENT CHECKS and
+  emit nothing — a method-level `@Decl` carries no owner and no parameter list,
+  so it cannot name the factory whose method it is, and the 1.0.6-beta draft's
+  `rkRegisterLifecycle("<decl.name>", …)` inside a `#[postConstruct]` body would
+  have registered the method's name as the component's. `#[managed]` is the only
+  decl that sees both a method and its owner, so it emits one registration per
+  marked method — the same split `#[getMapping]`/`#[restController]` already use.
+  Eight new assertions on both rows.
+
+  `rkRegisterLifecycle` takes the METHOD as well as the owner, where the README
+  writes four arguments: step 4's own acceptance requires a failing hook to be
+  named "component AND method". `post` runs in registration order and `pre` in
+  reverse; the post pass marks an entry done, so "exactly once for a singleton"
+  is a property of the pass rather than the caller's problem; the post pass stops
+  the boot at the first raise and the pre pass logs and continues.
+
+  **A type NAME is node-global on the erlang row.** `botopink test` runs each
+  test file in its own process on node and in ONE node on erlang, where
+  `rkSingleton`'s cache is a node-global ETS table keyed by type name. A third
+  `Clock` in `test/context_test.bp` — beside the ones
+  `overlapping_routes_test.bp` and `scopes_test.bp` already declare — turned both
+  of THEIR cells red with `{error, undef}`, and the node row showed nothing.
+  Every type this front's tests declare is now named for its file.
+
 - **`#[provides]`, qualifiers and primary** (front 06, step 3). A factory
   FUNCTION whose return value enters the registry under its type, spelled
   `#[provides]` because `#[bean]` already exists and is frozen at a method.
