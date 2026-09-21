@@ -32,6 +32,8 @@ let hooks = null;
 let selected = 0;
 let nav = 0;
 let settleOrder = "";
+let island = -1;
+let hole = 0;
 
 export function setHooks(h) {
   hooks = h;
@@ -90,11 +92,41 @@ export function concurrent() {
   return false;
 }
 
+// Island ordinals are 0-based (`i0`, `i1`, …) and hole ordinals are 1-based
+// (`h1`, `h2`, …) — `contracts.md § 2` spells both, and neither is derived from
+// a route, a pattern or a position in the tree.
+export function nextIsland() {
+  island = island + 1;
+  return island;
+}
+
+export function nextHole() {
+  hole = hole + 1;
+  return hole;
+}
+
+// The payload round trip. This half uses `JSON.parse`, the BEAM half uses OTP's
+// own `json:decode/1` — two parsers this front did not write, so a document
+// whose payload is not valid JSON fails on BOTH rows. The keys come back SORTED
+// because a map has no order and an object's insertion order is not the
+// contract; the field SET is.
+export function payloadKeys(json) {
+  return Object.keys(JSON.parse(json)).sort().join(",");
+}
+
+export function payloadText(json, key) {
+  const v = JSON.parse(json)[key];
+  if (v === undefined) return "";
+  return typeof v === "string" ? v : JSON.stringify(v);
+}
+
 export function reset() {
   hooks = null;
   selected = 0;
   nav = 0;
   settleOrder = "";
+  island = -1;
+  hole = 0;
   return 0;
 }
 

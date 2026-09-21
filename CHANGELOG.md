@@ -20,6 +20,39 @@
 > (`{badkey,param}` / `{badkey,query}`), which AGENTS.md § Blocked already
 > records.
 
+- **The document, the payload and `RenderHooks`** (front 23, step 4 and decision
+  77).
+
+  One `<script id="__onze" type="application/json">`, the last thing in
+  `<body>`, carrying `contracts.md § 2`'s key table — `v` first and `1` as its
+  value — plus `k` and `z`, which this front allocates and fronts 60 and 61
+  write. `<`, `>` and `&` are written as `\u003c`, `\u003e`, `\u0026`, so
+  `</script` is unrepresentable inside the block rather than filtered out of it;
+  a param carrying `</script><img src=x onerror=alert(1)>` yields a document
+  with no `<img` in it and exactly one script closer.
+
+  **The round trip is one test.** `rkSsrPayloadKeys` / `rkSsrPayloadText` parse
+  the emitted block with a parser this front did not write — `JSON.parse` on
+  node, OTP's own `json:decode/1` on the BEAM — so a payload that is not valid
+  JSON fails on BOTH rows, and the field set comes back sorted from both.
+
+  **`RenderHooks` is this front's record, with a no-op default** (decision 77).
+  Seven function fields, each replaceable on its own; `Onze.run` fills them and
+  `islandAttr` is jhonstart front 29's. `repository/rakun/src/` names no module
+  of onze — the only `onze` in it is the `data-onze-*` marker strings. One
+  consequence is written down rather than smoothed over: with the sheet moved
+  into the hooks, a document rendered through `defaultHooks()` carries **no**
+  `<style>`, where the front's own text (written before 77) says "exactly one".
+
+  **U+2028 / U+2029 are escaped by CODE POINT, never by a literal** — a
+  non-ASCII string literal raises `badarg` on the erlang row before any of this
+  front's code runs, so the needle could not be written and the positive case is
+  not expressible as a cell. The same gap front 62 recorded for a non-ASCII
+  cookie.
+
+  10 new assertions, every one on both rows: 282 → **292** on commonJS,
+  280/2 → **290/2** on erlang.
+
 - **The escaping walker, the composition order and the rendered page** (front 23,
   steps 1 to 3).
 

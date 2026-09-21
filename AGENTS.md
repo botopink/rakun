@@ -720,6 +720,113 @@ work inside and outside a request takes the values as parameters. `requestLive()
 exists for a DISPATCHER deciding whether it already opened a frame, not for an
 accessor deciding whether to answer.
 
+### `RenderHooks` — the one seam, and it points inwards (decision 77)
+
+A framework built on this pipeline has three things to add to a document:
+stylesheet `<link>`s and blocking scripts in the head, the deferred bundle tags
+after the payload, and a style sink that decides WHEN the sheet is serialised.
+None of it may be reached for from here — an edge from rakun to a bundler would
+make the server depend on the toolchain that packages it, and rakun would stop
+being usable without one.
+
+```bp
+pub type RenderHooks(
+    headExtra: fn(string) -> string,           // route -> extra <head> markup
+    bodyExtra: fn(string) -> string,           // route -> markup after the payload tag
+    islandAttr: fn(i32) -> #(string, string),  // ordinal -> the marker pair
+    openSink: fn() -> i32,                     // before anything renders
+    collectHead: fn() -> string,               // once, after the shell
+    collectChunk: fn(string) -> string,        // holeId -> the block before that chunk
+    closeSink: fn() -> string,                 // after the last chunk
+)
+pub fn defaultHooks() -> RenderHooks
+pub fn setHooks(h: RenderHooks) -> i32
+pub fn hooks() -> RenderHooks
+```
+
+`defaultHooks()` is a working document: no extra tags, the marker pair of
+`contracts.md § 2`, and a sink that collects nothing. The record is filled FIELD
+BY FIELD — `withHeadExtra` / `withBodyExtra` / `withIslandAttr` /
+`withCollectHead` / `withSink` each replace one field and leave the other six at
+their defaults, because botopink has no record-update expression and a caller
+spelling all seven to change one is a caller who will get one of them wrong.
+
+`grep` `modules/rakun/src/` for `onze` and the only hits are the `data-onze-*`
+marker names and `__onzeFill` — `contracts.md § 2` STRINGS, not module
+references. `Onze.run` installs its own record at boot, one line in ITS code;
+`islandAttr` is jhonstart front 29's, because the marker belongs to whoever
+decides which components are islands, while the ordinals are assigned here.
+
+**`void` is not a value in botopink**, so `openSink` answers `i32` — the shape
+every rakun cell that does something rather than computing something already
+has. The front's text spells it `fn() -> void`.
+
+**`emilia.flush()` is not called here and may not be.** The front's § *The
+document* still says the pipeline calls it once per document; decision 77
+replaced that with the four sink fields, filled by front 69 and installed by
+`Onze.run`, so `repository/rakun/` names no module of onze and none of emilia
+either. The consequence is visible in one acceptance: a document rendered
+through `defaultHooks()` carries **no** `<style>`, where the front's text says
+"exactly one". The suite asserts zero for the default and exactly one through a
+hooks record whose `collectHead` answers a block.
+
+### Step 4 — the document and the payload
+
+```bp
+pub type Payload(build, pathname, pattern, params, query, table,
+                 islands, actions, styles, holes, dynamic, kinds, slots)
+pub fn writePayload(p: Payload) -> string
+pub fn payloadEscape(json: string) -> string
+#[@future] pub fn document(head: string, body: string, p: Payload) -> @Future<string>
+```
+
+The payload is one `<script id="__onze" type="application/json">`, the last
+thing in `<body>` before the client bundle, and its key table is
+`contracts.md § 2` — `v b p r m q t i a s h d`, plus `k` and `z`, which this
+front ALLOCATES and fronts 60 and 61 write. `k` and `z` are separate blobs
+joined on `pattern` rather than extra columns in the route table, so contract 1
+stays untouched and its round-trip test keeps testing four fields.
+
+`kinds` and `slots` are fields of the record because the front's step-4 sketch
+of `Payload` predates its own key table by two keys: a key with no field cannot
+be written.
+
+**Payload escaping.** `<`, `>` and `&` become `\u003c`, `\u003e`, `\u0026`,
+and U+2028 / U+2029 become `\u2028` / `\u2029`. `</script` is therefore
+UNREPRESENTABLE inside the block rather than filtered out of it, which is the
+property that makes an inert `application/json` script safe to carry
+attacker-controlled strings. The two line separators are found BY CODE POINT and
+never by a literal: a non-ASCII string literal raises `badarg` on the erlang row
+before any of this front's code runs, so the needle could not be written. The
+positive case — a payload actually carrying U+2028 — is for the same reason not
+expressible as a cell, which is front 62's non-ASCII-cookie gap one library
+later; the guard is asserted on the escape output instead.
+
+**The round trip is one test, not two half-tests.** `rkSsrPayloadKeys` and
+`rkSsrPayloadText` parse the emitted block with a JSON parser this front did not
+write — `JSON.parse` on node, OTP's own `json:decode/1` on the BEAM (OTP 27 and
+later) — so a document whose payload is not valid JSON fails on BOTH rows. The
+keys come back SORTED, because a map has no order and an object's insertion
+order is not the contract; the field SET is. A reader of our own would have been
+a second implementation of the thing under test, which is the failure mode the
+round trip exists to prevent.
+
+**Island ordinals are assigned here, in render order** — `i0`, `i1`, … —
+through `nextIslandOrdinal()`, and the attribute pair is read through
+`RenderHooks.islandAttr`, so the marker and the payload index cannot disagree.
+Hole ordinals are `h1`, `h2`, … in shell order. Neither is derived from a route,
+a pattern or a position in the tree; fronts 29, 30 and 68 designed against that.
+
+**What is NOT written here.** The build id `b` is front 03's content hash of the
+build, which does not exist on this binary; `Payload.build` is whatever the
+caller passes and `render` reads `rakun.build.id` from front 04's property
+table. The contract-4 class-name fixture — the literal hex class the document's
+`<style>` and the payload's `s` must share with
+`emilia/test/integration_test.bp` — is not asserted here either: it needs emilia
+to be a dependency of rakun, and `s` arrives through the style sink's
+`emittedClasses`, so the assertion belongs to front 69 or 68, where both sides
+of the comparison exist.
+
 ### Why this front ships BOTH host files where front 05 shipped none
 
 Front 05's three measurements still hold and none of them is violated here:

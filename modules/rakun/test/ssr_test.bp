@@ -29,6 +29,7 @@ import {
     rkAppPage,
     rkAppReset,
 } from "file_router";
+import {rkReqShareBump, rkReqShareCount, rkReqShareReset} from "request_context";
 import {
     ElementView,
     Node,
@@ -38,12 +39,31 @@ import {
     escapeHtml,
     headerOfPage,
     htmlHeaders,
+    Payload,
+    RenderHooks,
+    defaultHooks,
+    document,
+    emptyPayload,
+    hooks,
+    island,
+    islandId,
+    jsonString,
+    nextIslandOrdinal,
     nodeView,
+    payloadEscape,
+    payloadOf,
+    payloadScript,
     raw,
     registerBoundary,
     renderNode,
     renderedPage,
+    rkSsrPayloadKeys,
+    rkSsrPayloadText,
     rkSsrReset,
+    setHooks,
+    withCollectHead,
+    withHeadExtra,
+    writePayload,
     selected,
     toResponse,
 } from "ssr";
@@ -244,4 +264,167 @@ test "rakun ssr: each layout render receives its own selected depth, root first"
 #[@future]
 pub fn pageOf(route: PageContext) -> @Future<Node> {
     return el("page", [], []);
+}
+
+// ── step 4: the document and the payload ────────────────────────────────────
+
+pub fn samplePayload() -> Payload {
+    return Payload(
+        build: "b0",
+        pathname: "/blog/hello",
+        pattern: "/blog/[slug]",
+        params: "slug=hello",
+        query: "page=2",
+        table: "L|/\nP|/blog/[slug]",
+        islands: [#("i0", "Counter", "n=1"), #("i1", "Toggle", "on=")],
+        actions: [#("like", "a1")],
+        styles: "a1b2 c3d4",
+        holes: ["h1"],
+        dynamic: true,
+        kinds: "/blog/[slug]|dynamic",
+        slots: "/dashboard|team",
+    );
+}
+
+test "rakun ssr: the payload emits `v` first and `1` as its value" {
+    val json = writePayload(samplePayload());
+    assert json.startsWith("{\"v\":1,");
+    assert rkSsrPayloadText(json, "v") == "1";
+}
+
+test "rakun ssr: the payload's `t` is the route-table blob verbatim, newline-escaped by the JSON writer" {
+    val json = writePayload(samplePayload());
+    assert json.contains("\"t\":\"L|/\\nP|/blog/[slug]\"");
+    assert rkSsrPayloadText(json, "t") == "L|/\nP|/blog/[slug]";
+}
+
+test "rakun ssr: a JSON string escapes the backslash before anything it adds" {
+    assert jsonString("a\\b") == "\"a\\\\b\"";
+    assert jsonString("say \"hi\"") == "\"say \\\"hi\\\"\"";
+    assert jsonString("one\ntwo") == "\"one\\ntwo\"";
+}
+
+test "rakun ssr: payloadEscape leaves no literal `<`, `>` or `&` in its output" {
+    val out = payloadEscape("{\"m\":\"a=<b>&c\"}");
+    assert out.contains("<") == false;
+    assert out.contains(">") == false;
+    assert out.contains("&") == false;
+    assert out.contains("\\u003c");
+    assert out.contains("\\u003e");
+    assert out.contains("\\u0026");
+}
+
+test "rakun ssr: a param carrying `</script>` yields a document with exactly two script closers" {
+    val _s = rkSsrReset();
+    val p = Payload(
+        build: "b0",
+        pathname: "/p",
+        pattern: "/p",
+        params: "q=</script><img src=x onerror=alert(1)>",
+        query: "",
+        table: "",
+        islands: [],
+        actions: [],
+        styles: "",
+        holes: [],
+        dynamic: false,
+        kinds: "",
+        slots: "",
+    );
+    val doc = await document("<title>t</title>", "<p>body</p>", p);
+    // ONE closer, this front's own: the spec says two because the second is the
+    // client bundle's, and `defaultHooks()` installs no bundle.
+    assert countOf(doc, "</script>") == 1;
+    // The dangerous half of the injection cannot form at all: no `<` survives
+    // the payload escape, so `<img` is not in the document even though the
+    // inert text `onerror=alert(1)` is — which is the point of an
+    // `application/json` block a parser never executes.
+    assert doc.contains("<img") == false;
+    assert doc.contains("img src=x onerror=alert(1)");
+    assert payloadOf(doc).contains("</script") == false;
+}
+
+test "rakun ssr: the payload round trip — a real parser on each row reads the same field set" {
+    val _s = rkSsrReset();
+    val p: Payload = samplePayload();
+    val doc = await document("", "<main></main>", p);
+    val json = payloadOf(doc);
+    assert rkSsrPayloadKeys(json) == "a,b,d,h,i,k,m,p,q,r,s,t,v,z";
+    assert rkSsrPayloadText(json, "p") == "/blog/hello";
+    assert rkSsrPayloadText(json, "r") == "/blog/[slug]";
+    assert rkSsrPayloadText(json, "m") == "slug=hello";
+    assert rkSsrPayloadText(json, "q") == "page=2";
+    assert rkSsrPayloadText(json, "s") == "a1b2 c3d4";
+    assert rkSsrPayloadText(json, "d") == "true";
+    assert rkSsrPayloadText(json, "h") == "[\"h1\"]";
+    assert rkSsrPayloadText(json, "i") == "[[\"i0\",\"Counter\",\"n=1\"],[\"i1\",\"Toggle\",\"on=\"]]";
+    assert rkSsrPayloadText(json, "a") == "[[\"like\",\"a1\"]]";
+    assert rkSsrPayloadText(json, "k") == "/blog/[slug]|dynamic";
+    assert rkSsrPayloadText(json, "z") == "/dashboard|team";
+}
+
+test "rakun ssr: a document rendered with the default hooks names no bundler and opens no sheet" {
+    val _s = rkSsrReset();
+    val doc = await document("<title>t</title>", "<p>hi</p>", emptyPayload());
+    assert doc.startsWith("<!DOCTYPE html><html lang=\"pt-BR\"><head><meta charset=\"utf-8\">");
+    assert doc.contains("<div data-onze-root=\"\"><p>hi</p></div>");
+    assert doc.endsWith("</body></html>");
+    assert doc.contains("<script src") == false;
+    // Decision 77: the sheet is a `RenderHooks` field, so a default document
+    // carries NO `<style>` at all. The front's own text says "exactly one",
+    // which was written when this front still called `emilia.flush()` itself.
+    assert doc.contains("<style") == false;
+}
+
+test "rakun ssr: the hooks record is filled field by field, not all or nothing" {
+    val _s = rkSsrReset();
+    val base: RenderHooks = defaultHooks();
+    val one: RenderHooks = withHeadExtra(base, { r -> "<link rel=\"stylesheet\" href=\"/a.css\">" });
+    val _i = setHooks(one);
+    val doc = await document("", "<p>hi</p>", emptyPayload());
+    assert doc.contains("<link rel=\"stylesheet\" href=\"/a.css\">");
+    // the other six are still the defaults
+    assert doc.contains("<style") == false;
+    assert doc.endsWith("</script></body></html>");
+    val _r = rkSsrReset();
+}
+
+test "rakun ssr: the head is serialised once per document, after the body rendered" {
+    val _s = rkSsrReset();
+    val _z = rkReqShareReset();
+    val base: RenderHooks = defaultHooks();
+    val sunk: RenderHooks = withCollectHead(base, { -> countedSheet() });
+    val _i = setHooks(sunk);
+    val doc = await document("", "<p>hi</p>", emptyPayload());
+    assert countOf(doc, "<style") == 1;
+    assert rkReqShareCount("ssr.collectHead") == 1;
+    // a second document in the same process gets its own call, not a drained sheet
+    val again = await document("", "<p>two</p>", emptyPayload());
+    assert countOf(again, "<style") == 1;
+    assert rkReqShareCount("ssr.collectHead") == 2;
+    val _r = rkSsrReset();
+}
+
+test "rakun ssr: island ordinals are assigned here, in render order, and the marker agrees with the index" {
+    val _s = rkSsrReset();
+    val v: ElementView<Node> = view();
+    val h: RenderHooks = hooks();
+    val first = nextIslandOrdinal();
+    val second = nextIslandOrdinal();
+    assert islandId(first) == "i0";
+    assert islandId(second) == "i1";
+    val markup = renderNode(v, el("main", [], [
+        island(v, h, first, txt("one")),
+        island(v, h, second, txt("two")),
+    ]));
+    assert markup == "<main><div data-onze-i=\"i0\">one</div><div data-onze-i=\"i1\">two</div></main>";
+}
+
+pub fn countedSheet() -> string {
+    val _b = rkReqShareBump("ssr.collectHead");
+    return "<style>.a{color:red}</style>";
+}
+
+pub fn countOf(haystack: string, needle: string) -> i32 {
+    return haystack.split(needle).length - 1;
 }

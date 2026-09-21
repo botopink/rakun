@@ -507,6 +507,42 @@ A layout learns how deep it sits with `selected()` — `0` for the root layout,
 `1` for the next one down. It is a call rather than a field of `LayoutProps`
 because that record is the router's and carries three fields.
 
+### The document and the payload
+
+```bp
+val doc = await document(renderHead(meta), body, Payload(
+    build: buildId(), pathname: "/blog/hello", pattern: "/blog/[slug]",
+    params: "slug=hello", query: "page=2", table: rkAppTable(),
+    islands: [], actions: [], styles: "", holes: [], dynamic: false,
+    kinds: "", slots: "",
+));
+```
+
+`document` writes the doctype, the head, the body inside
+`<div data-onze-root="">`, and then one
+`<script id="__onze" type="application/json">` carrying the payload the browser
+reconnects through. Inside that block `<`, `>` and `&` are written as `\u003c`,
+`\u003e` and `\u0026`, so `</script` cannot occur in it at all — which is why
+a param carrying `</script><img src=x onerror=…>` produces a document with no
+`<img` in it.
+
+### `RenderHooks` — what a framework adds, without rakun knowing about it
+
+rakun never imports a bundler or a stylesheet pipeline. Everything a full-stack
+framework adds to a document arrives as a record of functions:
+
+```bp
+val custom = withHeadExtra(defaultHooks(), { route -> "<link rel=\"stylesheet\" href=\"/app.css\">" });
+val _ = setHooks(custom);
+```
+
+Seven fields — `headExtra`, `bodyExtra`, `islandAttr`, `openSink`,
+`collectHead`, `collectChunk`, `closeSink` — each replaceable on its own, the
+other six staying at their defaults. A document rendered through
+`defaultHooks()` is a working page with no extra tags and no `<style>` block:
+the stylesheet is the sink's, and the sink is installed by whoever boots the
+app.
+
 ## The container: beans, `Context`, lifecycle and events
 
 Constructor injection resolves a field by type and needs no help. Everything

@@ -24,12 +24,16 @@
 
 -export([set_hooks/1, has_hooks/0, hooks_or/1,
          set_selected/1, selected_depth/0, next_nav/0,
+         next_island/0, next_hole/0,
+         payload_keys/1, payload_text/2,
          all/1, settled_order/0, concurrent/0, reset/0]).
 
 -define(HOOKS, rakun_ssr_hooks).
 -define(SELECTED, rakun_ssr_selected).
 -define(NAV, rakun_ssr_nav).
 -define(ORDER, rakun_ssr_order).
+-define(ISLAND, rakun_ssr_island).
+-define(HOLE, rakun_ssr_hole).
 
 %% ═══ the installed hooks ═════════════════════════════════════════════════════
 
@@ -71,6 +75,57 @@ next_nav() ->
         end + 1,
     _ = erlang:put(?NAV, N),
     N.
+
+%% ═══ the two ordinal counters ═══════════════════════════════════════════════
+%%
+%% Island ordinals are 0-based (`i0`, `i1`, …) and hole ordinals are 1-based
+%% (`h1`, `h2`, …) — `contracts.md § 2` spells both, and neither is derived from
+%% a route, a pattern or a position in the tree.
+
+next_island() ->
+    N = case erlang:get(?ISLAND) of
+            undefined -> -1;
+            V -> V
+        end + 1,
+    _ = erlang:put(?ISLAND, N),
+    N.
+
+next_hole() ->
+    N = case erlang:get(?HOLE) of
+            undefined -> 0;
+            V -> V
+        end + 1,
+    _ = erlang:put(?HOLE, N),
+    N.
+
+%% ═══ the payload round trip ══════════════════════════════════════════════════
+%%
+%% OTP's own `json:decode/1` (OTP 27 and later), against `JSON.parse` on the
+%% node row: two parsers this front did not write, so a document whose payload
+%% is not valid JSON fails on BOTH rows. A parser of our own would have been a
+%% second implementation of the very thing under test.
+%%
+%% The keys come back SORTED because a map has no order and an object's
+%% insertion order is not the contract; the field SET is.
+
+payload_keys(Json) ->
+    M = json:decode(to_bin(Json)),
+    join_bins(lists:sort(maps:keys(M))).
+
+payload_text(Json, Key) ->
+    M = json:decode(to_bin(Json)),
+    case maps:get(to_bin(Key), M, undefined) of
+        undefined -> <<>>;
+        V when is_binary(V) -> V;
+        V -> iolist_to_binary(json:encode(V))
+    end.
+
+join_bins([]) -> <<>>;
+join_bins([H | T]) ->
+    lists:foldl(fun(X, Acc) -> <<Acc/binary, ",", X/binary>> end, H, T).
+
+to_bin(B) when is_binary(B) -> B;
+to_bin(L) when is_list(L) -> list_to_binary(L).
 
 %% ═══ the gather over unstarted thunks ════════════════════════════════════════
 %%
@@ -137,6 +192,8 @@ settled_order() ->
 concurrent() -> true.
 
 reset() ->
+    _ = erlang:erase(?ISLAND),
+    _ = erlang:erase(?HOLE),
     _ = erlang:erase(?HOOKS),
     _ = erlang:erase(?SELECTED),
     _ = erlang:erase(?NAV),

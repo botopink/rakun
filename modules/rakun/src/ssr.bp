@@ -44,6 +44,8 @@ import {dict} from "std";
 import {Response} from "http";
 import {
     RouteEntry,
+    charOf,
+    sub,
     PageContext,
     LayoutProps,
     rkAppHasRender,
@@ -112,6 +114,29 @@ pub declare fn rkSsrSettledOrder() -> string;
 #[@External.Node("./ssr.mjs", "concurrent"),
   @External.Erlang("rakun_ssr", "concurrent")]
 pub declare fn rkSsrConcurrent() -> bool;
+
+#[@External.Node("./ssr.mjs", "nextIsland"),
+  @External.Erlang("rakun_ssr", "next_island")]
+pub declare fn rkSsrNextIsland() -> i32;
+
+#[@External.Node("./ssr.mjs", "nextHole"),
+  @External.Erlang("rakun_ssr", "next_hole")]
+pub declare fn rkSsrNextHole() -> i32;
+
+// The payload round trip, and the one place this front lets a host read what it
+// wrote. Both halves use a JSON parser this front did not write — `JSON.parse`
+// on node, OTP's own `json:decode/1` on the BEAM — so a document whose payload
+// is not valid JSON fails on BOTH rows, and the keys come back SORTED because
+// a map has no order and an object's insertion order is not the contract.
+// A parser of our own would have been a second implementation of the thing
+// under test, which is the failure mode the round trip exists to prevent.
+#[@External.Node("./ssr.mjs", "payloadKeys"),
+  @External.Erlang("rakun_ssr", "payload_keys")]
+pub declare fn rkSsrPayloadKeys(json: string) -> string;
+
+#[@External.Node("./ssr.mjs", "payloadText"),
+  @External.Erlang("rakun_ssr", "payload_text")]
+pub declare fn rkSsrPayloadText(json: string, key: string) -> string;
 
 #[@External.Node("./ssr.mjs", "reset"),
   @External.Erlang("rakun_ssr", "reset")]
@@ -237,12 +262,12 @@ pub fn nodeChildren(e: Node) -> Node[] {
 // the two bodies to delete, not to reconcile. `&` is replaced FIRST or the
 // ampersand of an entity is escaped a second time.
 
-pub fn escapeHtml(raw: string) -> string {
-    return raw.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+pub fn escapeHtml(plain: string) -> string {
+    return plain.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
 
-pub fn escapeAttribute(raw: string) -> string {
-    return escapeHtml(raw).replaceAll("\"", "&quot;").replaceAll("'", "&#39;");
+pub fn escapeAttribute(plain: string) -> string {
+    return escapeHtml(plain).replaceAll("\"", "&quot;").replaceAll("'", "&#39;");
 }
 
 // A `script` or `style` body that closes its own element is REFUSED, never
@@ -307,6 +332,391 @@ pub fn renderIn<El>(v: ElementView<El>, e: El, rawParent: bool) -> string {
             return if (isVoid(tag)) open else open + inner + "</" + tag + ">";
         };
     };
+}
+
+// ── decision 77: `RenderHooks` — the one seam, and it points inwards ────────
+//
+// A full-stack framework built on this pipeline has three things to add to a
+// document: stylesheet `<link>`s and blocking scripts in the head, the deferred
+// bundle tags after the payload, and a style sink that decides WHEN the sheet
+// is serialised. None of that may be reached for from here — an edge from rakun
+// to a bundler would make the server depend on the toolchain that packages it,
+// and rakun would stop being usable without one.
+//
+// So this front declares a record of function values and READS it. It never
+// imports an implementation: `grep` this file for `onze` and the only hits are
+// the `data-onze-*` marker names and `__onzeFill`, which are `contracts.md § 2`
+// STRINGS and not module references. `Onze.run` installs its own record at
+// boot — one line in ITS code — and `islandAttr` is jhonstart front 29's,
+// because the marker belongs to whoever decides which components are islands
+// while the ordinals are assigned here. One definition, passed in.
+//
+// The four sink fields carry no state in their signatures: the sheet is already
+// process-local and rakun serves each request in its own BEAM process, so the
+// implementation holds whatever it needs and rakun holds nothing it would have
+// to name a type for.
+//
+// `void` is not a value in botopink, so `openSink` answers `i32` like every
+// other rakun cell that does something rather than computing something.
+
+pub type RenderHooks(
+    headExtra: fn(string) -> string,
+    bodyExtra: fn(string) -> string,
+    islandAttr: fn(i32) -> #(string, string),
+    openSink: fn() -> i32,
+    collectHead: fn() -> string,
+    collectChunk: fn(string) -> string,
+    closeSink: fn() -> string,
+)
+
+pub fn islandId(ordinal: i32) -> string {
+    return "i" + ordinal.toString();
+}
+
+pub fn holeId(ordinal: i32) -> string {
+    return "h" + ordinal.toString();
+}
+
+// `contracts.md § 2`: `data-onze-i="i0"`. The component name and the props live
+// in the payload's `i` array, never on the element.
+pub fn defaultIslandAttr(ordinal: i32) -> #(string, string) {
+    return #("data-onze-i", islandId(ordinal));
+}
+
+pub fn noHeadExtra(route: string) -> string {
+    return "";
+}
+
+pub fn noBodyExtra(route: string) -> string {
+    return "";
+}
+
+pub fn noOpenSink() -> i32 {
+    return 0;
+}
+
+pub fn noCollectHead() -> string {
+    return "";
+}
+
+pub fn noCollectChunk(hole: string) -> string {
+    return "";
+}
+
+pub fn noCloseSink() -> string {
+    return "";
+}
+
+// A working document with no bundler and no stylesheet pipeline: no extra tags,
+// the marker pair of `contracts.md § 2`, and a sink that collects nothing. An
+// app with no toolchain renders correctly through it.
+pub fn defaultHooks() -> RenderHooks {
+    return RenderHooks(
+        headExtra: { r -> noHeadExtra(r) },
+        bodyExtra: { r -> noBodyExtra(r) },
+        islandAttr: { n -> defaultIslandAttr(n) },
+        openSink: { -> noOpenSink() },
+        collectHead: { -> noCollectHead() },
+        collectChunk: { h -> noCollectChunk(h) },
+        closeSink: { -> noCloseSink() },
+    );
+}
+
+// The record is filled FIELD BY FIELD, not all or nothing: replacing one leaves
+// the other six at their defaults. botopink has no record-update expression, so
+// each field gets a function of its own rather than a caller spelling all seven.
+
+pub fn withHeadExtra(h: RenderHooks, f: fn(string) -> string) -> RenderHooks {
+    return RenderHooks(
+        headExtra: f,
+        bodyExtra: h.bodyExtra,
+        islandAttr: h.islandAttr,
+        openSink: h.openSink,
+        collectHead: h.collectHead,
+        collectChunk: h.collectChunk,
+        closeSink: h.closeSink,
+    );
+}
+
+pub fn withBodyExtra(h: RenderHooks, f: fn(string) -> string) -> RenderHooks {
+    return RenderHooks(
+        headExtra: h.headExtra,
+        bodyExtra: f,
+        islandAttr: h.islandAttr,
+        openSink: h.openSink,
+        collectHead: h.collectHead,
+        collectChunk: h.collectChunk,
+        closeSink: h.closeSink,
+    );
+}
+
+pub fn withIslandAttr(h: RenderHooks, f: fn(i32) -> #(string, string)) -> RenderHooks {
+    return RenderHooks(
+        headExtra: h.headExtra,
+        bodyExtra: h.bodyExtra,
+        islandAttr: f,
+        openSink: h.openSink,
+        collectHead: h.collectHead,
+        collectChunk: h.collectChunk,
+        closeSink: h.closeSink,
+    );
+}
+
+pub fn withCollectHead(h: RenderHooks, f: fn() -> string) -> RenderHooks {
+    return RenderHooks(
+        headExtra: h.headExtra,
+        bodyExtra: h.bodyExtra,
+        islandAttr: h.islandAttr,
+        openSink: h.openSink,
+        collectHead: f,
+        collectChunk: h.collectChunk,
+        closeSink: h.closeSink,
+    );
+}
+
+pub fn withSink(
+    h: RenderHooks,
+    open: fn() -> i32,
+    head: fn() -> string,
+    chunk: fn(string) -> string,
+    close: fn() -> string,
+) -> RenderHooks {
+    return RenderHooks(
+        headExtra: h.headExtra,
+        bodyExtra: h.bodyExtra,
+        islandAttr: h.islandAttr,
+        openSink: open,
+        collectHead: head,
+        collectChunk: chunk,
+        closeSink: close,
+    );
+}
+
+pub fn setHooks(h: RenderHooks) -> i32 {
+    return rkSsrSetHooks(h);
+}
+
+pub fn hooksInstalled() -> bool {
+    return rkSsrHasHooks();
+}
+
+pub fn hooks() -> RenderHooks {
+    return rkSsrHooksOr(defaultHooks());
+}
+
+// An island marker: the element the client bundle walks to find a component's
+// own server-rendered DOM. The ordinal is assigned HERE, in render order, and
+// the attribute pair is read through the hooks — so the marker and the payload
+// index cannot disagree.
+pub fn island<El>(v: ElementView<El>, h: RenderHooks, ordinal: i32, inner: El) -> El {
+    val make = v.make;
+    val attrOf = h.islandAttr;
+    return make("div", "", [attrOf(ordinal)], [inner]);
+}
+
+pub fn nextIslandOrdinal() -> i32 {
+    return rkSsrNextIsland();
+}
+
+// ── step 4: the document and the payload ────────────────────────────────────
+//
+// One `<script id="__onze" type="application/json">`, the last thing in
+// `<body>` before the client bundle. JSON is the right choice precisely because
+// only the BROWSER parses it: the server writes it by concatenation, and
+// `std/json`'s lack of a structured walker never comes up.
+//
+// `k` and `z` are allocated by this front and written by fronts 60 and 61. They
+// are SEPARATE BLOBS joined on `pattern` rather than extra columns in `t`, so
+// contract 1 — the route table — stays untouched and its round-trip test keeps
+// testing four fields. A front that wants a per-pattern fact gets a key here; it
+// does not widen the table.
+
+pub type Payload(
+    build: string,
+    pathname: string,
+    pattern: string,
+    params: string,
+    query: string,
+    table: string,
+    islands: Array<#(string, string, string)>,
+    actions: Array<#(string, string)>,
+    styles: string,
+    holes: string[],
+    dynamic: bool,
+    kinds: string,
+    slots: string,
+)
+
+pub fn payloadVersion() -> i32 {
+    return 1;
+}
+
+pub fn emptyPayload() -> Payload {
+    return Payload(
+        build: "",
+        pathname: "",
+        pattern: "",
+        params: "",
+        query: "",
+        table: "",
+        islands: [],
+        actions: [],
+        styles: "",
+        holes: [],
+        dynamic: false,
+        kinds: "",
+        slots: "",
+    );
+}
+
+// A JSON string, escaped as JSON requires. The backslash goes FIRST or every
+// escape this function adds is escaped a second time.
+pub fn jsonString(text: string) -> string {
+    return "\"" + text
+        .replaceAll("\\", "\\\\")
+        .replaceAll("\"", "\\\"")
+        .replaceAll("\n", "\\n")
+        .replaceAll("\r", "\\r")
+        .replaceAll("\t", "\\t") + "\"";
+}
+
+pub fn jsonBool(b: bool) -> string {
+    return if (b) "true" else "false";
+}
+
+pub fn jsonStrings(xs: string[]) -> string {
+    var parts: string[] = [];
+    loop (xs) { x ->
+        parts.push(jsonString(x));
+    };
+    return "[" + parts.join(",") + "]";
+}
+
+pub fn jsonPairs(xs: Array<#(string, string)>) -> string {
+    var parts: string[] = [];
+    loop (xs) { x ->
+        parts.push("[" + jsonString(x._0) + "," + jsonString(x._1) + "]");
+    };
+    return "[" + parts.join(",") + "]";
+}
+
+pub fn jsonTriples(xs: Array<#(string, string, string)>) -> string {
+    var parts: string[] = [];
+    loop (xs) { x ->
+        parts.push("[" + jsonString(x._0) + "," + jsonString(x._1) + "," + jsonString(x._2) + "]");
+    };
+    return "[" + parts.join(",") + "]";
+}
+
+// `v` FIRST and `1` as its value: a client that does not recognise the version
+// refuses to hydrate rather than guessing, and it should be able to decide that
+// from the first bytes it reads.
+pub fn writePayload(p: Payload) -> string {
+    return "{\"v\":" + payloadVersion().toString()
+        + ",\"b\":" + jsonString(p.build)
+        + ",\"p\":" + jsonString(p.pathname)
+        + ",\"r\":" + jsonString(p.pattern)
+        + ",\"m\":" + jsonString(p.params)
+        + ",\"q\":" + jsonString(p.query)
+        + ",\"t\":" + jsonString(p.table)
+        + ",\"i\":" + jsonTriples(p.islands)
+        + ",\"a\":" + jsonPairs(p.actions)
+        + ",\"s\":" + jsonString(p.styles)
+        + ",\"h\":" + jsonStrings(p.holes)
+        + ",\"d\":" + jsonBool(p.dynamic)
+        + ",\"k\":" + jsonString(p.kinds)
+        + ",\"z\":" + jsonString(p.slots)
+        + "}";
+}
+
+// `<`, `>` and `&` become `\u003c`, `\u003e`, `\u0026`, and U+2028 / U+2029
+// become `\u2028` / `\u2029`. `</script` is therefore UNREPRESENTABLE inside
+// the block rather than filtered out of it, which is the property that makes an
+// inert `type="application/json"` script safe to carry attacker-controlled
+// strings.
+//
+// The two line separators are found by CODE POINT and never by a literal: a
+// non-ASCII string literal raises `badarg` on the erlang row before any of this
+// front's code runs, so `"\u{2028}"` could not be written even as a needle.
+// `charCodeAt` answers a UTF-16 code unit on node against a codepoint on the
+// BEAM, and the two agree for every character in the BMP, which both of these
+// are.
+pub fn payloadEscape(json: string) -> string {
+    val flat = json
+        .replaceAll("&", "\\u0026")
+        .replaceAll("<", "\\u003c")
+        .replaceAll(">", "\\u003e");
+    var out = "";
+    var i = 0;
+    loop (i < flat.length()) {
+        val code = flat.charCodeAt(i);
+        if (code == 8232) {
+            out = out + "\\u2028";
+        } else if (code == 8233) {
+            out = out + "\\u2029";
+        } else {
+            out = out + charOf(flat, i);
+        };
+        i = i + 1;
+    };
+    return out;
+}
+
+pub fn payloadScript(p: Payload) -> string {
+    return "<script id=\"__onze\" type=\"application/json\">"
+        + payloadEscape(writePayload(p))
+        + "</script>";
+}
+
+// The payload text back out of a rendered document, for a reader that has the
+// bytes and not the record. Written with `indexOf`/`sub` rather than a parser:
+// the opening tag is a fixed string this front emitted itself.
+pub fn payloadOf(document: string) -> string {
+    val open = "<script id=\"__onze\" type=\"application/json\">";
+    val at = document.indexOf(open);
+    if (at < 0) return "" else {
+        val rest = sub(document, at + open.length(), document.length());
+        val close = rest.indexOf("</script>");
+        return if (close < 0) rest else sub(rest, 0, close);
+    };
+}
+
+pub fn doctype() -> string {
+    return "<!DOCTYPE html><html lang=\"pt-BR\"><head><meta charset=\"utf-8\">";
+}
+
+pub fn rootOpen() -> string {
+    return "<div data-onze-root=\"\">";
+}
+
+// The shell, the body and the payload, in the one order the sheet allows.
+//
+// The head is written AFTER the body is rendered, because the style sink is
+// filled by the render and serialising it early would write an empty block —
+// which is why the non-streaming path builds the body string first and the
+// document string second. `collectHead` is that serialisation and it is called
+// EXACTLY ONCE per document: the hook's contract is that a second call answers
+// nothing, so a stray earlier call is a drained sheet, not a doubled one.
+//
+// `emilia.flush()` does not appear here and may not: decision 77 makes the four
+// sink calls FIELDS of `RenderHooks`, filled by front 69 and installed by
+// `Onze.run`, so `repository/rakun/` names no module of onze and none of
+// emilia. A document rendered through `defaultHooks()` therefore carries no
+// `<style>` at all, which is what "a working document with no toolchain" means.
+#[@future]
+pub fn document(head: string, body: string, p: Payload) -> @Future<string> {
+    val h: RenderHooks = hooks();
+    val collectHead = h.collectHead;
+    val headExtra = h.headExtra;
+    val bodyExtra = h.bodyExtra;
+    val sheet = collectHead();
+    val extra = headExtra(p.pattern);
+    val tail = bodyExtra(p.pattern);
+    return doctype() + head + sheet + extra + "</head><body>"
+        + rootOpen() + body + "</div>"
+        + payloadScript(p)
+        + tail
+        + "</body></html>";
 }
 
 // ── step 2: composition order ───────────────────────────────────────────────
