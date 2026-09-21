@@ -20,6 +20,110 @@
 > (`{badkey,param}` / `{badkey,query}`), which AGENTS.md § Blocked already
 > records.
 
+- **Validation: `#[validated]`, one predicate for both rows, and the report**
+  (front 14). `modules/rakun-validation/src/{report,table,messages,spi,constraints,binding,boot,decorators}.bp`,
+  `src/validation_host.mjs`, `src/sidecars/rakun_validation.erl`, and seven
+  suites under `modules/rakun-validation/test/`.
+
+  `#[validated]` on a record-shaped `type` reflects `decl.fields`, reads each
+  field's constraint annotations, and `@emit`s exactly two functions —
+  `validate<TypeName>(v) -> ValidationReport` and `constraintsOf<TypeName>() ->
+  string`. Thirteen markers: `#[notNull]`, `#[notBlank]`, `#[notEmpty]`,
+  `#[sizeBetween(min, max)]`, `#[minValue(n)]`, `#[maxValue(n)]`, `#[positive]`,
+  `#[positiveOrZero]`, `#[email]`, `#[pattern(regex)]`, `#[pastDate]`,
+  `#[futureDate]`, `#[constraint(name)]`. No `#[future]`: that name collides with
+  the effect marker `#[@future]`.
+
+  **This is the only `both — boundary` member, and the mechanism is the reason.**
+  The emitted validator is plain botopink — string comparisons, length checks and
+  `std/regex` matches, no host cell in the predicate path — so ONE source
+  compiles for erlang and for commonJS and the server and the client run the same
+  predicate rather than two predicates that are supposed to agree.
+  `test/parity_test.bp` holds that up the only way it can be held up: twenty
+  inputs, one function, ONE expected digest carrying every violation's field,
+  code and resolved message. A row that answered differently reds there instead
+  of passing its own half of a two-test pair. `std/regex` was measured on both
+  rows before anything was built on it — `matches`, `match` (value and index) and
+  `replaceAll` all answer identically, and the email grammar is written in the
+  intersection of PCRE and ECMAScript so it is one grammar and not two.
+
+  **Refusal beats a constraint that could never fail** (decision 67). The failure
+  mode designed out is a validator that silently passes what it cannot check, so
+  a marker on a field whose type it cannot check is a LOCATED COMPILE ERROR, not
+  a row that quietly always holds: `#[notBlank]` on an `i32`, `#[minValue]` on a
+  `string`, `#[pastDate]` on an `i32`, `#[notNull]` on a field that can never be
+  null, `#[sizeBetween(50, 2)]`, an empty `#[pattern]`. At run time,
+  `#[constraint("cpf")]` with nothing registered is a violation coded
+  `unknownConstraint` naming the registered list — never a pass — and
+  `bindInt("age", "12x")` answers `0` AND records a `typeMismatch`, so the zero
+  can never be mistaken for a value the caller meant. Deleting the trim from
+  `vNotBlank` reds three cells in two files on both rows; shifting
+  `#[sizeBetween]`'s upper bound by one reds two, the parity digest among them.
+
+  **The naming contract with front 05.** Front 05's boot path builds `validate` +
+  the type name and calls it after binding and before the first component is
+  constructed, so the spelling breaks the BUILD rather than a test.
+  `src/boot.bp` ships the other half — `configProblem`/`refuseInvalidConfig`,
+  which render a refusal naming property KEYS rather than field names, one line
+  per violation. The call site `modules/rakun/src/config.bp` names
+  `rkConfigValidate` does not exist in the tree and `modules/rakun/**` is not this
+  front's to edit; front 05 adds it. Note also that `config.bp` already declares
+  a placement-only `#[validated]` of its own: an application that wants the
+  emission imports `validated` from `rakun-validation` and must not import both.
+
+  **The table is a blob, not a JSON literal.** `constraintsOf<Name>()` is emitted
+  as a call to `constraintTableJson(name, blob)` (`<field>|<code>[|<arg>]*`,
+  records joined with `;`) so the grammar is an ordinary function a test can call
+  instead of a string literal written into source through two levels of
+  escaping — front 72's condition blob for the same reason. An argument carrying
+  `;`, `|` or `"` is refused by the marker that takes it, so the grammar has no
+  escape and needs none. The JSON is byte-identical on both rows.
+
+  **Two host halves, and neither decides anything.** The SPI registry maps a name
+  to a closure (no string table holds one) and the binding accumulator is
+  appended to by the `bind…` readers (records are immutable, so a binder record
+  cannot accumulate as it goes). `validation_host.mjs` holds a Map and an array;
+  `rakun_validation.erl` holds an ETS registry behind an owner process and hangs
+  the accumulator off the SERVING PROCESS's dictionary. `bindingIsolated()` is
+  the one answer the host gives rather than botopink: the BEAM half MEASURES it
+  by spawning a child and comparing this process's count, the node half states it
+  about a row whose dispatcher runs one request to completion. Making the BEAM
+  `bind_drain` stop erasing reds `binding_test.bp` on erlang and leaves commonJS
+  green — which is what proves the erlang row is really being exercised.
+
+  **Three compiler defects met and reported, none worked around in library
+  source.** (1) A record that `implement`s a behavior does not coerce to the
+  behavior type anywhere, so the spec's `registerConstraint(name, c: Constraint)`
+  is spelled `registerConstraint(name, code, check)` and the behavior stays as the
+  checked shape. (2) An integer literal does not widen to `i64` in arithmetic —
+  and that diagnostic carries no line or column — so `#[minValue]`/`#[maxValue]`
+  are REFUSED on an `i64` field rather than emitted as something that reds.
+  (3) On erlang a record method's owner module is resolved only when the type is
+  imported into the calling module; without it `erlc` refuses the module, the
+  runner prints no summary for it and the command exits 127. All three carry
+  minimal repros in `AGENTS.md` § Validation → Language notes.
+
+  Counts. `modules/rakun-validation` went from **0/0 on both rows** (no test
+  blocks) to **54 passing / 0 failing on commonJS and 54 passing / 0 failing on
+  erlang**, summed over seven modules: `binding_test` 10, `config_test` 6,
+  `constraints_test` 14, `parity_test` 3, `report_test` 7, `spi_test` 8,
+  `table_test` 6. `modules/rakun` is untouched and unchanged at 346/0 on commonJS
+  and 344 passing / 2 failing on erlang, the two reds being front 04's own
+  `server_test.bp:74,80`; re-measured after merging front 07, `modules/rakun-web`
+  is likewise unchanged at 83/0 on both rows.
+
+  **One name needs care at the import line.** `validated` now exists twice in the
+  workspace: here, where it emits, and in `modules/rakun/src/config.bp` (front
+  05), where it is placement-only and emits nothing. Importing that one leaves
+  `validate<TypeName>` undefined and the failure lands at the CALL SITE as an
+  unbound variable rather than at the annotation; importing both into one module
+  is a duplicate binding. The rule is written where an application author reads
+  — `docs.md` § Validation (first paragraph of the section), `modules/README.md`
+  § Consuming a member, and the docblocks of `src/root.bp` and
+  `src/decorators.bp` — not only in a test header. Front 05's marker is left
+  alone; whether it should be deleted now that this front has landed is front
+  05's call.
+
 - **The filter chain, CORS and RFC 9457 problem details** (front 07).
   `modules/rakun-web/` stops being a two-comment scaffold: it now carries one
   ordered chain between the socket and the route handler, two entry points into

@@ -1,0 +1,55 @@
+//// rakun-validation — boot-time configuration validation (step 6).
+////
+//// Front 14 owns the CONSTRAINTS; front 05 owns the MOMENT — after binding and
+//// before the first component is constructed. The seam between them is the
+//// NAME: front 05's generated binder calls `validate<TypeName>(bound)`, which
+//// it builds from the type name it already has, and never has to know what
+//// constraints exist. This file is the other half of that seam: what a boot
+//// refusal READS LIKE, in one place, so every refusal names property keys
+//// rather than field names.
+////
+//// WHY THE KEY AND NOT THE FIELD. An operator reads `application.yaml`, not the
+//// record. `retryLimit: must be at least 1` sends them looking for a field they
+//// cannot see; `app.billing.retry-limit: must be at least 1` names the line
+//// they have to change. `ValidationReport` carries field names because that is
+//// what a validator knows; this file is where the prefix is added.
+////
+//// REFUSE, DO NOT WARN. Decision 67: a bound-but-invalid configuration
+//// reaching a request is the failure this prevents, and there is no flag that
+//// turns the refusal into a warning.
+
+import {ValidationReport, Violation} from "report";
+
+// The property key a field was bound from. Front 05's binder reads
+// `prefix + "." + field`, and its `rawValue` then tries the written key, the
+// kebab spelling, the camel spelling and the SCREAMING_SNAKE one — so the key
+// printed here is the one the catalogue lists, and every spelling that bound it
+// resolves back to this one.
+pub fn propertyKey(prefix: string, field: string) -> string {
+    if (prefix == "") return field else return prefix + "." + field;
+}
+
+pub fn violationLine(prefix: string, v: Violation) -> string {
+    return "  " + propertyKey(prefix, v.field) + ": " + v.message + " (" + v.code + ")";
+}
+
+// The whole refusal, one line per violation, every line naming its key.
+pub fn configProblem(typeName: string, prefix: string, report: ValidationReport) -> string {
+    val lines = report.violations.map({ v -> violationLine(prefix, v) });
+    return "rakun config: `" + typeName + "` is not valid - the application will not start\n" + lines.join(
+        "\n"
+    );
+}
+
+// The refusal itself. A valid report costs one pass over the violations (which
+// is empty) and nothing else; an invalid one halts with every violation
+// printed. Front 05's boot path is the intended caller, right after the binder
+// and before the first component is constructed.
+pub fn refuseInvalidConfig(
+    typeName: string,
+    prefix: string,
+    report: ValidationReport,
+) -> i32 {
+    assert report.isValid(), configProblem(typeName, prefix, report);
+    return report.violations.length;
+}

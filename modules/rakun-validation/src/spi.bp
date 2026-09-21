@@ -1,0 +1,115 @@
+//// rakun-validation — the constraint SPI.
+////
+//// An application adds its own constraint without touching this module: it
+//// writes a type implementing `Constraint`, registers it under a name, and
+//// reaches it from a field with `#[constraint("cpf")]`.
+////
+//// `check` answers a `string` rather than a `?Violation` on purpose: an empty
+//// string is unambiguous, and it keeps the SPI free of optionals, which are the
+//// thing most likely to behave differently under a comptime body. A non-empty
+//// answer is the MESSAGE TEMPLATE, so an application constraint interpolates
+//// through the same path as a built-in one.
+////
+//// THE REGISTRY IS IN THE HOST. botopink has no top-level mutable state, and
+//// what a registration holds is a CLOSURE — no string table holds one.
+//// `src/validation_host.mjs` and `src/sidecars/rakun_validation.erl` are the
+//// two halves; neither decides anything, they hold a table.
+////
+//// AN UNREGISTERED NAME IS A VIOLATION, NOT A PASS. Decision 67: a validator
+//// that silently accepts what it cannot check is the failure this module is
+//// written to design out. `#[constraint("cpf")]` with nothing registered under
+//// `cpf` makes the report INVALID, with the name in the message, at the first
+//// validation call.
+
+import {Violation, violation, noViolation, oneViolation} from "report";
+import {message, builtInTemplate, arg, noArgs} from "messages";
+
+pub behavior Constraint {
+    fn code(self: Self) -> string;
+    // "" when the value is acceptable; otherwise the message template.
+    fn check(self: Self, field: string, value: string) -> string;
+}
+
+// ── the host table ──────────────────────────────────────────────────────────
+
+#[@External.Node("./validation_host.mjs", "registerConstraint"),
+  @External.Erlang("rakun_validation", "register_constraint")]
+declare fn rkvPut(name: string, c: fn(field: string, value: string) -> string) -> i32;
+
+#[@External.Node("./validation_host.mjs", "hasConstraint"),
+  @External.Erlang("rakun_validation", "has_constraint")]
+declare fn rkvHas(name: string) -> bool;
+
+#[@External.Node("./validation_host.mjs", "constraintOf"),
+  @External.Erlang("rakun_validation", "constraint_of")]
+declare fn rkvGet(name: string) -> fn(field: string, value: string) -> string;
+
+#[@External.Node("./validation_host.mjs", "putCode"),
+  @External.Erlang("rakun_validation", "put_code")]
+declare fn rkvPutCode(name: string, code: string) -> i32;
+
+#[@External.Node("./validation_host.mjs", "codeOf"),
+  @External.Erlang("rakun_validation", "code_of")]
+declare fn rkvCode(name: string) -> string;
+
+#[@External.Node("./validation_host.mjs", "registeredNames"),
+  @External.Erlang("rakun_validation", "registered_names")]
+declare fn rkvNames() -> string;
+
+#[@External.Node("./validation_host.mjs", "constraintReset"),
+  @External.Erlang("rakun_validation", "constraint_reset")]
+declare fn rkvClear() -> i32;
+
+// ── the surface ─────────────────────────────────────────────────────────────
+
+pub fn registerConstraint(name: string, code: string, check: fn(field: string, value: string) -> string) -> i32 {
+    val _c = rkvPutCode(name, code);
+    return rkvPut(name, check);
+}
+
+pub fn constraintRegistered(name: string) -> bool {
+    return rkvHas(name);
+}
+
+// Comma-joined, in registration order — the list an error message names when a
+// `#[constraint(...)]` does not resolve.
+pub fn registeredConstraints() -> string {
+    return rkvNames();
+}
+
+// Drops every registration. For a test that has to start from an empty table;
+// nothing in the validation path calls it.
+pub fn clearConstraints() -> i32 {
+    return rkvClear();
+}
+
+pub fn unknownConstraintMessage(name: string) -> string {
+    return "rakun validation: no constraint is registered under \"" + name + "\" — registered: [" + rkvNames() + "]";
+}
+
+// `#[constraint("cpf")]` lowers to this. An unregistered name is a violation
+// coded `unknownConstraint`; a registered one is asked, and its non-empty
+// answer is interpolated as the message template it is.
+pub fn vConstraint(field: string, name: string, value: string) -> Array<Violation> {
+    if (rkvHas(name) == false) return oneViolation(
+        violation(
+            field,
+            "unknownConstraint",
+            message(
+                "unknownConstraint",
+                builtInTemplate("unknownConstraint"),
+                field,
+                value,
+                [arg("name", "\"" + name + "\""), arg("registered", rkvNames())],
+            ),
+            value,
+        ),
+    );
+    val check = rkvGet(name);
+    val template = check(field, value);
+    if (template == "") return noViolation();
+    val code = rkvCode(name);
+    return oneViolation(
+        violation(field, code, message(code, template, field, value, noArgs()), value),
+    );
+}

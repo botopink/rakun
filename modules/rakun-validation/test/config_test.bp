@@ -1,0 +1,108 @@
+//// rakun-validation — step 6: boot-time configuration validation.
+////
+//// Front 14 owns the CONSTRAINTS; front 05 owns the MOMENT. This file asserts
+//// the half this front can assert: that a record carrying BOTH
+//// `#[configurationProperties]` (front 05, `modules/rakun/src/config.bp`) and
+//// `#[validated]` (this module) binds and then validates, that the refusal
+//// names property KEYS rather than field names, and that the name front 05
+//// builds — `validate` + the type name — is the name that exists.
+////
+//// WHAT THIS FILE CANNOT ASSERT, and why. The call itself is front 05's:
+//// `rkConfigValidate` is named in `config.bp`'s comment ("until 14 lands this
+//// is placement only, and `rkConfigValidate` has nothing to run") and does not
+//// exist in the tree. `modules/rakun/**` is not this front's to edit, so the
+//// boot path's call site is reported rather than written. Everything the call
+//// site would need is here and is exercised below.
+////
+//// The HALT is an `assert` inside `refuseInvalidConfig`, which aborts the
+//// process it runs in. A test cannot observe an abort and keep running, so the
+//// refusal TEXT is asserted directly and the halt is exercised only on the
+//// valid path, where it does not fire.
+////
+//// NOTE ON `#[validated]`. Front 05 already declares a placement-only
+//// `#[validated]` in `modules/rakun/src/config.bp`. It is NOT the one imported
+//// here: that one checks placement and emits nothing. An application that wants
+//// the emission imports `validated` from `rakun-validation`, and must not
+//// import both names into one module.
+
+import {validated, notBlank, minValue, maxValue, pattern, sizeBetween} from "decorators";
+import {configurationProperties, defaultValue} from "rakun";
+import {rkSetProp, rkProp, rkValueOr, rkPropIntOr, rkPropBool, rkPropFloat, rkPropList, rkPropDuration, rkPropSize, rkSingleton, rkRegisterConfigKeys} from "rakun";
+import {ValidationReport, Violation} from "report";
+import {constraintTableJson} from "table";
+import {vNotBlank, vMinValueI32, vMaxValueI32, vPattern, vSizeBetween} from "constraints";
+import {vConstraint} from "spi";
+import {propertyKey, violationLine, configProblem, refuseInvalidConfig} from "boot";
+
+#[validated]
+#[configurationProperties("app.billing")]
+pub type BillingConfig(
+    #[notBlank]
+    #[pattern("^https?://.+$")]
+    endpoint: string,
+
+    #[minValue(1)]
+    #[maxValue(10)]
+    retryLimit: i32,
+)
+
+fn seed(endpoint: string, retries: string) -> i32 {
+    val _a = rkSetProp("app.billing.endpoint", endpoint);
+    return rkSetProp("app.billing.retryLimit", retries);
+}
+
+fn bound() -> BillingConfig {
+    return __rkBind_BillingConfig("app.billing");
+}
+
+// ── the seam ────────────────────────────────────────────────────────────────
+
+test "rakun validation: the name front 05 builds is the name that exists" {
+    val _s = seed("https://billing.example.com", "3");
+    val report = validateBillingConfig(bound());
+    assert report.isValid();
+    assert refuseInvalidConfig("BillingConfig", "app.billing", report) == 0;
+}
+
+test "rakun validation: a bound-but-invalid configuration is refused, with every violation" {
+    val _s = seed("", "42");
+    val cfg = bound();
+    assert cfg.endpoint == "";
+    assert cfg.retryLimit == 42;
+    val report = validateBillingConfig(cfg);
+    assert report.isValid() == false;
+    assert report.violations.map({ v -> v.code }).join(",") == "notBlank,pattern,maxValue";
+}
+
+test "rakun validation: every line of the refusal names its property key" {
+    val _s = seed("", "42");
+    val text = configProblem("BillingConfig", "app.billing", validateBillingConfig(bound()));
+    assert text.contains("`BillingConfig` is not valid");
+    assert text.contains("  app.billing.endpoint: must not be blank (notBlank)");
+    assert text.contains("  app.billing.retryLimit: must be at most 10 (maxValue)");
+    assert text.contains("  endpoint:") == false;
+}
+
+test "rakun validation: the key is the prefix plus the field, and bare without one" {
+    assert propertyKey("app.billing", "retryLimit") == "app.billing.retryLimit";
+    assert propertyKey("", "retryLimit") == "retryLimit";
+    val v = Violation(
+        field: "retryLimit",
+        code: "maxValue",
+        message: "must be at most 10",
+        invalidValue: "42",
+    );
+    assert violationLine("app.billing", v) == "  app.billing.retryLimit: must be at most 10 (maxValue)";
+}
+
+test "rakun validation: a valid configuration costs one pass over the violations" {
+    val _s = seed("http://x.test", "1");
+    val report = validateBillingConfig(bound());
+    assert report.violations.length == 0;
+    assert refuseInvalidConfig("BillingConfig", "app.billing", report) == 0;
+    assert configProblem("BillingConfig", "app.billing", report) == "rakun config: `BillingConfig` is not valid - the application will not start\n";
+}
+
+test "rakun validation: the configuration record's table crosses like any other" {
+    assert constraintsOfBillingConfig() == "{\"type\":\"BillingConfig\",\"fields\":[{\"name\":\"endpoint\",\"constraints\":[{\"code\":\"notBlank\"},{\"code\":\"pattern\",\"regex\":\"^https?://.+$\"}]},{\"name\":\"retryLimit\",\"constraints\":[{\"code\":\"minValue\",\"min\":1},{\"code\":\"maxValue\",\"max\":10}]}]}";
+}
