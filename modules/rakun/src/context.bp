@@ -34,6 +34,8 @@
 //// call a sibling function. When `decorators.bp` unfreezes, this body folds
 //// into the six stereotypes and the extra line goes away.
 
+import {rkSingleton} from "runtime";
+
 // ── scopes ──────────────────────────────────────────────────────────────────
 //
 // `Singleton` goes through `rkSingleton` and is what constructor injection
@@ -420,6 +422,74 @@ pub fn rkBeanNamesIn(path: string) -> string[] {
         };
     };
     return names;
+}
+
+// ── `Context` ───────────────────────────────────────────────────────────────
+//
+// The record face of the free functions above, and what replaces the
+// declaration-only `behavior Context` that `rakun.d.bp` carried under a header
+// calling it "not yet implemented".
+//
+// `Context` IS INJECTABLE BY TYPE. `__rkMake_Context()` is emitted here, so a
+// field of type `Context` wires with no extra declaration — `decorators.bp`
+// emits `__rkMake_<FieldType>()` for every field and this is that factory. It
+// is EXEMPT FROM THE CYCLE GUARD on purpose: it brackets nothing with
+// `rkEnter`/`rkDone` because it is constructed before the scan runs and depends
+// on nothing, so a component holding a `Context` can never be a cycle through
+// it. And it is NOT a registered bean, so it does not appear in its own
+// `beanNames()` and the eager pass does not construct it twice.
+//
+// `resolve` TAKES THE TYPE NAME AS A STRING because the type argument is not
+// reachable at run time: there is no `@typeName<T>()`, and explicit generic
+// arguments do not parse at a call site, so `ctx.resolve<UserRepository>()` is
+// not writable. The type comes from the annotated binding —
+//
+//     val repo: ?UserRepository = self.ctx.resolve("UserRepository");
+//
+// — and the pairing of `T` with the string is unchecked. Both halves are
+// language gaps and both are in the front's register. Dropping the generic and
+// returning `any` would lose the type everywhere; the string is the smaller cost.
+
+pub type Context(
+    scopePath: string,
+) {
+    pub fn resolve<T>(self: Self, typeName: string) -> ?T {
+        return rkResolveIn(self.scopePath, typeName);
+    }
+
+    pub fn resolveNamed<T>(self: Self, typeName: string, qualifier: string) -> ?T {
+        return rkResolveNamedIn(self.scopePath, typeName, qualifier);
+    }
+
+    pub fn has(self: Self, typeName: string) -> bool {
+        return rkHasBeanIn(self.scopePath, typeName);
+    }
+
+    pub fn beanNames(self: Self) -> string[] {
+        return rkBeanNamesIn(self.scopePath);
+    }
+
+    // A context whose `resolve` looks in its own registry first and delegates
+    // upward on a miss. Front 62 builds the per-request scope on it.
+    pub fn child(self: Self, name: string) -> Context {
+        if (name == "") @panic(childNameProblem());
+        if (name.contains("/")) @panic(childNameProblem());
+        return Context(scopePath: self.scopePath + "/" + name);
+    }
+
+    pub fn path(self: Self) -> string {
+        return self.scopePath;
+    }
+}
+
+pub fn childNameProblem() -> string {
+    return "rakun: a child context needs a name, and it may not contain '/'";
+}
+
+// The root context. A singleton so two injection sites share one value, and
+// deliberately NOT bracketed by `rkEnter`/`rkDone`: see above.
+pub fn __rkMake_Context() -> Context {
+    return rkSingleton("Context", { -> Context(scopePath: "") });
 }
 
 // ── `#[managed]` ────────────────────────────────────────────────────────────

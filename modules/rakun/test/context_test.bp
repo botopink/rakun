@@ -9,7 +9,7 @@
 //// `rkBeanReset()`: it would wipe the registrations the file is about.
 
 import {service, repository, restController, route, getMapping} from "decorators";
-import {rkScan, rkSingleton, rkEnter, rkDone, rkRegisterRoute, rkBuildCount} from "runtime";
+import {rkScan, rkSingleton, rkEnter, rkDone, rkRegisterRoute, rkBuildCount, rkScannedNames} from "runtime";
 import {Request, Response} from "http";
 import {
     managed,
@@ -38,6 +38,9 @@ import {
     rkHasBean,
     rkHasBeanIn,
     chooseBean,
+    Context,
+    childNameProblem,
+    __rkMake_Context,
 } from "context";
 import {asserts} from "std";
 
@@ -201,4 +204,86 @@ test "rakun context: with one candidate marked #[primary] the unqualified resolv
     val _b = rkRegisterBean("Picked", "right", "singleton", true, false, "rightMaker", { -> 2 });
     val v: ?i32 = rkResolve("Picked");
     assert v.unwrapOr(0) == 2;
+}
+
+// ── step 2: `Context` ───────────────────────────────────────────────────────
+//
+// The receiver is ALWAYS an annotated local. `__rkMake_Context().resolve(...)`
+// and `val ctx = __rkMake_Context();` both lose the optional's payload type —
+// the optional a record method answers loses its type when the receiver is a
+// call or an UNANNOTATED local (AGENTS.md § Language notes). `val ctx: Context`
+// is the spelling that keeps `?OrderCache` an `?OrderCache`.
+
+#[service]
+#[managed]
+pub type ContextHolder(
+    // `Context` is injectable by type with no extra declaration: front 06 emits
+    // its factory and `decorators.bp` emits `__rkMake_Context()` for the field.
+    ctx: Context,
+) {
+    pub fn sees(self: Self, typeName: string) -> bool {
+        return self.ctx.has(typeName);
+    }
+}
+
+test "rakun context: ctx.resolve returns what field injection returns" {
+    val ctx: Context = __rkMake_Context();
+    val cache: ?OrderCache = ctx.resolve("OrderCache");
+    var size = -1;
+    if (cache != null) size = cache.size();
+    assert size == 3;
+    assert ctx.has("OrderCache");
+    assert !ctx.has("Nonexistent");
+    assert ctx.path() == "";
+}
+
+test "rakun context: a field of type Context is injected with no extra declaration" {
+    val holder = __rkMake_ContextHolder();
+    assert holder.sees("OrderCache");
+    assert !holder.sees("Nonexistent");
+}
+
+test "rakun context: Context is not a bean of its own registry and is not in the cycle guard" {
+    val ctx: Context = __rkMake_Context();
+    assert !ctx.has("Context");
+    assert !ctx.beanNames().contains("Context");
+    // `rkEnter`/`rkDone` are what `rkBuildCount` counts; the Context factory
+    // brackets nothing, so the guard never saw it.
+    assert rkBuildCount("Context") == 0;
+}
+
+test "rakun context: beanNames is the registry, not the scan list" {
+    val ctx: Context = __rkMake_Context();
+    val scanned = rkScannedNames();
+    loop (ctx.beanNames()) { name ->
+        assert scanned.contains(name) || name.startsWith("Dup") || name.startsWith("Tied") || name.startsWith("Picked") || name.startsWith("Layered") || name.startsWith("Scoped");
+    };
+    assert scanned.contains("UnregisteredService");
+    assert !ctx.beanNames().contains("UnregisteredService");
+}
+
+test "rakun context: a child context finds a bean registered only in the parent" {
+    val ctx: Context = __rkMake_Context();
+    val kid: Context = ctx.child("request");
+    assert kid.path() == "/request";
+    val cache: ?OrderCache = kid.resolve("OrderCache");
+    var size = -1;
+    if (cache != null) size = cache.size();
+    assert size == 3;
+    assert kid.has("OrderCache");
+    val grand: Context = kid.child("inner");
+    assert grand.path() == "/request/inner";
+    assert grand.has("OrderCache");
+}
+
+test "rakun context: a child needs a name and the name may not carry a separator" {
+    val ctx: Context = __rkMake_Context();
+    try asserts.throwsWith({ ->
+        ctx.child("");
+        0;
+    }, childNameProblem());
+    try asserts.throwsWith({ ->
+        ctx.child("a/b");
+        0;
+    }, childNameProblem());
 }

@@ -1281,6 +1281,26 @@ five-argument call has no room for the third of those four, and neither has room
 for the owner its own ambiguity message spells (`two beans of type 'Clock'
 ('systemClock', 'fixedClock')`). Both are added rather than dropped.
 
+### `Context` is injectable, and reached through an annotated local
+
+`context.bp` emits `pub fn __rkMake_Context() -> Context`, which is the name
+`decorators.bp` already emits for a field of any type — so a `ctx: Context` field
+wires with no extra step. The consumer names that factory in its `import` list
+beside `rkScan` and `rkSingleton`, because the emitted wiring calls it at the
+APPLICATION site; the front's acceptance says "without any extra declaration",
+and an import is not a declaration.
+
+The factory brackets nothing with `rkEnter`/`rkDone` — `Context` is constructed
+before the scan runs and depends on nothing, so a component holding one can never
+be a cycle through it — and it registers no bean, so `Context` does not appear in
+its own `beanNames()` and the eager pass does not build it twice.
+
+**The receiver has to be an annotated local.** `__rkMake_Context().resolve(…)`
+and `val ctx = __rkMake_Context();` both lose the optional's payload type (the
+`§ Language notes` row about a record method's optional and an unannotated
+receiver). Every call site in `test/context_test.bp` writes
+`val ctx: Context = __rkMake_Context();`, and that is not style.
+
 ### Resolution and the tie
 
 `__rkMake_<FieldType>()` is unique by construction, so constructor injection

@@ -11,6 +11,22 @@
 > passing / 2 failing, the two reds being `{badkey,param}`/`{badkey,query}` in
 > front 04's `server_test.bp`.
 
+- **`Context`, and the parent/child chain** (front 06, step 2).
+  `pub type Context(scopePath)` carries `resolve` / `resolveNamed` / `has` /
+  `beanNames` / `child` / `path`, and `__rkMake_Context()` makes it injectable by
+  type with no extra step — the factory is exempt from the cycle guard (it is
+  constructed before the scan runs and depends on nothing) and registers no bean,
+  so `Context` does not appear in its own `beanNames()`. `ctx.child("request")`
+  is a real chain rather than a label: it looks in its own registry first and
+  delegates upward on a miss, which is what front 62 builds the per-request scope
+  on. Six new assertions, green on both rows.
+
+  **The receiver has to be an annotated local.** `__rkMake_Context().resolve(…)`
+  and `val ctx = __rkMake_Context();` both lose the optional's payload type, so
+  every call site writes `val ctx: Context = __rkMake_Context();`. That is the
+  `§ Language notes` row about a record method's optional and an unannotated
+  receiver, met again.
+
 - **The bean registry, and why it holds factories** (front 06, step 1).
   `modules/rakun/src/context.bp` is the first of the container's doors:
   `#[managed]` stacks under a stereotype and `@emit`s one
