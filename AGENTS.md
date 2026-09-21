@@ -718,6 +718,47 @@ turns "this page is not being prerendered" into a line of build output. The
 frame's `strict` flag is set by front 60's prerenderer and by nothing else: a
 dynamic read raises there, naming the function and the route.
 
+### `cookies()`, and the `Set-Cookie` queue
+
+Front 04's `rkSetReplyHeader/2` replaces by NAME, so it can carry one
+`Set-Cookie` and no more. This front therefore queues fully serialized lines on
+the frame and hands the list back from `endRequest()` as a `\n`-separated blob;
+the dispatcher appends each line to the response as its own header. The host
+holds a keyed line list — insertion-ordered, replaced by key, position kept on a
+replace — which is the same primitive `set_reply_header/2` already is. Neither
+host knows what a cookie looks like.
+
+`cookieNames` / `cookieLookup` / `cookiePresent` take the header as a PARAMETER
+and are pure, so the grammar is asserted with no socket. A chunk with no `=`
+contributes nothing: a cookie the client never sent must not read as one it did.
+Spaces around the separators are trimmed, a trailing `;` is skipped, the first
+occurrence of a repeated name wins (RFC 6265 § 5.4), and a cookie NAME is
+case-sensitive where a header name is not.
+
+**`cookieDefaults()`'s `maxAge: 0` is a defect, implemented as specified.** RFC
+6265 § 5.2.2 says a `Max-Age` at or below zero expires the cookie immediately,
+so `serializeCookie(n, v, cookieDefaults())` writes a line the user agent
+deletes on arrival — `maxAge: 0` is not the restrictive end of the lifetime
+axis, it is the *deleting* end. The restrictive-and-correct default is to OMIT
+`Max-Age`, which is a session cookie. The front's acceptance pins the literal
+`s=a%20b; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax` and eleven fronts
+cite this one, so the literal is honoured and the defect is written down rather
+than silently corrected. Fronts 10 and 18 must pass their own `maxAge`;
+`delete` is told apart from a defaulted `set` by its EMPTY value, not by its
+`Max-Age`. Closing it is a one-line change in `serializeCookie` plus one
+acceptance line, and it belongs to the front that owns sessions.
+
+**Percent encoding is ASCII, and says so.** There is no byte type (front 01
+recorded it), `std`'s `unicode` module is `undef` on the erlang row from here,
+and `charCodeAt` answers a UTF-16 code unit on node against a codepoint on the
+BEAM: three reasons the two rows cannot be made to agree about a non-ASCII
+octet. A CONTROL character percent-encodes — that is how "a `Set-Cookie` line
+cannot hold a newline" is kept true — and a character ABOVE printable ASCII
+makes `serializeCookie` raise, naming the cookie and saying to encode the value
+first. `percentDecode` decodes only into the printable range: a decoder that can
+produce a control character is a decoder that can put a newline in a header, so
+`%0A` stays `%0A`, which is lossless and round-trips.
+
 ### Language notes this module is written around
 
 - **A `@panic` message must be pure ASCII.** `asserts.throwsWith` catches
@@ -727,6 +768,19 @@ dynamic read raises there, naming the function and the route.
   refusal text in this module uses `-` where the prose around it uses `—`, and
   the assertions are the reason. Measured, not guessed: the first run of
   `test/request_context_test.bp` on the erlang row failed six cells on it.
+- **`i32 / i32` is FLOAT division on commonJS and INTEGER division on erlang.**
+  `233 / 16` is `14.5625` on the node row and `14` on the BEAM. Subtract the
+  remainder first — `idiv(a, b)` is `(a - a % b) / b` — and the quotient is
+  exact on both. Measured while writing `hexByte`.
+- **`std`'s `unicode` module is `undef` on the erlang row from rakun.**
+  `unicode.fromCodepoint` and `unicode.codepoints` both answer `{error, undef}`
+  under `botopink test --target erlang`, so neither can carry a UTF-8
+  round trip here. They work on the node row.
+- **A non-ASCII string LITERAL raises on the erlang row.** `"caf\u00e9".length()`
+  is `{badarg, <<...>>}` — before any of this front's code runs. So the positive
+  case of the non-ASCII cookie refusal is not expressible as a cell at all; the
+  guard, its text and the negative case are asserted instead, and the gap is
+  listed here rather than quietly dropped.
 - **A refusal is a function.** `noFrameProblem` / `nestedFrameProblem` /
   `staleEpochProblem` are `pub fn`s returning the text, for the reason
   `durationProblem` is one: a test reads the words without the halt taking the

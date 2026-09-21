@@ -33,6 +33,7 @@
 -module(rakun_request_context).
 
 -export([begin_frame/1, end_frame/0, is_live/0, epoch/0, slot/1, put_slot/2]).
+-export([queue_cookie/2, cookie_blob/0]).
 
 %% reachable for a test or a later front
 -export([ensure/0, owner/1]).
@@ -124,3 +125,35 @@ put_slot(Name, Value) ->
         #{slots := S} = F -> put(?FRAME, F#{slots := S#{Name => Value}}), 0;
         _ -> 0
     end.
+
+%% ═══ the queued `Set-Cookie` lines ═══════════════════════════════════════════
+%% A keyed line list, insertion-ordered and replaced by key — the same primitive
+%% `rakun_runtime:set_reply_header/2` already is, and for the same reason: that
+%% one replaces by name, so it carries one `Set-Cookie` and no more. This module
+%% does not know what a cookie looks like; it is handed a name and a finished
+%% line.
+
+queue_cookie(Name, Line) ->
+    case get(?FRAME) of
+        #{cookies := Cs} = F ->
+            %% Replacing keeps the ORIGINAL position: a response whose headers
+            %% reorder themselves because a value was rewritten is a response
+            %% nobody can diff.
+            Next = case lists:keyfind(Name, 1, Cs) of
+                       false -> Cs ++ [{Name, Line}];
+                       _ -> lists:keyreplace(Name, 1, Cs, {Name, Line})
+                   end,
+            put(?FRAME, F#{cookies := Next}),
+            length(Next);
+        _ -> 0
+    end.
+
+cookie_blob() ->
+    case get(?FRAME) of
+        #{cookies := Cs} -> join([L || {_N, L} <- Cs]);
+        _ -> <<>>
+    end.
+
+join([]) -> <<>>;
+join([H | T]) ->
+    lists:foldl(fun(X, Acc) -> <<Acc/binary, "\n", X/binary>> end, H, T).

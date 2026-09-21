@@ -44,6 +44,21 @@ import {
     dynamicReason,
     markDynamic,
     strictProblem,
+    CookieAttrs,
+    Cookies,
+    cookies,
+    cookieOf,
+    cookieDefaults,
+    serializeCookie,
+    cookieNames,
+    cookieLookup,
+    cookiePresent,
+    percentEncode,
+    percentDecode,
+    hexByte,
+    nonAscii,
+    cookieValueProblem,
+    cookiePhaseProblem,
 } from "request_context";
 
 fn scopeOf(id: string, phase: RequestPhase, path: string) -> RequestScope {
@@ -321,4 +336,173 @@ test "rakun request: a Headers handle minted in the previous request raises in t
         0;
     }, "belongs to a request that has ended");
     val _x2 = endRequest();
+}
+
+
+// ── step 3: cookies() ───────────────────────────────────────────────────────
+
+fn cookieScope(phase: RequestPhase, header: string) -> RequestScope {
+    return RequestScope(
+        id: "c-1",
+        phase: phase,
+        method: "GET",
+        path: "/dashboard",
+        query: "",
+        headersWire: "host\texample.com\ncookie\t" + header,
+        strict: false,
+    );
+}
+
+test "rakun request: percent encoding round-trips the printable range" {
+    assert percentEncode("a b") == "a%20b";
+    assert percentEncode("plain-VALUE_1.~") == "plain-VALUE_1.~";
+    assert percentEncode("a;b") == "a%3Bb";
+    assert percentEncode("a=b") == "a%3Db";
+    assert hexByte(32) == "20";
+    assert hexByte(255) == "FF";
+    assert percentDecode("a%20b") == "a b";
+    assert percentDecode(percentEncode("a b;c=d")) == "a b;c=d";
+    assert percentDecode("%zz") == "%zz";
+    assert percentDecode("100%") == "100%";
+    assert percentDecode("%0A") == "%0A";
+}
+
+test "rakun request: serializeCookie writes the literal that goes on the wire" {
+    assert serializeCookie("s", "a b", cookieDefaults())
+        == "s=a%20b; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax";
+}
+
+test "rakun request: serializeCookie carries every attribute it is given" {
+    val attrs = CookieAttrs(
+        path: "/admin",
+        domain: "example.com",
+        maxAge: 3600,
+        httpOnly: false,
+        secure: true,
+        sameSite: "Strict",
+    );
+    assert serializeCookie("session", "abc", attrs)
+        == "session=abc; Path=/admin; Domain=example.com; Max-Age=3600; Secure; SameSite=Strict";
+}
+
+// The POSITIVE case cannot be written on both rows: a non-ASCII string LITERAL
+// makes `String.length()` raise `{badarg, <<...>>}` on the erlang row before
+// any of this front's code runs, so a cell asserting it reddens erlang whatever
+// else it says. The guard, its refusal text and the negative case are asserted
+// here; the shape is listed in `AGENTS.md`.
+test "rakun request: a non-ASCII cookie value is refused, not guessed at" {
+    assert nonAscii("plain") == false;
+    assert nonAscii("a b;c=d") == false;
+    assert cookieValueProblem("theme").contains("outside printable ASCII");
+    assert cookieValueProblem("theme").contains("encode the value yourself");
+}
+
+test "rakun request: a cookie value cannot carry a newline" {
+    val line: string = serializeCookie("s", "a\nb", cookieDefaults());
+    assert line.contains("\n") == false;
+    assert line.startsWith("s=a%0Ab; ") == true;
+}
+
+test "rakun request: the cookie header parses without inventing entries" {
+    assert cookieNames("theme=dark; sid=abc").join(",") == "theme,sid";
+    assert cookieNames("theme=dark;").join(",") == "theme";
+    assert cookieNames("  theme = dark ; sid = abc ").join(",") == "theme,sid";
+    assert cookieNames("novalue; theme=dark").join(",") == "theme";
+    assert cookieNames("=orphan; theme=dark").join(",") == "theme";
+    assert cookieNames("").join(",") == "";
+    assert cookieLookup("theme=dark; sid=abc", "sid") == "abc";
+    assert cookieLookup("theme=dark; theme=light", "theme") == "dark";
+    assert cookieLookup("theme=dark", "missing") == "";
+    assert cookiePresent("theme=dark", "theme") == true;
+    assert cookiePresent("theme=dark", "Theme") == false;
+}
+
+test "rakun request: a cookie value is read back percent-decoded" {
+    val _e = beginRequest(cookieScope(RequestPhase.Handler, "theme=a%20b; sid=abc"));
+    val c: Cookies = cookies();
+    val theme = c.get("theme");
+    assert theme.unwrapOr("") == "a b";
+    assert cookieOf(cookies(), "sid", "") == "abc";
+    assert c.has("sid") == true;
+    assert c.has("nope") == false;
+    val absent = c.get("nope");
+    try asserts.isNil(absent);
+    assert c.names().join(",") == "theme,sid";
+    val _x = endRequest();
+}
+
+test "rakun request: a cookie set in phase Render raises" {
+    val _e = beginRequest(cookieScope(RequestPhase.Render, "theme=dark"));
+    val c: Cookies = cookies();
+    try asserts.throwsWith({ ->
+        c.set("theme", "light", cookieDefaults());
+        0;
+    }, "a cookie may be set from a server action, a route handler or middleware");
+    try asserts.throwsWith({ ->
+        c.delete("theme");
+        0;
+    }, "a cookie may be set from a server action, a route handler or middleware");
+    val _x = endRequest();
+}
+
+test "rakun request: two names queue two lines and one name queues the later value" {
+    val _e = beginRequest(cookieScope(RequestPhase.Action, ""));
+    val c: Cookies = cookies();
+    val _a = c.set("theme", "dark", cookieDefaults());
+    val _b = c.set("sid", "one", cookieDefaults());
+    val _d = c.set("theme", "light", cookieDefaults());
+    val blob: string = endRequest();
+    val lines: string[] = blob.split("\n");
+    assert lines.length() == 2;
+    assert lines.at(0).unwrapOr("") == "theme=light; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax";
+    assert lines.at(1).unwrapOr("") == "sid=one; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax";
+}
+
+test "rakun request: delete queues an empty value with Max-Age=0" {
+    val _e = beginRequest(cookieScope(RequestPhase.Handler, "session=abc"));
+    val c: Cookies = cookies();
+    val _d = c.delete("session");
+    val blob: string = endRequest();
+    assert blob == "session=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax";
+}
+
+test "rakun request: a request that queues nothing answers an empty blob" {
+    val _e = beginRequest(cookieScope(RequestPhase.Handler, ""));
+    assert endRequest() == "";
+}
+
+test "rakun request: a Cookies handle used after endRequest raises rather than writing" {
+    val _e = beginRequest(cookieScope(RequestPhase.Handler, ""));
+    val c: Cookies = cookies();
+    val _x = endRequest();
+    try asserts.throwsWith({ ->
+        c.set("theme", "dark", cookieDefaults());
+        0;
+    }, "request context is not established");
+}
+
+test "rakun request: a Cookies handle minted in the previous request raises in the next" {
+    val _e = beginRequest(cookieScope(RequestPhase.Handler, ""));
+    val stale: Cookies = cookies();
+    val _x = endRequest();
+    val _e2 = beginRequest(cookieScope(RequestPhase.Handler, ""));
+    try asserts.throwsWith({ ->
+        stale.set("theme", "dark", cookieDefaults());
+        0;
+    }, "belongs to a request that has ended");
+    val blob: string = endRequest();
+    assert blob == "";
+}
+
+test "rakun request: cookies() marks a render dynamic" {
+    val _e = beginRequest(cookieScope(RequestPhase.Render, "theme=dark"));
+    val c: Cookies = cookies();
+    assert isDynamic() == true;
+    assert dynamicReason() == "cookies";
+    val _x = endRequest();
+}
+
+test "rakun request: the cookie refusal texts say what they mean" {
+    assert cookieValueProblem("sid").contains("encode the value yourself");
+    assert cookiePhaseProblem("render").contains("never from a render");
 }

@@ -38,7 +38,7 @@
 //// serialization and every refusal message are botopink, compiled twice.
 
 import {rkPropInt} from "runtime";
-import {sub} from "config";
+import {charOf, sub} from "config";
 
 // ── the five phases ─────────────────────────────────────────────────────────
 //
@@ -130,6 +130,21 @@ pub declare fn rkReqSlot(name: string) -> string;
   @External.Erlang("rakun_request_context", "put_slot")]
 pub declare fn rkReqPutSlot(name: string, value: string) -> i32;
 
+// The queued `Set-Cookie` lines. A keyed line list, insertion-ordered and
+// replaced by key: front 04's `rkSetReplyHeader/2` replaces by NAME, so it can
+// carry one `Set-Cookie` and no more, and this front therefore queues fully
+// serialized lines on the frame and hands the list back from `endRequest()`.
+// The host knows only "a keyed list of lines" — the same primitive
+// `set_reply_header/2` already is; it does not know what a cookie looks like.
+
+#[@External.Node("./request_context.mjs", "queueCookie"),
+  @External.Erlang("rakun_request_context", "queue_cookie")]
+pub declare fn rkReqQueueCookie(name: string, line: string) -> i32;
+
+#[@External.Node("./request_context.mjs", "cookieBlob"),
+  @External.Erlang("rakun_request_context", "cookie_blob")]
+pub declare fn rkReqCookieBlob() -> string;
+
 // ── the refusals ────────────────────────────────────────────────────────────
 //
 // Each message is a function of its own, for the reason `durationProblem` is:
@@ -177,8 +192,9 @@ pub fn beginRequest(scope: RequestScope) -> i64 {
 
 pub fn endRequest() -> string {
     val _d = demand("endRequest()");
+    val blob: string = rkReqCookieBlob();
     val _e = rkReqEnd();
-    return "";
+    return blob;
 }
 
 pub fn setPhase(phase: RequestPhase) -> i32 {
@@ -384,5 +400,291 @@ pub fn headers() -> Headers {
 // what fronts 23, 24 and 25 should use.
 pub fn headerOf(h: Headers, name: string, fallback: string) -> string {
     val found: ?string = h.get(name);
+    return found.unwrapOr(fallback);
+}
+
+// ── percent encoding ────────────────────────────────────────────────────────
+//
+// There is no byte type (front 01 recorded it), `std`'s `unicode` module is
+// `undef` on the erlang row from here, and `charCodeAt` answers a UTF-16 code
+// unit on node against a codepoint on the BEAM — three reasons the two rows
+// cannot be made to agree about a non-ASCII octet. So this encoder is ASCII and
+// says so: a character at or above 128 makes `serializeCookie` RAISE, naming
+// the cookie, rather than writing a byte sequence one row would read back
+// differently from the other. A caller with a non-ASCII value encodes it
+// itself — base64url is the usual answer, and a session token already is one.
+//
+// `idiv` is here because `i32 / i32` is FLOAT division on commonJS (`233 / 16`
+// is `14.5625`) and integer division on erlang (`14`). Subtracting the
+// remainder first makes the quotient exact on both rows.
+
+fn idiv(a: i32, b: i32) -> i32 {
+    return (a - a % b) / b;
+}
+
+fn hexDigit(n: i32) -> string {
+    return charOf("0123456789ABCDEF", n);
+}
+
+pub fn hexByte(code: i32) -> string {
+    return hexDigit(idiv(code, 16)) + hexDigit(code % 16);
+}
+
+// Index == code - 32. Only the printable range is here, deliberately: a decoder
+// that can produce a control character is a decoder that can put a newline in a
+// header, and this front's contract is that a `Set-Cookie` line cannot hold one.
+fn printableAscii() -> string {
+    return " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~";
+}
+
+fn unreserved(c: string) -> bool {
+    if (c == "") return false;
+    return "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~".indexOf(c) >= 0;
+}
+
+// A control character is percent-encoded — that is how `serializeCookie`'s
+// promise that a `Set-Cookie` line cannot hold a newline is kept. A character
+// ABOVE printable ASCII is refused, because there is no byte type and the two
+// rows do not agree what octets it is.
+//
+// On the erlang row this guard is unreachable: a non-ASCII string LITERAL makes
+// `String.length()` raise `{badarg, <<...>>}` before any code here runs, which
+// is why `test/request_context_test.bp` asserts the refusal TEXT and the
+// negative case rather than the positive one. Recorded in `AGENTS.md`, not
+// worked around.
+pub fn nonAscii(raw: string) -> bool {
+    var found = false;
+    var i = 0;
+    loop (i < raw.length()) {
+        val code: i32 = charOf(raw, i).charCodeAt(0);
+        found = if (code > 126) true else found;
+        i = i + 1;
+    };
+    return found;
+}
+
+pub fn percentEncode(raw: string) -> string {
+    var out = "";
+    var i = 0;
+    loop (i < raw.length()) {
+        val c: string = charOf(raw, i);
+        val code: i32 = c.charCodeAt(0);
+        val escaped: string = if (code < 128) "%" + hexByte(code) else c;
+        val piece: string = if (unreserved(c)) c else escaped;
+        out = out + piece;
+        i = i + 1;
+    };
+    return out;
+}
+
+fn hexValue(c: string) -> i32 {
+    if (c == "") return -1;
+    return "0123456789ABCDEF".indexOf(c.toUpper());
+}
+
+// `%XX` in the printable ASCII range decodes; anything else stays as written.
+// Rebuilding a codepoint out of octets needs a byte type this language does not
+// have, and producing a control character out of an escape is how a newline
+// reaches a header. Leaving the escape untouched is lossless and round-trips;
+// guessing would not.
+pub fn percentDecode(raw: string) -> string {
+    var out = "";
+    var i = 0;
+    loop (i < raw.length()) {
+        val c: string = charOf(raw, i);
+        val hi: i32 = if (c == "%") hexValue(charOf(raw, i + 1)) else -1;
+        val lo: i32 = if (c == "%") hexValue(charOf(raw, i + 2)) else -1;
+        val pair = ((hi >= 0) && (lo >= 0));
+        val code: i32 = if (pair) hi * 16 + lo else -1;
+        val decodable = ((code >= 32) && (code <= 126));
+        val piece: string = if (decodable) charOf(printableAscii(), code - 32) else c;
+        val step: i32 = if (decodable) 3 else 1;
+        out = out + piece;
+        i = i + step;
+    };
+    return out;
+}
+
+// ── cookies ─────────────────────────────────────────────────────────────────
+//
+// `cookieDefaults()` is the restrictive end of every axis, because a default
+// that has to be tightened is a default that ships untightened.
+//
+// ONE DEFECT IN THAT SENTENCE IS THE SPEC'S AND IS IMPLEMENTED AS WRITTEN.
+// `maxAge = 0` is NOT the restrictive end of the lifetime axis: RFC 6265
+// § 5.2.2 says a `Max-Age` at or below zero expires the cookie immediately, so
+// `serializeCookie(n, v, cookieDefaults())` writes a line the user agent
+// deletes on arrival. The restrictive-and-correct default is to OMIT `Max-Age`
+// — a session cookie, gone when the browser closes. The front's acceptance
+// pins the literal `s=a%20b; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax`
+// and eleven fronts cite this one, so the literal is honoured and the defect is
+// written down rather than silently corrected: a caller that wants the cookie
+// to survive the response passes its own `maxAge`, and `delete` is told apart
+// from a defaulted `set` by its EMPTY value, not by its `Max-Age`.
+
+pub type CookieAttrs(
+    path: string,
+    domain: string,
+    maxAge: i32,
+    httpOnly: bool,
+    secure: bool,
+    sameSite: string,
+)
+
+pub fn cookieDefaults() -> CookieAttrs {
+    return CookieAttrs(
+        path: "/",
+        domain: "",
+        maxAge: 0,
+        httpOnly: true,
+        secure: true,
+        sameSite: "Lax",
+    );
+}
+
+pub fn cookieValueProblem(name: string) -> string {
+    return "rakun request: cookie `" + name
+        + "` carries a character outside printable ASCII - there is no byte type, so the "
+        + "two backends cannot agree what octets that is; encode the value yourself "
+        + "(base64url) before setting it";
+}
+
+pub fn cookiePhaseProblem(phase: string) -> string {
+    return "rakun request: a cookie may not be written in phase `" + phase
+        + "` - a cookie may be set from a server action, a route handler or middleware, "
+        + "never from a render (the response head may already be on the wire) and never "
+        + "after the response is sent";
+}
+
+// The one place a cookie becomes a wire line. Pure, so it is asserted as a
+// literal string with no socket anywhere near it.
+pub fn serializeCookie(name: string, value: string, attrs: CookieAttrs) -> string {
+    if (nonAscii(name)) @panic(cookieValueProblem(name));
+    if (nonAscii(value)) @panic(cookieValueProblem(name));
+    var out: string = name + "=" + percentEncode(value);
+    val path: string = attrs.path;
+    if (path != "") out = out + "; Path=" + path;
+    val domain: string = attrs.domain;
+    if (domain != "") out = out + "; Domain=" + domain;
+    out = out + "; Max-Age=" + attrs.maxAge.toString();
+    if (attrs.httpOnly) out = out + "; HttpOnly";
+    if (attrs.secure) out = out + "; Secure";
+    val sameSite: string = attrs.sameSite;
+    if (sameSite != "") out = out + "; SameSite=" + sameSite;
+    return out;
+}
+
+// ── the cookie request header ───────────────────────────────────────────────
+//
+// `name=value; name2=value2`. A chunk with no `=` contributes nothing — it does
+// not become an entry with an empty value, because a cookie the client never
+// sent must not read as one it did. Spaces around the separators are trimmed, a
+// trailing `;` produces an empty chunk that is skipped, and a cookie NAME is
+// case-sensitive where a header name is not.
+
+fn cookieChunkName(chunk: string) -> string {
+    val c: string = chunk.trim();
+    val eq: i32 = c.indexOf("=");
+    if (eq <= 0) return "";
+    return sub(c, 0, eq).trim();
+}
+
+fn cookieChunkValue(chunk: string) -> string {
+    val c: string = chunk.trim();
+    val eq: i32 = c.indexOf("=");
+    if (eq <= 0) return "";
+    return percentDecode(sub(c, eq + 1, c.length()).trim());
+}
+
+pub fn cookieNames(header: string) -> string[] {
+    var out: string[] = [];
+    val chunks: string[] = header.split(";");
+    var i = 0;
+    loop (i < chunks.length()) {
+        val name: string = cookieChunkName(chunks.at(i).unwrapOr(""));
+        val fresh = ((name != "") && (out.indexOf(name) < 0));
+        if (fresh) out.push(name);
+        i = i + 1;
+    };
+    return out;
+}
+
+// The FIRST occurrence wins, which is what RFC 6265 § 5.4 says a server should
+// assume when a client sends one name twice.
+pub fn cookieLookup(header: string, name: string) -> string {
+    val chunks: string[] = header.split(";");
+    var out = "";
+    var found = false;
+    var i = 0;
+    loop (i < chunks.length()) {
+        val chunk: string = chunks.at(i).unwrapOr("");
+        val hit = ((cookieChunkName(chunk) == name) && (found == false));
+        out = if (hit) cookieChunkValue(chunk) else out;
+        found = if (hit) true else found;
+        i = i + 1;
+    };
+    return out;
+}
+
+pub fn cookiePresent(header: string, name: string) -> bool {
+    return cookieNames(header).indexOf(name) >= 0;
+}
+
+// ── cookies() ───────────────────────────────────────────────────────────────
+
+fn cookieHeader() -> string {
+    return headerLookup(rkReqSlot("headers"), "cookie");
+}
+
+fn demandWritablePhase() -> i32 {
+    val phase: string = rkReqSlot("phase");
+    val blocked = ((phase == "render") || (phase == "after"));
+    if (blocked) @panic(cookiePhaseProblem(phase));
+    return 0;
+}
+
+pub type Cookies(
+    epoch: i64,
+) {
+    pub fn get(self: Self, name: string) -> ?string {
+        val _c = checkEpoch(self.epoch, "cookies");
+        val header: string = cookieHeader();
+        if (cookiePresent(header, name) == false) return null;
+        return cookieLookup(header, name);
+    }
+
+    pub fn has(self: Self, name: string) -> bool {
+        val _c = checkEpoch(self.epoch, "cookies");
+        return cookiePresent(cookieHeader(), name);
+    }
+
+    pub fn names(self: Self) -> string[] {
+        val _c = checkEpoch(self.epoch, "cookies");
+        return cookieNames(cookieHeader());
+    }
+
+    pub fn set(self: Self, name: string, value: string, attrs: CookieAttrs) -> i32 {
+        val _c = checkEpoch(self.epoch, "cookies");
+        val _p = demandWritablePhase();
+        return rkReqQueueCookie(name, serializeCookie(name, value, attrs));
+    }
+
+    pub fn delete(self: Self, name: string) -> i32 {
+        val _c = checkEpoch(self.epoch, "cookies");
+        val _p = demandWritablePhase();
+        val attrs = cookieDefaults();
+        return rkReqQueueCookie(name, serializeCookie(name, "", attrs));
+    }
+}
+
+pub fn cookies() -> Cookies {
+    val _m = markIfRendering("cookies");
+    return Cookies(epoch: rkReqEpoch());
+}
+
+// The typed read, for the reason `headerOf` is typed: the optional a record
+// method answers loses its type when the receiver is a call.
+pub fn cookieOf(c: Cookies, name: string, fallback: string) -> string {
+    val found: ?string = c.get(name);
     return found.unwrapOr(fallback);
 }

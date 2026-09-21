@@ -71,3 +71,22 @@ export function putSlot(name, value) {
   if (live()) frame.slots.set(name, value);
   return 0;
 }
+
+// ── the queued `Set-Cookie` lines ────────────────────────────────────────────
+//
+// A keyed line list, insertion-ordered and replaced by key — the same primitive
+// `runtime.mjs`'s `setReplyHeader` already is. This file does not know what a
+// cookie looks like: it is handed a name and a finished line.
+
+export function queueCookie(name, line) {
+  if (!live()) return 0;
+  const at = frame.cookies.findIndex((c) => c.name === name);
+  if (at >= 0) frame.cookies[at] = { name, line };
+  else frame.cookies.push({ name, line });
+  return frame.cookies.length;
+}
+
+export function cookieBlob() {
+  if (!live()) return "";
+  return frame.cookies.map((c) => c.line).join("\n");
+}

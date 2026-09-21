@@ -69,6 +69,50 @@
   `botopink test` 159/159; `botopink test --target erlang` 157 passing / 2
   failing, the same two front-04 reds.
 
+- **`cookies()`, the `Set-Cookie` queue and the cookie wire** (front 62, step
+  3). `serializeCookie(name, value, attrs)` is the one place a cookie becomes a
+  wire line and is pure, so it is asserted as a literal string with no socket
+  near it; `cookieNames` / `cookieLookup` / `cookiePresent` read the request
+  header the same way. A chunk with no `=` contributes nothing, a trailing `;`
+  and spaces around the separators parse without inventing entries, the first
+  occurrence of a repeated name wins, and a cookie name is case-sensitive where
+  a header name is not. `set` and `delete` raise in phase `Render` and phase
+  `After` — by the time a render runs the response head may already be on the
+  wire, which is why `§ 10` puts cookie writes in server actions. Front 04's
+  `rkSetReplyHeader/2` replaces by name and so carries one `Set-Cookie` and no
+  more; the lines are therefore queued on the frame and handed back from
+  `endRequest()` as a `\n`-separated blob, two names producing two lines and one
+  name producing the later value in its original position.
+
+  **`cookieDefaults()`'s `maxAge: 0` is a defect of the front's text, honoured
+  rather than silently corrected.** RFC 6265 § 5.2.2 expires a cookie whose
+  `Max-Age` is at or below zero, so the specified default writes a line the user
+  agent deletes on arrival: `maxAge: 0` is the deleting end of the lifetime
+  axis, not the restrictive end, and the restrictive-and-correct default omits
+  `Max-Age` entirely (a session cookie). The literal
+  `s=a%20b; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax` is an acceptance
+  eleven fronts cite, so it is implemented as written and the argument is
+  recorded in `AGENTS.md` for the front that owns sessions.
+
+  Three more compiler shapes recorded rather than worked around: **`i32 / i32`
+  is float division on commonJS and integer division on erlang** (`233 / 16` is
+  `14.5625` against `14`), so every quotient here goes through
+  `idiv(a, b) = (a - a % b) / b`; **`std`'s `unicode` module is `undef` on the
+  erlang row from rakun**, so no UTF-8 round trip is available; and **a
+  non-ASCII string literal raises `{badarg, …}` on the erlang row**, so the
+  positive case of the non-ASCII cookie refusal is not expressible as a cell and
+  the guard, its text and the negative case are asserted instead.
+
+  Measured: `botopink test` 174/174. On the erlang row the LIBRARY baseline
+  moved under this front mid-step — the shared compiler binary was rebuilt by
+  another thread (`botopink-lang` `98ad7cb1` → `a8087490`, C-01 half 3's
+  identity-in-the-value work) and seven cells in `router_test.bp`,
+  `server_test.bp`, `erlang_runtime_test.bp` and `file_router_test.bp` went red
+  with `{error, badarg}` on a record field read. `botopink test --target erlang`
+  is 165 passing / 9 failing: front 04's two `request/6` reds, those seven, and
+  none of this front's. Verified by checking this front's tree out at its step-2
+  commit against the same binary: the same nine.
+
 - **The route table crosses the boundary, and one matcher reads it on both
   rows** (front 22, steps 3 and 4). `RouteEntry(kind, pattern, slot, verb)`
   writes as `kind|pattern|slot|verb`, one record per line in registration order,
