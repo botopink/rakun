@@ -1525,7 +1525,16 @@ guessed, and each costs a spelling in `src/config.bp`:
   `String.charCodeAt` make the commonJS backend emit a self-recursive
   `String.prototype.charCodeAt` patch that kills the module before a single test
   runs. `String.at` (native `charAt`) does not. Every substring is therefore
-  built through `charOf`/`sub`.
+  built through `charOf`/`sub`. **Those two live in `config.bp` and nowhere
+  else** — `file_router.bp` and `ssr.bp` import them from there. They were
+  copied into `file_router.bp` once, byte-identically, under a comment blaming
+  the rule that a decorator body cannot call a sibling function; that rule is
+  real but does not cover these two, whose call sites in that file are all in
+  ordinary functions (the decorator bodies further down carry their own separate
+  copies, which is what the rule actually forces). The copies were removed in
+  1.0.10-beta when the compiler began refusing an unqualified import that two
+  modules both satisfy: `sub` is declared `pub` by `file_router` and by `config`,
+  and this import does not say which.
 - `Array.pop` is `lists:last/1` on the erlang row — it READS the last element, it
   does not remove it. Nothing here pops; a stack shrinks with `dropLast`.
 - `&&` and `||` cannot appear directly inside an `if (…)` or `loop (…)` head;
