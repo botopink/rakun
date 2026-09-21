@@ -116,7 +116,21 @@ field). See the runnable end-to-end app under
 
 ## Configuration
 
-`#[value("key")]` reads the property table; `config.bp` fills it.
+`#[value("key")]` reads the property table; `config.bp` fills it. A whole record
+binds at once with `#[configurationProperties]`:
+
+```bp
+#[configurationProperties("my.service")]
+pub type MyService(
+    enabled: bool,
+    remoteAddress: string,                       // binds from remote-address too
+    #[unit("seconds")] sessionTimeout: Duration,
+    #[nested] security: Security,
+)
+```
+
+The record is then injectable by type into any `#[service]`, and every key it
+declares lands in the run-time catalogue.
 
 ```bp
 import {readDocument, rkConfigApply, entryAt} from "rakun";

@@ -1099,6 +1099,7 @@ pub fn rkConfigLoadFrom(args: string[]) -> @Result<i32, string> {
 
     val written = rkConfigApply(resolvedValues.entries);
     val _ = setResolved(actives);
+    val _keys = registerRakunKeys();
     return written;
 }
 
@@ -1631,4 +1632,179 @@ pub fn rkPropDuration(key: string, unit: string) -> Duration {
 
 pub fn rkPropSize(key: string, unit: string) -> DataSize {
     return parseDataSize(rkValue(key), unit, key);
+}
+
+// ── step 9: the key catalogue ───────────────────────────────────────────────
+// A rakun decorator body cannot accumulate comptime state across invocations —
+// each is lowered alone into its own eval script — so there is no comptime
+// catalogue of every configuration key in the build. The registry is built at
+// RUN time instead, by the module-load `val`s the rest of rakun uses, and a
+// headless boot (`rakun.main.headless`, front 04) is what dumps it for
+// `rakun config-catalogue` (front 88) and the LSP's `application.yaml`
+// completion.
+//
+// It lives in the property table like everything else: `rakun.config.catalogue`
+// is the comma-separated list of registered prefixes and
+// `rakun.config.catalogue.<prefix>` is that prefix's spec, so there is still one
+// store.
+
+pub fn rkRegisterConfigKeys(prefix: string, spec: string) -> i32 {
+    val known: string = rkProp("rakun.config.catalogue");
+    val already = (("," + known + ",").contains("," + prefix + ","));
+    if (already == false) {
+        val next: string = if (known == "") prefix else known + "," + prefix;
+        val _ = rkSetProp("rakun.config.catalogue", next);
+    };
+    return rkSetProp("rakun.config.catalogue." + prefix, spec);
+}
+
+pub fn configCataloguePrefixes() -> string[] {
+    val known: string = rkProp("rakun.config.catalogue");
+    if (known == "") {
+        val none: string[] = [];
+        return none;
+    } else return known.split(",");
+}
+
+// `<prefix>.<name>:<type>:<default>` per key, so a dump is a fold over the
+// prefixes and a split of each spec — no second format and no second store.
+pub fn configCatalogue() -> Array<Entry> {
+    var out: Array<Entry> = [];
+    loop (configCataloguePrefixes()) { prefix ->
+        val spec: string = rkProp("rakun.config.catalogue." + prefix);
+        if (spec != "") {
+            loop (spec.split("|")) { row ->
+                val entry: string = row;
+                val colon = entry.indexOf(":");
+                if (colon > 0) {
+                    val name: string = sub(entry, 0, colon);
+                    out.push(Entry(key: prefix + "." + name, value: sub(entry, colon + 1, entry.length())));
+                };
+            };
+        };
+    };
+    return out;
+}
+
+// rakun's own keys, registered beside the application's so a dump answers "every
+// key rakun reads" and not "every key the application declared". The boot
+// options are front 04's table (AGENTS.md § The server half).
+pub fn registerRakunKeys() -> i32 {
+    val _m = rkRegisterConfigKeys(
+        "rakun.main",
+        "banner-mode:string:console|headless:bool:false|keep-alive:bool:true|pid-file:string:|port-file:string:",
+    );
+    val _s = rkRegisterConfigKeys(
+        "rakun.server",
+        "port:i32:8080|backlog:i32:128|idle-timeout:Duration:60000|max-connections:i32:16384|transport:string:gen_tcp|bound-port:i32:",
+    );
+    val _c = rkRegisterConfigKeys(
+        "rakun.config",
+        "name:string:application|location:string:optional:file:./|import:string:|activate.on-profile:string:|activate.on-cloud-platform:string:",
+    );
+    return rkRegisterConfigKeys(
+        "rakun.profiles",
+        "active:string:|default:string:default|include:string[]:|group:string[]:|resolved:string[]:",
+    );
+}
+
+// ── step 7: `#[configurationProperties("prefix")]` ──────────────────────────
+//
+// A type-level decorator that emits two functions and one registration:
+//
+//   pub fn __rkBind_<Name>(prefix: string) -> <Name>   — prefix is a PARAMETER,
+//       which is what makes `#[nested]` compose: a nested field calls the nested
+//       type's own binder with `prefix + "." + <field>`, and neither decorator
+//       has to know the other exists. A rakun decorator body cannot call a
+//       sibling function, so composition has to happen in the EMITTED code.
+//   pub fn __rkMake_<Name>() -> <Name>                  — the ordinary DI factory
+//       name, so a bound record is injectable by type into any `#[service]` with
+//       no further wiring.
+//   val __rkCat_<Name> = rkRegisterConfigKeys(...)      — the run-time catalogue.
+//
+// A LIST FIELD IS RECOGNISED BY AN EMPTY `typeName`. `@Decl` renders no name at
+// all for a generic type: `hosts: string[]` reflects as `typeName == ""`, the
+// same as `Array<string>` would. An empty name is therefore read as a list here,
+// which is right for every array and wrong for any other generic field — the
+// only signal the reflection offers, and a gap worth closing in `@Decl` rather
+// than around.
+//
+// RELAXED BINDING IS IN THE READER, NOT THE EMITTER. The spec puts the
+// `remoteAddress` → `remote-address` rewrite in the decorator. It is in
+// `rawValue` instead, which tries the written key, the kebab spelling, the camel
+// spelling and the `SCREAMING_SNAKE` one — so the emitter stays free of string
+// surgery a decorator body would have to inline (it cannot call a helper), and
+// all three spellings bind rather than only the two the emitter would have
+// produced.
+
+pub fn configurationProperties(comptime decl: @Decl, prefix: string) {
+    var args: Array<string> = [];
+    var catalogue: Array<string> = [];
+    decl.fields.forEach({ f ->
+        var unit = "";
+        var fallback = "";
+        var nested = false;
+        f.annotations.forEach({ a ->
+            if (a.name == "unit") unit = a.args.join("").replaceAll("\"", "");
+            if (a.name == "defaultValue") fallback = a.args.join("").replaceAll("\"", "");
+            if (a.name == "nested") nested = true;
+        });
+        val key = "prefix + \".\" + \"" + f.name + "\"";
+        val quoted = "\"" + fallback + "\"";
+        val reader = if (nested) "__rkBind_" + f.typeName + "(" + key + ")" else if (f.typeName == "bool") "rkPropBool(" + key + ", " + (if (fallback == "") "false" else fallback) + ")" else if (f.typeName == "i32") "rkPropIntOr(" + key + ", " + (if (fallback == "") "0" else fallback) + ")" else if (f.typeName == "f64") "rkPropFloat(" + key + ", " + (if (fallback == "") "0.0" else fallback) + ")" else if (f.typeName == "Duration") "rkPropDuration(" + key + ", \"" + unit + "\")" else if (f.typeName == "DataSize") "rkPropSize(" + key + ", \"" + unit + "\")" else if (f.typeName == "string[]") "rkPropList(" + key + ")" else if (f.typeName == "Array<string>") "rkPropList(" + key + ")" else if (f.typeName == "") "rkPropList(" + key + ")" else if (f.typeName.contains("[]")) "rkPropList(" + key + ")" else if (f.typeName.startsWith("Array<")) "rkPropList(" + key + ")" else "rkValueOr(" + key + ", " + quoted + ")";
+        args.push(f.name + ": " + reader);
+        val shown = if (f.typeName == "") "string[]" else f.typeName;
+        catalogue.push(f.name + ":" + shown + ":" + fallback);
+    });
+    @emit("pub fn __rkBind_" + decl.name + "(prefix: string) -> " + decl.name + " { return " + decl.name + "(" + args.join(
+            ", "
+        ) + "); }");
+    @emit("pub fn __rkMake_" + decl.name + "() -> " + decl.name + " { return rkSingleton(\"" + decl.name + "\", { -> __rkBind_" + decl.name + "(\"" + prefix + "\") }); }");
+    @emit("val __rkCat_" + decl.name + " = rkRegisterConfigKeys(\"" + prefix + "\", \"" + catalogue.join(
+            "|"
+        ) + "\");");
+    if (decl.kind != DeclKind.Type) decl.fail("#[configurationProperties] must annotate a type");
+    if (decl.variants.length > 0) decl.fail("#[configurationProperties] must annotate a type with fields, not an enum");
+}
+
+// `#[nested]` marks a field bound under `<prefix>.<field>` by its own type's
+// binder. The `#[configurationProperties]` body does the wiring (it sees every
+// field); this marker enforces placement.
+pub fn nested(comptime decl: @Decl) {
+    if (decl.kind != DeclKind.Field) decl.fail("#[nested] must annotate a field");
+}
+
+// `#[unit("seconds")]` is the unit a BARE number is read in for a `Duration` or
+// a `DataSize` field. A suffixed value (`30s`, `10MB`) parses whatever it says.
+pub fn unit(comptime decl: @Decl, name: string) {
+    if (decl.kind != DeclKind.Field) decl.fail("#[unit] must annotate a field");
+}
+
+// `#[defaultValue("false")]` is row 8 — the declared field default — written
+// where the catalogue can report it. A default written on the field itself
+// (`enabled: bool = false`) is not visible through `@Decl.fields`, so the
+// annotation is the form that reaches both the reader and the dump.
+pub fn defaultValue(comptime decl: @Decl, literal: string) {
+    if (decl.kind != DeclKind.Field) decl.fail("#[defaultValue] must annotate a field");
+}
+
+// `#[validated]` marks a configuration record whose constraints run at boot.
+// Front 14 owns the constraints; front 05 owns the MOMENT — after binding and
+// before the first component is constructed. Until 14 lands this is placement
+// only, and `rkConfigValidate` has nothing to run.
+pub fn validated(comptime decl: @Decl) {
+    if (decl.kind != DeclKind.Type) decl.fail("#[validated] must annotate a type");
+    if (decl.variants.length > 0) decl.fail("#[validated] must annotate a type with fields, not an enum");
+}
+
+// `#[enableConfigurationProperties]` on a `#[configuration]` type is the
+// explicit-registration form for records that carry
+// `#[configurationProperties]` but live in a module the application does not
+// otherwise import. It registers the same names the record's own decorator
+// would have.
+pub fn enableConfigurationProperties(comptime decl: @Decl, types: string) {
+    var registrations: Array<string> = [];
+    types.split(",").forEach({ t -> registrations.push(t.trim()) });
+    registrations.forEach({ name -> @emit("val __rkEnable_" + name + " = rkScan(\"" + name + "\");") });
+    if (decl.kind != DeclKind.Type) decl.fail("#[enableConfigurationProperties] must annotate a type");
 }

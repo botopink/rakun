@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **`#[configurationProperties]` binds a record, and every key it declares lands
+  in a catalogue** (front 05, steps 7 and 9). The decorator emits
+  `__rkBind_<Name>(prefix)`, the ordinary DI factory `__rkMake_<Name>()` and a
+  module-load `val __rkCat_<Name> = rkRegisterConfigKeys(…)`. The prefix is a
+  PARAMETER, which is what makes `#[nested]` compose without either decorator
+  knowing the other — two levels are asserted — and the ordinary factory name is
+  what makes a bound record injectable by type into a `#[service]` with no extra
+  wiring, also asserted. `#[unit]`, `#[defaultValue]`, `#[validated]` and
+  `#[enableConfigurationProperties]` come with it. `rkConfigLoad` registers
+  rakun's own `rakun.main.*`, `rakun.server.*`, `rakun.config.*` and
+  `rakun.profiles.*` keys beside the application's. Two departures from the
+  spec, both recorded in `AGENTS.md`: relaxed binding is in the reader rather
+  than the emitter (three spellings instead of one, and a decorator body cannot
+  call a helper), and a list field is recognised by an EMPTY `@Decl` `typeName`,
+  which is the only signal the reflection offers for a generic type.
+
 - **Placeholders, random values and the typed readers** (front 05, steps 4 and
   8). `${key}` and `${key:default}` resolve at load time, recursively; an
   unresolvable reference with no default and a reference cycle each refuse the

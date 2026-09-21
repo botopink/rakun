@@ -437,6 +437,60 @@ all. It is not the narrowing it reads as — a botopink integer is a JavaScript
 number on the node row and a BEAM integer on the erlang one, so `10GB`
 (10737418240) is exact on both and is asserted as such.
 
+### `#[configurationProperties("prefix")]`
+
+A type-level decorator in `src/config.bp` (`decorators.bp` is frozen for the
+milestone). It emits three things into the module that declares the record:
+
+```bp
+pub fn __rkBind_MyService(prefix: string) -> MyService { … }   // prefix is a PARAMETER
+pub fn __rkMake_MyService() -> MyService { … }                 // the ordinary DI factory name
+val __rkCat_MyService = rkRegisterConfigKeys("my.service", "…"); // the run-time catalogue
+```
+
+The prefix being a parameter is what makes `#[nested]` compose: a nested field
+calls the nested type's own binder with `prefix + "." + <field>`, and neither
+decorator has to know the other exists. A rakun decorator body cannot call a
+sibling function, so composition has to happen in the EMITTED code — which is
+also why two levels of nesting work with no extra machinery. `__rkMake_<Name>`
+is the ordinary factory name, so a bound record is injectable by type into any
+`#[service]` with no further wiring.
+
+The field markers are `#[nested]`, `#[unit("seconds")]` (the unit a BARE number
+is read in) and `#[defaultValue("guest")]` (row 8, written where the catalogue
+can report it — a default written on the field itself is not visible through
+`@Decl.fields`). `#[validated]` marks a record whose constraints run at boot;
+front 14 owns the constraints and until it lands the marker is placement only.
+`#[enableConfigurationProperties("A,B")]` is the explicit-registration form.
+
+Two deliberate departures from the spec, both arguable and both here:
+
+- **Relaxed binding is in the READER, not the emitter.** The spec rewrites
+  `remoteAddress` → `remote-address` in the decorator. `rawValue` does it
+  instead, trying the written key, the kebab spelling, the camel spelling and
+  the `SCREAMING_SNAKE` one. A decorator body cannot call a helper, so the
+  emitter would have to inline the string surgery in every marker; and the
+  reader covers three spellings where the emitter would have produced one.
+- **A list field is recognised by an EMPTY `typeName`.** `@Decl` renders no name
+  for a generic type: `hosts: string[]` reflects as `typeName == ""`, exactly as
+  `Array<string>` would. An empty name is read as a list, which is right for
+  every array and wrong for any other generic field. It is the only signal the
+  reflection offers and it is a gap worth closing in `@Decl` rather than around.
+
+### The key catalogue
+
+A decorator body cannot accumulate comptime state across invocations — each is
+lowered alone into its own eval script — so there is no comptime catalogue. The
+registry is built at RUN time by the module-load `val`s, and a headless boot
+(`rakun.main.headless`, front 04) is what dumps it for `rakun config-catalogue`
+(front 88) and the LSP's `application.yaml` completion. It lives in the property
+table like everything else: `rakun.config.catalogue` is the comma-separated list
+of prefixes and `rakun.config.catalogue.<prefix>` is that prefix's
+`name:type:default|…` spec, so there is still one store. `rkConfigLoad`
+registers rakun's OWN keys (`rakun.main.*`, `rakun.server.*`, `rakun.config.*`,
+`rakun.profiles.*`) beside the application's, so a dump answers "every key rakun
+reads".
+
 ### Language notes this module is written around
 
 Each was measured against the compiler at `repository/botopink-lang`, not

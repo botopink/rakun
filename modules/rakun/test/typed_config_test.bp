@@ -1,0 +1,140 @@
+// rakun — `#[configurationProperties]` binding, on BOTH rows.
+//
+// Separate from `config_test.bp` because these types carry decorators, and a
+// decorator `@emit`s its wiring into the module that hosts the annotated type:
+// the emitted `__rkBind_*` / `__rkMake_*` / `val __rkCat_*` are spliced in here,
+// which is why the runtime fns they call are imported here too.
+//
+// The binding is asserted through the emitted factories, the way an application
+// reaches them. `__rkMake_<Name>` is the ORDINARY DI factory name, so a bound
+// record is injectable by type into a `#[service]` with no extra wiring — the
+// last test asserts exactly that, through `#[service]`'s own emission.
+
+import {configurationProperties, nested, unit, defaultValue, validated};
+import {service};
+import {Duration, DataSize};
+import {rkSetProp, rkProp};
+import {rkSingleton, rkEnter, rkDone, rkScan};
+import {rkValue, rkValueOr, rkPropBool, rkPropIntOr, rkPropFloat, rkPropList, rkPropDuration, rkPropSize};
+import {rkRegisterConfigKeys, configCatalogue, configCataloguePrefixes, rkConfigLoadFrom, entryAt, Entry};
+
+// Two levels of nesting: `MyService` → `Security` → `Tls`. Each carries its own
+// `#[configurationProperties]`; the outer one never names the inner prefix,
+// because the binder takes the prefix as a PARAMETER.
+
+#[configurationProperties("my.service.security.tls")]
+type Tls(
+    enabled: bool,
+    protocol: string,
+)
+
+#[configurationProperties("my.service.security")]
+type Security(
+    #[defaultValue("guest")] username: string,
+    #[nested] tls: Tls,
+)
+
+#[validated]
+#[configurationProperties("my.service")]
+type MyService(
+    enabled: bool,
+    remoteAddress: string,
+    retries: i32,
+    ratio: f64,
+    hosts: string[],
+    #[unit("seconds")] sessionTimeout: Duration,
+    #[unit("bytes")] bufferSize: DataSize,
+    #[nested] security: Security,
+)
+
+// A component that declares the bound record as a field: `#[service]` resolves
+// it by type through `__rkMake_MyService()`, which is what the decorator emitted.
+#[service]
+type UsesConfig(
+    cfg: MyService,
+) {
+    pub fn where(self: Self) -> string {
+        return self.cfg.remoteAddress;
+    }
+}
+
+fn loadTyped() -> string {
+    var args: string[] = [];
+    args.push("--rakun.config.name=application");
+    args.push("--rakun.config.location=file:test/fixtures/typed/");
+    val r = rkConfigLoadFrom(args);
+    if (r.isError()) {
+        val assert Error(e) = r;
+        return e;
+    } else return "";
+}
+
+test "rakun config: #[configurationProperties] binds every field from the prefix" {
+    assert loadTyped() == "";
+    val cfg = __rkBind_MyService("my.service");
+    assert cfg.enabled == true;
+    assert cfg.remoteAddress == "192.168.1.1";
+    assert cfg.retries == 7;
+    assert cfg.ratio > 2.49;
+    assert cfg.hosts.join(",") == "a,b";
+    assert cfg.sessionTimeout.millis == 30000;
+    assert cfg.bufferSize.bytes == 10485760;
+}
+
+test "rakun config: a field binds from the kebab, the camel and the screaming spelling" {
+    assert loadTyped() == "";
+    // The document writes `remote-address`; the field is `remoteAddress`.
+    assert __rkBind_MyService("my.service").remoteAddress == "192.168.1.1";
+    val _c = rkSetProp("camel.remoteAddress", "camel");
+    assert rkValue("camel.remoteAddress") == "camel";
+    val _s = rkSetProp("SCREAM_REMOTE_ADDRESS", "screaming");
+    assert rkValue("scream.remoteAddress") == "screaming";
+}
+
+test "rakun config: #[nested] composes two levels down" {
+    assert loadTyped() == "";
+    val _u = rkSetProp("my.service.security.username", "admin");
+    val _e = rkSetProp("my.service.security.tls.enabled", "true");
+    val _p = rkSetProp("my.service.security.tls.protocol", "TLSv1.3");
+    val cfg = __rkBind_MyService("my.service");
+    assert cfg.security.username == "admin";
+    assert cfg.security.tls.enabled == true;
+    assert cfg.security.tls.protocol == "TLSv1.3";
+}
+
+test "rakun config: a declared default fills a key nothing sets" {
+    assert loadTyped() == "";
+    val _u = rkSetProp("my.service.security.username", "");
+    assert __rkBind_Security("my.service.security").username == "guest";
+}
+
+test "rakun config: the bound record is injectable by type with no extra wiring" {
+    assert loadTyped() == "";
+    assert __rkMake_UsesConfig().where() == "192.168.1.1";
+    // The singleton factory is the ordinary DI one, so the record is shared.
+    assert __rkMake_MyService().remoteAddress == "192.168.1.1";
+}
+
+test "rakun config: every emission registers its keys in the catalogue" {
+    assert loadTyped() == "";
+    val cat = configCatalogue();
+    assert entryAt(cat, "my.service.remoteAddress") == "string:";
+    assert entryAt(cat, "my.service.sessionTimeout") == "Duration:";
+    assert entryAt(cat, "my.service.hosts") == "string[]:";
+    assert entryAt(cat, "my.service.security.username") == "string:guest";
+    // rakun's own keys are registered beside the application's.
+    assert entryAt(cat, "rakun.main.banner-mode") == "string:console";
+    assert entryAt(cat, "rakun.profiles.default") == "string:default";
+    assert entryAt(cat, "rakun.server.port") == "i32:8080";
+}
+
+test "rakun config: the catalogue lists each prefix once, however often it registers" {
+    assert loadTyped() == "";
+    val _a = rkRegisterConfigKeys("twice.over", "a:string:");
+    val _b = rkRegisterConfigKeys("twice.over", "a:string:|b:i32:1");
+    var seen = 0;
+    loop (configCataloguePrefixes()) { p -> if (p == "twice.over") { seen = seen + 1; }; };
+    assert seen == 1;
+    val cat = configCatalogue();
+    assert entryAt(cat, "twice.over.b") == "i32:1";
+}
