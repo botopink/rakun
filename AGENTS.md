@@ -198,10 +198,18 @@ to skip the erlang/beam cells. The workspace's `targets` is `["commonJS", "erlan
 member inherits when it declares none — and a member may only **restrict** it, so the core's
 `["commonJS"]` is a restriction and dropping it would widen the core's matrix to a red erlang cell,
 not fix a no-op key. Front 04 built the erlang host module (§ The erlang host module) but did
-**not** widen `targets`: `botopink test --target erlang` is 21 passing / 6 failing and one test
-file that does not compile, and every one of those reds is an erlang-BACKEND gap listed in
-§ Blocked, not rakun's. `erlang` joins `targets` in the change that closes them — widening it
-now would only move a known red into the gate. rakun has no line in
+**not** widen `targets`, and every front since has made the same call for the same reason:
+a red on that axis would move into the gate rather than be fixed by the widening.
+
+**Measured 2026-09-21, with front 06 in the tree:** `botopink test` is 267/267 and
+`botopink test --target erlang` is 265 passing / 2 failing. The two are front 04's own
+`request/6` (`{badkey,param}` / `{badkey,query}`) — the map it builds carries `method`,
+`path`, `params`, `query`, `headers` and `body` but no member funs, so `req.param("name")`
+dispatches and finds nothing. That is the one thing left between the erlang row and
+`targets: ["commonJS", "erlang"]`, and it is a line in `rakun_runtime.erl`, not a backend
+gap: the two older blockers below were closed during front 05 and the record-field-read
+regression was closed during front 06 step 5. `erlang` joins `targets` in the change that
+closes `request/6` — a front that re-measures the whole library, not one mid-flight. rakun has no line in
 `botopink-lang/scripts/known-red-libs.txt` (that file lives in the compiler repository and
 currently holds only its header), so there is nothing to delete there either.
 
@@ -337,7 +345,13 @@ either `runtime.mjs` unfreezes or a test file can declare its target.
 > `{badkey,query}` — `request/6` in `rakun_runtime.erl` builds a map carrying
 > `method`, `path`, `params`, `query`, `headers` and `body` but no member funs,
 > so `req.param("name")` now dispatches and finds nothing. That is rakun's own
-> line, in front 04's file, and front 05 does not touch it. `targets` stays
+> line, in front 04's file, and front 05 does not touch it. (**Front 06,
+> 2026-09-21:** a third gap opened and closed inside this front's window — the
+> compiler broke a record field read on erlang, reddening nine rakun cells with
+> `{error, badarg}` and an empty RUN LOG; the fix landed in the shared checkout
+> during step 5 and the row went from 200/9 to 250/2. Steps 1 to 4 of front 06's
+> CHANGELOG entries are reported against the 200/9 baseline and say so.)
+> `targets` stays
 > `["commonJS"]` until the front that re-measures the whole library against the
 > new compiler makes that call — not a front mid-flight. The text below is
 > front 04's and is kept for the reasoning it records.
@@ -533,12 +547,13 @@ already dies on `rakun_runtime:serve/2`. Nothing in this front makes that worse
 and nothing in this front can fix it — it is the toolchain's.
 
 **`targets` still reads `["commonJS"]`, deliberately.** All 48 of this front's
-assertions are green on both rows, but `botopink test --target erlang` for the
-member is 134 passing / 2 failing, and the two reds are front 04's `request/6`
-(`{badkey,param}` / `{badkey,query}`), not this front's. Widening `targets` now
-would move a known red into `botopink-lib-test` rather than fix anything, which
-is the call front 04 and front 05 each made for the same reason. `erlang` joins
-in the change that closes them.
+assertions are green on both rows, but the member's erlang row still carries
+front 04's `request/6` reds (`{badkey,param}` / `{badkey,query}`), not this
+front's. Widening `targets` now would move a known red into `botopink-lib-test`
+rather than fix anything, which is the call front 04 and front 05 each made for
+the same reason, and front 06 after them. `erlang` joins in the change that
+closes them. (The counts this paragraph carried were front 22's and are
+superseded by the measurement in § Tree.)
 
 **Table ownership on the BEAM.** An ETS table dies with the process that created
 it, and a registration runs in whatever process loaded the module, so
