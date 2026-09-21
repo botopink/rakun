@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- **The repository is a workspace** (`02-packaging` step 2; decisions 75 and 76 of
+  1.0.10-beta). `botopink.json` at the root is `{ name, version, description, targets
+  [commonJS, erlang], workspaces ["modules/*", "examples/*"] }` — no `src`, `files`, `target` or
+  `dependencies`; `botopink build/test` there is the located refusal naming the members. The
+  core moved with `git mv` to `modules/rakun/` (`src/**` incl. `runtime.mjs`, the five
+  `test/*_test.bp`) and its manifest lists `files: [root, http, runtime, decorators, bootstrap,
+  rakun.d]`, `targets: [commonJS]` (a restriction of the workspace's; front 04 adds erlang).
+  The thirteen scaffolds gain `files: ["root.bp"]` (a library member without `files` is
+  `✗ ships nothing`), `targets` per `03-rakun/modules.md` § Targets (erlang, except
+  `rakun-validation` and `rakun-test`: both), and `{ "rakun": { "workspace": true } }` in place
+  of the refused `{ "path": "../../" }`; none is renamed (every scaffold is a KEEP of the
+  reconciliation table). `examples/rakun` is the member `rakun-example` (renamed from
+  `rakun-app`, the name front 22's submodule takes — duplicate member names are refused),
+  depending on `rakun` via `{ "workspace": true }` instead of the git form. The pre-commit
+  runner is workspace-aware: `botopink test` in every `modules/*/` member, then the examples
+  gate. Measured: core 17/17 commonJS at its new path; the example builds and answers the
+  documented routes; `botopink-lib-test` prints 15 member rows and no umbrella row.
+
 - **The 1.0.3 surface** (botopink-lang front 12): records and the enum are `type`s, `Request`
   and `Context` are `behavior`s, and the sources are `botopink format`ted. The component
   markers check `decl.kind != DeclKind.Type` plus `decl.variants.length > 0` (an enum-shaped
