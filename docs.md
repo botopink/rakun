@@ -125,6 +125,22 @@ val docs = try readDocument("application.yaml");
 loop (docs) { d -> val _ = rkConfigApply(d.entries); };
 ```
 
+`rkConfigLoad()` is the whole load: eight sources in order (command line,
+`RAKUN_APPLICATION_JSON`, environment, profile documents, base documents,
+configuration trees, `rkSetProp`, declared defaults), profiles resolved and
+written to `rakun.profiles.resolved`, and one refusal naming the input when a
+location, an import, a document or a profile group is wrong.
+
+```bp
+import {rkConfigLoad} from "rakun";
+import {active} from "rakun";
+
+fn main() {
+    try rkConfigLoad();
+    @print(active().join(","));
+}
+```
+
 Three formats are read — `.properties`, `.json` and a documented YAML subset —
 plus `configtree:` directories (one file per key). A nested JSON object flattens
 to dot keys (`server.port`) and an array to indexed keys (`a[0]`). A YAML

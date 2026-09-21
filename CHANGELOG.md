@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- **Configuration resolves, in order, with profiles** (front 05, steps 2, 3, 5
+  and 6). `rkConfigLoad()` merges the eight sources — command line,
+  `RAKUN_APPLICATION_JSON`, `RAKUN_*` environment variables, profile documents,
+  base documents, configuration trees, `rkSetProp`, declared defaults — each row
+  with a test asserting it beats the row below, plus a full-stack test setting
+  one key in six of them. `rakun.config.name`/`rakun.config.location` choose the
+  documents, a location without `optional:` that does not exist refuses the boot
+  naming the path, and `rakun.config.import` resolves after its importer with a
+  cycle refused naming the chain. `src/profiles.bp` owns the profile set:
+  `active`, `default`, `include[i]` and transitive `group.<name>[i]` (the group
+  name activated beside its members, a self-reference refused), read back in
+  activation order through `profiles.active()`. A document may carry
+  `rakun.config.activate.on-profile` (names, `|`, `&`, `!`, parentheses) and
+  `on-cloud-platform`, both of which must hold, and a document whose conditions
+  do not hold contributes nothing. Measured: `botopink test` 67/67 (was 39/39);
+  `botopink test --target erlang` 57 passing (was 29), the same six
+  pre-existing reds.
+
 - **Configuration documents load** (1.0.10-beta front 05, step 1).
   `modules/rakun/src/config.bp` reads `.properties` (comments, `\`
   continuations, `#---` document separators), `.json` (a flattening scanner that

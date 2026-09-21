@@ -11,11 +11,13 @@
 // Fixture documents live under `test/fixtures/` and are read by path, so nothing
 // here depends on a working directory beyond the package root.
 
-import {fs};
+import {fs, env} from "std";
 import {rkSetProp, rkProp};
 import {Entry, Doc};
 import {parseProperties, parseJson, parseYaml, readTree, readDocument};
 import {entryAt, entryHas, rkConfigApply, toI32, sub, charOf};
+import {rkConfigLoadFrom, cliEntries, envKey, envEntries, cloudPlatform};
+import {matches, active, isActive} from "profiles";
 
 // Every entry of every document of a parse, flattened — the shape an ordering
 // test wants and the shape a single-document test does not mind.
@@ -82,4 +84,304 @@ test "rakun config: configtree reads one file per key, newline stripped" {
 
 test "rakun config: an unknown extension is refused, not guessed" {
     assert readDocument("test/fixtures/config/application.conf").isError() == true;
+}
+
+
+// ── steps 2, 3, 5 and 6: locations, ordering, activation and profiles ──────
+//
+// Every load below drives `rkConfigLoadFrom` with an explicit argv, because
+// `env.args()` hands a test the RUNNER's arguments and never the program's. Each
+// names both `rakun.config.name` and `rakun.config.location`: the property table
+// is process-global by design, so a value one test leaves behind is a value the
+// next one would otherwise read through the `rkProp` fallback.
+
+fn noArgs() -> string[] {
+    val none: string[] = [];
+    return none;
+}
+
+// Answers the boot refusal, or "" when the load succeeded.
+fn loadAt(location: string, extra: string[]) -> string {
+    var args: string[] = [];
+    args.push("--rakun.config.name=application");
+    args.push("--rakun.config.location=" + location);
+    loop (extra) { a -> args.push(a); };
+    val r = rkConfigLoadFrom(args);
+    if (r.isError()) {
+        val assert Error(e) = r;
+        return e;
+    } else return "";
+}
+
+// -- step 2: locations, names and imports ------------------------------------
+
+test "rakun config: rakun.config.name picks the document stem" {
+    var args: string[] = [];
+    args.push("--rakun.config.name=myproject");
+    args.push("--rakun.config.location=test/fixtures/name/");
+    val r = rkConfigLoadFrom(args);
+    assert r.isOk() == true;
+    assert rkProp("which.file") == "myproject";
+}
+
+test "rakun config: a non-optional location that does not exist fails the boot" {
+    val e = loadAt("file:test/fixtures/does-not-exist/", noArgs());
+    assert e != "";
+    assert e.contains("test/fixtures/does-not-exist/") == true;
+}
+
+test "rakun config: an optional location that does not exist contributes nothing" {
+    val e = loadAt("optional:file:test/fixtures/does-not-exist/,file:test/fixtures/order/", noArgs());
+    assert e == "";
+    assert rkProp("demo.key") == "base";
+}
+
+test "rakun config: a later location overrides an earlier one" {
+    val e = loadAt("file:test/fixtures/order/,file:test/fixtures/order/more/", noArgs());
+    assert e == "";
+    assert rkProp("order.later") == "later";
+}
+
+test "rakun config: rakun.config.import pulls a document resolved after the importer" {
+    val e = loadAt("file:test/fixtures/imports/", noArgs());
+    assert e == "";
+    assert rkProp("imp.extra") == "yes";
+    // The import is resolved AFTER the importing document, at its precedence.
+    assert rkProp("imp.base") == "imported";
+    assert rkProp("imp.only") == "base";
+}
+
+test "rakun config: an import cycle fails the boot naming both files" {
+    val e = loadAt("file:test/fixtures/cycle/", noArgs());
+    assert e != "";
+    assert e.contains("cycle") == true;
+    assert e.contains("b.yaml") == true;
+}
+
+// -- step 3: the order between sources ---------------------------------------
+
+test "rakun config: row 1 beats row 2 — the command line beats RAKUN_APPLICATION_JSON" {
+    env.write("RAKUN_APPLICATION_JSON", "{\"row\":\"appjson\"}");
+    var extra: string[] = [];
+    extra.push("--row=cli");
+    val e = loadAt("optional:file:test/fixtures/order/", extra);
+    env.clear("RAKUN_APPLICATION_JSON");
+    assert e == "";
+    assert rkProp("row") == "cli";
+}
+
+test "rakun config: row 2 beats row 3 — RAKUN_APPLICATION_JSON beats the variables beside it" {
+    env.write("RAKUN_ROW2", "env");
+    env.write("RAKUN_APPLICATION_JSON", "{\"row2\":\"appjson\"}");
+    val e = loadAt("optional:file:test/fixtures/order/", noArgs());
+    env.clear("RAKUN_APPLICATION_JSON");
+    env.clear("RAKUN_ROW2");
+    assert e == "";
+    assert rkProp("row2") == "appjson";
+}
+
+test "rakun config: row 3 beats row 4 — the environment beats a profile document" {
+    env.write("RAKUN_DEMO_KEY", "fromenv");
+    var extra: string[] = [];
+    extra.push("--rakun.profiles.active=dev");
+    val e = loadAt("file:test/fixtures/order/", extra);
+    env.clear("RAKUN_DEMO_KEY");
+    assert e == "";
+    assert rkProp("demo.key") == "fromenv";
+}
+
+test "rakun config: row 4 beats row 5 — a profile document beats the base document" {
+    var extra: string[] = [];
+    extra.push("--rakun.profiles.active=prod");
+    val e = loadAt("file:test/fixtures/order/", extra);
+    assert e == "";
+    assert rkProp("demo.key") == "prod";
+}
+
+test "rakun config: with dev and prod active the later profile wins" {
+    var extra: string[] = [];
+    extra.push("--rakun.profiles.active=dev,prod");
+    val e = loadAt("file:test/fixtures/order/", extra);
+    assert e == "";
+    assert rkProp("order.full") == "prod";
+}
+
+test "rakun config: row 5 beats row 6 — a base document beats a configuration tree" {
+    val e = loadAt("configtree:test/fixtures/order/tree,file:test/fixtures/order/", noArgs());
+    assert e == "";
+    assert rkProp("order.tree") == "base-doc";
+}
+
+test "rakun config: row 6 beats row 7 — a configuration tree beats rkSetProp" {
+    val _ = rkSetProp("order.prog", "programmatic");
+    val e = loadAt("configtree:test/fixtures/order/tree", noArgs());
+    assert e == "";
+    assert rkProp("order.prog") == "tree-wins";
+}
+
+test "rakun config: row 7 survives a load that does not mention the key" {
+    val _ = rkSetProp("order.onlyprog", "programmatic");
+    val e = loadAt("optional:file:test/fixtures/order/", noArgs());
+    assert e == "";
+    assert rkProp("order.onlyprog") == "programmatic";
+}
+
+test "rakun config: the full stack — one key in six sources, one winner" {
+    env.write("RAKUN_ORDER_FULL", "env");
+    env.write("RAKUN_APPLICATION_JSON", "{\"order\":{\"full\":\"appjson\"}}");
+    val _ = rkSetProp("order.full", "programmatic");
+    var extra: string[] = [];
+    extra.push("--rakun.profiles.active=prod");
+    extra.push("--order.full=cli");
+    val e = loadAt("configtree:test/fixtures/order/tree,file:test/fixtures/order/", extra);
+    env.clear("RAKUN_APPLICATION_JSON");
+    env.clear("RAKUN_ORDER_FULL");
+    assert e == "";
+    assert rkProp("order.full") == "cli";
+}
+
+test "rakun config: a variable without the RAKUN_ prefix contributes nothing" {
+    assert envKey("PATH") == "";
+    assert envKey("RAKUN_SERVER_PORT") == "server.port";
+    assert envKey("RAKUN_REMOTE__ADDRESS") == "remote-address";
+    assert envKey("RAKUN_APPLICATION_JSON") == "";
+}
+
+test "rakun config: a command-line argument is --key=value and nothing else" {
+    var args: string[] = [];
+    args.push("--server.port=9090");
+    args.push("server.port=ignored");
+    args.push("--bare");
+    val es = cliEntries(args);
+    assert entryAt(es, "server.port") == "9090";
+    assert entryHas(es, "bare") == true;
+    assert es.length == 2;
+}
+
+// -- step 5: multi-document activation and cloud-platform detection ----------
+
+// The property table is process-global, so a key a document does NOT contribute
+// keeps whatever an earlier test left in it. Each activation test blanks the
+// keys it expects to be absent first, which is also the honest assertion: "this
+// document did not write it", not "nothing ever wrote it".
+fn blankActivationKeys() -> i32 {
+    val _a = rkSetProp("act.always", "");
+    val _b = rkSetProp("act.prodish", "");
+    val _c = rkSetProp("act.notprod", "");
+    return rkSetProp("act.both", "");
+}
+
+test "rakun config: a conditional document contributes only when its profile is active" {
+    val _ = blankActivationKeys();
+    val e = loadAt("file:test/fixtures/activate/", noArgs());
+    assert e == "";
+    assert rkProp("act.always") == "set";
+    assert rkProp("act.prodish") == "";
+    assert rkProp("act.notprod") == "set";
+}
+
+test "rakun config: on-profile takes an expression" {
+    val _ = blankActivationKeys();
+    var extra: string[] = [];
+    extra.push("--rakun.profiles.active=staging");
+    val e = loadAt("file:test/fixtures/activate/", extra);
+    assert e == "";
+    assert rkProp("act.prodish") == "set";
+    assert rkProp("act.notprod") == "set";
+}
+
+test "rakun config: a document with two conditions needs both" {
+    val _ = blankActivationKeys();
+    var extra: string[] = [];
+    extra.push("--rakun.profiles.active=prod");
+    val e = loadAt("file:test/fixtures/activate/", extra);
+    assert e == "";
+    assert rkProp("act.prodish") == "set";
+    // `!prod` does not hold, and `act.both` also needs the kubernetes platform.
+    assert rkProp("act.notprod") == "";
+    assert rkProp("act.both") == "";
+}
+
+test "rakun config: on-cloud-platform matches a detected platform" {
+    val _ = blankActivationKeys();
+    assert cloudPlatform() == "none";
+    env.write("KUBERNETES_SERVICE_HOST", "10.0.0.1");
+    assert cloudPlatform() == "kubernetes";
+    var extra: string[] = [];
+    extra.push("--rakun.profiles.active=prod");
+    val e = loadAt("file:test/fixtures/activate/", extra);
+    env.clear("KUBERNETES_SERVICE_HOST");
+    assert e == "";
+    assert rkProp("act.both") == "set";
+    assert cloudPlatform() == "none";
+}
+
+test "rakun config: the profile expression grammar" {
+    var prod: string[] = [];
+    prod.push("prod");
+    var staging: string[] = [];
+    staging.push("staging");
+    val none: string[] = [];
+    assert matches("prod | staging", prod) == true;
+    assert matches("prod | staging", staging) == true;
+    assert matches("prod | staging", none) == false;
+    assert matches("!prod", none) == true;
+    assert matches("!prod", prod) == false;
+    assert matches("prod & staging", prod) == false;
+    assert matches("(prod | staging) & !dev", staging) == true;
+    assert matches("", none) == true;
+}
+
+// -- step 6: profiles, includes and groups -----------------------------------
+
+test "rakun config: an active profile loads its document and is readable back" {
+    var extra: string[] = [];
+    extra.push("--rakun.profiles.active=dev");
+    val e = loadAt("file:test/fixtures/order/", extra);
+    assert e == "";
+    assert rkProp("demo.key") == "dev";
+    assert active().join(",") == "dev";
+    assert isActive("dev") == true;
+    assert isActive("prod") == false;
+}
+
+test "rakun config: rakun.profiles.default applies only when nothing is active" {
+    var extra: string[] = [];
+    extra.push("--rakun.profiles.default=fallback");
+    val e = loadAt("optional:file:test/fixtures/order/", extra);
+    assert e == "";
+    assert active().join(",") == "fallback";
+    var extra2: string[] = [];
+    extra2.push("--rakun.profiles.default=fallback");
+    extra2.push("--rakun.profiles.active=dev");
+    val e2 = loadAt("optional:file:test/fixtures/order/", extra2);
+    assert e2 == "";
+    assert active().join(",") == "dev";
+}
+
+test "rakun config: with nothing configured the active profile is `default`" {
+    val e = loadAt("optional:file:test/fixtures/order/", noArgs());
+    assert e == "";
+    assert active().join(",") == "default";
+}
+
+test "rakun config: an include activates a profile regardless of the active list" {
+    var extra: string[] = [];
+    extra.push("--rakun.profiles.active=dev");
+    extra.push("--rakun.profiles.include[0]=common");
+    val e = loadAt("optional:file:test/fixtures/order/", extra);
+    assert e == "";
+    assert active().join(",") == "dev,common";
+}
+
+test "rakun config: a group expands one name into a list, the name included" {
+    val e = loadAt("file:test/fixtures/groups/", noArgs());
+    assert e == "";
+    assert active().join(",") == "production,proddb,prodmq";
+}
+
+test "rakun config: a group that refers to itself fails the boot naming the cycle" {
+    val e = loadAt("file:test/fixtures/groupcycle/", noArgs());
+    assert e != "";
+    assert e.contains("rakun.profiles.group") == true;
 }

@@ -1,0 +1,278 @@
+//// rakun — the profile SET: what is active, and whether an expression matches it.
+////
+//// Front 05 owns the set; front 72 reads it. `#[profile("prod | staging")]`,
+//// `#[conditionalOnProperty]` and every other conditional-registration marker
+//// belong to 72 — building a second condition mechanism here would leave two.
+//// What this module owns is the answer those markers ask for: which profiles are
+//// active, in activation order, and does an expression hold over them.
+////
+//// It imports nothing from `config`, on purpose: `config` imports THIS module (a
+//// document's `rakun.config.activate.on-profile` is evaluated while the document
+//// is being loaded), and the module graph has to stay one-directional. The two
+//// helpers below are therefore private copies of `config`'s rather than an
+//// import that would close a cycle.
+
+import {rkProp, rkSetProp} from "runtime";
+
+// ── private helpers (see the header for why they are not imported) ─────────
+
+fn pAt(s: string, i: i32) -> string {
+    return s.at(i).unwrapOr("");
+}
+
+fn contains(xs: string[], name: string) -> bool {
+    var found = false;
+    loop (xs) { x -> if (x == name) { found = true; }; };
+    return found;
+}
+
+// ── the active set ───────────────────────────────────────────────────────────
+// The loader writes the RESOLVED list (active + includes + expanded groups, in
+// activation order) under `rakun.profiles.resolved`, because `rakun.profiles.active`
+// is the CONFIGURED string and answering that would hand a caller a list that has
+// not had `include` or `group` applied to it.
+
+pub fn resolvedKey() -> string {
+    return "rakun.profiles.resolved";
+}
+
+pub fn active() -> string[] {
+    val raw = rkProp(resolvedKey());
+    if (raw == "") return [] else return raw.split(",");
+}
+
+pub fn isActive(name: string) -> bool {
+    return contains(active(), name);
+}
+
+pub fn setResolved(names: string[]) -> i32 {
+    return rkSetProp(resolvedKey(), names.join(","));
+}
+
+// ── group / include expansion ────────────────────────────────────────────────
+// `groupOf(name, i)` answers `rakun.profiles.group.<name>[<i>]` — a closure, so
+// this module never has to know where the merged property list lives. Expansion
+// is transitive, the GROUP NAME is activated beside what it expands to, and a
+// cycle is a refusal naming the two names that close it, never a loop.
+
+#[@result]
+pub fn expand(seed: string[], groupOf: fn(name: string, index: i32) -> string) -> @Result<string[], string> {
+    var out: string[] = [];
+    var queue: string[] = [];
+    var trail: string[] = [];
+    loop (seed) { s -> queue.push(s); };
+    var head = 0;
+    var guard = 0;
+    var err = "";
+    loop (head < queue.length) {
+        guard = guard + 1;
+        if (guard > 10000) {
+            err = "rakun.profiles.group: expansion did not terminate";
+            head = queue.length;
+        } else {
+            val name = queue.at(head).unwrapOr("");
+            head = head + 1;
+            val members = groupMembers(name, groupOf);
+            if (members.length == 0) {
+                if (contains(out, name) == false) out.push(name);
+            } else {
+                if (contains(trail, name)) {
+                    err = "rakun.profiles.group." + name + ": a group that refers to itself — " + trail.join(" -> ") + " -> " + name;
+                    head = queue.length;
+                } else {
+                    trail.push(name);
+                    if (contains(out, name) == false) out.push(name);
+                    loop (members) { m -> queue.push(m); };
+                };
+            };
+        };
+    };
+    if (err != "") throw err;
+    return out;
+}
+
+fn groupMembers(name: string, groupOf: fn(name: string, index: i32) -> string) -> string[] {
+    var out: string[] = [];
+    var i = 0;
+    var run = true;
+    loop (run) {
+        val v = groupOf(name, i);
+        if (v == "") run = false else {
+            out.push(v);
+            i = i + 1;
+        };
+    };
+    return out;
+}
+
+// -- the expression grammar --------------------------------------------------
+// Names, `|`, `&`, `!` and parentheses: the grammar
+// `rakun.config.activate.on-profile` takes here and the front-72 profile marker will take in
+// front 72. Evaluated with the two-stack shunting yard rather than by recursion,
+// so precedence is one table (`!` binds tightest, then `&`, then `|`) and there
+// is no parser to keep in step with a second one.
+//
+// Every step is a FUNCTION over a `Stacks` value rather than an inner loop: the
+// erlang backend lowers a loop body by collecting the variables it mutates into
+// a tuple, and a `var` declared inside a nested block of a loop body comes out
+// `unbound` in one of the branches, taking the whole module down with it. One
+// loop per function, mutating only what that function declared.
+
+pub type Stacks(
+    vals: string[],
+    ops: string[],
+    bad: bool,
+)
+
+pub fn matches(expr: string, actives: string[]) -> bool {
+    val trimmed: string = expr.trim();
+    if (trimmed == "") return true else {
+        val noVals: string[] = [];
+        val noOps: string[] = [];
+        var st = Stacks(vals: noVals, ops: noOps, bad: false);
+        var i = 0;
+        loop (i < trimmed.length()) {
+            val c = pAt(trimmed, i);
+            if (c == " ") i = i + 1 else if (c == "(") {
+                st = pushOp(st, "(");
+                i = i + 1;
+            } else if (c == ")") {
+                st = unwindParen(st);
+                i = i + 1;
+            } else if (c == "!") {
+                st = pushOp(st, "!");
+                i = i + 1;
+            } else if (c == "&") {
+                st = pushOp(drainFor(st, 2), "&");
+                val step2: i32 = if (pAt(trimmed, i + 1) == "&") 2 else 1;
+                i = i + step2;
+            } else if (c == "|") {
+                st = pushOp(drainFor(st, 1), "|");
+                val step1: i32 = if (pAt(trimmed, i + 1) == "|") 2 else 1;
+                i = i + step1;
+            } else {
+                val name: string = scanName(trimmed, i);
+                if (name == "") {
+                    st = Stacks(vals: st.vals, ops: st.ops, bad: true);
+                    i = i + 1;
+                } else {
+                    st = pushVal(st, if (contains(actives, name)) "1" else "0");
+                    i = i + name.length();
+                };
+            };
+        };
+        val done = applyAll(st);
+        if (done.bad) return false else if (done.vals.length == 0) return true else return done.vals.at(done.vals.length - 1).unwrapOr("0") == "1";
+    };
+}
+
+fn scanName(s: string, start: i32) -> string {
+    var name = "";
+    var i = start;
+    var run = true;
+    loop (run) {
+        val ch = pAt(s, i);
+        val stop = (ch == "" || ch == " " || ch == "(" || ch == ")" || ch == "!" || ch == "&" || ch == "|");
+        if (stop) run = false else {
+            name = name + ch;
+            i = i + 1;
+        };
+    };
+    return name;
+}
+
+fn pushOp(st: Stacks, op: string) -> Stacks {
+    var ops = st.ops;
+    ops.push(op);
+    return Stacks(vals: st.vals, ops: ops, bad: st.bad);
+}
+
+fn pushVal(st: Stacks, v: string) -> Stacks {
+    var vals = st.vals;
+    vals.push(v);
+    return Stacks(vals: vals, ops: st.ops, bad: st.bad);
+}
+
+fn topOp(st: Stacks) -> string {
+    return st.ops.at(st.ops.length - 1).unwrapOr("");
+}
+
+// Pop and apply every operator that binds at least as tightly as the incoming
+// one, stopping at an open parenthesis.
+fn drainFor(st: Stacks, incoming: i32) -> Stacks {
+    var cur = st;
+    var run = true;
+    loop (run) {
+        val n = cur.ops.length;
+        val op: string = if (n == 0) "" else topOp(cur);
+        val keep = (n == 0 || op == "(" || prec(op) < incoming);
+        if (keep) run = false else cur = applyTop(cur);
+    };
+    return cur;
+}
+
+// A `)` applies everything back to the matching `(` and drops it. No `(` on the
+// stack is a malformed expression, not a guess.
+fn unwindParen(st: Stacks) -> Stacks {
+    var cur = st;
+    var run = true;
+    loop (run) {
+        if (cur.ops.length == 0) {
+            cur = Stacks(vals: cur.vals, ops: cur.ops, bad: true);
+            run = false;
+        } else if (topOp(cur) == "(") {
+            cur = Stacks(vals: cur.vals, ops: dropTail(cur.ops), bad: cur.bad);
+            run = false;
+        } else cur = applyTop(cur);
+    };
+    return cur;
+}
+
+// An unmatched `(` left at the end is malformed too.
+fn applyAll(st: Stacks) -> Stacks {
+    var cur = st;
+    var run = true;
+    loop (run) {
+        if (cur.ops.length == 0) run = false else if (topOp(cur) == "(") {
+            cur = Stacks(vals: cur.vals, ops: dropTail(cur.ops), bad: true);
+        } else cur = applyTop(cur);
+    };
+    return cur;
+}
+
+fn prec(op: string) -> i32 {
+    if (op == "!") return 3 else if (op == "&") return 2 else if (op == "|") return 1 else return 0;
+}
+
+fn applyTop(st: Stacks) -> Stacks {
+    val op: string = topOp(st);
+    val ops = dropTail(st.ops);
+    if (op == "!") {
+        if (st.vals.length == 0) return Stacks(vals: st.vals, ops: ops, bad: true) else {
+            val a = st.vals.at(st.vals.length - 1).unwrapOr("0");
+            var vals = dropTail(st.vals);
+            vals.push(if (a == "1") "0" else "1");
+            return Stacks(vals: vals, ops: ops, bad: st.bad);
+        };
+    } else {
+        if (st.vals.length < 2) return Stacks(vals: st.vals, ops: ops, bad: true) else {
+            val b = st.vals.at(st.vals.length - 1).unwrapOr("0");
+            val a = st.vals.at(st.vals.length - 2).unwrapOr("0");
+            var vals = dropTail(dropTail(st.vals));
+            val both = (a == "1" && b == "1");
+            val either = (a == "1" || b == "1");
+            if (op == "&") vals.push(if (both) "1" else "0") else vals.push(if (either) "1" else "0");
+            return Stacks(vals: vals, ops: ops, bad: st.bad);
+        };
+    };
+}
+
+fn dropTail(xs: string[]) -> string[] {
+    var out: string[] = [];
+    var i = 0;
+    loop (i < xs.length - 1) {
+        out.push(xs.at(i).unwrapOr(""));
+        i = i + 1;
+    };
+    return out;
+}

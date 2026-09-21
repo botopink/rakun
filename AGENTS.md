@@ -307,6 +307,74 @@ therefore written once, in botopink, over std's `fs`/`env` (both carry both
 forms), and the same code answers on both rows. `test/config_test.bp` is green on
 `commonJS` AND on `erlang`.
 
+### The eight sources, highest precedence first
+
+| # | Source | Form |
+|---|---|---|
+| 1 | Command-line arguments | `--server.port=9090`, from `env.args()` |
+| 2 | `RAKUN_APPLICATION_JSON` | one JSON object in one variable, flattened |
+| 3 | OS environment variables | `RAKUN_SERVER_PORT` → `server.port`; `__` → `-` FIRST, then `_` → `.`, lowercased. A variable without the prefix contributes nothing |
+| 4 | Profile-specific documents | `application-<profile>.<ext>`, the later ACTIVE profile winning |
+| 5 | Base documents | `application.<ext>`, the later LOCATION winning |
+| 6 | Configuration trees | `configtree:/etc/config`, one file per key |
+| 7 | Programmatic defaults | `rkSetProp` / `boot/1`, already in the table |
+| 8 | Declared field defaults | the second argument of a typed reader |
+
+Row 7 is not a layer and needs no enumeration of the table: the merge of rows
+6..1 is written OVER the table, so a key nothing else mentions keeps the value
+`rkSetProp` gave it and a key a file mentions loses it. Row 8 is not a layer
+either — it is the fallback a typed reader applies when the table has no answer.
+
+`rkConfigLoad()` is the entry point and the ONE `#[@result]` seam: a missing
+non-optional location, a cyclic import, a refused YAML construct and a
+self-referential profile group all come back as one refusal naming the input, so
+`main` writes `try rkConfigLoad();` and the boot stops. `rkConfigLoadFrom(args)`
+is the same load with an explicit argv, which is what the tests drive (a test
+process carries the RUNNER's arguments, never the program's).
+
+The load is TWO passes, because the profile set decides which documents
+contribute and a document can set the profile set: pass 1 merges the sources
+that carry no condition and resolves the set, pass 2 merges everything with the
+set known. Spring does the same for the same reason.
+
+### Locations
+
+`rakun.config.location` is an ordered comma-separated list, defaulting to
+`optional:file:./,optional:file:./config/`; `rakun.config.name` (default
+`application`) is the document stem. An entry is `[optional:]<file:|configtree:><path>`
+and a **file location must end in `/`** — it is a directory, and the stem is
+appended to it. A location WITHOUT `optional:` that does not exist is a startup
+failure naming the path: the milestone's most-restrictive rule applied to
+configuration, where a typo in a location is not a warning. Within one location
+the extensions apply low to high as `yml, yaml, json, properties`, so
+`.properties` beats `.yaml` for the same key at the same location — Spring's own
+rule. `rakun.config.import` pulls in another document at the importing
+document's precedence, resolved after it; an import cycle is a startup failure
+naming the chain.
+
+### Profiles
+
+`src/profiles.bp` owns the profile SET; front 72 owns every conditional
+registration marker that reads it. `rakun.profiles.active=dev,postgres`
+activates in order, `rakun.profiles.default` (itself defaulting to `default`)
+applies when nothing is active, `rakun.profiles.include[0]` adds
+unconditionally, and `rakun.profiles.group.production[0]` expands one name into
+a list, transitively, **activating the group name beside its members**; a group
+that refers to itself is a refusal naming the cycle.
+
+`profiles.active()` answers the RESOLVED list in activation order — read from
+`rakun.profiles.resolved`, which the loader writes. Reading
+`rakun.profiles.active` through `#[value]` also works and is a different
+question: it is the CONFIGURED string, before `include` and `group` are applied.
+
+A document may carry `rakun.config.activate.on-profile` (the expression grammar
+— names, `|`, `&`, `!` and parentheses, `!` binding tightest) and
+`rakun.config.activate.on-cloud-platform` (`kubernetes` on
+`KUBERNETES_SERVICE_HOST`, `cloud-foundry` on `VCAP_APPLICATION`, `heroku` on
+`DYNO`, `azure-app-service` on `WEBSITE_SITE_NAME`, `none` otherwise). Both have
+to hold. A document whose conditions do not hold contributes **nothing** — not a
+lower-priority value, nothing.
+
 ### The document formats
 
 | Format | Covered | Refused |
@@ -345,6 +413,17 @@ guessed, and each costs a spelling in `src/config.bp`:
 - On the erlang row `try` unwraps only in a `val` binding — `return try f()` and
   `g(try f())` both hand on the `{ok, …}` wrapper.
 - `from` is a keyword and cannot name a parameter.
+- A module-level `val` with an ALL-CAPS name is emitted as an erlang VARIABLE and
+  comes back `unbound`, which takes the whole module down; every constant here is
+  a function.
+- The `files` ORDER in a member's `botopink.json` is a dependency order: a module
+  has to be listed after every sibling it imports (`http` before `runtime`,
+  `profiles` before `config`). It compiles inside the member either way; a
+  CONSUMER's build reds with `unbound variable` inside rakun's own source.
+- An `if` expression cannot sit on the right of `+` (`i = i + if (…) 2 else 1`),
+  and a `var` declared inside a NESTED block of a loop body comes out `unbound`
+  on the erlang row — which is why `profiles.matches` is a chain of functions
+  over a `Stacks` value rather than one loop with inner loops.
 
 ## Design at a glance
 

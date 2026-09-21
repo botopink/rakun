@@ -38,6 +38,7 @@
 
 import {fs, env} from "std";
 import {rkSetProp, rkProp} from "runtime";
+import {matches, expand, setResolved} from "profiles";
 
 // ── a flat key/value pair, the only shape a source ever yields ──────────────
 
@@ -678,5 +679,428 @@ pub fn rkConfigApply(entries: Array<Entry>) -> i32 {
         val _ = rkSetProp(e.key, e.value);
         n = n + 1;
     };
+    return n;
+}
+
+// ── the eight sources ───────────────────────────────────────────────────────
+//
+// Highest precedence first, which is the order a reader argues about and the
+// REVERSE of the order they are merged in (a merge applies low first so the high
+// one overwrites it):
+//
+//   1  command-line arguments        --server.port=9090
+//   2  RAKUN_APPLICATION_JSON        one JSON object in one variable, flattened
+//   3  OS environment variables      RAKUN_SERVER_PORT then server.port
+//   4  profile-specific documents    application-<profile>.<ext>, later profile wins
+//   5  base documents                application.<ext>, later location wins
+//   6  configuration trees           configtree:/etc/config/, one file per key
+//   7  programmatic defaults         rkSetProp / boot/1, already in the table
+//   8  declared field defaults       the second argument of a typed reader
+//
+// Row 7 needs no layer and no enumeration of the table: the merge of rows 6..1
+// is written OVER the table, so a key nothing else mentions keeps the value
+// `rkSetProp` gave it and a key a file mentions loses it. Row 8 is not a layer at
+// all: it is the fallback the typed readers apply when the table has no answer.
+
+// -- row 1: the command line -------------------------------------------------
+// Split out from `env.args()` so a test can drive argv, which `env.args()` never
+// lets it do: a test process carries the runner's arguments, not the program's.
+
+pub fn cliEntries(args: string[]) -> Array<Entry> {
+    var out: Array<Entry> = [];
+    loop (args) { raw ->
+        val arg: string = raw;
+        if (arg.startsWith("--")) {
+            val body: string = sub(arg, 2, arg.length());
+            val eq = body.indexOf("=");
+            if (eq < 0) out = entryPut(out, body, "") else out = entryPut(
+                out,
+                sub(body, 0, eq),
+                sub(body, eq + 1, body.length()),
+            );
+        };
+    };
+    return out;
+}
+
+// -- row 2: RAKUN_APPLICATION_JSON -------------------------------------------
+
+#[@result]
+pub fn applicationJsonEntries(raw: string) -> @Result<Array<Entry>, string> {
+    if (raw == "") return [] else {
+        val docs = try parseJson(raw, "RAKUN_APPLICATION_JSON");
+        var out: Array<Entry> = [];
+        loop (docs) { d -> loop (d.entries) { e -> out = entryPut(out, e.key, e.value); }; };
+        return out;
+    };
+}
+
+// -- row 3: the environment --------------------------------------------------
+// `RAKUN_SERVER_PORT` becomes `server.port`: strip the prefix, `__` to `-`, `_`
+// to `.`, lowercase. `__` is replaced FIRST, so the `-` it produces is not then
+// read as a separator. A variable WITHOUT the prefix contributes nothing: the
+// environment is not a property table and a rakun application does not read
+// `PATH`. `RAKUN_APPLICATION_JSON` is row 2 and is excluded here so it cannot
+// also contribute its raw JSON text under the key `application.json`.
+
+pub fn envKey(name: string) -> string {
+    if (name.startsWith("RAKUN_") == false) return "" else if (name == "RAKUN_APPLICATION_JSON") return "" else {
+        val body: string = sub(name, 6, name.length());
+        return body.replaceAll("__", "-").replaceAll("_", ".").toLower();
+    };
+}
+
+pub fn envEntries(names: string[], values: string[]) -> Array<Entry> {
+    var out: Array<Entry> = [];
+    var i = 0;
+    loop (i < names.length) {
+        val key: string = envKey(names.at(i).unwrapOr(""));
+        if (key != "") out = entryPut(out, key, values.at(i).unwrapOr(""));
+        i = i + 1;
+    };
+    return out;
+}
+
+pub fn readEnvEntries() -> Array<Entry> {
+    var names: string[] = [];
+    var values: string[] = [];
+    loop (env.vars()) { v ->
+        names.push(v.0);
+        values.push(v.1);
+    };
+    return envEntries(names, values);
+}
+
+// -- merging -----------------------------------------------------------------
+// `mergeInto` applies a HIGHER-precedence layer over a lower one; the caller
+// walks the source table upwards.
+
+pub fn mergeInto(base: Array<Entry>, higher: Array<Entry>) -> Array<Entry> {
+    var out = base;
+    loop (higher) { e -> out = entryPut(out, e.key, e.value); };
+    return out;
+}
+
+// -- locations, names and imports --------------------------------------------
+
+// A module-level `val` with an ALL-CAPS name is emitted as an erlang VARIABLE
+// and comes back `unbound`, taking the whole module down with it, so every
+// constant here is a function.
+pub fn defaultLocations() -> string {
+    return "optional:file:./,optional:file:./config/";
+}
+
+pub fn locationsOf(entries: Array<Entry>) -> string[] {
+    val raw: string = if (entryHas(entries, "rakun.config.location")) entryAt(entries, "rakun.config.location") else {
+        val fromTable: string = rkProp("rakun.config.location");
+        if (fromTable == "") defaultLocations() else fromTable;
+    };
+    return raw.split(",");
+}
+
+pub fn configNameOf(entries: Array<Entry>) -> string {
+    val raw: string = if (entryHas(entries, "rakun.config.name")) entryAt(entries, "rakun.config.name") else rkProp(
+        "rakun.config.name"
+    );
+    if (raw == "") return "application" else return raw;
+}
+
+// A location is `[optional:]<file:|configtree:><path>`. Without `optional:` a
+// path that does not exist is a STARTUP FAILURE naming it, which is the
+// milestone's most-restrictive rule applied to configuration: a typo in a
+// location is not a warning.
+
+pub fn locationOptional(loc: string) -> bool {
+    return loc.trim().startsWith("optional:");
+}
+
+fn locationBody(loc: string) -> string {
+    val t: string = loc.trim();
+    if (t.startsWith("optional:")) return sub(t, 9, t.length()) else return t;
+}
+
+pub fn locationPath(loc: string) -> string {
+    val body: string = locationBody(loc);
+    if (body.startsWith("configtree:")) return sub(body, 11, body.length()) else if (body.startsWith("file:")) return sub(
+        body,
+        5,
+        body.length()
+    ) else return body;
+}
+
+pub fn locationIsTree(loc: string) -> bool {
+    return locationBody(loc).startsWith("configtree:");
+}
+
+// Within ONE location the extensions apply low to high, so `.properties` beats
+// `.yaml` for the same key at the same location, which is Spring's own rule.
+pub fn extensions() -> string {
+    return "yml,yaml,json,properties";
+}
+
+// -- carriers ----------------------------------------------------------------
+// Everything below the public entry point answers a VALUE carrying its own
+// error rather than an `@Result`: `try` unwraps only in a `val` binding on the
+// erlang row, and a loop body is a lambda, so a fallible call inside one has no
+// way to propagate. The public `rkConfigLoad` is the single `#[@result]` seam
+// and throws the first error it is handed.
+
+pub type Loaded(
+    docs: Array<Doc>,
+    error: string,
+)
+
+pub type Resolved(
+    names: string[],
+    error: string,
+)
+
+fn loadedOf(r: @Result<Array<Doc>, string>) -> Loaded {
+    val empty: Array<Doc> = [];
+    if (r.isError()) {
+        val assert Error(e) = r;
+        return Loaded(docs: empty, error: e);
+    } else return Loaded(docs: r.unwrapOr(empty), error: "");
+}
+
+// -- the cloud platform ------------------------------------------------------
+// One function, and testable by setting an environment variable, which is how
+// its test works.
+
+pub fn cloudPlatform() -> string {
+    if (env.read("KUBERNETES_SERVICE_HOST").unwrapOr("") != "") return "kubernetes" else if (env.read("VCAP_APPLICATION").unwrapOr("") != "") return "cloud-foundry" else if (env.read("DYNO").unwrapOr("") != "") return "heroku" else if (env.read("WEBSITE_SITE_NAME").unwrapOr("") != "") return "azure-app-service" else return "none";
+}
+
+// -- activation --------------------------------------------------------------
+// A document whose conditions do not hold contributes NOTHING: not a
+// lower-priority value, nothing. Two conditions both have to hold.
+
+pub fn docApplies(d: Doc, actives: string[], platform: string) -> bool {
+    var ok = true;
+    loop (d.conditions) { c ->
+        val key: string = c.key;
+        if (key == "on-profile") {
+            if (matches(c.value, actives) == false) ok = false;
+        } else if (key == "on-cloud-platform") {
+            if (c.value.trim() != platform) ok = false;
+        };
+    };
+    return ok;
+}
+
+pub fn flattenDocs(docs: Array<Doc>, actives: string[], platform: string) -> Array<Entry> {
+    var out: Array<Entry> = [];
+    loop (docs) { d ->
+        if (docApplies(d, actives, platform)) {
+            loop (d.entries) { e -> out = entryPut(out, e.key, e.value); };
+        };
+    };
+    return out;
+}
+
+// -- one location's documents, plus what they import -------------------------
+
+fn documentsAt(path: string, visited: string[]) -> Loaded {
+    var docs: Array<Doc> = [];
+    var err = "";
+    if (visited.length > 64) return Loaded(docs: docs, error: path + ": configuration imports nested more than 64 deep") else {
+        var seen = false;
+        loop (visited) { v -> if (v == path) { seen = true; }; };
+        if (seen) return Loaded(docs: docs, error: "rakun.config.import cycle: " + visited.join(" -> ") + " -> " + path) else {
+            val first = loadedOf(readDocument(path));
+            if (first.error != "") return first else {
+                var trail = visited;
+                trail.push(path);
+                loop (first.docs) { d -> docs.push(d); };
+                var imports: string[] = [];
+                loop (first.docs) { d ->
+                    loop (d.entries) { e ->
+                        if (e.key == "rakun.config.import") {
+                            loop (e.value.split(",")) { ref -> imports.push(ref); };
+                        };
+                    };
+                };
+                loop (imports) { ref ->
+                    val target: string = locationPath(ref);
+                    val optional = locationOptional(ref);
+                    val exists = fs.exists(target);
+                    if (exists) {
+                        val nested = documentsAt(target, trail);
+                        if (nested.error != "") {
+                            if (err == "") err = nested.error;
+                        } else loop (nested.docs) { d -> docs.push(d); };
+                    } else if (optional == false) {
+                        if (err == "") err = "rakun.config.import: " + target + " does not exist and is not marked `optional:`";
+                    };
+                };
+                return Loaded(docs: docs, error: err);
+            };
+        };
+    };
+}
+
+// `profile` empty means the BASE document (`application.<ext>`); otherwise
+// `application-<profile>.<ext>`. Locations apply in list order, so a later
+// location overrides an earlier one; extensions apply in `extensions()` order, so
+// `.properties` beats `.yaml` at the same location.
+
+pub fn documentsFor(locations: string[], name: string, profile: string) -> Loaded {
+    var docs: Array<Doc> = [];
+    var err = "";
+    val stem: string = if (profile == "") name else name + "-" + profile;
+    loop (locations) { loc ->
+        if (locationIsTree(loc)) {
+        } else {
+            val dir: string = locationPath(loc);
+            val dirExists = fs.exists(dir);
+            if ((dirExists == false && locationOptional(loc) == false)) {
+                if (err == "") err = "rakun.config.location: " + dir + " does not exist and is not marked `optional:`";
+            } else {
+                val seed: string[] = [];
+                loop (extensions().split(",")) { ext ->
+                    val path: string = dir + stem + "." + ext;
+                    if (fs.exists(path)) {
+                        val one = documentsAt(path, seed);
+                        if (one.error != "") {
+                            if (err == "") err = one.error;
+                        } else loop (one.docs) { d -> docs.push(d); };
+                    };
+                };
+            };
+        };
+    };
+    return Loaded(docs: docs, error: err);
+}
+
+// -- row 6: configuration trees ----------------------------------------------
+
+pub fn treesFor(locations: string[]) -> Array<Entry> {
+    var out: Array<Entry> = [];
+    loop (locations) { loc ->
+        if (locationIsTree(loc)) {
+            val dir: string = locationPath(loc);
+            if (fs.exists(dir)) {
+                val empty: Array<Entry> = [];
+                val es = readTree(dir).unwrapOr(empty);
+                loop (es) { e -> out = entryPut(out, e.key, e.value); };
+            };
+        };
+    };
+    return out;
+}
+
+// -- the profile set ---------------------------------------------------------
+// `rakun.profiles.active` activates in order; `rakun.profiles.default` (itself
+// defaulting to `default`) applies when nothing is active; `include[i]` adds
+// unconditionally; `group.<name>[i]` expands one name into a list, transitively.
+
+pub fn resolveProfiles(entries: Array<Entry>) -> Resolved {
+    var seed: string[] = [];
+    val activeRaw: string = entryAt(entries, "rakun.profiles.active");
+    if (activeRaw != "") {
+        loop (activeRaw.split(",")) { p ->
+            val name: string = p.trim();
+            if (name != "") seed.push(name);
+        };
+    };
+    var i = 0;
+    var run = true;
+    loop (run) {
+        val v: string = entryAt(entries, "rakun.profiles.include[" + i + "]");
+        if (v == "") run = false else {
+            val name: string = v.trim();
+            if (name != "") seed.push(name);
+            i = i + 1;
+        };
+    };
+    if (seed.length == 0) {
+        val fallback: string = entryAt(entries, "rakun.profiles.default");
+        if (fallback == "") seed.push("default") else {
+            loop (fallback.split(",")) { p ->
+                val name: string = p.trim();
+                if (name != "") seed.push(name);
+            };
+        };
+    };
+    val expanded = expand(seed, { name, index -> entryAt(entries, "rakun.profiles.group." + name + "[" + index + "]") });
+    val none: string[] = [];
+    if (expanded.isError()) {
+        val assert Error(e) = expanded;
+        return Resolved(names: none, error: e);
+    } else return Resolved(names: expanded.unwrapOr(none), error: "");
+}
+
+fn documentsForProfiles(locations: string[], name: string, actives: string[]) -> Loaded {
+    var docs: Array<Doc> = [];
+    var err = "";
+    loop (actives) { p ->
+        val one = documentsFor(locations, name, p);
+        if (one.error != "") {
+            if (err == "") err = one.error;
+        } else loop (one.docs) { d -> docs.push(d); };
+    };
+    return Loaded(docs: docs, error: err);
+}
+
+// ── the loader ────────────────────────────────────────────────────────────
+// The ONE public entry point, and the only `#[@result]` seam in the chain: an
+// error anywhere below is carried up as a value and thrown here, so a caller
+// writes `try rkConfigLoad();` in `main` and a bad location, a cyclic import, a
+// refused YAML construct or a self-referential profile group all refuse the boot
+// the same way, naming the input.
+//
+// Two passes, which is what Spring does and what the ordering forces: the
+// profile set decides which documents contribute, and a document can set the
+// profile set. Pass 1 merges the sources that carry no condition and resolves
+// the set; pass 2 merges everything with the set known.
+
+#[@result]
+pub fn rkConfigLoadFrom(args: string[]) -> @Result<i32, string> {
+    val cli = cliEntries(args);
+    val rawJson: string = env.read("RAKUN_APPLICATION_JSON").unwrapOr("");
+    val appJson = try applicationJsonEntries(rawJson);
+    val envs = readEnvEntries();
+
+    // rows 3, 2 and 1, low to high: they decide the name and the locations,
+    // because a document cannot name the location it is itself read from.
+    var high: Array<Entry> = [];
+    high = mergeInto(high, envs);
+    high = mergeInto(high, appJson);
+    high = mergeInto(high, cli);
+
+    val locations = locationsOf(high);
+    val name = configNameOf(high);
+    val platform = cloudPlatform();
+    val trees = treesFor(locations);
+
+    val base = documentsFor(locations, name, "");
+    if (base.error != "") throw base.error;
+
+    val noProfiles: string[] = [];
+    var seed: Array<Entry> = [];
+    seed = mergeInto(seed, trees);
+    seed = mergeInto(seed, flattenDocs(base.docs, noProfiles, platform));
+    seed = mergeInto(seed, high);
+    val resolved = resolveProfiles(seed);
+    if (resolved.error != "") throw resolved.error;
+    val actives = resolved.names;
+
+    val profileDocs = documentsForProfiles(locations, name, actives);
+    if (profileDocs.error != "") throw profileDocs.error;
+
+    var merged: Array<Entry> = [];
+    merged = mergeInto(merged, trees);
+    merged = mergeInto(merged, flattenDocs(base.docs, actives, platform));
+    merged = mergeInto(merged, flattenDocs(profileDocs.docs, actives, platform));
+    merged = mergeInto(merged, high);
+
+    val written = rkConfigApply(merged);
+    val _ = setResolved(actives);
+    return written;
+}
+
+#[@result]
+pub fn rkConfigLoad() -> @Result<i32, string> {
+    val n = try rkConfigLoadFrom(env.args());
     return n;
 }
