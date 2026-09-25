@@ -326,7 +326,7 @@ cors_reset() ->
 
 %% ═══ raises and the guard ════════════════════════════════════════════════════
 %% botopink has no typed raise and no user-visible catch of one: `throw` is legal
-%% only inside `#[@result]` and yields an `Error(e)` VALUE. So the raise and the
+%% only under a `@Result` return and yields an `Error(e)` VALUE. So the raise and the
 %% catch are both here, and the error entry hands in two closures.
 
 raise_problem(Tag, Detail) ->

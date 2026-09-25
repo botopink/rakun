@@ -295,8 +295,7 @@ test "rakun ssr: each layout render receives its own selected depth, root first"
     assert out == "<d0><d1><d2><page></page></d2></d1></d0>";
 }
 
-#[@future]
-pub fn pageOf(route: PageContext) -> @Future<Node> {
+pub fn pageOf(route: PageContext) -> @Task<Node> {
     return el("page", [], []);
 }
 
@@ -465,19 +464,16 @@ pub fn countOf(haystack: string, needle: string) -> i32 {
 
 // ── steps 5 and 6: streaming and the two entry points ───────────────────────
 
-#[@future]
-pub fn slowLeaf(name: string, ms: i32) -> @Future<Node> {
+pub fn slowLeaf(name: string, ms: i32) -> @Task<Node> {
     val _s = rkReqSleep(ms);
     return el(name, [], []);
 }
 
-#[@future]
-pub fn blogPage(route: PageContext) -> @Future<Node> {
+pub fn blogPage(route: PageContext) -> @Task<Node> {
     return el("article", [], [txt("post " + route.pathname)]);
 }
 
-#[@future]
-pub fn queryPage(route: PageContext) -> @Future<Node> {
+pub fn queryPage(route: PageContext) -> @Task<Node> {
     val q = searchParam(route, "page");
     return el("article", [], [txt("page " + q)]);
 }
@@ -573,14 +569,14 @@ test "rakun ssr: the previous phase is restored after a render" {
 
 test "rakun ssr: sibling loaders are unstarted thunks gathered in ONE await" {
     val _s = rkSsrReset();
-    var thunks: Array<fn() -> @Future<Node>> = [];
+    var thunks: Array<fn() -> @Task<Node>> = [];
     thunks.push({ -> slowLeaf("one", 50) });
     thunks.push({ -> slowLeaf("two", 50) });
     // The clock is `std/time` reached DIRECTLY from this test file — measured
     // green on both rows on `4fe1747e`, which is why `ssr.bp`'s `nowMs` /
     // `sinceUnder` wrappers are gone. It is two calls rather than one
     // `time.measureMillis(body)` because the body being measured is an AWAIT,
-    // and a `#[@future]` body may not await inside a closure.
+    // and a `@Task` body may not await inside a closure.
     val start = time.monotonicMillis();
     val resolved = await renderAll(thunks);
     val fast = (time.monotonicMillis() - start) < 100;
@@ -590,7 +586,7 @@ test "rakun ssr: sibling loaders are unstarted thunks gathered in ONE await" {
     // The BEAM spawns one process per thunk, so two 50 ms loaders finish in
     // well under 100 ms. Node has no process and `rkReqSleep` blocks the event
     // loop, so the same two take 100 ms there — which is exactly what the same
-    // test written over already-started `@Future` values would look like on BOTH
+    // test written over already-started `@Task` values would look like on BOTH
     // rows, and why the thunk type is the thing that is asserted, not the clock.
     assert fast == concurrentRow();
 }
@@ -601,7 +597,7 @@ test "rakun ssr: a shell and one boundary produce three chunks, the first ending
     val first = nextHoleOrdinal();
     assert holeId(first) == "h1";
     val shell = renderNode(v, el("main", [], [holeMarker(v, first, txt("loading"))]));
-    var thunks: Array<fn() -> @Future<Node>> = [];
+    var thunks: Array<fn() -> @Task<Node>> = [];
     thunks.push({ -> slowLeaf("late", 1) });
     val resolved = await renderAll(thunks);
     val page: RenderedPage = streamChunks(
@@ -634,7 +630,7 @@ test "rakun ssr: hole ids are ordinals in shell order even when the boundaries r
         holeMarker(v, a, txt("A")),
         holeMarker(v, b, txt("B")),
     ]));
-    var thunks: Array<fn() -> @Future<Node>> = [];
+    var thunks: Array<fn() -> @Task<Node>> = [];
     thunks.push({ -> slowLeaf("slow", 60) });
     thunks.push({ -> slowLeaf("quick", 1) });
     val resolved = await renderAll(thunks);
@@ -693,7 +689,7 @@ test "rakun ssr: a streamed chunk carries the sink's block before its markup" {
     val _i = setHooks(sunk);
     val hole = nextHoleOrdinal();
     val shell = renderNode(v, el("main", [], [holeMarker(v, hole, txt("..."))]));
-    var thunks: Array<fn() -> @Future<Node>> = [];
+    var thunks: Array<fn() -> @Task<Node>> = [];
     thunks.push({ -> slowLeaf("late", 1) });
     val resolved = await renderAll(thunks);
     val page: RenderedPage = streamChunks("", shell, [holeId(hole)], markupAll(v, resolved), holePayload(["h1"]));

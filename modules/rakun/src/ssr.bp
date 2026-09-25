@@ -116,14 +116,13 @@ pub declare fn rkSsrSelected() -> i32;
 pub declare fn rkSsrNextNav() -> i32;
 
 // One process per thunk on the BEAM, the results gathered BY INDEX. The
-// argument is an `Array<fn() -> T>` and never an already-started `@Future`:
-// `@Future<T>` lowers eagerly on erlang, so two futures awaited together have
+// argument is an `Array<fn() -> T>` and never an already-started `@Task`:
+// `@Task<T>` lowers eagerly on erlang, so two tasks awaited together have
 // already run one after the other, at full latency, and no assertion over the
 // markup would ever say so.
-#[@future]
 #[@External.Node("./ssr.mjs", "all"),
   @External.Erlang("rakun_ssr", "all")]
-pub declare fn rkSsrAll<T>(thunks: Array<fn() -> @Future<T>>) -> @Future<Array<T>>;
+pub declare fn rkSsrAll<T>(thunks: Array<fn() -> @Task<T>>) -> @Task<Array<T>>;
 
 #[@External.Node("./ssr.mjs", "settledOrder"),
   @External.Erlang("rakun_ssr", "settled_order")]
@@ -770,8 +769,7 @@ pub fn rootOpen() -> string {
 // `Onze.run`, so `repository/rakun/` names no module of onze and none of
 // emilia. A document rendered through `defaultHooks()` therefore carries no
 // `<style>` at all, which is what "a working document with no toolchain" means.
-#[@future]
-pub fn document(head: string, body: string, p: Payload) -> @Future<string> {
+pub fn document(head: string, body: string, p: Payload) -> @Task<string> {
     val h: RenderHooks = hooks();
     val collectHead = h.collectHead;
     val headExtra = h.headExtra;
@@ -898,15 +896,16 @@ pub fn registerBoundary<El>(kind: string, pattern: string, render: fn(props: Lay
 // also means `cookies().set(...)` from a render raises — asserted here, not
 // described.
 //
-// AWAITING CHILDREN, AND WHY `@Future` IS NOT CONCURRENCY. `@Future<T>` lowers
-// EAGERLY on erlang — `libs/std/src/http.bp:16-18` says so outright — so a
-// future is a value that has already been computed, and calling two loaders and
-// awaiting both afterwards runs them one after the other at full latency. No
-// assertion over the markup would ever say so. And a `#[@future]` fn cannot
-// `await` inside a `loop` or a closure, because the effect marker attaches to
-// the function and not to the closure. So the pipeline NEVER awaits in a loop
-// and never hands anything an already-started future: it builds an
-// `Array<fn() -> @Future<El>>` — unstarted THUNKS — and gathers them in ONE
+// AWAITING CHILDREN, AND WHY `@Task` IS NOT CONCURRENCY. `@Task<T>` lowers
+// EAGERLY on erlang — decision 120, and `libs/std/src/http.bp` says so
+// outright — so a task is a value that has already been computed, and calling
+// two loaders and awaiting both afterwards runs them one after the other at
+// full latency. No assertion over the markup would ever say so. And a `@Task`
+// fn cannot `await` inside a `loop` or a closure, because the await channel is
+// the function's return and a closure has a return of its own. So the pipeline
+// NEVER awaits in a loop and never hands anything an already-started task: it
+// builds an
+// `Array<fn() -> @Task<El>>` — unstarted THUNKS — and gathers them in ONE
 // await. The concurrency comes from spawned processes.
 
 // `std/querystring` COMPILES AND RUNS on both rows now — the compiler fixed the
@@ -999,10 +998,9 @@ pub fn searchParam(route: PageContext, name: string) -> string {
 
 // One process per thunk, one await. This is the shape every sibling render in
 // this front goes through, and the type is what makes "no call site passes an
-// already-started future" checkable: the parameter is a FUNCTION, so a value
+// already-started task" checkable: the parameter is a FUNCTION, so a value
 // does not fit.
-#[@future]
-pub fn renderAll<T>(thunks: Array<fn() -> @Future<T>>) -> @Future<Array<T>> {
+pub fn renderAll<T>(thunks: Array<fn() -> @Task<T>>) -> @Task<Array<T>> {
     return await rkSsrAll(thunks);
 }
 
@@ -1049,14 +1047,12 @@ pub fn notFoundProblem(pathname: string) -> string {
 
 // ── step 6: the non-streaming entry point ───────────────────────────────────
 
-#[@future]
-pub fn missingPage<El>(v: ElementView<El>, route: PageContext) -> @Future<El> {
+pub fn missingPage<El>(v: ElementView<El>, route: PageContext) -> @Task<El> {
     val make = v.make;
     return make("#fragment", "", [], []);
 }
 
-#[@future]
-pub fn render<El>(v: ElementView<El>, pathname: string, query: string) -> @Future<RenderedPage> {
+pub fn render<El>(v: ElementView<El>, pathname: string, query: string) -> @Task<RenderedPage> {
     val previous: RequestPhase = requestPhase();
     val _p = setPhase(RequestPhase.Render);
     val h: RenderHooks = hooks();
@@ -1075,7 +1071,7 @@ pub fn render<El>(v: ElementView<El>, pathname: string, query: string) -> @Futur
         query: queryDict(query),
         rest: [],
     );
-    // The optional binder is a CLOSURE, and a `#[@future]` body may not await
+    // The optional binder is a CLOSURE, and a `@Task` body may not await
     // inside one — so the match is unpacked here and every await happens below
     // it, in the function's own body.
     if (matchPath(table, pathname)) { hit ->
@@ -1085,14 +1081,14 @@ pub fn render<El>(v: ElementView<El>, pathname: string, query: string) -> @Futur
         route = contextOf(hit, pathname, queryDict(query));
     };
     // THE AWAIT IS UNCONDITIONAL, and that is not a simplification. `await`
-    // inside an `if`/`else` block of a `#[@future]` body is emitted on the
+    // inside an `if`/`else` block of a `@Task` body is emitted on the
     // commonJS row inside a NON-ASYNC arrow IIFE — botopink's `if` is an
     // expression — and node refuses the file at LOAD with `SyntaxError: await
     // is only valid in async functions`, which takes the whole test file down
     // rather than one cell. Measured here. So the page function is looked up
     // for both arms (a miss resolves to `missingPage`, an empty fragment) and
     // awaited once, at the body's own level.
-    val pageFn: fn(route: PageContext) -> @Future<El> =
+    val pageFn: fn(route: PageContext) -> @Task<El> =
         rkAppRender(recordLine("P", pattern), { r -> missingPage(v, r) });
     val page = await pageFn(route);
     var body = "";
@@ -1156,7 +1152,7 @@ pub fn rootChain(table: RouteEntry[]) -> RouteEntry[] {
 // `Hole<El>` was a record here — `(fallback, body)` — and it is gone: a
 // parameter typed `Array<Hole<El>>` hits the same `generic-arg-skip-forbidden`
 // refusal as the bare thunk array, so a caller passes the fallbacks (already in
-// the shell) and the bodies (an `Array<fn() -> @Future<El>>`) as two lists. A
+// the shell) and the bodies (an `Array<fn() -> @Task<El>>`) as two lists. A
 // record nothing can take as a parameter is surface with no use.
 
 // The shell marker for a hole. The ordinal is assigned HERE, as an ordinal in
@@ -1203,13 +1199,13 @@ pub fn indicesOf(order: string) -> i32[] {
 // chunks in resolution order, each carrying the markup of its own boundary.
 // **The streaming entry is three calls and not one, and the reason is a
 // compiler gap, not a design choice.** A parameter typed
-// `Array<fn() -> @Future<El>>` in a function that also takes an
+// `Array<fn() -> @Task<El>>` in a function that also takes an
 // `ElementView<El>` is refused with `generic-arg-skip-forbidden: cannot skip a
 // defaulted argument while providing a later one` — reported on the token AFTER
 // the parameter, at any position in the list. Each half compiles on its own;
 // the two together do not. So the gather keeps its own function, where the
 // thunk type is the thing that makes "no call site passes an already-started
-// future" checkable, and the chunk protocol keeps its own, where nothing is
+// task" checkable, and the chunk protocol keeps its own, where nothing is
 // generic at all:
 //
 // ```bp

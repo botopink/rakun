@@ -20,6 +20,34 @@
 > (`{badkey,param}` / `{badkey,query}`), which AGENTS.md § Blocked already
 > records.
 
+- **Effects by return type** (botopink front 24, step E7, decisions 118–128).
+  `modules/rakun/src/{config,profiles,ssl_bundle,ssr,file_router,request_memo,request_context}.bp`,
+  `modules/rakun/test/{file_router,file_router_markers,request_memo,ssr}_test.bp`,
+  `examples/rakun-ssr/src/main.bp`, comments in `rakun-web` / `rakun-validation`
+  and both sidecars, `AGENTS.md`, `docs.md`.
+
+  Every effect annotation is gone: the return is the annotation. The nine
+  `result` annotations leave their `-> @Result<…>` functions unchanged; the
+  seventeen `future` annotations go and every one-argument `@Future` is `@Task` — none of
+  rakun's futures carried an error (no body throws or tries, and `render`
+  answers a miss as the status 404), so no `await` became `try await` and no
+  return gained a `@Result`. `rkSsrAll`, the host gather, is `-> @Task<Array<T>>`:
+  per decision 126 a rejection there is a fatal host failure, which is what a
+  crashed thunk already was.
+
+  The file-convention markers read `decl.returnType == "Task"` where they read
+  `"Future"`: `#[page]` requires a `-> @Task<…>` return, and `#[layout]` /
+  `#[template]` / `#[defaultView]` refuse one. The refusal texts name `@Task`.
+
+  `request_context.bp` gains `RequestBase` (a field-less marker type) and
+  `RequestScope` now `implement @Context<RequestBase>` — the base a request hook
+  (`-> @Component<RequestBase, T>`) anchors at, decision 128 / the guide's § 4.4.
+  No accessor became a hook.
+
+  Open point 8 (the error of a failing render; whether `ChunkWriter.write` stays
+  infallible) is recorded in the meta repository's
+  `specs/1.0.10-beta/decisions-pending.md`; nothing here spells those types yet.
+
 - **The `std` substitutes, measured and settled** (front 74 follow-up).
   `modules/rakun/src/ssr.bp`, `modules/rakun/test/ssr_test.bp`,
   `modules/rakun/src/events.bp`, `modules/rakun/src/request_context.bp`,
@@ -48,7 +76,7 @@
   All five. So: `ssr.bp`'s `nowMs()` / `sinceUnder()` are DELETED and the one
   timing cell in `ssr_test.bp` calls `time.monotonicMillis()` itself — still two
   calls rather than `time.measureMillis(body)`, because the body being measured
-  is an AWAIT and a `#[@future]` body may not await inside a closure. The dead
+  is an AWAIT and a `@Task` body (then `@Future`) may not await inside a closure. The dead
   rule is deleted from `AGENTS.md` and the clauses that leaned on it in
   `events.bp`, `filter.bp` and `request_context.bp`'s percent-encoding header
   (three reasons to two, the same correction `AGENTS.md` carries) are gone with
@@ -182,7 +210,7 @@
   `#[sizeBetween(min, max)]`, `#[minValue(n)]`, `#[maxValue(n)]`, `#[positive]`,
   `#[positiveOrZero]`, `#[email]`, `#[pattern(regex)]`, `#[pastDate]`,
   `#[futureDate]`, `#[constraint(name)]`. No `#[future]`: that name collides with
-  the effect marker `#[@future]`.
+  the `future` effect annotation (removed since, decision 118).
 
   **This is the only `both — boundary` member, and the mechanism is the reason.**
   The emitted validator is plain botopink — string comparisons, length checks and
@@ -452,8 +480,8 @@
   a render raises — the phase table of `contracts.md § 5` is enforced, not
   described.
 
-  **Concurrency is processes, not `@Future`.** `renderAll` takes an
-  `Array<fn() -> @Future<T>>` — unstarted THUNKS — and gathers them in one
+  **Concurrency is processes, not `@Task`** (then `@Future`). `renderAll` takes an
+  `Array<fn() -> @Task<T>>` — unstarted THUNKS — and gathers them in one
   await, one spawned BEAM process per thunk. Two 50 ms loaders finish under
   100 ms on the row that spawns and take 100 ms on the row that cannot, and the
   cell asserts `fast == concurrentRow()` rather than claiming one shape for
@@ -461,7 +489,7 @@
   future" checkable.
 
   **The streaming entry is three calls and not one, and it is a compiler gap
-  rather than a design choice.** A parameter typed `Array<fn() -> @Future<El>>`
+  rather than a design choice.** A parameter typed `Array<fn() -> @Task<El>>`
   in a function that also takes an `ElementView<El>` is refused with
   `generic-arg-skip-forbidden`; each half compiles alone. So the gather keeps
   its own function and `streamChunks` — where nothing is generic — keeps the
@@ -470,7 +498,7 @@
   once, and a boundary that resolved before the flush is no hole at all.
 
   **Four more measurements, each of which cost a red:** `await` inside an
-  `if`/`else` block of a `#[@future]` body is emitted in a non-async arrow IIFE
+  `if`/`else` block of a `@Task` body is emitted in a non-async arrow IIFE
   on commonJS and takes the whole test FILE down at load; the optional binder is
   a closure and may not await; `xs.at(i).unwrapOr(…)` reads the element back
   unwrapped when the array came off a record field or the function is generic;
@@ -947,11 +975,11 @@
   next call runs it again. `preload(k, load)` then `memoize(k, load)` runs the
   loader once and answers the preloaded value, a second `preload` for one key
   starts nothing, and a `memoize` over a preload that is still running waits for
-  the child — asserted with a loader that sleeps. The `#[@future]` row holds
+  the child — asserted with a loader that sleeps. The task-returning loader row holds
   too: the eager erlang lowering means the first call stores a value, so the
   second is the resolved-value row.
 
-  `preload` is not built on `@Future` and cannot be: on erlang `@Future<T>`
+  `preload` is not built on `@Task` (then `@Future`) and cannot be: on erlang `@Task<T>`
   lowers eagerly, so `await` is identity and there is no third state in which
   the frame holds an unresolved future. It spawns a monitored child and stores a
   pending marker instead. Node has no process, so `preload` there runs the
@@ -1035,8 +1063,8 @@
   Two new measurements are recorded in `AGENTS.md` rather than worked around: a
   named function used as a VALUE is `variable 'BlogPostPage' is unbound` on the
   erlang row, so a marker emits `{ route -> blogPostPage(route) }`; and
-  `decl.returnType` carries no type argument (`"Future"`, not
-  `"@Future<Element>"`), so a page is checked to BE a future and the required
+  `decl.returnType` carries no type argument (`"Future"` then, `"Task"` now, not
+  `"@Task<Element>"`), so a page is checked to BE a task and the required
   spelling lives in the message. A third is why there are two test files: an
   `@emit`ted module-load `val` lands at the END of the emitted module, so a
   registration cannot be snapshotted in its own module, and `botopink test` runs

@@ -129,8 +129,8 @@ to_bin(L) when is_list(L) -> list_to_binary(L).
 
 %% ═══ the gather over unstarted thunks ════════════════════════════════════════
 %%
-%% `@Future<T>` lowers EAGERLY on this row — `libs/std/src/http.bp` says so in
-%% as many words — so a future is a value that has already been computed and
+%% `@Task<T>` lowers EAGERLY on this row — decision 120, and `libs/std/src/http.bp`
+%% says the same — so a task is a value that has already been computed and
 %% awaiting two of them runs them one after the other at full latency. The
 %% concurrency therefore comes from PROCESSES: one `spawn_monitor` per thunk,
 %% the results gathered by INDEX, and the order they settled in recorded on the

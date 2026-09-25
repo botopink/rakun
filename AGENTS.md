@@ -127,7 +127,7 @@ rakun/
 │   │   │   │                    the browser function a fill chunk calls
 │   │   │   ├── sidecars/rakun_ssr.erl ← the same cells on the BEAM, in the serving
 │   │   │   │                    process's dictionary; `all/1` spawns one monitored
-│   │   │   │                    child per thunk, because `@Future` is eager there
+│   │   │   │                    child per thunk, because `@Task` is eager there
 │   │   │   ├── autoconfig_registry.bp ← THE AUTO-CONFIGURATION SEAM (§ The
 │   │   │   │                    auto-configuration pass): the host cells behind the
 │   │   │   │                    registration table, plus the `botopink.json`
@@ -712,8 +712,8 @@ failed outcome discards the contributions.
 | Written | Refused with |
 |---|---|
 | `#[page]` on a type | `#[page] must annotate a function` |
-| `#[page]` on a fn returning `Element` | `#[page] must annotate a #[@future] fn returning @Future<Element> — every page is async so the render pipeline has one shape to drive` |
-| `#[layout]` on a `#[@future]` fn | `#[layout] must annotate a fn(props: LayoutProps) -> Element — a layout is synchronous, only a page is a @Future` |
+| `#[page]` on a fn returning `Element` | `#[page] must annotate a fn returning @Task<Element> — every page is async so the render pipeline has one shape to drive` |
+| `#[layout]` on a fn returning `@Task<…>` | `#[layout] must annotate a fn(props: LayoutProps) -> Element — a layout is synchronous, only a page is a @Task` |
 | `#[page()]`, `#[page(1)]` | the automatic argument check, with no code in this front |
 
 Three measurements shape these bodies and one of them is new:
@@ -723,9 +723,9 @@ Three measurements shape these bodies and one of them is new:
   `variable 'BlogPostPage' is unbound` on erlang. The markers therefore emit
   `{ route -> blogPostPage(route) }`, which is the same value, lowers on both,
   and is what `decorators.bp` already emits for a controller method.
-- **`decl.returnType` carries no type argument.** It is `"Future"` for
-  `-> @Future<Element>`, `"Element"` for `-> Element` and `""` for a type. So a
-  page is checked to BE a `Future` and a layout to be anything that is not one;
+- **`decl.returnType` carries no type argument.** It is `"Task"` for
+  `-> @Task<Element>`, `"Element"` for `-> Element` and `""` for a type. So a
+  page is checked to BE a `Task` and a layout to be anything that is not one;
   the required spelling is in the message, which is as close to "naming the
   required return type" as the reflection allows.
 - **An `@emit`ted module-load `val` lands at the END of the emitted module**,
@@ -819,6 +819,15 @@ it was minted with; a handle used after `endRequest`, or from the next request o
 the same connection, RAISES rather than writing into somebody else's response.
 That is the first test in `test/request_context_test.bp`, deliberately.
 
+**`RequestScope` owns the context: `implement @Context<RequestBase>`.**
+`RequestBase` (`pub type RequestBase {}`, a marker with no fields) is the base
+a request hook's `use`s anchor at — `-> @Component<RequestBase, T>` (decision
+128, front 24's guide § 4.4) — so the one-base rule refuses a request hook
+inside a jhonstart component (`ElementBase`) at the second `use`. No accessor
+here is a hook yet: every reader below is an ordinary function that raises
+outside a frame, and turning one into a hook is a front of its own (every caller
+would then need a `@Component<RequestBase, …>` return).
+
 | Verb | Who calls it | What it does |
 |---|---|---|
 | `beginRequest(scope)` | front 04's acceptor, front 23's SSR pipeline, front 24's action dispatcher, front 07's chain | writes the one frame key — `rakun_request` in the serving process's dictionary on the BEAM, one module global on node — and answers the epoch. Over an existing frame it RAISES, naming the outer scope's path |
@@ -892,7 +901,7 @@ pub type Payload(build, pathname, pattern, params, query, table,
                  islands, actions, styles, holes, dynamic, kinds, slots)
 pub fn writePayload(p: Payload) -> string
 pub fn payloadEscape(json: string) -> string
-#[@future] pub fn document(head: string, body: string, p: Payload) -> @Future<string>
+pub fn document(head: string, body: string, p: Payload) -> @Task<string>
 ```
 
 The payload is one `<script id="__onze" type="application/json">`, the last
@@ -945,8 +954,8 @@ of the comparison exist.
 ### Steps 5 and 6 — the chunk protocol and the two entry points
 
 ```bp
-#[@future] pub fn render<El>(v: ElementView<El>, pathname: string, query: string) -> @Future<RenderedPage>
-#[@future] pub fn renderAll<T>(thunks: Array<fn() -> @Future<T>>) -> @Future<Array<T>>
+pub fn render<El>(v: ElementView<El>, pathname: string, query: string) -> @Task<RenderedPage>
+pub fn renderAll<T>(thunks: Array<fn() -> @Task<T>>) -> @Task<Array<T>>
 pub fn markupAll<El>(v: ElementView<El>, resolved: Array<El>) -> string[]
 pub fn streamChunks(head, shell, ids: string[], markups: string[], p: Payload) -> RenderedPage
 pub fn beginRender(id, pathname, query, strict) -> i64
@@ -969,26 +978,26 @@ call can hold it. On the BEAM the frame dies with the serving process, which is
 why it is process-local; on node it would survive, which is why the rule is
 written here as well as in front 62.
 
-**`@Future` is not concurrency on the target this front compiles for.** It
-lowers EAGERLY on erlang, so a future is a value that has already been computed
-and two of them awaited together have already run in sequence, at full latency —
-and no assertion over the markup would ever say so. A `#[@future]` fn also
-cannot `await` inside a `loop` or a closure. So the pipeline never awaits in a
-loop and never hands anything an already-started future: it builds an
-`Array<fn() -> @Future<El>>` — unstarted THUNKS — and `renderAll` gathers them
+**`@Task` is not concurrency on the target this front compiles for.** It
+lowers EAGERLY on erlang (decision 120), so a task is a value that has already
+been computed and two of them awaited together have already run in sequence, at
+full latency — and no assertion over the markup would ever say so. A `@Task` fn
+also cannot `await` inside a `loop` or a closure. So the pipeline never awaits
+in a loop and never hands anything an already-started task: it builds an
+`Array<fn() -> @Task<El>>` — unstarted THUNKS — and `renderAll` gathers them
 in ONE await, one spawned process per thunk. The PARAMETER TYPE is what makes
-"no call site passes an already-started future" checkable: a value does not fit
+"no call site passes an already-started task" checkable: a value does not fit
 where a function is required.
 
 The suite measures it: two 50 ms loaders finish under 100 ms on the row that
 spawns and take 100 ms on the row that cannot, and the cell asserts
 `fast == concurrentRow()` rather than claiming one shape for both. The same
-test written over already-started futures takes 100 ms on BOTH rows and looks
+test written over already-started tasks takes 100 ms on BOTH rows and looks
 correct in every other respect, which is the whole reason the thunk type is
 pinned.
 
 **The streaming entry is three calls and not one, and that is a compiler gap.**
-A parameter typed `Array<fn() -> @Future<El>>` in a function that also takes an
+A parameter typed `Array<fn() -> @Task<El>>` in a function that also takes an
 `ElementView<El>` is refused with `generic-arg-skip-forbidden: cannot skip a
 defaulted argument while providing a later one`, reported on the token AFTER the
 parameter and at any position in the list; each half compiles alone, the two
@@ -1081,7 +1090,7 @@ being false and none of them is visible in a test:
 Beyond the two call-site rules above, five measurements shaped this file and
 each of them cost a red:
 
-- **`await` inside an `if`/`else` block of a `#[@future]` body is emitted inside
+- **`await` inside an `if`/`else` block of a `@Task` body is emitted inside
   a NON-ASYNC arrow IIFE on the commonJS row** — botopink's `if` is an
   expression — and node refuses the file at LOAD with `SyntaxError: await is
   only valid in async functions`, taking the whole test FILE down rather than
@@ -1297,14 +1306,15 @@ request — a memo that survives a request is a cache, and caches belong to fron
 counter rather than a local: a local would be captured by the closure and prove
 nothing about whether the closure ran.
 
-**`preload` is not built on `@Future`, and cannot be.** On erlang `@Future<T>`
-lowers eagerly — `libs/std/src/http.bp` says so in as many words — so `await` is
-identity and a future is a value that has already been computed. `preload`
+**`preload` is not built on `@Task`, and cannot be.** On erlang `@Task<T>`
+lowers eagerly — decision 120, and `libs/std/src/http.bp` says so in as many
+words — so `await` is identity and a task is a value that has already been
+computed. `preload`
 therefore spawns a monitored child and stores a PENDING marker holding its pid;
 a later `memoize` with that key waits on the monitor rather than starting a
 second load, and a child that dies without answering is not a poisoned key (the
 waiter runs the loader itself). There is no third state in which the frame holds
-an unresolved future. Node has no process, so `preload` there runs the loader
+an unresolved task. Node has no process, so `preload` there runs the loader
 immediately and stores the resolved value: the pending row is a BEAM shape, and
 every assertion the front makes — the loader runs once, the memo answers the
 preloaded value — holds on both rows.
@@ -1439,7 +1449,7 @@ Row 7 is not a layer and needs no enumeration of the table: the merge of rows
 `rkSetProp` gave it and a key a file mentions loses it. Row 8 is not a layer
 either — it is the fallback a typed reader applies when the table has no answer.
 
-`rkConfigLoad()` is the entry point and the ONE `#[@result]` seam: a missing
+`rkConfigLoad()` is the entry point and the ONE `-> @Result` seam: a missing
 non-optional location, a cyclic import, a refused YAML construct and a
 self-referential profile group all come back as one refusal naming the input, so
 `main` writes `try rkConfigLoad();` and the boot stops. `rkConfigLoadFrom(args)`
@@ -2577,8 +2587,8 @@ fields the decorator cannot spell come from the bean.
 
 ### Problem details, and what an "exception" is here
 
-botopink has no exception hierarchy: `throw` is legal only inside `#[@result]`
-and yields an `Error(e)` VALUE, and `try … catch` works over `@Result` alone. So
+botopink has no exception hierarchy: `throw` is legal only under a `@Result`
+return and yields an `Error(e)` VALUE, and `try … catch` works over `@Result` alone. So
 `#[exceptionHandler("NotFoundException")]` has nothing to catch. What exists on
 the BEAM is a raise, and rakun-web gives it one shape — `raiseProblem(tag,
 detail)` raises `{rakun_problem, Tag, Detail}` in the host, and the error entry
@@ -2778,8 +2788,9 @@ skips it silently. Measured — see § Language notes below.
 | `#[pastDate]` / `#[futureDate]` | `i64` epoch millis | strictly before / after `std/time.nowMillis()` |
 | `#[constraint(name)]` | `string` | the registered constraint named `name` answers `""` |
 
-There is **no `#[future]`**: that name collides with the effect marker
-`#[@future]` (`repository/emilia/src/emilia.bp:62`). The temporal markers are
+There is **no `#[future]`**: the name reads as the `future` effect annotation
+that decision 118 removed (a `-> @Task<…>` return replaced it), and a marker
+that looks like a removed effect is a trap. The temporal markers are
 `#[pastDate]` and `#[futureDate]`.
 
 `#[sizeBetween]` takes BOTH bounds because a declared parameter default is never

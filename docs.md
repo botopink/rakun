@@ -211,8 +211,7 @@ import {layout, page, PageContext, LayoutProps, ctxParam, rkAppLayout, rkAppPage
 pub fn rootLayout(props: LayoutProps<Element>) -> Element { … }
 
 #[page("blog/[slug]")]
-#[@future]
-pub fn blogPostPage(route: PageContext) -> @Future<Element> {
+pub fn blogPostPage(route: PageContext) -> @Task<Element> {
     return post(blogPostPageParams(route).slug);
 }
 ```
@@ -263,6 +262,11 @@ val setCookies = endRequest();
 `headersWire` is `name\tvalue` lines, `\n`-separated, names already lowercased
 by the dispatcher. `endRequest()` must run on the failure path too, or the next
 request on a keep-alive connection starts inside the previous one's frame.
+
+`RequestScope` is the context owner, `implement @Context<RequestBase>`: a hook
+over the request is written `-> @Component<RequestBase, T>` and composes only
+with other `RequestBase` hooks (decision 128). The readers below are ordinary
+functions, not hooks.
 
 The scope is a FRAME with an EPOCH, not a process: a connection process serves
 many requests in sequence, so every handle minted from the frame carries the
@@ -588,19 +592,19 @@ Reading the search params marks the render dynamic:
 val page = searchParam(route, "page");   // sets the payload's `d` to true
 ```
 
-### Slow sections: thunks, never futures
+### Slow sections: thunks, never started tasks
 
-`@Future<T>` lowers eagerly on erlang, so awaiting two futures runs them one
+`@Task<T>` lowers eagerly on erlang, so awaiting two tasks runs them one
 after the other at full latency. Concurrency comes from processes:
 
 ```bp
-var loaders: Array<fn() -> @Future<Element>> = [];
+var loaders: Array<fn() -> @Task<Element>> = [];
 loaders.push({ -> loadPosts() });
 loaders.push({ -> loadAuthor() });
 val resolved = await renderAll(loaders);   // one process per thunk, one await
 ```
 
-Never hand `renderAll` an already-started `@Future` — the parameter is a
+Never hand `renderAll` an already-started `@Task` — the parameter is a
 function type, so it will not fit, which is the point.
 
 ### Streaming
@@ -1276,8 +1280,8 @@ if (report.isValid() == false) return Response.withStatus(400, report.toProblemD
 | `#[pastDate]` / `#[futureDate]` | `i64` epoch millis | strictly before / after the clock |
 | `#[constraint(name)]` | `string` | the registered constraint answers `""` |
 
-There is **no `#[future]`**: that name collides with the effect marker
-`#[@future]`. `#[sizeBetween]` names both bounds because a declared parameter
+There is **no `#[future]`**: the name reads as the `future` effect annotation
+that decision 118 removed. `#[sizeBetween]` names both bounds because a declared parameter
 default is never applied at a call site.
 
 A marker on a field whose type it cannot check is a **located compile error**,
