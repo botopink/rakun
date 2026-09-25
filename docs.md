@@ -166,7 +166,7 @@ declares lands in the run-time catalogue.
 import {readDocument, rkConfigApply, entryAt} from "rakun";
 
 val docs = try readDocument("application.yaml");
-loop (docs) { d -> val _ = rkConfigApply(d.entries); };
+for (docs) { d -> val _ = rkConfigApply(d.entries); };
 ```
 
 `rkConfigLoad()` is the whole load: eight sources in order (command line,

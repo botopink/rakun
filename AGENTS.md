@@ -1613,7 +1613,7 @@ guessed, and each costs a spelling in `src/config.bp`:
   and this import does not say which.
 - `Array.pop` is `lists:last/1` on the erlang row — it READS the last element, it
   does not remove it. Nothing here pops; a stack shrinks with `dropLast`.
-- `&&` and `||` cannot appear directly inside an `if (…)` or `loop (…)` head;
+- `&&` and `||` cannot appear directly inside an `if (…)` or `while (…)` head;
   they need their own parentheses (`if ((a && b))`) or a `val` binding.
 - A `val` bound inside a `loop` lambda loses its string type, and `.length()` is
   then emitted as a call against JavaScript's `length` PROPERTY. Every such
@@ -1629,7 +1629,7 @@ guessed, and each costs a spelling in `src/config.bp`:
   `" + body + "` and the value comes out as that text.
 - `x.field.length()` is emitted as a call against JavaScript's `length` PROPERTY
   and dies on the node row; bind the field to a local first.
-- A `loop (cond)` or `loop (0..n)` body is lowered to recursion on commonJS, so a
+- A `while (cond)` or `for (0..n)` body is lowered to recursion on commonJS, so a
   thousand iterations exceeds the JavaScript stack. std's
   `random.intInRange` also floors a float by walking one recursive step per unit
   of range, which blows the stack for anything the size of a port space — hence
@@ -2625,8 +2625,8 @@ quietly matches nothing is the failure mode decision 67 exists to prevent.
 - **A method on a host-supplied `behavior` does not dispatch on erlang.** See
   *The chain's request value is NOT `Request`* above; it is front 04's
   `server_test.bp:74,80` and it is why `WebRequest` exists.
-- **A trailing-lambda `loop` body needs its `;`.** `loop (xs) { x -> f(x) };`
-  is `unexpected }`; `loop (xs) { x -> f(x); };` compiles. Three lines cost a
+- **A trailing-lambda `for` body needs its `;`.** `for (xs) { x -> f(x) };`
+  is `unexpected }`; `for (xs) { x -> f(x); };` compiles. Three lines cost a
   compile each while writing `filter.bp`.
 - **Wrong placement is not expressible as a cell.** `#[filter]` on a function is
   a COMPILE failure, so a file containing one has no cell to run. A clean
