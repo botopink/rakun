@@ -22,7 +22,8 @@
 
 - **The `std` substitutes, measured and settled** (front 74 follow-up).
   `modules/rakun/src/ssr.bp`, `modules/rakun/test/ssr_test.bp`,
-  `modules/rakun/src/events.bp`, `modules/rakun-web/src/filter.bp`, `AGENTS.md`.
+  `modules/rakun/src/events.bp`, `modules/rakun/src/request_context.bp`,
+  `modules/rakun-web/src/filter.bp`, `AGENTS.md`.
 
   Three compiler defects closed in `fecec6b4` made a `from "std"` module
   reachable from a `test/` file on the erlang row: a prelude-defaults guard on
@@ -49,8 +50,10 @@
   calls rather than `time.measureMillis(body)`, because the body being measured
   is an AWAIT and a `#[@future]` body may not await inside a closure. The dead
   rule is deleted from `AGENTS.md` and the clauses that leaned on it in
-  `events.bp` and `filter.bp` are gone with it; `filter.bp`'s `rkFreshId` keeps
-  its real reason (a correlation handle is not a token).
+  `events.bp`, `filter.bp` and `request_context.bp`'s percent-encoding header
+  (three reasons to two, the same correction `AGENTS.md` carries) are gone with
+  it; `filter.bp`'s `rkFreshId` keeps its real reason (a correlation handle is
+  not a token).
 
   **`splitQuery` / `encodeQuery` STAY, for a reason that is not loading.**
   `AGENTS.md` said they were "two bodies to delete when std is fixed"; std is

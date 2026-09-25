@@ -324,14 +324,15 @@ not fix a no-op key. Front 04 built the erlang host module (§ The erlang host m
 **not** widen `targets`, and every front since has made the same call for the same reason:
 a red on that axis would move into the gate rather than be fixed by the widening.
 
-**Measured 2026-09-21, with front 72 in the tree** (the pinned compiler
-`2e6bb4ac`, summed over every module summary — `botopink test` prints one per
+**Measured 2026-09-25, with the std-substitutes follow-up in the tree** (compiler
+`4fe1747e`, summed over every module summary — `botopink test` prints one per
 module, so the LAST line is the last module's count and never the run's total):
-`botopink test` is **346 / 0** and `botopink test --target erlang` is **344
-passing / 2 failing**. Front 72 added 44 cells and moved neither red. The
-baseline it measured before starting was 302 / 0 and 300 / 2. (Front 06 measured
-267/267 and 265/2 on the same two reds; the numbers grew with the suite, not
-with the failures.) The two are front 04's own
+inside `modules/rakun`, `botopink test` is **388 / 0** and `botopink test
+--target erlang` is **386 passing / 2 failing**; `modules/rakun-web` is 104 / 0
+and `modules/rakun-validation` 54 / 0 on both rows. Front 72 measured 346 / 0 and
+344 / 2 on `2e6bb4ac`, having added 44 cells and moved neither red; its baseline
+was 302 / 0 and 300 / 2, and front 06 measured 267/267 and 265/2 on the same two
+reds — the numbers grew with the suite, not with the failures. The two are front 04's own
 `request/6` (`{badkey,param}` / `{badkey,query}`) — the map it builds carries `method`,
 `path`, `params`, `query`, `headers` and `body` but no member funs, so `req.param("name")`
 dispatches and finds nothing. That is the one thing left between the erlang row and
