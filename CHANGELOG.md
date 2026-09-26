@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### rakun-web: message converters and `WebCustomizer` (botopink front 07 steps 6 and 7)
+
+- `negotiation.bp`: the converter registry (text/plain, then JSON), the
+  negotiation entry at order 250 (406 when `Accept` admits nothing, 400 when a
+  request body fails its converter's `read`), `#[messageConverter]`.
+- `customizer.bp`: `WebRegistry` (`addConverter` / `addCorsMapping` /
+  `addFilter` / `addFormatter`), `#[webCustomizer]`, the once-per-boot pass in
+  `#[order]` order that fails the boot naming a customizer that raises.
+- `installBuiltins` registers six entries; the band has twelve rows.
+  `rakun-web` 126 / 0 → **138 / 0**.
+
 ### rakun-web: std's JSON writer, static error pages, compression (botopink front 07 steps 4, 5 and 9)
 
 - `problemJson` writes through `json.object` / `json.quote`; `jsonEscape` is

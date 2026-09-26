@@ -57,6 +57,11 @@
 -export([meta_put/2, meta_get/1, meta_reset/0]).
 %% the ordering trace
 -export([trace/1, trace_log/0, trace_reset/0]).
+%% the message converters (step 6) and the web customizers (step 7)
+-export([converter_register/3, converter_media/0, converter_write/2, converter_read/2,
+         converter_reset/0,
+         customizer_register/3, customizer_run/1, customizer_names/0, customizer_reset/0,
+         formatter_register/2, formatter_apply/2]).
 %% the seam front 04's `dispatch_http/5` calls
 -export([run/6, set_runner/1]).
 
@@ -71,6 +76,8 @@
 -define(RUNNER, rakun_web_runner).     %% set:         {runner, Fun}
 -define(META, rakun_web_meta).         %% set:         {Key, Value}
 -define(TRACE, rakun_web_trace).       %% ordered_set: {Seq, Line}
+-define(CONVERTERS, rakun_web_converters). %% set:     {Media, Seq, Write, Read}
+-define(CUSTOMIZERS, rakun_web_customizers). %% set:   {Name, Order, Seq, Fun}
 -define(OWNER, rakun_web_owner).
 
 -define(HEADERS, rakun_web_headers).   %% process dict: [{LowerName, Name, Value}]
@@ -113,6 +120,8 @@ owner(Caller) ->
             _ = ets:new(?RUNNER, [set | Common]),
             _ = ets:new(?META, [set | Common]),
             _ = ets:new(?TRACE, [ordered_set | Common]),
+            _ = ets:new(?CONVERTERS, [set | Common]),
+            _ = ets:new(?CUSTOMIZERS, [set | Common]),
             Caller ! {?OWNER, ready},
             owner_loop();
         _ ->
@@ -128,6 +137,105 @@ owner_loop() ->
 
 next_seq(Key) ->
     ets:update_counter(?SEQ, Key, {2, 1}, {Key, 0}).
+
+%% ═══ message converters (step 6) ═════════════════════════════════════════════
+%% Keyed by media type: a second registration for one type REPLACES the first
+%% and keeps its place, so an application converter registered for
+%% `application/json` wins over the built-in one without reordering the rest.
+
+converter_register(Media, Write, Read) ->
+    ensure(),
+    Key = string:lowercase(Media),
+    Seq = case ets:lookup(?CONVERTERS, Key) of
+              [{_, S, _, _}] -> S;
+              [] -> next_seq(converters)
+          end,
+    true = ets:insert(?CONVERTERS, {Key, Seq, Write, Read}),
+    Seq.
+
+converter_media() ->
+    ensure(),
+    Rows = lists:keysort(2, ets:tab2list(?CONVERTERS)),
+    join([M || {M, _S, _W, _R} <- Rows], <<"\n">>).
+
+converter_write(Media, Value) ->
+    ensure(),
+    case ets:lookup(?CONVERTERS, string:lowercase(Media)) of
+        [{_, _, Write, _}] -> Write(Value);
+        [] -> Value
+    end.
+
+converter_read(Media, Body) ->
+    ensure(),
+    case ets:lookup(?CONVERTERS, string:lowercase(Media)) of
+        [{_, _, _, Read}] -> Read(Body);
+        [] -> {ok, Body}
+    end.
+
+converter_reset() ->
+    ensure(),
+    true = ets:delete_all_objects(?CONVERTERS),
+    0.
+
+%% ═══ web customizers (step 7) ═════════════════════════════════════════════════
+%% Run once, in `#[order]` order and then registration order. A customizer that
+%% raises stops the pass and answers its NAME, which `bootWeb()` turns into the
+%% boot refusal; `<<>>` means every customizer ran. A customizer that already
+%% ran is not run again by a second pass.
+
+customizer_register(Name, Order, Fun) ->
+    ensure(),
+    Seq = next_seq(customizers),
+    true = ets:insert(?CUSTOMIZERS, {Name, Order, Seq, Fun}),
+    Seq.
+
+customizer_names() ->
+    ensure(),
+    join([N || {N, _O, _S, _F} <- customizer_rows()], <<"\n">>).
+
+customizer_rows() ->
+    lists:sort(fun({_, O1, S1, _}, {_, O2, S2, _}) -> {O1, S1} =< {O2, S2} end,
+               ets:tab2list(?CUSTOMIZERS)).
+
+customizer_run(Registry) ->
+    ensure(),
+    run_customizers(customizer_rows(), Registry).
+
+run_customizers([], _Registry) ->
+    <<>>;
+run_customizers([{Name, _O, _S, Fun} | Rest], Registry) ->
+    case ets:lookup(?META, {customized, Name}) of
+        [_] -> run_customizers(Rest, Registry);
+        [] ->
+            try Fun(Registry) of
+                _ ->
+                    true = ets:insert(?META, {{customized, Name}, <<"1">>}),
+                    run_customizers(Rest, Registry)
+            catch
+                _:_ -> Name
+            end
+    end.
+
+%% A formatter is a named `string -> string` function (Spring's `Formatter`,
+%% narrowed the way the converters are). An unknown name formats nothing: the
+%% value comes back as it went in.
+formatter_register(Name, Fun) ->
+    ensure(),
+    true = ets:insert(?META, {{formatter, Name}, Fun}),
+    0.
+
+formatter_apply(Name, Value) ->
+    ensure(),
+    case ets:lookup(?META, {formatter, Name}) of
+        [{_, Fun}] -> Fun(Value);
+        [] -> Value
+    end.
+
+customizer_reset() ->
+    ensure(),
+    true = ets:delete_all_objects(?CUSTOMIZERS),
+    ets:match_delete(?META, {{customized, '_'}, '_'}),
+    0.
 
 %% ═══ the chain registry ══════════════════════════════════════════════════════
 %% Keyed `{Order, Seq}` on an ordered_set, so the table is WALKED rather than

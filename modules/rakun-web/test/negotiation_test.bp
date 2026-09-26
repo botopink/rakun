@@ -1,0 +1,125 @@
+//// rakun-web — content negotiation through the message converters (front 07
+//// step 6). The chain runs with the negotiation entry at its band order and a
+//// terminal of this file's own; `#[messageConverter]` registers an application
+//// converter the way an application would.
+
+import {Response, rkScan, rkSingleton, rkEnter, rkDone, rkProp, rkPropInt, toI32} from "rakun";
+import {runChain, registerFilter, resetChain, headerValue, rkChainSetTerminal, orderNegotiation} from "filter";
+import {negotiationEntry, installConverters, registerConverter, converterMediaTypes, rkConverterReset, jsonWrite} from "negotiation";
+import {messageConverter} from "convention";
+
+// An application converter for CSV: rows joined by newlines on the way out,
+// and a body that must not be empty on the way in.
+#[messageConverter("text/csv")]
+pub type CsvConverter {
+    pub fn write(self: Self, value: string) -> string {
+        return "csv:" + value;
+    }
+
+    pub fn read(self: Self, body: string) -> @Result<string, string> {
+        val checked: string = try csvRead(body);
+        return checked;
+    }
+}
+
+// The refusal lives in a module fn: a `throw` written directly in a METHOD
+// that returns `@Result` lowers to an uncaught Erlang throw (a compiler defect,
+// recorded in the milestone's `language-gaps.md`).
+fn csvRead(body: string) -> @Result<string, string> {
+    if (body.trim() == "") throw "empty csv";
+    return body;
+}
+
+fn negotiating() -> i32 {
+    val _r = resetChain();
+    val _c = rkConverterReset();
+    val _i = installConverters();
+    return registerFilter("negotiation", orderNegotiation(), { req, chain -> negotiationEntry(req, chain) });
+}
+
+fn echoTerminal() -> i32 {
+    return rkChainSetTerminal({ method, path, headersWire, queryWire, body ->
+        if (body == "") Response.ok("hello") else Response.ok("got " + body);
+    });
+}
+
+fn getAccepting(accept: string) -> Response {
+    return runChain("GET", "/x", "accept\t" + accept, "", "");
+}
+
+test "rakun-web negotiation: #[messageConverter] registered its media type when the module loaded" {
+    assert converterMediaTypes().filter({ m -> m == "text/csv" }).length == 1;
+    val _t = echoTerminal();
+    val _r = resetChain();
+    val _f = registerFilter("negotiation", orderNegotiation(), { req, chain -> negotiationEntry(req, chain) });
+    val res: Response = getAccepting("text/csv");
+    assert res.body == "csv:hello";
+}
+
+test "rakun-web negotiation: text/plain and application/json are registered, text first" {
+    val _n = negotiating();
+    assert converterMediaTypes().join(",") == "text/plain,application/json";
+}
+
+test "rakun-web negotiation: Accept application/json selects JSON, text/plain the identity" {
+    val _n = negotiating();
+    val _t = echoTerminal();
+    val asJson: Response = getAccepting("application/json");
+    assert headerValue("Content-Type") == "application/json";
+    assert asJson.body == "\"hello\"";
+    val asText: Response = getAccepting("text/plain");
+    assert headerValue("Content-Type") == "text/plain";
+    assert asText.body == "hello";
+}
+
+test "rakun-web negotiation: q-values decide between two acceptable types" {
+    val _n = negotiating();
+    val _t = echoTerminal();
+    val res: Response = getAccepting("application/json;q=0.5, text/plain;q=0.9");
+    assert headerValue("Content-Type") == "text/plain";
+    assert res.body == "hello";
+}
+
+test "rakun-web negotiation: */* selects the first registered converter" {
+    val _n = negotiating();
+    val _t = echoTerminal();
+    val res: Response = getAccepting("*/*");
+    assert headerValue("Content-Type") == "text/plain";
+    assert res.body == "hello";
+}
+
+test "rakun-web negotiation: an Accept matching nothing answers 406" {
+    val _n = negotiating();
+    val _t = echoTerminal();
+    val res: Response = getAccepting("image/png");
+    assert res.status == 406;
+}
+
+test "rakun-web negotiation: a JSON request body reaches the handler read by the JSON converter" {
+    val _n = negotiating();
+    val _t = echoTerminal();
+    val ok: Response = runChain("POST", "/x", "content-type\tapplication/json\naccept\ttext/plain", "", "{\"a\":1}");
+    assert ok.status == 200;
+    assert ok.body == "got {\"a\":1}";
+    val refused: Response = runChain("POST", "/x", "content-type\tapplication/json", "", "{\"a\":");
+    assert refused.status == 400;
+    assert refused.body.startsWith("the request body is not JSON: json.decode:");
+}
+
+test "rakun-web negotiation: a JSON document is written as it is, other text as a JSON string" {
+    assert jsonWrite("{\"a\":1}") == "{\"a\":1}";
+    assert jsonWrite("[1,2]") == "[1,2]";
+    assert jsonWrite("plain") == "\"plain\"";
+}
+
+test "rakun-web negotiation: #[messageConverter] registers an application converter that wins for its type" {
+    val _n = negotiating();
+    val _a = registerConverter("text/csv", { v -> __rkMake_CsvConverter().write(v) }, { b -> __rkMake_CsvConverter().read(b) });
+    val _t = echoTerminal();
+    val res: Response = getAccepting("text/csv");
+    assert headerValue("Content-Type") == "text/csv";
+    assert res.body == "csv:hello";
+    val refused: Response = runChain("POST", "/x", "content-type\ttext/csv", "", " ");
+    assert refused.status == 400;
+    assert refused.body == "empty csv";
+}

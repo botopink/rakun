@@ -1,0 +1,82 @@
+//// rakun-web — `WebCustomizer` (front 07 step 7): Spring's `WebMvcConfigurer`.
+////
+//// `#[webCustomizer]` on a component (`convention.bp`) registers it; `bootWeb()`
+//// runs every customizer ONCE, in `#[order]` order and then registration order,
+//// handing each a `WebRegistry` through which it adds converters, CORS
+//// mappings, chain filters and formatters — so an application extends the web
+//// layer from one place instead of a decorator on every piece. A customizer
+//// that raises fails the boot NAMING the component; the host catches, and the
+//// refusal text is written here.
+
+import {Response} from "rakun";
+import {registerFilter} from "filter";
+import {registerConverter} from "negotiation";
+import {registerCorsMapping} from "cors";
+
+#[@External.Erlang("rakun_chain", "customizer_register")]
+pub declare fn rkCustomizerRegister<R>(name: string, order: i32, customize: fn(reg: R) -> i32) -> i32;
+
+// Run every customizer not yet run; answers the NAME of one that raised, or `""`.
+#[@External.Erlang("rakun_chain", "customizer_run")]
+pub declare fn rkCustomizerRun(reg: WebRegistry) -> string;
+
+#[@External.Erlang("rakun_chain", "customizer_names")]
+pub declare fn rkCustomizerNames() -> string;
+
+#[@External.Erlang("rakun_chain", "customizer_reset")]
+pub declare fn rkCustomizerReset() -> i32;
+
+#[@External.Erlang("rakun_chain", "formatter_register")]
+pub declare fn rkFormatterRegister(name: string, format: fn(value: string) -> string) -> i32;
+
+#[@External.Erlang("rakun_chain", "formatter_apply")]
+pub declare fn rkFormatterApply(name: string, value: string) -> string;
+
+// What a customizer is handed. The field names the registry for a log line; the
+// methods are the four doors.
+pub type WebRegistry(
+    source: string,
+) {
+    pub fn addConverter(
+        self: Self,
+        media: string,
+        write: fn(value: string) -> string,
+        read: fn(body: string) -> @Result<string, string>,
+    ) -> i32 {
+        return registerConverter(media, write, read);
+    }
+
+    pub fn addCorsMapping(self: Self, prefix: string, origins: string, methods: string) -> i32 {
+        return registerCorsMapping(prefix, origins, methods);
+    }
+
+    pub fn addFilter<Rq, Ch>(self: Self, name: string, order: i32, entry: fn(req: Rq, chain: Ch) -> Response) -> i32 {
+        return registerFilter(name, order, entry);
+    }
+
+    pub fn addFormatter(self: Self, name: string, format: fn(value: string) -> string) -> i32 {
+        return rkFormatterRegister(name, format);
+    }
+}
+
+pub fn formatWith(name: string, value: string) -> string {
+    return rkFormatterApply(name, value);
+}
+
+pub fn customizerNames() -> string[] {
+    val wire: string = rkCustomizerNames();
+    if (wire == "") return [] else return wire.split("\n");
+}
+
+pub fn customizerProblem(name: string) -> string {
+    return "rakun-web: the web customizer `" + name + "` raised while customizing - "
+        + "the application will not start with a half-configured web layer";
+}
+
+// The pass `bootWeb()` runs. Idempotent: a customizer that already ran is not
+// run again, so booting twice does not register a filter twice.
+pub fn runCustomizers() -> i32 {
+    val failed: string = rkCustomizerRun(WebRegistry(source: "bootWeb"));
+    if (failed != "") @panic(customizerProblem(failed));
+    return customizerNames().length;
+}

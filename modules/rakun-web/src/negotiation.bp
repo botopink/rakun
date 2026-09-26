@@ -8,7 +8,9 @@
 //// The most specific matching range wins for a media type: `text/html` over
 //// `text/*` over `*/*`. An absent `Accept` means `*/*`.
 
-import {toI32} from "rakun";
+import {Response, toI32} from "rakun";
+import {WebRequest, Chain, withHeader, headerValue, sentinelStatus} from "filter";
+import {json} from "std";
 
 pub fn rangeQ(raw: string) -> i32 {
     val t: string = raw.trim();
@@ -79,4 +81,118 @@ pub fn negotiate(accept: string, offered: string[]) -> string {
 // A browser asking for a page: HTML acceptable, and preferred to JSON.
 pub fn prefersHtml(accept: string) -> bool {
     return negotiate(accept, ["text/html", "application/json"]) == "text/html";
+}
+
+// ── message converters (step 6) ─────────────────────────────────────────────
+//
+// A converter is a media type and two functions over strings: `write` shapes a
+// handler's body for the wire, `read` checks (and may normalise) a request body
+// before the handler sees it, answering an `Error` to refuse it. botopink has
+// no run-time type descriptor to dispatch on, so there is no `canWrite(type)`:
+// a handler's `Response` body is already a string, and the converter's real
+// job is choosing the media type and the shape — a narrowing of Spring's
+// `HttpMessageConverter`, stated rather than hidden. The registry is keyed by
+// media type in `rakun_chain.erl`; registering a type twice REPLACES the
+// converter and keeps its place, so an application's converter wins for its
+// media type. `text/plain` (the identity) is registered first and
+// `application/json` second, so `Accept: */*` — curl's default — keeps a
+// handler's text as text.
+
+#[@External.Erlang("rakun_chain", "converter_register")]
+pub declare fn rkConverterRegister(
+    media: string,
+    write: fn(value: string) -> string,
+    read: fn(body: string) -> @Result<string, string>,
+) -> i32;
+
+#[@External.Erlang("rakun_chain", "converter_media")]
+pub declare fn rkConverterMedia() -> string;
+
+#[@External.Erlang("rakun_chain", "converter_write")]
+pub declare fn rkConverterWrite(media: string, value: string) -> string;
+
+#[@External.Erlang("rakun_chain", "converter_read")]
+pub declare fn rkConverterRead(media: string, body: string) -> @Result<string, string>;
+
+#[@External.Erlang("rakun_chain", "converter_reset")]
+pub declare fn rkConverterReset() -> i32;
+
+pub fn converterMediaTypes() -> string[] {
+    val wire: string = rkConverterMedia();
+    if (wire == "") return [] else return wire.split("\n");
+}
+
+pub fn registerConverter(
+    media: string,
+    write: fn(value: string) -> string,
+    read: fn(body: string) -> @Result<string, string>,
+) -> i32 {
+    if (media.indexOf("/") <= 0) @panic("rakun-web: a message converter needs a media type like `application/json`, not `" + media + "`");
+    return rkConverterRegister(media.toLower(), write, read);
+}
+
+// The JSON converter's two halves. A body that already IS a JSON document is
+// written as it is; any other text becomes a JSON string. A request body must
+// be one RFC 8259 document (std's `json.decode`), or the request is refused.
+pub fn jsonWrite(value: string) -> string {
+    if (json.decode(value).isOk()) return value else return json.quote(value);
+}
+
+pub fn jsonRead(body: string) -> @Result<string, string> {
+    val parsed = json.decode(body);
+    if (parsed.isError()) {
+        val assert Error(e) = parsed;
+        throw "the request body is not JSON: " + e;
+    };
+    return body;
+}
+
+pub fn textRead(body: string) -> @Result<string, string> {
+    return body;
+}
+
+pub fn installConverters() -> i32 {
+    val _t = registerConverter("text/plain", { v -> v }, { b -> textRead(b) });
+    return registerConverter("application/json", { v -> jsonWrite(v) }, { b -> jsonRead(b) });
+}
+
+fn readBody(inType: string, body: string) -> @Result<string, string> {
+    if ((inType == "") || (body == "")) return body;
+    val decoded: string = try rkConverterRead(inType, body);
+    return decoded;
+}
+
+fn mediaOf(contentType: string) -> string {
+    return (contentType.split(";").at(0) ?? "").trim().toLower();
+}
+
+// The entry, at order 250. On the way IN a body is read by the converter its
+// `Content-Type` names (a type nobody registered passes through untouched); a
+// refusal answers 400. On the way OUT a response that set no `Content-Type`
+// and carries a body gets the media type `Accept` prefers among the registered
+// ones, written by that converter; an `Accept` that admits none of them
+// answers 406.
+pub fn negotiationEntry(req: WebRequest, chain: Chain) -> Response {
+    val inType: string = mediaOf(req.header("content-type"));
+    val read = readBody(inType, req.body);
+    if (read.isError()) {
+        val assert Error(why) = read;
+        return Response.badRequest(why);
+    };
+    val decoded: WebRequest = WebRequest(
+        method: req.method,
+        path: req.path,
+        target: req.target,
+        headersWire: req.headersWire,
+        queryWire: req.queryWire,
+        body: read.unwrapOr(req.body),
+    );
+    val res: Response = chain.next(decoded);
+    if (res.status == sentinelStatus()) return res;
+    if (res.body == "") return res;
+    if (headerValue("Content-Type") != "") return res;
+    val chosen: string = negotiate(req.header("accept"), converterMediaTypes());
+    if (chosen == "") return Response(status: 406, body: "");
+    val _h = withHeader(res, "Content-Type", chosen);
+    return Response(status: res.status, body: rkConverterWrite(chosen, res.body));
 }

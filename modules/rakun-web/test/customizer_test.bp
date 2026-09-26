@@ -1,0 +1,79 @@
+//// rakun-web — `#[webCustomizer]` (front 07 step 7). Two customizers are
+//// declared the way an application declares them; `runCustomizers()` is the
+//// pass `bootWeb()` runs. The refusal is driven through a registration made in
+//// the test itself and cleared after it, because a raising customizer left in
+//// the table would fail every later boot in this node.
+
+import {testing.asserts} from "std";
+import {Response, rkScan, rkSingleton, rkEnter, rkDone, rkProp, rkPropInt, toI32} from "rakun";
+import {WebRequest, Chain, runChain, resetChain, chainNames, headerValue, rkChainSetTerminal, rkTrace, rkTraceLog, rkTraceReset, withHeader} from "filter";
+import {converterMediaTypes, rkConverterReset, installConverters} from "negotiation";
+import {corsMappingRows, resetCorsMappings} from "cors";
+import {WebRegistry, runCustomizers, customizerNames, rkCustomizerRegister, rkCustomizerReset, formatWith, customizerProblem} from "customizer";
+import {webCustomizer, order} from "convention";
+
+fn stamp(req: WebRequest, chain: Chain) -> Response {
+    val res: Response = chain.next(req);
+    return withHeader(res, "X-Customized", "yes");
+}
+
+#[webCustomizer]
+#[order("20")]
+pub type LateCustomizer {
+    pub fn customize(self: Self, reg: WebRegistry) -> i32 {
+        val _t = rkTrace("late");
+        val _c = reg.addConverter("text/tab-separated-values", { v -> "tsv:" + v }, { b -> tsvRead(b) });
+        return reg.addCorsMapping("/api/tsv", "https://tsv.test", "GET");
+    }
+}
+
+#[webCustomizer]
+#[order("-5")]
+pub type EarlyCustomizer {
+    pub fn customize(self: Self, reg: WebRegistry) -> i32 {
+        val _t = rkTrace("early");
+        val _f = reg.addFilter("stamp", 10, { req, chain -> stamp(req, chain) });
+        return reg.addFormatter("upper", { v -> v.toUpper() });
+    }
+}
+
+fn tsvRead(body: string) -> @Result<string, string> {
+    return body;
+}
+
+test "rakun-web customizer: the pass runs every customizer once, in #[order] order" {
+    val _r = resetChain();
+    val _t = rkTraceReset();
+    val n: i32 = runCustomizers();
+    assert n == 2;
+    assert rkTraceLog() == "early|late";
+    val _again = runCustomizers();
+    assert rkTraceLog() == "early|late";
+    assert customizerNames().join(",") == "EarlyCustomizer,LateCustomizer";
+}
+
+test "rakun-web customizer: a converter, a CORS mapping, a filter and a formatter all take effect" {
+    assert converterMediaTypes().filter({ m -> m == "text/tab-separated-values" }).length == 1;
+    assert corsMappingRows().filter({ r -> r.contains("/api/tsv") }).length == 1;
+    assert chainNames().filter({ n -> n == "stamp" }).length == 1;
+    assert formatWith("upper", "abc") == "ABC";
+    assert formatWith("nobody", "abc") == "abc";
+    val _t = rkChainSetTerminal({ method, path, headersWire, queryWire, body -> Response.ok("x") });
+    val _r = runChain("GET", "/x", "", "", "");
+    assert headerValue("X-Customized") == "yes";
+    val _c = resetChain();
+}
+
+test "rakun-web customizer: one that raises fails the boot naming the component" {
+    val _a = rkCustomizerRegister("BrokenCustomizer", 0, { reg -> brokenCustomize(reg) });
+    try asserts.throwsWith({ ->
+        val _p = runCustomizers();
+        0;
+    }, "the web customizer `BrokenCustomizer` raised");
+    val _z = rkCustomizerReset();
+    assert customizerProblem("X").contains("will not start");
+}
+
+fn brokenCustomize(reg: WebRegistry) -> i32 {
+    @panic("customizer failure");
+}

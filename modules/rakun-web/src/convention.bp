@@ -22,7 +22,9 @@
 import {Response} from "rakun";
 import {rkProp, toI32} from "rakun";
 import {WebRequest, Chain, withHeader, registerFilter, runChain} from "filter";
-import {orderRequestId, orderCors, orderProblem, orderCompression, orderServerId, rkFreshId, rkChainSetRunner} from "filter";
+import {orderRequestId, orderCors, orderProblem, orderCompression, orderNegotiation, orderServerId, rkFreshId, rkChainSetRunner} from "filter";
+import {negotiationEntry, installConverters} from "negotiation";
+import {runCustomizers} from "customizer";
 import {corsEntry, globalPolicy, validatePolicy} from "cors";
 import {errorEntry} from "error";
 import {compressionEntry, serverIdEntry, validateCompression} from "compression";
@@ -52,6 +54,57 @@ pub fn filter(comptime decl: @Decl) {
     @emit("val __rkFilter_" + decl.name + " = registerFilter(\"" + decl.name + "\", toI32(" + ord + "), { req, chain -> __rkMake_" + decl.name + "().handle(req, chain) });");
     if (decl.kind != DeclKind.Type) decl.fail("#[filter] must annotate a type");
     if (decl.variants.length > 0) decl.fail("#[filter] must annotate a type with fields, not an enum");
+}
+
+// `#[messageConverter("text/csv")]` on a component type with
+// `write(self, value: string) -> string` and
+// `read(self, body: string) -> @Result<string, string>`: the component wiring a
+// stereotype contributes, then one converter registration for the media type.
+// A later registration for the same media type replaces the built-in one, so
+// an application's converter wins for its type.
+pub fn messageConverter(comptime decl: @Decl, media: string) {
+    @emit("val __rkScan_" + decl.name + " = rkScan(\"" + decl.name + "\");");
+    var args: Array<string> = [];
+    decl.fields.forEach({ f ->
+        var valKey = "";
+        f.annotations.forEach({ a -> if (a.name == "value") valKey = a.args.join("") });
+        val expr = if (valKey != "") {
+            if (f.typeName == "i32") "rkPropInt(" + valKey + ")" else "rkProp(" + valKey + ")";
+        } else "__rkMake_" + f.typeName + "()";
+        args.push(f.name + ": " + expr);
+    });
+    @emit("pub fn __rkMake_" + decl.name + "() -> " + decl.name + " { return rkSingleton(\"" + decl.name + "\", { -> val _e = rkEnter(\"" + decl.name + "\"); val v = " + decl.name + "(" + args.join(
+            ", "
+        ) + "); val _d = rkDone(\"" + decl.name + "\"); v }); }");
+    @emit("val __rkConverter_" + decl.name + " = registerConverter(\"" + media + "\", { v -> __rkMake_" + decl.name + "().write(v) }, { b -> __rkMake_" + decl.name + "().read(b) });");
+    if (decl.kind != DeclKind.Type) decl.fail("#[messageConverter] must annotate a type");
+    if (decl.variants.length > 0) decl.fail("#[messageConverter] must annotate a type with fields, not an enum");
+    if (media.indexOf("/") <= 0) decl.fail("#[messageConverter] needs a media type like \"text/csv\"");
+}
+
+// `#[webCustomizer]` on a component type with
+// `customize(self, reg: WebRegistry) -> i32`: the component wiring, then one
+// customizer registration at its `#[order("N")]` (default 0). `bootWeb()` runs
+// every customizer once, in that order.
+pub fn webCustomizer(comptime decl: @Decl) {
+    @emit("val __rkScan_" + decl.name + " = rkScan(\"" + decl.name + "\");");
+    var args: Array<string> = [];
+    decl.fields.forEach({ f ->
+        var valKey = "";
+        f.annotations.forEach({ a -> if (a.name == "value") valKey = a.args.join("") });
+        val expr = if (valKey != "") {
+            if (f.typeName == "i32") "rkPropInt(" + valKey + ")" else "rkProp(" + valKey + ")";
+        } else "__rkMake_" + f.typeName + "()";
+        args.push(f.name + ": " + expr);
+    });
+    @emit("pub fn __rkMake_" + decl.name + "() -> " + decl.name + " { return rkSingleton(\"" + decl.name + "\", { -> val _e = rkEnter(\"" + decl.name + "\"); val v = " + decl.name + "(" + args.join(
+            ", "
+        ) + "); val _d = rkDone(\"" + decl.name + "\"); v }); }");
+    var ord = "\"0\"";
+    decl.annotations.forEach({ a -> if (a.name == "order") ord = a.args.join("") });
+    @emit("val __rkCustomizer_" + decl.name + " = rkCustomizerRegister(\"" + decl.name + "\", toI32(" + ord + "), { reg -> __rkMake_" + decl.name + "().customize(reg) });");
+    if (decl.kind != DeclKind.Type) decl.fail("#[webCustomizer] must annotate a type");
+    if (decl.variants.length > 0) decl.fail("#[webCustomizer] must annotate a type with fields, not an enum");
 }
 
 // `#[order("-100")]` is read off `decl.annotations` by `#[filter]`; on its own
@@ -167,13 +220,16 @@ pub fn installBuiltins() -> i32 {
     val _c = registerFilter("cors", orderCors(), { req, chain -> corsEntry(req, chain) });
     val _e = registerFilter("problem", orderProblem(), { req, chain -> errorEntry(req, chain) });
     val _z = registerFilter("compression", orderCompression(), { req, chain -> compressionEntry(req, chain) });
+    val _n = registerFilter("negotiation", orderNegotiation(), { req, chain -> negotiationEntry(req, chain) });
     val _s = registerFilter("server-id", orderServerId(), { req, chain -> serverIdEntry(req, chain) });
-    return 5;
+    val _v = installConverters();
+    return 6;
 }
 
 pub fn bootWeb() -> i32 {
     val _v = validatePolicy(globalPolicy());
     val _c = validateCompression();
+    val _w = runCustomizers();
     val _b = installBuiltins();
     return rkChainSetRunner({ method, path, headersWire, queryWire, body ->
         runChain(method, path, headersWire, queryWire, body);

@@ -2731,12 +2731,39 @@ bundle registry.
   `ok` and execution continues) — `language-gaps.md`. `errorEntry` binds the
   condition and the page first instead.
 
+### Steps 6 and 7 — message converters and `WebCustomizer`
+
+- **Converters** (`negotiation.bp`, the table in `rakun_chain.erl`): a media
+  type plus `write: string -> string` and `read: string -> @Result<string,
+  string>`; a second registration for one media type REPLACES the converter and
+  keeps its place, which is how an application's converter wins for its type.
+  There is no `canWrite(type)`: no run-time type descriptor exists, a handler's
+  body is already a string, and the converter's job is the media type and the
+  shape. Built in: `text/plain` (identity) FIRST, then `application/json`
+  (a JSON document is written as it is, any other text as a JSON string; a
+  request body must be one RFC 8259 document or the request is a 400) — so
+  `Accept: */*`, curl's default, keeps text as text. The entry sits at order
+  **250**, INSIDE compression (200), so the `Content-Type` it chooses is on the
+  response when compression asks; the band has twelve rows. A response that
+  set its own `Content-Type`, or has no body, is left alone; an `Accept` that
+  admits no registered type answers 406. `#[messageConverter("text/csv")]` on
+  a component type with `write` / `read` registers one at module load.
+- **`WebCustomizer`** (`customizer.bp`): `#[webCustomizer]` on a component with
+  `customize(self, reg: WebRegistry) -> i32`, at its `#[order("N")]`;
+  `bootWeb()` runs the pass after the built-ins (`runCustomizers`): once per
+  customizer (a second pass skips those that ran), in order then registration
+  order. `WebRegistry` has `addConverter`, `addCorsMapping`, `addFilter` and
+  `addFormatter` (a named `string -> string`, read with `formatWith`). A
+  customizer that raises stops the pass and fails the boot NAMING it.
+- **Another compiler defect**: a `throw` written directly in a METHOD returning
+  `@Result` lowers to an uncaught Erlang `throw`; the same `throw` in a module
+  fn is an `Error` value. `language-gaps.md`; the test's CSV converter keeps its
+  refusal in a module fn.
+
 ### What front 07 did NOT reach
 
 | Step | What it needs |
 |---|---|
-| 6 — content negotiation | The converter registry on top of `negotiation.bp`. No blocker; it is work |
-| 7 — `WebCustomizer` | `WebRegistry` with `addConverter`/`addCorsMapping`/`addFilter`/`addFormatter`, which needs step 6's converter registry first |
 | 8 — API versioning | The resolution is string work with no blocker; the `Deprecation`/`Sunset` pair needs front 05 keys that exist |
 | 10 — graceful shutdown | The listening socket is `rakun_runtime.erl`'s (front 04's), and front 76's `readinessDrained()` is the soft half the spec says how to land without |
 
