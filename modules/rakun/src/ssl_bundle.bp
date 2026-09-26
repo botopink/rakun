@@ -16,23 +16,13 @@
 ////   rakun.ssl.bundle.pem.<name>.verify         full | none          (client)
 ////   rakun.ssl.bundle.pem.<name>.reload-on-update
 ////
-//// WHY THIS IS BOTOPINK AND NOT A SIDECAR, AND WHY IT SHIPS BOTH HOSTS ANYWAY.
-//// The front's spec declares every host seam `#[@External.Erlang("rakun_ssl",…)]`
-//// only, on the reasoning that `ssl` and `public_key` are OTP applications with
-//// no Node form. That is true of `ssl:listen/2` and false of everything this
-//// module actually needs, and the difference matters because of a MEASURED shape:
-//// `botopink test` compiles every `test/*.bp` on BOTH rows with no per-target
-//// gate, and a `declare fn` carrying only an `#[@External.Erlang]` form is a
-//// located diagnostic AT THE CALL SITE on the node row. A single erlang-only cell
-//// behind a called wrapper takes the whole member off the commonJS row — the row
-//// `modules/rakun`'s `targets` gates and the row
-//// `botopink-lang/scripts/restricted-targets.txt` pins. So every cell below
-//// carries both forms, `src/ssl_bundle.mjs` is the node half and
-//// `src/sidecars/rakun_ssl.erl` the BEAM half, and the two answer identically —
-//// which is the only claim worth making about a port. This is front 07's
-//// resolution (`src/chain.mjs` beside `src/sidecars/rakun_chain.erl`) and front
-//// 05's (`config.bp` over `std`'s `fs` rather than `rakun_config.erl`), applied a
-//// third time for the same reason.
+//// WHY THIS IS BOTOPINK AND NOT A SIDECAR. The front's spec declares every host
+//// seam `#[@External.Erlang("rakun_ssl",…)]`, on the reasoning that `ssl` and
+//// `public_key` are OTP applications. That is true of `ssl:listen/2` and not of
+//// everything this module needs: the file reading and PEM parsing are botopink over `std`, and only the OTP
+//// half (`ssl`, `public_key`) is `src/sidecars/rakun_ssl.erl`. The module was
+//// written while the core still ran on both rows, with a node twin
+//// (`ssl_bundle.mjs`) that left with front 04's Step 10 (decision 113).
 ////
 //// WHAT THE HOSTS HOLD AND WHAT THEY DO NOT. They hold a two-level table
 //// (`name` → `field` → value), an X.509 field reader (`public_key` on the BEAM,
@@ -75,26 +65,21 @@ import {sub, toI32, rkValue, rkValueOr, rkPropIntOr, rkPropBool, rkPropList} fro
 // Both forms, always. The two-level registry, the X.509 reader and the key
 // correspondence check; nothing else.
 
-#[@External.Node("./ssl_bundle.mjs", "put"),
-  @External.Erlang("rakun_ssl", "put")]
+#[@External.Erlang("rakun_ssl", "put")]
 pub declare fn rkSslPut(name: string, field: string, value: string) -> i32;
 
-#[@External.Node("./ssl_bundle.mjs", "get"),
-  @External.Erlang("rakun_ssl", "get")]
+#[@External.Erlang("rakun_ssl", "get")]
 pub declare fn rkSslGet(name: string, field: string) -> string;
 
 // Registered names, `\n`-separated, in REGISTRATION order — which is property
 // order, because `sslRegisterAll` walks `sslBundleNames()`.
-#[@External.Node("./ssl_bundle.mjs", "names"),
-  @External.Erlang("rakun_ssl", "names")]
+#[@External.Erlang("rakun_ssl", "names")]
 pub declare fn rkSslNames() -> string;
 
-#[@External.Node("./ssl_bundle.mjs", "forget"),
-  @External.Erlang("rakun_ssl", "forget")]
+#[@External.Erlang("rakun_ssl", "forget")]
 pub declare fn rkSslForget(name: string) -> i32;
 
-#[@External.Node("./ssl_bundle.mjs", "reset"),
-  @External.Erlang("rakun_ssl", "reset")]
+#[@External.Erlang("rakun_ssl", "reset")]
 pub declare fn rkSslReset() -> i32;
 
 // One PEM chain in, one blob out:
@@ -103,14 +88,12 @@ pub declare fn rkSslReset() -> i32;
 // canonicalised by both hosts to `CN=…,O=…` in certificate order, because node
 // answers newline-separated attributes and OTP answers an `rdnSequence` of OID
 // tuples, and one test has to be able to assert one string.
-#[@External.Node("./ssl_bundle.mjs", "certInfo"),
-  @External.Erlang("rakun_ssl", "cert_info")]
+#[@External.Erlang("rakun_ssl", "cert_info")]
 pub declare fn rkSslCertInfo(pem: string) -> string;
 
 // Does this private key belong to this certificate? A mismatch is a STARTUP
 // failure, not a first-handshake one, which is the whole reason this cell exists.
-#[@External.Node("./ssl_bundle.mjs", "keyMatches"),
-  @External.Erlang("rakun_ssl", "key_matches")]
+#[@External.Erlang("rakun_ssl", "key_matches")]
 pub declare fn rkSslKeyMatches(certPem: string, keyPem: string) -> bool;
 
 // ── the five consumer seams ─────────────────────────────────────────────────
@@ -120,29 +103,24 @@ pub declare fn rkSslKeyMatches(certPem: string, keyPem: string) -> bool;
 // registry about what a bundle is.
 
 // Front 04's acceptor and front 76's management listener.
-#[@External.Node("./ssl_bundle.mjs", "listenerOpts"),
-  @External.Erlang("rakun_ssl", "listener_opts")]
+#[@External.Erlang("rakun_ssl", "listener_opts")]
 pub declare fn rkSslListenerOpts(bundle: string) -> string;
 
 // Fronts 08, 09, 13 and 15. `host` becomes `server_name_indication` and, under
 // `verify=full`, the hostname the chain is checked against.
-#[@External.Node("./ssl_bundle.mjs", "clientOpts"),
-  @External.Erlang("rakun_ssl", "client_opts")]
+#[@External.Erlang("rakun_ssl", "client_opts")]
 pub declare fn rkSslClientOpts(bundle: string, host: string) -> string;
 
 // The health indicator and the info contributor.
-#[@External.Node("./ssl_bundle.mjs", "expiryDays"),
-  @External.Erlang("rakun_ssl", "expiry_days")]
+#[@External.Erlang("rakun_ssl", "expiry_days")]
 pub declare fn rkSslExpiryDays(bundle: string) -> i32;
 
 // The info contributor.
-#[@External.Node("./ssl_bundle.mjs", "subject"),
-  @External.Erlang("rakun_ssl", "subject")]
+#[@External.Erlang("rakun_ssl", "subject")]
 pub declare fn rkSslSubject(bundle: string) -> string;
 
 // The health indicator; `""` when the last resolve succeeded.
-#[@External.Node("./ssl_bundle.mjs", "lastError"),
-  @External.Erlang("rakun_ssl", "last_error")]
+#[@External.Erlang("rakun_ssl", "last_error")]
 pub declare fn rkSslLastError(bundle: string) -> string;
 
 // ── the blob ────────────────────────────────────────────────────────────────
@@ -213,15 +191,13 @@ pub fn warnThresholdDays() -> i32 {
 // Spring discovers the bundle names by walking the property tree for
 // `spring.ssl.bundle.pem.*` and taking the segment after the prefix. rakun's
 // property table has no key enumeration on either row: front 04's `?PROPS` ETS
-// table is `public` and could be folded over, but `runtime.mjs`'s `props` is a
-// module-private `Map` with no export, `runtime.mjs` is FROZEN for the milestone
-// and it is this front's `Does not touch`. So the names are read as a LIST —
+// table is `public` and could be folded over, but the core exposes no cell for
+// it and `runtime.bp` is this front's `Does not touch`. So the names are read as a LIST —
 // `rakun.ssl.bundle.pem` as a comma-separated scalar, or the indexed keys a YAML
 // sequence flattens to — through front 05's `rkPropList`, which is the same
 // idiom front 05 uses for its own key catalogue (`rakun.config.catalogue`).
 // Closing it needs ONE cell with two halves, `rkPropKeys(prefix) -> string`:
-// `ets:foldl` over `rakun_props` on the BEAM and a `props.keys()` export in
-// `runtime.mjs` on node. The `.bp` surface below does not change when it lands —
+// `ets:foldl` over `rakun_props` on the BEAM. The `.bp` surface below does not change when it lands —
 // only this function's body does.
 pub fn sslBundleNames() -> string[] {
     return rkPropList(bundlePrefix());

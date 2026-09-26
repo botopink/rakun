@@ -1,4 +1,5 @@
-%%% rakun-web — the filter chain, BEAM half: the erlang twin of `src/chain.mjs`.
+%%% rakun-web — the filter chain, BEAM half: the node twin `src/chain.mjs` left with
+%%% front 04 Step 10 (decision 113).
 %%%
 %%% WHAT LIVES HERE AND WHY. botopink has no top-level mutable state, so the
 %%% chain's registries live in the host: the ordered entry table, the advice
@@ -10,7 +11,7 @@
 %%% WHAT DOES *NOT* LIVE HERE. The order band, the sentinel interpretation, the
 %%% replace-by-name rule, the `Vary` union, the `Set-Cookie` refusal, the CORS
 %%% decision, the RFC 9457 shape and every refusal message are botopink,
-%%% compiled to both targets. This module holds tables, a walk by index and a
+%%% compiled to erlang. This module holds tables, a walk by index and a
 %%% try/catch. It never parses a header and never decides what a policy allows —
 %%% which is what makes "the two rows cannot disagree about what the chain did"
 %%% a property rather than a hope.

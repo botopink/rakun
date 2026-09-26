@@ -1,5 +1,5 @@
-%%% rakun — the SSL bundle registry, BEAM half: the erlang twin of
-%%% `src/ssl_bundle.mjs`.
+%%% rakun — the SSL bundle registry, BEAM half: its node twin `src/ssl_bundle.mjs` left
+%%% with front 04 Step 10 (decision 113).
 %%%
 %%% WHAT LIVES HERE AND WHY. botopink has no top-level mutable state, so the
 %%% registry — a two-level `name` -> `field` -> value table, in registration

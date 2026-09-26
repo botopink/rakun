@@ -24,8 +24,8 @@ refusal is the core's `config_check.bp`.
 
 | Member | `files` | `targets` | Spring Boot 4 | Front(s) | State |
 |---|---|---|---|---|---|
-| [rakun](./rakun/) (core) | root · http · runtime · decorators · bootstrap · rakun.d | commonJS (erlang with 04) | `spring-boot-starter` | 04 · 05 · 06 · 62 · 72 · 74 | real code, 310 tests |
-| [rakun-app](./rakun-app/) | root · file_router · ssr | inherited (commonJS, erlang) | (Next.js `app/` router, server half) | 22 · 23 · 24 · 25 · 60 · 61 · 63 · 64 · 66 | real code, 59 tests |
+| [rakun](./rakun/) (core) | root · http · runtime · decorators · bootstrap · rakun.d | erlang | `spring-boot-starter` | 04 · 05 · 06 · 62 · 72 · 74 | real code, 310 tests |
+| [rakun-app](./rakun-app/) | root · file_router · ssr | erlang | (Next.js `app/` router, server half) | 22 · 23 · 24 · 25 · 60 · 61 · 63 · 64 · 66 | real code, 59 tests |
 | [rakun-actuator](./rakun-actuator/) | root | erlang | `-actuator` (host) | 11 · 76 · 87 | scaffold |
 | [rakun-cache](./rakun-cache/) | root | erlang | `-cache` | 12 | scaffold |
 | [rakun-client](./rakun-client/) | root | erlang | `RestClient` / `WebClient` | 13 | scaffold |
@@ -36,7 +36,7 @@ refusal is the core's `config_check.bp`.
 | [rakun-scheduling](./rakun-scheduling/) | root | erlang | `@Scheduled` / `-quartz` | 16 · 84 | scaffold |
 | [rakun-security](./rakun-security/) | root | erlang | `-security`, `-oauth2-client`, `-saml2` | 10 · 79 | scaffold |
 | [rakun-session](./rakun-session/) | root | erlang | `spring-session-jdbc` / `-data-redis` | 18 | scaffold |
-| [rakun-test](./rakun-test/) | root | commonJS, erlang | `-test` | 19 | empty `pub` surface, 1 inline test |
+| [rakun-test](./rakun-test/) | root | erlang | `-test` | 19 | empty `pub` surface, 1 inline test |
 | [rakun-web](./rakun-web/) | root · filter · error · middleware · cors · convention | erlang | `-webmvc` (websocket is `rakun-websocket`) | 07 · 65 · 82 | real code, 83 tests |
 
 `modules/rakun-web/` stopped being a scaffold with front 07: it carries the filter chain, CORS and
@@ -160,8 +160,8 @@ rakun-<name>/
 
 - **Decorator-based**: all annotations use `#[decorator]` syntax.
 - **IoC integration**: every component is managed by the core container (`rakun`).
-- **Target per member**: `03-rakun/modules.md` § Targets — erlang for the server modules,
-  `commonJS, erlang` only where the module sits on the boundary (`rakun-test`, `rakun-app`; validation is the bundled `validation` library).
+- **Target per member**: erlang, every member and the workspace root (decision 117 rule 9);
+  what the browser runs too is a bundled library (`routing`, `actions`, `validation`), not a member.
 - **Std lib reuse**: use `std.*` modules when possible; `std` is never listed as a dependency.
 - **No compiler changes**: the compiler core knows nothing about rakun modules.
 

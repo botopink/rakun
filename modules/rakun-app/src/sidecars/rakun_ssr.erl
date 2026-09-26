@@ -1,4 +1,5 @@
-%%% rakun — the SSR pipeline's BEAM half: the erlang twin of `src/ssr.mjs`.
+%%% rakun — the SSR pipeline's BEAM half: the node twin `src/ssr.mjs` left with
+%%% front 04 Step 10 (decision 113).
 %%%
 %%% WHAT LIVES HERE AND WHY. botopink has no top-level mutable state, and three
 %%% of the things this front holds are not values a string table can hold: the
@@ -8,7 +9,7 @@
 %%%
 %%% WHAT DOES NOT LIVE HERE. The escaping, the walker, the composition order,
 %%% the payload format, the document shell and the chunk protocol are botopink
-%%% in `ssr.bp`, compiled to both targets. This module never sees HTML.
+%%% in `ssr.bp`, compiled to erlang. This module never sees HTML.
 %%%
 %%% MODULE ATOM. `src/sidecars/rakun_ssr.erl`, never `src/ssr.erl`:
 %%% `shipErlSidecars` skips a qualifier atom matching a module the build

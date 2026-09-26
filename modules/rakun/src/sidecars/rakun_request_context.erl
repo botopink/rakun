@@ -1,5 +1,5 @@
-%%% rakun — the request context, BEAM half: the erlang twin of
-%%% `src/request_context.mjs`.
+%%% rakun — the request context, BEAM half: its node twin `src/request_context.mjs` left
+%%% with front 04 Step 10 (decision 113).
 %%%
 %%% WHAT LIVES HERE AND WHY. botopink has no top-level mutable state and no
 %%% mutable record field, so the request frame has to live in the host. And the
@@ -9,7 +9,7 @@
 %%%
 %%% WHAT DOES *NOT* LIVE HERE. The phase table, the header wire grammar, the
 %%% cookie grammar, the `Set-Cookie` serialization, the draft-mode signature and
-%%% every refusal message are botopink, compiled to both targets. This module
+%%% every refusal message are botopink, compiled to erlang. This module
 %%% holds a keyed slot store, a keyed line list, a queue, a table and a counter.
 %%%
 %%% THE SCOPE. A request is served by a process, so the frame is the serving

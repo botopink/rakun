@@ -1,0 +1,299 @@
+// rakun — the BEAM listener, driven over a real socket (front 04 steps 2, 5, 6, 7).
+//
+// `erlang_runtime_test.bp` drives the cells without a socket. This file boots
+// the `gen_tcp` acceptor on an ephemeral port with `rakun.main.keep-alive=false`
+// — the CI smoke shape, where `rkServe` answers the bound port instead of
+// blocking — and speaks HTTP/1.1 to it through std's `io.net`. Every request
+// here is a fresh connection unless the test is about keep-alive.
+
+import {Request, Response};
+import {rkEnter, rkDone, rkSingleton, rkBuildCount};
+import {rkSetProp, rkProp};
+import {rkRegisterRoute, rkRouteCount, rkDispatchHttp, rkServe};
+import {rkSetReplyHeader, rkReplyHeaders, rkBoot};
+import {toI32};
+import {async, io: {net, fs, process}, io.net.Socket} from "std";
+
+// A socket handle for the `unwrapOr` fallback of a refused connect.
+#[@External.Erlang("""undefined""")]
+declare fn noHandle() -> any;
+
+// Raise inside a handler — the 500 path.
+#[@External.Erlang("""erlang:error(<<"handler exploded">>)""")]
+declare fn explode() -> string;
+
+#[@External.Erlang("rakun_request_context", "sleep")]
+declare fn sleepMs(ms: i32) -> i32;
+
+fn hello(req: Request) -> Response {
+    return Response.ok("hello");
+}
+
+fn echo(req: Request) -> Response {
+    return Response.created(req.body());
+}
+
+fn query(req: Request) -> Response {
+    return Response.ok("q=" + req.query("q"));
+}
+
+fn header(req: Request) -> Response {
+    return Response.ok("h=" + req.header("X-Tag"));
+}
+
+fn boom(req: Request) -> Response {
+    return Response.ok(explode());
+}
+
+fn trace(req: Request) -> Response {
+    val _h1 = rkSetReplyHeader("X-Trace", "first");
+    val _h2 = rkSetReplyHeader("x-trace", "abc");
+    return Response.ok("traced");
+}
+
+fn slow(req: Request) -> Response {
+    val _s = sleepMs(300);
+    return Response.ok("slow");
+}
+
+// Register the routes this file serves once; `rkRouteCount` guards a second call.
+fn routes() -> i32 {
+    if (rkProp("test.srv.routes") == "yes") {
+        return 0;
+    } else {
+        val _p = rkSetProp("test.srv.routes", "yes");
+        val _a = rkRegisterRoute("GET", "/srv/hello", { r -> hello(r) });
+        val _b = rkRegisterRoute("POST", "/srv/echo", { r -> echo(r) });
+        val _c = rkRegisterRoute("GET", "/srv/query", { r -> query(r) });
+        val _d = rkRegisterRoute("GET", "/srv/header", { r -> header(r) });
+        val _e = rkRegisterRoute("GET", "/srv/boom", { r -> boom(r) });
+        val _f = rkRegisterRoute("GET", "/srv/trace", { r -> trace(r) });
+        val _g = rkRegisterRoute("GET", "/srv/slow", { r -> slow(r) });
+        return 0;
+    };
+}
+
+// Boot the listener on an ephemeral port and answer the bound one.
+fn start() -> i32 {
+    val _r = routes();
+    val _k = rkSetProp("rakun.main.keep-alive", "false");
+    return rkServe(0, { m, p, h, q, b -> rkDispatchHttp(m, p, h, q, b) });
+}
+
+fn open(port: i32) -> Socket {
+    return net.connect("127.0.0.1", port, 1000).unwrapOr(Socket(handle: noHandle()));
+}
+
+// Read until the head is complete and the body has its Content-Length.
+fn readResponse(sock: Socket) -> string {
+    return readMore(sock, "");
+}
+
+fn readMore(sock: Socket, acc: string) -> string {
+    val chunk = net.recv(sock, 0, 1000).unwrapOr("");
+    val got = acc + chunk;
+    if (chunk == "") {
+        return got;
+    } else {
+        if (complete(got)) {
+            return got;
+        } else {
+            return readMore(sock, got);
+        };
+    };
+}
+
+fn complete(text: string) -> bool {
+    val parts = text.split("\r\n\r\n");
+    if (parts.length < 2) {
+        return false;
+    } else {
+        return byteLength(bodyOf(text)) >= contentLength(parts.at(0) ?? "");
+    };
+}
+
+// `string.length` counts grapheme clusters on the BEAM, and `\r\n` is ONE
+// cluster there; the wire counts bytes. Every text here is ASCII, so the byte
+// length is the cluster length plus one per CRLF.
+fn byteLength(text: string) -> i32 {
+    return text.length + text.split("\r\n").length - 1;
+}
+
+fn contentLength(head: string) -> i32 {
+    val lines = head.split("\r\n");
+    val found = lines.filter({ l -> l.toLower().startsWith("content-length:") });
+    val line = found.at(0) ?? "content-length: 0";
+    return toI32(line.split(":").at(1) ?? "0");
+}
+
+fn statusOf(response: string) -> string {
+    return (response.split(" ").at(1) ?? "");
+}
+
+fn bodyOf(response: string) -> string {
+    val parts = response.split("\r\n\r\n");
+    return parts.slice(1, parts.length).join("\r\n\r\n");
+}
+
+fn exchange(port: i32, request: string) -> string {
+    val sock = open(port);
+    val _s = net.send(sock, request);
+    val answer = readResponse(sock);
+    val _c = net.close(sock);
+    return answer;
+}
+
+fn get(port: i32, path: string) -> string {
+    return exchange(port, "GET " + path + " HTTP/1.1\r\nHost: x\r\n\r\n");
+}
+
+test "rakun server: port 0 binds an ephemeral port and serve answers it" {
+    val port = start();
+    assert port > 0;
+    assert rkProp("rakun.server.bound-port") == port.toString();
+}
+
+test "rakun server: a registered route answers 200 with the handler's body" {
+    val answer = get(start(), "/srv/hello");
+    assert statusOf(answer) == "200";
+    assert bodyOf(answer) == "hello";
+}
+
+test "rakun server: an unregistered path answers 404" {
+    assert statusOf(get(start(), "/srv/nope")) == "404";
+}
+
+test "rakun server: a POST body containing a blank line arrives intact" {
+    val body = "a\r\n\r\nb";
+    val answer = exchange(start(), "POST /srv/echo HTTP/1.1\r\nHost: x\r\nContent-Length: " + byteLength(body).toString() + "\r\n\r\n" + body);
+    assert statusOf(answer) == "201";
+    assert bodyOf(answer) == body;
+}
+
+test "rakun server: a query reaches req.query and a repeated key takes the first" {
+    val answer = get(start(), "/srv/query?q=one&q=two");
+    assert bodyOf(answer) == "q=one";
+}
+
+test "rakun server: header lookup is case-insensitive" {
+    val answer = exchange(start(), "GET /srv/header HTTP/1.1\r\nHost: x\r\nx-TAG: abc\r\n\r\n");
+    assert bodyOf(answer) == "h=abc";
+}
+
+test "rakun server: a handler that raises answers 500 and the next connection still answers 200" {
+    val port = start();
+    assert statusOf(get(port, "/srv/boom")) == "500";
+    assert statusOf(get(port, "/srv/hello")) == "200";
+}
+
+test "rakun server: a reply header reaches the wire once, with the last value" {
+    val answer = get(start(), "/srv/trace");
+    assert answer.contains("x-trace: abc\r\n");
+    assert !answer.contains("first");
+    assert answer.split("race:").length == 2;
+}
+
+test "rakun server: headers of request n do not leak into n+1 on a keep-alive connection" {
+    val sock = open(start());
+    val _a = net.send(sock, "GET /srv/trace HTTP/1.1\r\nHost: x\r\n\r\n");
+    val first = readResponse(sock);
+    val _b = net.send(sock, "GET /srv/hello HTTP/1.1\r\nHost: x\r\n\r\n");
+    val second = readResponse(sock);
+    val _c = net.close(sock);
+    assert first.contains("x-trace: abc");
+    assert statusOf(second) == "200";
+    assert !second.contains("trace");
+}
+
+test "rakun server: a handler that sets no header writes the same head as before" {
+    val answer = get(start(), "/srv/hello");
+    assert answer == "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: keep-alive\r\n\r\nhello";
+}
+
+test "rakun server: over max-connections the next connection is answered 503 and closed" {
+    val port = start();
+    val _m = rkSetProp("rakun.server.max-connections", "1");
+    val held = open(port);
+    val _h = net.send(held, "GET /srv/hello HTTP/1.1\r\nHost: x\r\n\r\n");
+    val _r = readResponse(held);
+    val answer = get(port, "/srv/hello");
+    val _c = net.close(held);
+    val _u = rkSetProp("rakun.server.max-connections", "16384");
+    assert statusOf(answer) == "503";
+}
+
+test "rakun server: an idle keep-alive connection is closed after rakun.server.idle-timeout" {
+    val _i = rkSetProp("rakun.server.idle-timeout", "200");
+    val port = start();
+    val sock = open(port);
+    val _s = net.send(sock, "GET /srv/hello HTTP/1.1\r\nHost: x\r\n\r\n");
+    val _r = readResponse(sock);
+    // Nothing more is sent: the server closes within the idle timeout, so the
+    // next read answers `closed` well inside 500 ms.
+    val next = net.recv(sock, 0, 500);
+    val _c = net.close(sock);
+    val _u = rkSetProp("rakun.server.idle-timeout", "60000");
+    assert next.isError();
+}
+
+test "rakun server: a slow request on one connection does not hold up another" {
+    val port = start();
+    val slow = open(port);
+    val _s = net.send(slow, "GET /srv/slow HTTP/1.1\r\nHost: x\r\n\r\n");
+    assert bodyOf(get(port, "/srv/hello")) == "hello";
+    assert bodyOf(readResponse(slow)) == "slow";
+    val _c = net.close(slow);
+}
+
+test "rakun server: the port file holds the BOUND port" {
+    val dir = process.cwd();
+    val file = dir + "/.rakun-port-file-test";
+    val _p = rkSetProp("rakun.main.port-file", file);
+    val port = start();
+    val _u = rkSetProp("rakun.main.port-file", "");
+    val written = fs.readText(file).unwrapOr("");
+    val _rm = fs.rm(file);
+    assert written == port.toString();
+}
+
+test "rakun server: rkBoot writes the pid file and a clean return removes it" {
+    val file = process.cwd() + "/.rakun-pid-file-test";
+    val _b = rkBoot("{\"rakun.main.pid-file\":\"" + file + "\",\"rakun.main.banner-mode\":\"off\"}");
+    val pid = fs.readText(file).unwrapOr("");
+    assert pid == process.pid().toString();
+    val _s = start();
+    assert !fs.exists(file);
+    val _u = rkSetProp("rakun.main.pid-file", "");
+}
+
+test "rakun server: headless starts no listener and keeps the route table" {
+    val _r = routes();
+    val before = rkRouteCount();
+    val _h = rkSetProp("rakun.main.headless", "true");
+    val _k = rkSetProp("rakun.main.keep-alive", "false");
+    val answered = rkServe(0, { m, p, h, q, b -> rkDispatchHttp(m, p, h, q, b) });
+    val _u = rkSetProp("rakun.main.headless", "");
+    assert answered == 0;
+    assert rkRouteCount() == before;
+}
+
+test "rakun server: rkBoot writes the same property table configuration fills" {
+    val _b = rkBoot("{\"rakun.server.backlog\":\"64\",\"rakun.main.banner-mode\":\"off\"}");
+    assert rkProp("rakun.server.backlog") == "64";
+}
+
+test "rakun server: twenty processes racing an uncached singleton build it once" {
+    val tasks = Array.range(0, 20).map({ i -> { -> async {
+        rkSingleton("Racer", { ->
+            val _e = rkEnter("Racer");
+            val _s = sleepMs(20);
+            val _d = rkDone("Racer");
+            i
+        })
+    } } });
+    val got = await async.runAll(tasks);
+    val first = got.at(0) ?? -1;
+    assert got.length == 20;
+    assert got.all({ v -> v == first });
+    assert rkBuildCount("Racer") == 1;
+}

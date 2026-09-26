@@ -21,13 +21,14 @@ route registration per mapped method (reading `decl.methods` + the `#[route]`
 prefix); a `#[configuration]` `@emit`s a `__rkMake_<ReturnType>()` per `#[bean]`
 method. botopink has no top-level mutable state, so the registries those calls
 feed — the scan list, the singleton cache, the cycle guard, the config props, the
-router table — live in `runtime.mjs`, reached through the `#[@External.Node]`
-declarations in `runtime.bp`. The emitted code references those runtime fns by
+router table — live in the BEAM host module `sidecars/rakun_runtime.erl`, reached
+through the `#[@External.Erlang]` declarations in `runtime.bp`. rakun is
+erlang-only (decision 113). The emitted code references those runtime fns by
 name, so a module declaring components also imports them (`import {service,
 rkScan, rkSingleton, rkEnter, rkDone, rkRegisterRoute, …} from "rakun"`). The HTTP
 value types + the `Request` behavior are real emitted code (`http.bp`);
-`Rakun.run` (`bootstrap.bp`) starts rakun's own node `http` transport
-(`rkServe` → `serve` in `runtime.mjs`).
+`Rakun.run` (`bootstrap.bp`) starts rakun's own `gen_tcp` transport
+(`rkServe` → `serve/2` in `rakun_runtime.erl`).
 
 ## Tree
 
@@ -41,15 +42,15 @@ named by its own manifest. The **core is the member `modules/rakun/`**; `from "r
 rakun/
 ├── AGENTS.md          ← you are here
 ├── docs.md            ← what this lib provides + Spring mapping + loading notes
-├── botopink.json      ← WORKSPACE: name rakun · version · targets [commonJS, erlang] (the default
-│                        every member inherits and may only restrict) · workspaces
+├── botopink.json      ← WORKSPACE: name rakun · version · targets [erlang] (decision 117
+│                        rule 9 — every member declares [erlang] too) · workspaces
 │                        ["modules/*", "examples/*"]. Nothing importable from it.
 ├── modules/
 │   ├── README.md      ← the member table (14 today, 13 planned with their fronts), the
 │   │                    module ↔ Spring starter map, how to add a member
 │   ├── rakun/         ← THE CORE — what `from "rakun"` gives a consumer
-│   │   ├── botopink.json  name rakun · entry root.bp · target commonJS · targets [commonJS]
-│   │   │                    (erlang joins when § Blocked closes) · files: root · http ·
+│   │   ├── botopink.json  name rakun · entry root.bp · target erlang · targets [erlang]
+│   │   │                    (front 04 Step 10, decision 113) · files: root · http ·
 │   │   │                    runtime · decorators · bootstrap · rakun.d · no dependencies.
 │   │   │                    The `.erl` sidecar is NOT a `files` entry: `shipErlSidecars`
 │   │   │                    finds it under the package's `src/sidecars/`
@@ -57,14 +58,9 @@ rakun/
 │   │   │   ├── root.bp        ← module-tree root: `pub mod decorators; http; runtime; bootstrap;`
 │   │   │   ├── http.bp        ← concrete, emitted: `HttpMethod` enum-shaped type · `Response` type
 │   │   │   │                    (builders) · `App` config · `Request` behavior
-│   │   │   ├── runtime.mjs    ← host runtime: the mutable seams (scan list · singleton cache ·
-│   │   │   │                    cycle guard · config props · router table + dispatch/dispatchHttp)
-│   │   │   │                    + the node `http` transport (`serve`)
-│   │   │   ├── runtime.bp     ← the host cells, each carrying BOTH an `@External.Node` and an
-│   │   │   │                    `@External.Erlang` form (`rkScan`/`rkSingleton`/`rkEnter`/
-│   │   │   │                    `rkDone`/`rkProp`/`rkRegisterRoute`/`rkDispatch`/
-│   │   │   │                    `rkDispatchHttp`/`rkServe`/…); sibling `./runtime.mjs` shipped
-│   │   │   │                    next to the emitted module (G2)
+│   │   │   ├── runtime.bp     ← the host cells, each one `@External.Erlang` form
+│   │   │   │                    (`rkScan`/`rkSingleton`/`rkEnter`/`rkDone`/`rkProp`/
+│   │   │   │                    `rkRegisterRoute`/`rkDispatch`/`rkDispatchHttp`/`rkServe`/…)
 │   │   │   ├── sidecars/
 │   │   │   │   └── rakun_runtime.erl ← THE ERLANG HOST MODULE (§ The erlang host module):
 │   │   │   │                    the `application` + supervision tree + ETS tables behind
@@ -74,7 +70,6 @@ rakun/
 │   │   │   │                    registry): the property grammar, the refusals,
 │   │   │   │                    the two option-list encodings, reload, and the
 │   │   │   │                    `ssl` health and info contributions
-│   │   │   ├── ssl_bundle.mjs ← the registry + X.509 reader, node half
 │   │   │   ├── sidecars/rakun_ssl.erl ← the same on the BEAM, plus the one
 │   │   │   │                    genuinely erlang-only piece: the blob →
 │   │   │   │                    `ssl:listen/2` option list decoder front 04's
@@ -87,8 +82,6 @@ rakun/
 │   │   │   │                    request and there is no flag that changes it
 │   │   │   ├── request_memo.bp ← the `React.cache` analogue over the frame's
 │   │   │   │                    table: `memoize` · `preload` · `memoKey`
-│   │   │   ├── request_context.mjs ← the frame, node half: a module-global slot
-│   │   │   │                    store. Knows no phase, no header, no cookie
 │   │   │   ├── sidecars/rakun_request_context.erl ← the frame on the BEAM: ONE
 │   │   │   │                    process-dictionary key plus an ETS area that
 │   │   │   │                    outlives it, for work that runs after the response
@@ -103,17 +96,12 @@ rakun/
 │   │   │   ├── lifecycle.bp   ← `#[postConstruct]`/`#[preDestroy]` (placement
 │   │   │   │                    only), the two passes, `#[exitCode]`,
 │   │   │   │                    `shutdown()` and the process status
-│   │   │   ├── context.mjs    ← the four tables, node half: bean factories,
-│   │   │   │                    lifecycle thunks, listener closures, exit-code
-│   │   │   │                    generators. Knows no record grammar
 │   │   │   ├── sidecars/rakun_context.erl ← the same four on the BEAM, in ETS
 │   │   │   │                    behind a dedicated owner process
 │   │   │   ├── autoconfig_registry.bp ← THE AUTO-CONFIGURATION SEAM (§ The
 │   │   │   │                    auto-configuration pass): the host cells behind the
 │   │   │   │                    registration table, plus the `botopink.json`
 │   │   │   │                    dependency read `#[conditionalOnModule]` asks
-│   │   │   ├── autoconfig.mjs ← the registration table, node half: four strings
-│   │   │   │                    per row and one decision. Knows no grammar
 │   │   │   ├── sidecars/rakun_autoconfig.erl ← the same table on the BEAM, in ETS
 │   │   │   │                    behind a dedicated owner process
 │   │   │   ├── conditions.bp  ← the five condition markers, the `M|P|B|X|F` wire
@@ -160,8 +148,8 @@ rakun/
 │   │                    `modules/rakun/src/config_check.bp` — § Validation)
 │   ├── rakun-app/     ← THE SERVER HALF OF THE `app/` ROUTER (front 95 relocated fronts 22 and
 │   │   │                23 out of the core — `specs/1.0.10-beta/03-rakun/modules.md` § The cut):
-│   │   │                files [root.bp, file_router.bp, ssr.bp], no `targets` (inherits the
-│   │   │                workspace's), depends on `rakun` by `{ "workspace": true }`; imports the
+│   │   │                files [root.bp, file_router.bp, ssr.bp], targets [erlang],
+│   │   │                depends on `rakun` by `{ "workspace": true }`; imports the
 │   │   │                core `from "rakun"` (the request context `from "rakun/request_context"`,
 │   │   │                because std's `encoding` also declares `percentDecode`)
 │   │   ├── src/
@@ -171,8 +159,6 @@ rakun/
 │   │   │   │                    markers, over the bundled `routing` library's segment
 │   │   │   │                    grammar, `kind|pattern|slot|verb` wire and matcher. `decorators.bp` is frozen, so the markers
 │   │   │   │                    live here, as `#[configurationProperties]` does
-│   │   │   ├── file_router.mjs ← the App-Router REGISTRY, node half: an append-only
-│   │   │   │                    list of (wire line, render fn). Knows no grammar
 │   │   │   ├── sidecars/rakun_file_router.erl ← the same registry on the BEAM, in
 │   │   │   │                    ETS behind a dedicated owner process
 │   │   │   ├── ssr.bp         ← THE SSR PIPELINE (§ The SSR pipeline): the escaping
@@ -180,9 +166,6 @@ rakun/
 │   │   │   │                    payload, the document and the chunk protocol.
 │   │   │   │                    Generic in `El` throughout — rakun declares no
 │   │   │   │                    dependency on jhonstart and gains none here
-│   │   │   ├── ssr.mjs        ← the pipeline's node half: the installed hooks, the
-│   │   │   │                    gather over thunks, two ordinals — and `__onzeFill`,
-│   │   │   │                    the browser function a fill chunk calls
 │   │   │   └── sidecars/rakun_ssr.erl ← the same cells on the BEAM, in the serving
 │   │   │                        process's dictionary; `all/1` spawns one monitored
 │   │   │                        child per thunk, because `@Task` is eager there
@@ -225,8 +208,6 @@ rakun/
 │   │   │   │                    `#[middleware]`/`#[matcher]` · `#[crossOrigin]` ·
 │   │   │   │                    `#[controllerAdvice]`/`#[exceptionHandler]`), the
 │   │   │   │                    request-id built-in and `bootWeb()`
-│   │   │   ├── chain.mjs      ← the registries and the four per-request
-│   │   │   │                    accumulators, node half. Knows no grammar
 │   │   │   └── sidecars/rakun_chain.erl ← the same on the BEAM (ETS behind an
 │   │   │                        owner process + the process dictionary), plus
 │   │   │                        `run/6`, the seam `dispatch_http/5` calls
@@ -250,7 +231,7 @@ rakun/
 │                        { "rakun": { "workspace": true } }) + a two-comment `src/root.bp`;
 │                        contents land per front
 ├── examples/
-│   ├── rakun/         ← member `rakun-example` (an application: entry main.bp, target commonJS,
+│   ├── rakun/         ← member `rakun-example` (an application: entry main.bp, target erlang,
 │   │                    depends on `rakun` via { "workspace": true }); the sixty-second app
 │   ├── rakun-container/ ← member `rakun-container-example`: front 06's surface reached
 │   │                    through `from "rakun"`, which is the CONSUMER proof that
@@ -302,53 +283,58 @@ Front 74 appended `pub mod ssl_bundle;` and the matching `files` entry, last and
 reordering nothing: it imports `runtime` (the property table) and `config` (the
 typed readers and `rkValue`), and nothing inside rakun imports it — fronts 04,
 08, 09, 13, 15, 76, 79, 85 and 90 do, from outside, and
-`modules/rakun-web/src/tls.bp` is the first of them. Its two host files
-(`src/ssl_bundle.mjs`, `src/sidecars/rakun_ssl.erl`) are NOT `files` entries, for
-the reason `runtime.mjs` and `rakun_runtime.erl` are not.
+`modules/rakun-web/src/tls.bp` is the first of them. Its host file
+(`src/sidecars/rakun_ssl.erl`) is NOT a `files` entry, for the reason
+`rakun_runtime.erl` is not.
 
 rakun declares **no dependencies**: the HTTP transport
-`Rakun.run` starts is `serve` in its own `runtime.mjs` (bound as `rkServe`), so a
+`Rakun.run` starts is `serve/2` in its own `rakun_runtime.erl` (bound as `rkServe`), so a
 consumer declares only `rakun`. (It used to name a `server` library that exists in
 no repository — `botopink check` failed with `LibNotFound` before reading rakun's
 source.)
 
-The core's `botopink.json` carries both target keys on purpose: `"target": "commonJS"` is
-the build target the CLI reads (`config.zig`), and `"targets": ["commonJS"]` is
-the per-member whitelist `botopink-lib-test` reads (`lib-test-runner/src/discovery.zig`)
-to skip the erlang/beam cells. The workspace's `targets` is `["commonJS", "erlang"]` — the default a
-member inherits when it declares none — and a member may only **restrict** it, so the core's
-`["commonJS"]` is a restriction and dropping it would widen the core's matrix to a red erlang cell,
-not fix a no-op key. Front 04 built the erlang host module (§ The erlang host module) but did
-**not** widen `targets`, and every front since has made the same call for the same reason:
-a red on that axis would move into the gate rather than be fixed by the widening.
+**rakun is erlang-only (decision 113; decision 117 rule 9; front 04 Step 10).** The
+workspace root and every member — the core, `rakun-app`, `rakun-web`, `rakun-test`, the
+ten scaffolds and the three examples — declare `"targets": ["erlang"]`, and each package
+`"target": "erlang"` (the build target the CLI reads, `config.zig`; `targets` is the
+per-member whitelist `botopink-lib-test` reads). `botopink test` / `build` / `run` default
+to erlang here. The node host halves (`runtime.mjs`, `context.mjs`, `request_context.mjs`,
+`autoconfig.mjs`, `ssl_bundle.mjs`, `rakun-app`'s `file_router.mjs` / `ssr.mjs`, `rakun-web`'s
+`chain.mjs`) are deleted and no `#[@External.Node]` form remains in any member: every host
+cell is one `@External.Erlang` form. What both a browser and the server run is not a rakun
+member — the matcher and the navigation vocabulary are the bundled `routing`, the action
+protocol `actions`, validation `validation` (decisions 115, 116). The sections below that
+reason about "both rows", a "node twin" or `runtime.mjs:N` record why each piece was
+shaped as it is while the core still ran on commonJS; the `runtime.mjs:N` citations name
+the node code `rakun_runtime.erl` was ported from, term for term.
 
-**Measured 2026-09-25, with the std-substitutes follow-up in the tree** (compiler
-`4fe1747e`, summed over every module summary — `botopink test` prints one per
-module, so the LAST line is the last module's count and never the run's total):
-inside `modules/rakun`, `botopink test` is **388 / 0** and `botopink test
---target erlang` is **386 passing / 2 failing**; `modules/rakun-web` is 104 / 0
-and `modules/rakun-validation` 54 / 0 on both rows (measured before the member moved to the bundled `validation` library on 2026-09-26; after the move and the grammar's move to `routing`, `modules/rakun` is **369 / 0** on commonJS and **367 / 2** on erlang — the 26 routing tests left, the 7 of `config_check_test.bp` arrived — and `modules/rakun-web` stays 104 / 0 on both). Front 95 then relocated fronts 22 and 23 into `modules/rakun-app` (measured 2026-09-26, compiler `248d0896`): `file_router_test.bp`, `file_router_markers_test.bp`, `file_router_scan_test.bp` and `ssr_test.bp` left with their modules, so `modules/rakun` is **310 / 0** on commonJS and **308 / 2** on erlang (the same two reds) and `modules/rakun-app` is **59 / 0** on both rows. Front 72 measured 346 / 0 and
-344 / 2 on `2e6bb4ac`, having added 44 cells and moved neither red; its baseline
-was 302 / 0 and 300 / 2, and front 06 measured 267/267 and 265/2 on the same two
-reds — the numbers grew with the suite, not with the failures. The two are front 04's own
-`request/6` (`{badkey,param}` / `{badkey,query}`) — the map it builds carries `method`,
-`path`, `params`, `query`, `headers` and `body` but no member funs, so `req.param("name")`
-dispatches and finds nothing. That is the one thing left between the erlang row and
-`targets: ["commonJS", "erlang"]`, and it is a line in `rakun_runtime.erl`, not a backend
-gap: the two older blockers below were closed during front 05 and the record-field-read
-regression was closed during front 06 step 5. `erlang` joins `targets` in the change that
-closes `request/6` — a front that re-measures the whole library, not one mid-flight. rakun has no line in
-`botopink-lang/scripts/known-red-libs.txt` (that file lives in the compiler repository and
-currently holds only its header), so there is nothing to delete there either.
+**Measured 2026-09-26 (compiler `f011850c`), after the move:** `modules/rakun` **310 / 0**,
+`modules/rakun-app` **59 / 0**, `modules/rakun-web` **104 / 0**, `modules/rakun-test`
+**1 / 0** — erlang, the only row. The two erlang reds every front since 04 carried
+(`server_test.bp:74,80`, `{badkey,param}` / `{badfun,…}`) were front 04's own `request/6`:
+the erlang backend dispatches a method a `behavior` declares without a body through the
+value — `(maps:get(param, Req))(Req, N)` — and the map carried data under `query` / `body`
+and no funs. It now carries `param` / `query` / `header` / `body` as funs taking the
+receiver first, and the data under `params` / `query_map` / `headers` / `body_bin`.
+
+**What the move costs, and where it is owed.** (1) `botopink run` / `build` on erlang
+neither ships nor loads a sidecar (`shipErlSidecars` is called only from `test_cmd.zig`;
+`__bp_load_siblings/0` is emitted only under the test flag), so the three examples BUILD
+on erlang but a built program dies at the first host call (`undef rakun_runtime:serve/2`)
+— the compiler's `00 · 10-cli-residuals` gap, front 04 § Blocked. `examples/rakun` served
+HTTP on node until the move; it serves again on the BEAM when that gap closes. (2) The
+compiler repository's `scripts/restricted-targets.txt` pins the old matrix; its rakun
+rows are the compiler repository's to edit (the erlang rows of `rakun`, `rakun-example`,
+`rakun-container-example`, `rakun-ssr-example` leave; each member's commonJS row enters
+as a `build` restriction — `test-libs` names every line). rakun has no line in
+`known-red-libs.txt`.
 
 ## The erlang host module
 
-`modules/rakun/src/sidecars/rakun_runtime.erl` is the erlang twin of
-`runtime.mjs`. Every host cell in `runtime.bp` now carries two forms —
-`@External.Node("./runtime.mjs", "<camelCase>")` and
-`@External.Erlang("rakun_runtime", "<snake_case>")` — and the two answer
-identically: `test/erlang_runtime_test.bp` is one set of assertions run on both
-rows, which is the only statement worth making about a port.
+`modules/rakun/src/sidecars/rakun_runtime.erl` is rakun's host runtime, ported
+term for term from the deleted `runtime.mjs`. Every host cell in `runtime.bp`
+carries one form, `@External.Erlang("rakun_runtime", "<snake_case>")`;
+`test/erlang_runtime_test.bp` names the cells directly.
 
 **The module atom may not be `runtime`.** `shipErlSidecars`
 (`compiler-cli/src/cli/libs.zig`) reads the `atom:fun(` qualifiers out of the
@@ -408,7 +394,8 @@ on the warm path.
 
 ### The server half — cells with no node twin
 
-`runtime.mjs` is frozen for the milestone, so four pieces of the erlang host
+(Written while the core still ran on commonJS; since the erlang-only move an
+erlang-only cell CAN be asserted from a `.bp` test.) `runtime.mjs` was frozen for the milestone, so four pieces of the erlang host
 module have no `@External.Node` counterpart and therefore no `rk*` cell:
 `set_reply_header/2`, `reply_headers_json/0`, `boot/1` and `add_failure/3`.
 They are reached from erlang (by the acceptor, and by later fronts' sidecars),
@@ -460,6 +447,12 @@ either `runtime.mjs` unfreezes or a test file can declare its target.
   through `add_failure/3` without editing this module.
 
 ### Blocked — the erlang-backend gaps
+
+> **Closed (2026-09-26).** Both backend gaps below closed during fronts 05 and 06,
+> and the last two reds (`request/6`) closed with front 04's Step 10 — see the
+> erlang-only paragraph under § Module tree. Only the toolchain gap (a BUILT
+> program neither ships nor loads a sidecar) is still open. The text below is
+> kept for the reasoning it records.
 
 > **Updated during front 05 (2026-09-21).** The two gaps below were CLOSED by a
 > compiler change that landed mid-front: a module-level `val` with a side effect
@@ -1080,7 +1073,9 @@ either dropping `query` from `PageContext` or making it private — both are fro
 
 `examples/rakun-ssr/` is the consumer half, and it is a RUN rather than a claim:
 `botopink run` prints the document, and the program halts with a named refusal
-if the title reaches the browser unescaped or the payload is not `v1`.
+if the title reaches the browser unescaped or the payload is not `v1`. (Since the
+erlang-only move it builds but does not run: a built erlang program neither ships
+nor loads its sidecars — § Module tree, "What the move costs".)
 
 `scripts/git-hooks/lib/runner-standalone.sh` stage 1b enforces three claims of
 this front's *Definition of done*, because each of them is one edit away from
@@ -3209,7 +3204,9 @@ that builds, or a listed path that no longer exists, fails the gate too.
 When a fix makes an example build, delete its line in the same commit. The list may be absent,
 empty or hold only `#` comments — each means no example is allowed to fail.
 `examples/rakun` (member `rakun-example`, depending on `rakun` through
-`{ "workspace": true }`) builds; nothing is listed. It also **runs**: `botopink run`
+`{ "workspace": true }`) builds; nothing is listed. Until the erlang-only move it
+also **ran** on node — and runs again on the BEAM once a built erlang program ships
+and loads its sidecars (§ Module tree, "What the move costs"): `botopink run`
 inside it serves `GET /api/users/` → `ana, bob, cleo`, `GET /api/users/ana` →
 `Hello, ana!`, `GET /api/posts/` → `hello world | rakun rocks`,
 `POST /api/posts/` → 201 `created: hi` and `GET /api/nope` → 404, which is what

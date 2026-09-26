@@ -1,5 +1,5 @@
-%%% rakun — the auto-configuration registry, BEAM half: the erlang twin of
-%%% `src/autoconfig.mjs`.
+%%% rakun — the auto-configuration registry, BEAM half: its node twin `src/autoconfig.mjs` left
+%%% with front 04 Step 10 (decision 113).
 %%%
 %%% WHAT LIVES HERE AND WHY. botopink has no top-level mutable state, so a
 %%% registry lives in the host. What this one stores is four STRINGS per
@@ -9,7 +9,7 @@
 %%% WHAT DOES NOT LIVE HERE. The condition blob's grammar, the topological
 %%% sort, the evaluation of every record, the refusal texts and the rendered
 %%% report are botopink (`conditions.bp`, `autoconfig.bp`,
-%%% `condition_report.bp`), compiled to both targets. Front 06's measurement is
+%%% `condition_report.bp`), compiled to erlang. Front 06's measurement is
 %%% what decides the split: it stores four kinds of FUN and no string table
 %%% holds a fun, so its grammar stayed in botopink and its table went to the
 %%% host. Here nothing is a fun, so only the table crosses. This module appends

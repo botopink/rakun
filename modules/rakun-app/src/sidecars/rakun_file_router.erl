@@ -1,5 +1,5 @@
-%%% rakun — the file-convention route registry, BEAM half: the erlang twin of
-%%% `src/file_router.mjs`.
+%%% rakun — the file-convention route registry, BEAM half: its node twin `src/file_router.mjs` left
+%%% with front 04 Step 10 (decision 113).
 %%%
 %%% WHAT LIVES HERE AND WHY. botopink has no top-level mutable state, so a
 %%% registry lives in the host. This one is the App-Router table, filled by the
@@ -7,7 +7,7 @@
 %%% registered render FUNCTION, which no string store can hold.
 %%%
 %%% WHAT DOES NOT LIVE HERE. The segment grammar, the wire format and the
-%%% matcher are botopink, compiled to both targets. This module never parses a
+%%% matcher are botopink, compiled to erlang. This module never parses a
 %%% segment and never builds a record: it is handed the finished
 %%% `kind|pattern|slot|verb` line and appends it beside its function. Neither
 %%% host knows the format, which is what makes "the two sides cannot disagree

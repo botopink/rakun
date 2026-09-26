@@ -1,5 +1,5 @@
-%%% rakun — the container's doors, BEAM half: the erlang twin of
-%%% `src/context.mjs`.
+%%% rakun — the container's doors, BEAM half: its node twin `src/context.mjs` left
+%%% with front 04 Step 10 (decision 113).
 %%%
 %%% WHAT LIVES HERE AND WHY. botopink has no top-level mutable state, so a
 %%% registry lives in the host. What this one stores is a bean FACTORY, a
@@ -10,7 +10,7 @@
 %%% WHAT DOES NOT LIVE HERE. The bean record's grammar, the choice between two
 %%% candidates, every refusal message, the boot-event order and the reverse of
 %%% the pre-destroy pass are botopink (`context.bp`, `lifecycle.bp`,
-%%% `events.bp`), compiled to both targets. This module is handed a finished
+%%% `events.bp`), compiled to erlang. This module is handed a finished
 %%% `path|type|qualifier|scope|primary|lazy` line and appends it beside its
 %%% fun; it never parses one, never compares a qualifier and never decides
 %%% which of two beans wins. Neither host knows the format, which is what makes

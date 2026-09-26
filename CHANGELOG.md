@@ -2,6 +2,45 @@
 
 ## Unreleased
 
+### rakun is erlang-only; the BEAM listener, measured (botopink front 04 steps 2, 5–7 and 10; decisions 113, 117 rule 9)
+
+- **Every manifest is `["erlang"]`** — the workspace root, the core (`"target":
+  "erlang"`), `rakun-app`, `rakun-test`, the ten scaffolds and the three examples.
+  The node host halves are deleted: `runtime.mjs`, `context.mjs`,
+  `request_context.mjs`, `autoconfig.mjs`, `ssl_bundle.mjs`, `rakun-app`'s
+  `file_router.mjs` / `ssr.mjs`, `rakun-web`'s `chain.mjs`; no
+  `#[@External.Node]` form remains in any member.
+- **The two erlang reds are closed.** `request/6` built a map with data under
+  `query` / `body` and no method funs, so `req.param("name")` —
+  `(maps:get(param, Req))(Req, N)` on the erlang backend — found nothing. The
+  map now carries `param` / `query` / `header` / `body` as funs taking the
+  receiver first, and the data under `params` / `query_map` / `headers` /
+  `body_bin`.
+- **The acceptor answered no handler's `Response`.** `run_handler` matched a
+  `#{status, body}` map, while a handler's `Response` reaches it as the record
+  the backend lowers it to (`{'rakun@http@@Response', Status, Body}`), so every
+  request over the socket was a `try_clause` crash. `response_parts/1` reads
+  either shape. Found by the first test that spoke HTTP to the listener.
+- **First construction of a singleton is serialised per name** (`?LOCKS`, an
+  `insert_new/2` claim): twenty processes racing an uncached singleton build it
+  once (50 racing built it 50 times before). A claimant re-entering its own
+  claim is a cycle and builds again, which is where `enter/1` raises.
+- **Three cells**: `rkSetReplyHeader`, `rkReplyHeaders`, `rkBoot` (front 04's
+  surface, erlang-only now that the core is).
+- **`test/erlang_runtime_server_test.bp`** (18 cells) boots the acceptor on port
+  0 with `rakun.main.keep-alive=false` and speaks HTTP/1.1 through std's
+  `io.net`: 200 / 404, a POST body holding `\r\n\r\n`, the first of a
+  repeated query key, case-insensitive headers, 500 then 200, reply headers on
+  the wire and not leaking across keep-alive requests, the unchanged head of a
+  handler that sets none, 503 over `max-connections`, the idle timeout, a slow
+  connection not holding up another, the port and pid files, headless, and the
+  singleton race. `modules/rakun`: 310 / 0 → **328 / 0**; `rakun-app` 59 / 0,
+  `rakun-web` 104 / 0, `rakun-test` 1 / 0 — erlang, the only row.
+- **Owed elsewhere**: a BUILT erlang program neither ships nor loads its
+  sidecars, so the three examples build but do not run (the compiler's
+  `00 · 10-cli-residuals`); the compiler repository's
+  `scripts/restricted-targets.txt` still pins the old matrix.
+
 ### The package cut: `rakun-app` and `rakun-test` (botopink front 95)
 
 - **`modules/rakun-app/` is new**, the server half of the Next.js `app/` router

@@ -1,11 +1,13 @@
-%%% rakun — the host runtime on the BEAM: the erlang twin of `src/runtime.mjs`.
+%%% rakun — the host runtime on the BEAM: the node twin `src/runtime.mjs` left with
+%%% front 04 Step 10 (decision 113).
 %%%
 %%% botopink is immutable-first and has no top-level mutable state, so rakun's
 %%% runtime state — the component scan registry, the dependency-cycle guard,
 %%% the singleton cache, the property map and the router table — lives in the
 %%% host, reached from `src/runtime.bp` through `#[@External.Erlang(…)]`
-%%% declarations. This module is the erlang half of that seam; `runtime.mjs` is
-%%% the node half. Both rows answer the same cells with the same values.
+%%% declarations. This module is the host half of that seam; rakun is
+%%% erlang-only (decision 113). Comments citing `runtime.mjs:N` name the node
+%%% implementation this module was ported from, term for term.
 %%%
 %%% MODULE ATOM. The file is `src/sidecars/rakun_runtime.erl`, never
 %%% `src/runtime.erl`: `shipErlSidecars` skips any qualifier atom that matches a
@@ -74,6 +76,7 @@
 -define(PROPS,    rakun_props).       %% set:         {Key, Value}
 -define(ROUTES,   rakun_routes).      %% ordered_set: {Seq, Verb, Path, Segs, Handler}
 -define(FAILURES, rakun_failures).    %% set:         {Term, Description, Action}
+-define(LOCKS,    rakun_build_locks). %% set:         {Name, Pid} — first construction in flight
 
 -define(DEFAULT_BACKLOG, 128).
 -define(DEFAULT_IDLE_TIMEOUT, 60000).
@@ -159,6 +162,7 @@ create_tables() ->
     _ = ets:new(?PROPS,    [set | Common]),
     _ = ets:new(?ROUTES,   [ordered_set | Common]),
     _ = ets:new(?FAILURES, [set | Common]),
+    _ = ets:new(?LOCKS,    [set | Common]),
     seed_failures(),
     ok.
 
@@ -218,15 +222,42 @@ build_count(Name) ->
     end.
 
 %% ═══ singleton scope ═════════════════════════════════════════════════════════
-%% `runtime.mjs:71-78`, with the BEAM's one difference: two request processes can
-%% miss the cache at the same instant, so the insert is `insert_new/2` and the
-%% loser discards its value. "One instance per type" stays true without a lock;
-%% `build_count/1` is then 1 or 2, never a function of the number of readers.
+%% `runtime.mjs:71-78`, with the BEAM's one difference: many request processes
+%% can miss the cache at the same instant. The FIRST construction of a name is
+%% serialised by a per-name claim in `?LOCKS` (`insert_new/2`, no message round
+%% trip): the claimant builds, every other process waits for the value, so
+%% `build_count/1` is 1 however many readers raced. The build runs in the
+%% claimant's own process — the cycle guard is its process dictionary — and a
+%% claimant that re-enters its own claim (a cycle) builds again, which is where
+%% `enter/1` raises `{rakun_cycle, Name}`. A claimant that dies mid-build frees
+%% the claim (a waiter monitors it) and the next waiter builds. The value itself
+%% still goes in with `insert_new/2`, so one instance per type holds even then.
 
 singleton(Name, Build) ->
     ensure_started(),
     case ets:lookup(?SINGLE, Name) of
         [{_, Value}] -> Value;
+        [] -> claim(Name, Build)
+    end.
+
+claim(Name, Build) ->
+    Self = self(),
+    case ets:insert_new(?LOCKS, {Name, Self}) of
+        true ->
+            try build_once(Name, Build)
+            after ets:delete_object(?LOCKS, {Name, Self})
+            end;
+        false ->
+            case ets:lookup(?LOCKS, Name) of
+                [{_, Self}] -> build_once(Name, Build);
+                [{_, Owner}] -> await_singleton(Name, Build, Owner);
+                [] -> singleton(Name, Build)
+            end
+    end.
+
+build_once(Name, Build) ->
+    case ets:lookup(?SINGLE, Name) of
+        [{_, Existing}] -> Existing;
         [] ->
             Value = Build(),
             case ets:insert_new(?SINGLE, {Name, Value}) of
@@ -234,6 +265,29 @@ singleton(Name, Build) ->
                 false ->
                     [{_, Winner}] = ets:lookup(?SINGLE, Name),
                     Winner
+            end
+    end.
+
+await_singleton(Name, Build, Owner) ->
+    Ref = erlang:monitor(process, Owner),
+    Result = await_loop(Name, Ref),
+    erlang:demonitor(Ref, [flush]),
+    case Result of
+        {ok, Value} -> Value;
+        retry -> singleton(Name, Build)
+    end.
+
+await_loop(Name, Ref) ->
+    case ets:lookup(?SINGLE, Name) of
+        [{_, Value}] -> {ok, Value};
+        [] ->
+            case ets:member(?LOCKS, Name) of
+                false -> retry;
+                true ->
+                    receive
+                        {'DOWN', Ref, process, _, _} -> retry
+                    after 1 -> await_loop(Name, Ref)
+                    end
             end
     end.
 
@@ -324,11 +378,24 @@ bind(_, _, _) ->
 %% method/path field and four closures; the erlang twin is a map carrying the
 %% same six pieces, and `param`/`query`/`header` answer `<<>>` — never
 %% `undefined` — because `src/http.bp:30-34` fixes the contract at plain
-%% `string`. `request_param/2` and friends are the accessors the emitted handler
-%% reaches once erlang-backend behaviour dispatch lands (see AGENTS.md § Blocked).
+%% `string`. The erlang backend dispatches a method a `behavior` declares
+%% without a body through the value itself — `(maps:get(param, Req))(Req, N)` —
+%% so the four methods are funs under their own names, each taking the receiver
+%% first. The data sits under `params` / `query_map` / `headers` / `body_bin`,
+%% never under a method's name.
 request(Verb, Path, Params, Query, Headers, Body) ->
     #{method => Verb, path => Path, params => Params,
-      query => Query, headers => Headers, body => Body}.
+      query_map => Query, headers => Headers, body_bin => Body,
+      param => fun(_Self, N) -> lookup(N, Params) end,
+      query => fun(_Self, N) -> lookup(N, Query) end,
+      header => fun(_Self, N) -> lookup(string:lowercase(to_binary(N)), Headers) end,
+      body => fun(_Self) -> Body end}.
+
+lookup(Name, Map) ->
+    case maps:find(to_binary(Name), Map) of
+        {ok, V} -> to_binary(V);
+        error -> <<>>
+    end.
 
 %% In-process dispatch (`runtime.mjs:166-171`): path params bound, everything
 %% else empty. This is the seam `test/router_test.bp` drives.
@@ -769,12 +836,21 @@ run_handler(Dispatcher, Verb, Path, Headers, Query, Body) ->
     HeadersJson = iolist_to_binary(json:encode(Headers)),
     QueryJson = iolist_to_binary(json:encode(Query)),
     try Dispatcher(Verb, Path, HeadersJson, QueryJson, Body) of
-        #{status := _, body := _} = Response -> Response
+        Response -> response_parts(Response)
     catch
         Class:Reason ->
             #{status => 500,
               body => iolist_to_binary(io_lib:format("~p:~p", [Class, Reason]))}
     end.
+
+%% A handler's `Response` reaches the acceptor as the record the erlang backend
+%% lowers it to (decision 21: `{'rakun@http@@Response', Status, Body}`); a host
+%% path — `not_found/0`, the 500 above — builds the `#{status, body}` map the
+%% declaration boundary adopts. The acceptor reads either.
+response_parts(#{status := Status, body := Body}) ->
+    #{status => Status, body => Body};
+response_parts(Record) when is_tuple(Record), tuple_size(Record) =:= 3 ->
+    #{status => element(2, Record), body => element(3, Record)}.
 
 write_response(Sock, #{status := Status, body := Body}) ->
     Extra = [[N, <<": ">>, V, <<"\r\n">>] || {_K, N, V} <- reply_list()],
