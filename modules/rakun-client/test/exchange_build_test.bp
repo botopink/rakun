@@ -1,0 +1,94 @@
+//// rakun-client — what fails the BUILD (front 13 step 5).
+////
+//// A comptime refusal cannot be asserted from inside the module that carries
+//// it (that module would not compile, and the runner skips it), so each cell
+//// writes a one-file project depending on this member by path, runs the
+//// compiler on it and asserts the refusal and its location. The projects live
+//// under `.botopinkbuild/tmp/rakun-client-fixtures/` (git-ignored). The
+//// compiler is `$BOTOPINK_BIN`, else `botopink` on `PATH`, else the
+//// meta-repository's build; with none of them the cells FAIL saying so.
+
+import {testing.asserts} from "std";
+import {io: {fs, process}} from "std";
+
+fn fixtureRoot() -> string {
+    return process.cwd() + "/.botopinkbuild/tmp/rakun-client-fixtures";
+}
+
+fn compilerCommand() -> string {
+    return "B=\"$BOTOPINK_BIN\"; [ -n \"$B\" ] || B=\"$(command -v botopink)\"; [ -n \"$B\" ] || B=../../../botopink-lang/zig-out/bin/botopink; [ -x \"$B\" ] || { echo \"no botopink compiler: set BOTOPINK_BIN\"; exit 0; }; B=\"$(cd \"$(dirname \"$B\")\" && pwd)/$(basename \"$B\")\"; ";
+}
+
+// `rakun-actuator-api` is listed before `rakun-client`: a transitive
+// dependency is not loaded for a consumer (rakun AGENTS.md, front 08
+// finding 2), so a consumer names it itself.
+fn buildFixture(name: string, source: string) -> string {
+    val dir = fixtureRoot() + "/" + name;
+    val here = process.cwd();
+    val _m = process.runShell("rm -rf '" + dir + "' && mkdir -p '" + dir + "/src'");
+    val manifest = "{\n  \"name\": \"" + name + "\",\n  \"version\": \"0.0.1\",\n  \"src\": \"src/\",\n  \"entry\": \"root.bp\",\n  \"target\": \"erlang\",\n  \"targets\": [\"erlang\"],\n  \"dependencies\": {\n    \"rakun\": { \"path\": \"" + here + "/../rakun\" },\n    \"rakun-actuator-api\": { \"path\": \"" + here + "/../rakun-actuator-api\" },\n    \"rakun-client\": { \"path\": \"" + here + "\" }\n  }\n}\n";
+    val _j = fs.writeText(dir + "/botopink.json", manifest);
+    val _s = fs.writeText(dir + "/src/root.bp", source);
+    return process.runShell(compilerCommand() + "cd '" + dir + "' && \"$B\" build --target erlang --out out 2>&1 < /dev/null; echo \"exit=$?\"");
+}
+
+// `RestClient`'s type closure is imported with it: importing a type re-checks
+// its declaration at the importing site, so every type its fields and method
+// signatures name must be in scope there (rakun AGENTS.md, "unknown type").
+fn header() -> string {
+    return "import {RestClient, HttpClientSettings, CacheLife, ClientResponse, httpExchange, getExchange, postExchange, putExchange, patchExchange, deleteExchange} from \"rakun-client\";\n\n";
+}
+
+fn api(method: string) -> string {
+    return header() + "#[httpExchange(\"echo\")]\npub behavior EchoService {\n    " + method + "\n}\n";
+}
+
+test "build: a well-formed #[httpExchange] behavior builds with RestClient and its type closure imported" {
+    val out = buildFixture("ok", api("#[getExchange(\"/users/:id\")]\n    fn user(self: Self, id: string) -> string;\n\n    #[postExchange(\"/echo\")]\n    fn echo(self: Self, body: string) -> string;") + "\npub fn main() {\n    val _s: EchoService = httpEchoService();\n}\n");
+    try asserts.contains(out, "exit=0");
+}
+
+test "build: a path parameter with no method parameter of that name fails naming both" {
+    val out = buildFixture("mismatch", api("#[getExchange(\"/users/:userId\")]\n    fn user(self: Self, id: string) -> string;"));
+    try asserts.contains(out, "EchoService.user path /users/:userId names `:userId`, but the method has no parameter `userId` (parameters: id)");
+    try asserts.contains(out, "src/root.bp:");
+    try asserts.notContains(out, "exit=0");
+}
+
+test "build: a method whose return type is not string fails pointing at the missing JSON value model" {
+    val out = buildFixture("typed", api("#[getExchange(\"/users/:id\")]\n    fn user(self: Self, id: string) -> i32;"));
+    try asserts.contains(out, "EchoService.user returns `i32`, but an exchange method returns the body as string: std has no JSON value model");
+    try asserts.notContains(out, "exit=0");
+}
+
+test "build: a GET parameter outside the path fails, a POST without exactly one body parameter fails" {
+    val get = buildFixture("getbody", api("#[getExchange(\"/users\")]\n    fn user(self: Self, id: string) -> string;"));
+    try asserts.contains(get, "EchoService.user is a GET and takes no body, but parameter `id` is not in the path /users");
+    try asserts.notContains(get, "exit=0");
+    val post = buildFixture("posttwo", api("#[postExchange(\"/echo\")]\n    fn echo(self: Self, a: string, b: string) -> string;"));
+    try asserts.contains(post, "EchoService.echo is a POST: exactly one parameter that is not a path parameter carries the body, and it has 2 (a, b)");
+    try asserts.notContains(post, "exit=0");
+}
+
+test "build: a method without an exchange annotation fails" {
+    val out = buildFixture("bare", api("fn user(self: Self, id: string) -> string;"));
+    try asserts.contains(out, "EchoService.user has no exchange annotation");
+    try asserts.notContains(out, "exit=0");
+}
+
+test "build: an exchange annotation on anything but a method fails with a located message" {
+    val names = ["getExchange", "postExchange", "putExchange", "patchExchange", "deleteExchange"];
+    var failures: Array<string> = [];
+    for (names) { n ->
+        val out = buildFixture("placement-" + n, header() + "#[" + n + "(\"/x\")]\npub type NotAMethod(n: i32)\n");
+        val located = out.contains("#[" + n + "] must annotate a method of a #[httpExchange] behavior") && out.contains("src/root.bp:") && (out.contains("exit=0") == false);
+        if (located == false) failures.push(n + ": " + out);
+    };
+    try asserts.equals(failures.join("\n"), "");
+}
+
+test "build: #[httpExchange] on a type fails" {
+    val out = buildFixture("ontype", header() + "#[httpExchange(\"echo\")]\npub type NotABehavior(n: i32)\n");
+    try asserts.contains(out, "#[httpExchange] must annotate a behavior");
+    try asserts.notContains(out, "exit=0");
+}

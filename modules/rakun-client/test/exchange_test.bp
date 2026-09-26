@@ -1,0 +1,117 @@
+//// rakun-client — `#[httpExchange]` twins, end to end (front 13 step 5).
+////
+//// The behaviors below are decorated in this file, so the twin types and their
+//// factories are emitted HERE, at the application site, exactly as in a
+//// consumer. What fails the BUILD is asserted in `exchange_build_test.bp`.
+
+import {testing.asserts} from "std";
+import {Response, rkServe, rkSetProp, rkProp, toI32} from "rakun";
+import {HttpClientSettings} from "settings";
+import {CacheLife} from "cache";
+import {ClientResponse} from "response";
+import {RestClient, RestClientBuilder, RequestSpec} from "client";
+import {httpExchange, getExchange, postExchange, putExchange, patchExchange, deleteExchange} from "exchange";
+
+fn stub(method: string, path: string, body: string) -> Response {
+    val _l = rkSetProp("test.exchange.log", rkProp("test.exchange.log") + method + " " + path + " " + body + "\n");
+    val code = if (method == "DELETE") 204 else 200;
+    return Response.withStatus(code, method + " " + path + " <" + body + ">");
+}
+
+fn port() -> i32 {
+    val _a = rkSetProp("rakun.http.clients.allow", "127.0.0.0/8");
+    val known = rkProp("test.client.exchange.port");
+    if (known != "") return toI32(known);
+    val _k = rkSetProp("rakun.main.keep-alive", "false");
+    val p = rkServe(0, { m, path, h, q, b -> stub(m, path, b) });
+    val _s = rkSetProp("test.client.exchange.port", p.toString());
+    return p;
+}
+
+fn configure() -> i32 {
+    val base = "http://127.0.0.1:" + port().toString();
+    val _s = rkSetProp("rakun.http.serviceclient.shipping.base-url", base + "/ship");
+    val _e = rkSetProp("rakun.http.serviceclient.echo.base-url", base + "/echo");
+    val _t = rkSetProp("rakun.http.serviceclient.echo.read-timeout-millis", "750");
+    val _r = rkSetProp("test.exchange.log", "");
+    return 0;
+}
+
+#[httpExchange("shipping")]
+pub behavior ShippingApi {
+    #[getExchange("/shipments/:trackingId")]
+    fn shipment(self: Self, trackingId: string) -> string;
+
+    #[deleteExchange("/shipments/:trackingId")]
+    fn cancelShipment(self: Self, trackingId: string) -> string;
+
+    #[putExchange("/shipments/:trackingId/address")]
+    fn readdress(self: Self, trackingId: string, address: string) -> string;
+
+    #[patchExchange("/shipments/:trackingId")]
+    fn touch(self: Self, trackingId: string, patch: string) -> string;
+}
+
+#[httpExchange("echo")]
+pub behavior EchoService {
+    #[getExchange("/users/:id")]
+    fn user(self: Self, id: string) -> string;
+
+    #[postExchange("/echo")]
+    fn echo(self: Self, body: string) -> string;
+}
+
+// A consumer field typed by the behavior accepts the twin.
+pub type Front(shipping: ShippingApi) {
+    pub fn track(self: Self, id: string) -> string {
+        return self.shipping.shipment(id);
+    }
+}
+
+test "exchange: the twin substitutes the path parameter from the method parameter" {
+    val _c = configure();
+    val api: ShippingApi = httpShippingApi();
+    val got = api.shipment("trk-0001");
+    val _d = api.cancelShipment("trk-0001");
+    assert got == "GET /ship/shipments/trk-0001 <>";
+    assert rkProp("test.exchange.log") == "GET /ship/shipments/trk-0001 \nDELETE /ship/shipments/trk-0001 \n";
+}
+
+test "exchange: the body parameter of a POST, PUT and PATCH is the request body" {
+    val _c = configure();
+    val echo = httpEchoService();
+    val ship = httpShippingApi();
+    assert echo.echo("hello") == "POST /echo/echo <hello>";
+    assert ship.readdress("t1", "Main St 1") == "PUT /ship/shipments/t1/address <Main St 1>";
+    assert ship.touch("t2", "{}") == "PATCH /ship/shipments/t2 <{}>";
+}
+
+test "exchange: a path value is percent-encoded and cannot add a segment" {
+    val _c = configure();
+    val got = httpEchoService().user("a/b?c");
+    assert got == "GET /echo/users/a%2Fb%3Fc <>";
+}
+
+test "exchange: a field typed by the behavior accepts the twin" {
+    val _c = configure();
+    val front = Front(shipping: httpShippingApi());
+    assert front.track("t9") == "GET /ship/shipments/t9 <>";
+}
+
+test "exchange: each group's client is configured from its own keys and shares no settings" {
+    val _c = configure();
+    val ship = RestClient.forGroup("shipping");
+    val echo = RestClient.forGroup("echo");
+    assert ship.baseUrl.endsWith("/ship");
+    assert echo.baseUrl.endsWith("/echo");
+    assert echo.settings.readTimeoutMillis == 750;
+    assert ship.settings.readTimeoutMillis == 1000;
+    val _u = rkSetProp("rakun.http.serviceclient.echo.read-timeout-millis", "");
+}
+
+test "exchange: a group with no base-url raises naming the key" {
+    try asserts.throwsWith({ ->
+        val _g = RestClient.forGroup("nowhere");
+        0;
+    }, "rakun.http.serviceclient.nowhere.base-url is not set");
+}

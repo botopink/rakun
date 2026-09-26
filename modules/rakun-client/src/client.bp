@@ -1,0 +1,350 @@
+//// rakun-client — the one client: `RestClient`, its builder and the request
+//// chain (front 13 steps 1, 2 and 4).
+////
+//// ONE BUILDER, ONE TRANSPORT, TWO TERMINAL OPERATIONS. Spring's `WebClient` is
+//// not a second stack here: it is `retrieveFuture()` instead of `retrieve()` on
+//// the same `RequestSpec`, over the same settings, through the same address
+//// filter. `@Task<T>` lowers EAGERLY on erlang, so `retrieveFuture()` is the
+//// same blocking request with a different return shape — two of them issued
+//// before either is awaited run one after the other. Overlapping upstream calls
+//// is front 02's (`async.runAll` over unstarted thunks), not this module's.
+//// `RestTemplate` is not ported (upstream marks it legacy).
+////
+//// Every step is a record whose methods answer a NEW record; nothing mutates a
+//// receiver, so two clients built from one builder never share headers.
+////
+////   RestClient.builder() -> RestClientBuilder -> .build() -> RestClient
+////   client.get(path) -> RequestSpec -> .header(n, v) -> .cached(…) -> .retrieve()
+////                                                                 -> .retrieveFuture()
+////
+//// A path that is an absolute URL is used as it is; otherwise it is joined to
+//// the client's base URL with exactly one `/` between them.
+
+import {hash} from "std";
+import {rkValue, toI32} from "rakun";
+import {HttpClientSettings, globalSettings, groupSettings, groupPrefix, positiveProblem, redirectsProblem} from "settings";
+import {ClientResponse} from "response";
+import {CacheLife, cacheLifeOf, rkClientCacheThrough, responseCacheDisabled} from "cache";
+import {Outbound, transportExchange, rkClientEncodeSegment} from "transport";
+import {registerGroupHealth} from "health";
+
+pub type RestClient(
+    baseUrl: string,
+    headers: Array<#(string, string)>,
+    settings: HttpClientSettings,
+) {
+    // A builder carrying the global settings: a client built with no calls
+    // already has the configured timeouts.
+    pub fn builder() -> RestClientBuilder {
+        val none: Array<#(string, string)> = [];
+        return RestClientBuilder(baseUrl: "", headers: none, settings: globalSettings());
+    }
+
+    // The client of a `#[httpExchange]` group, configured from
+    // `rakun.http.serviceclient.<group>.*`; registers the group's health
+    // indicator when `health-check=true`.
+    pub fn forGroup(group: string) -> RestClient {
+        return groupClient(group);
+    }
+
+    pub fn get(self: Self, path: string) -> RequestSpec {
+        return requestOf(self, "GET", path, "");
+    }
+
+    pub fn head(self: Self, path: string) -> RequestSpec {
+        return requestOf(self, "HEAD", path, "");
+    }
+
+    pub fn delete(self: Self, path: string) -> RequestSpec {
+        return requestOf(self, "DELETE", path, "");
+    }
+
+    pub fn options(self: Self, path: string) -> RequestSpec {
+        return requestOf(self, "OPTIONS", path, "");
+    }
+
+    pub fn post(self: Self, path: string, body: string) -> RequestSpec {
+        return requestOf(self, "POST", path, body);
+    }
+
+    pub fn put(self: Self, path: string, body: string) -> RequestSpec {
+        return requestOf(self, "PUT", path, body);
+    }
+
+    pub fn patch(self: Self, path: string, body: string) -> RequestSpec {
+        return requestOf(self, "PATCH", path, body);
+    }
+
+    // What a `#[httpExchange]` method body calls: substitute `:name` segments
+    // from `names`/`values`, send, answer the body.
+    pub fn exchange(self: Self, verb: string, template: string, names: Array<string>, values: Array<string>, body: string) -> string {
+        return exchangeBody(self, verb, template, names, values, body);
+    }
+}
+
+pub type RestClientBuilder(
+    baseUrl: string,
+    headers: Array<#(string, string)>,
+    settings: HttpClientSettings,
+) {
+    pub fn baseUrl(self: Self, url: string) -> RestClientBuilder {
+        return RestClientBuilder(baseUrl: url, headers: self.headers, settings: self.settings);
+    }
+
+    pub fn defaultHeader(self: Self, name: string, value: string) -> RestClientBuilder {
+        return RestClientBuilder(baseUrl: self.baseUrl, headers: self.headers.append([#(name, value)]), settings: self.settings);
+    }
+
+    pub fn connectTimeout(self: Self, millis: i32) -> RestClientBuilder {
+        return withSettings(self, overrideTimeouts(self.settings, "connectTimeout", millis, self.settings.readTimeoutMillis));
+    }
+
+    pub fn readTimeout(self: Self, millis: i32) -> RestClientBuilder {
+        return withSettings(self, overrideTimeouts(self.settings, "readTimeout", self.settings.connectTimeoutMillis, millis));
+    }
+
+    pub fn redirects(self: Self, mode: string) -> RestClientBuilder {
+        return withSettings(self, overrideRedirects(self.settings, mode));
+    }
+
+    pub fn maxRedirects(self: Self, hops: i32) -> RestClientBuilder {
+        return withSettings(self, overrideMaxRedirects(self.settings, hops));
+    }
+
+    pub fn sslBundle(self: Self, bundle: string) -> RestClientBuilder {
+        val s = self.settings;
+        return withSettings(self, HttpClientSettings(
+            connectTimeoutMillis: s.connectTimeoutMillis,
+            readTimeoutMillis: s.readTimeoutMillis,
+            redirects: s.redirects,
+            maxRedirects: s.maxRedirects,
+            sslBundle: bundle,
+        ));
+    }
+
+    pub fn build(self: Self) -> RestClient {
+        return RestClient(baseUrl: self.baseUrl, headers: self.headers, settings: self.settings);
+    }
+}
+
+pub type RequestSpec(
+    client: RestClient,
+    method: string,
+    path: string,
+    body: string,
+    headers: Array<#(string, string)>,
+    cacheName: string,
+    cacheLife: CacheLife,
+    cacheTags: Array<string>,
+) {
+    pub fn header(self: Self, name: string, value: string) -> RequestSpec {
+        return RequestSpec(
+            client: self.client,
+            method: self.method,
+            path: self.path,
+            body: self.body,
+            headers: self.headers.append([#(name, value)]),
+            cacheName: self.cacheName,
+            cacheLife: self.cacheLife,
+            cacheTags: self.cacheTags,
+        );
+    }
+
+    // Cache the response in front 12's store under `name`. GET and HEAD only:
+    // on any other method this raises naming it.
+    pub fn cached(self: Self, name: string, life: CacheLife, tags: Array<string>) -> RequestSpec {
+        return cachedSpec(self, name, life, tags);
+    }
+
+    // Next's `fetch(url, { next: { revalidate: n } })`:
+    // `.cached(<derived name>, cacheLifeOf(0, n, n), [])`.
+    pub fn revalidate(self: Self, seconds: i32) -> RequestSpec {
+        val none: Array<string> = [];
+        return cachedSpec(self, derivedCacheName(), cacheLifeOf(0, seconds, seconds), none);
+    }
+
+    // The blocking terminal operation.
+    pub fn retrieve(self: Self) -> ClientResponse {
+        return retrieveSpec(self);
+    }
+
+    // The same request, answered as a `@Task`. Eager on erlang: it has run by
+    // the time this returns, and `await` is identity.
+    pub fn retrieveFuture(self: Self) -> @Task<ClientResponse> {
+        return retrieveSpec(self);
+    }
+}
+
+// ── the builder's overrides ─────────────────────────────────────────────────
+
+fn withSettings(b: RestClientBuilder, s: HttpClientSettings) -> RestClientBuilder {
+    return RestClientBuilder(baseUrl: b.baseUrl, headers: b.headers, settings: s);
+}
+
+fn overrideTimeouts(s: HttpClientSettings, what: string, connect: i32, read: i32) -> HttpClientSettings {
+    val given = if (what == "connectTimeout") connect else read;
+    val problem = positiveProblem("RestClientBuilder." + what, given.toString());
+    assert problem == "", problem;
+    return HttpClientSettings(
+        connectTimeoutMillis: connect,
+        readTimeoutMillis: read,
+        redirects: s.redirects,
+        maxRedirects: s.maxRedirects,
+        sslBundle: s.sslBundle,
+    );
+}
+
+fn overrideRedirects(s: HttpClientSettings, mode: string) -> HttpClientSettings {
+    val problem = redirectsProblem("RestClientBuilder.redirects", mode);
+    assert problem == "", problem;
+    return HttpClientSettings(
+        connectTimeoutMillis: s.connectTimeoutMillis,
+        readTimeoutMillis: s.readTimeoutMillis,
+        redirects: mode,
+        maxRedirects: s.maxRedirects,
+        sslBundle: s.sslBundle,
+    );
+}
+
+fn overrideMaxRedirects(s: HttpClientSettings, hops: i32) -> HttpClientSettings {
+    val problem = positiveProblem("RestClientBuilder.maxRedirects", hops.toString());
+    assert problem == "", problem;
+    return HttpClientSettings(
+        connectTimeoutMillis: s.connectTimeoutMillis,
+        readTimeoutMillis: s.readTimeoutMillis,
+        redirects: s.redirects,
+        maxRedirects: hops,
+        sslBundle: s.sslBundle,
+    );
+}
+
+// ── the request chain ───────────────────────────────────────────────────────
+
+pub fn noCacheLife() -> CacheLife {
+    return cacheLifeOf(0, 0, 0);
+}
+
+fn requestOf(c: RestClient, method: string, path: string, body: string) -> RequestSpec {
+    val none: Array<#(string, string)> = [];
+    val noTags: Array<string> = [];
+    return RequestSpec(
+        client: c,
+        method: method,
+        path: path,
+        body: body,
+        headers: none,
+        cacheName: "",
+        cacheLife: noCacheLife(),
+        cacheTags: noTags,
+    );
+}
+
+pub fn derivedCacheName() -> string {
+    return "rakun-client.revalidate";
+}
+
+pub fn cachedMutationProblem(method: string) -> string {
+    return "rakun-client: .cached(...) on a " + method + " request - only GET and HEAD responses may be cached; a cached mutation is a bug that only shows up in production";
+}
+
+pub fn cachedSpec(spec: RequestSpec, name: string, life: CacheLife, tags: Array<string>) -> RequestSpec {
+    val cacheable = spec.method == "GET" || spec.method == "HEAD";
+    assert cacheable, cachedMutationProblem(spec.method);
+    return RequestSpec(
+        client: spec.client,
+        method: spec.method,
+        path: spec.path,
+        body: spec.body,
+        headers: spec.headers,
+        cacheName: name,
+        cacheLife: life,
+        cacheTags: tags,
+    );
+}
+
+// `base` and `path` joined with exactly one `/`; an absolute `path` wins.
+pub fn joinUrl(base: string, path: string) -> string {
+    val absolute = path.startsWith("http://") || path.startsWith("https://");
+    val b = if (base.endsWith("/")) base.slice(0, base.length - 1) else base;
+    val p = if (path.startsWith("/") || path == "") path else "/" + path;
+    return if (absolute) path else b + p;
+}
+
+pub fn outboundOf(spec: RequestSpec) -> Outbound {
+    return Outbound(
+        method: spec.method,
+        url: joinUrl(spec.client.baseUrl, spec.path),
+        headers: spec.client.headers.append(spec.headers),
+        body: spec.body,
+        settings: spec.client.settings,
+    );
+}
+
+// The key parts front 12's `cacheKey(name, parts)` hashes: headers are NOT a
+// part, the body's hash is.
+pub fn cacheKeyParts(spec: RequestSpec) -> Array<string> {
+    val out = outboundOf(spec);
+    return [out.method, out.url, hash.sha256(out.body)];
+}
+
+// A response as one string for the store: `status\nheadersJson\nbody`
+// (JSON holds no raw newline, so the first two are unambiguous).
+pub fn encodeResponse(res: ClientResponse) -> string {
+    return res.status.toString() + "\n" + res.headersJson + "\n" + res.body;
+}
+
+pub fn decodeResponse(text: string) -> ClientResponse {
+    val parts = text.split("\n");
+    val status = parts.at(0) ?? "-1";
+    val code = toI32(status);
+    return ClientResponse(status: code, headersJson: parts.at(1) ?? "{}", body: parts.slice(2, parts.length).join("\n"));
+}
+
+pub fn retrieveSpec(spec: RequestSpec) -> ClientResponse {
+    val out = outboundOf(spec);
+    val direct = spec.cacheName == "" || responseCacheDisabled();
+    if (direct) return transportExchange(out);
+    val stored = rkClientCacheThrough(spec.cacheName, cacheKeyParts(spec), spec.cacheLife, spec.cacheTags, { -> encodeResponse(transportExchange(out)) });
+    return decodeResponse(stored);
+}
+
+// ── #[httpExchange] support ─────────────────────────────────────────────────
+
+pub fn groupClient(group: string) -> RestClient {
+    val base = rkValue(groupPrefix(group) + ".base-url").trim();
+    assert base != "", "rakun-client: " + groupPrefix(group) + ".base-url is not set - the #[httpExchange(\"" + group + "\")] client has nowhere to send";
+    val settings = groupSettings(group);
+    val _h = registerGroupHealth(group);
+    val none: Array<#(string, string)> = [];
+    return RestClient(baseUrl: base, headers: none, settings: settings);
+}
+
+// `/users/:id` with names `[id]` and values `[7]` → `/users/7`, each value
+// percent-encoded so it cannot add a segment or a query.
+pub fn substitutePath(template: string, names: Array<string>, values: Array<string>) -> string {
+    val segments = template.split("/").map({ seg -> substituteSegment(seg, names, values) });
+    return segments.join("/");
+}
+
+fn substituteSegment(seg: string, names: Array<string>, values: Array<string>) -> string {
+    val isParam = seg.startsWith(":");
+    val name = if (isParam) seg.slice(1, seg.length) else "";
+    val idx = if (isParam) indexIn(names, name) else -1;
+    val value = if (idx >= 0) values.at(idx) ?? seg else seg;
+    return if (idx >= 0) rkClientEncodeSegment(value) else seg;
+}
+
+fn indexIn(xs: Array<string>, x: string) -> i32 {
+    var found = -1;
+    var i = 0;
+    for (xs) { v ->
+        if (v == x && found < 0) found = i;
+        i = i + 1;
+    };
+    return found;
+}
+
+pub fn exchangeBody(c: RestClient, verb: string, template: string, names: Array<string>, values: Array<string>, body: string) -> string {
+    val spec = requestOf(c, verb, substitutePath(template, names, values), body);
+    return retrieveSpec(spec).body;
+}

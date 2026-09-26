@@ -1,0 +1,52 @@
+//// rakun-client — a client group's health indicator (front 13 step 6).
+////
+//// OPT-IN PER GROUP. `rakun.http.serviceclient.<group>.health-check=true`
+//// registers `httpClient.<group>` with front 11's registry
+//// (`rakun-actuator-api`) when the group's client is built; the default is
+//// false, because probing a partner's API on every health scrape is rude. With
+//// the key unset the group registers nothing, so a scrape makes no outbound
+//// request on its behalf.
+////
+//// The check is a HEAD against the group's base URL with the connect timeout
+//// as its whole budget: UP when ANY response answers in time (a 404 from a
+//// reachable partner is still a reachable partner), DOWN naming the group and
+//// the reason otherwise — the address filter applies as it does to every
+//// request.
+
+import {json} from "std";
+import {rkValue} from "rakun";
+import {Health, healthUp, healthDown, rkRegisterHealthIndicator} from "rakun-actuator-api";
+import {HttpClientSettings, groupSettings, groupPrefix} from "settings";
+import {Outbound, transportExchange} from "transport";
+
+pub fn healthIndicatorId(group: string) -> string {
+    return "httpClient." + group;
+}
+
+pub fn groupHealthEnabled(group: string) -> bool {
+    return rkValue(groupPrefix(group) + ".health-check").trim().toLower() == "true";
+}
+
+pub fn groupHealth(group: string) -> Health {
+    val s = groupSettings(group);
+    val probe = HttpClientSettings(
+        connectTimeoutMillis: s.connectTimeoutMillis,
+        readTimeoutMillis: s.connectTimeoutMillis,
+        redirects: "dont-follow",
+        maxRedirects: s.maxRedirects,
+        sslBundle: s.sslBundle,
+    );
+    val none: Array<#(string, string)> = [];
+    val base = rkValue(groupPrefix(group) + ".base-url").trim();
+    val res = transportExchange(Outbound(method: "HEAD", url: base, headers: none, body: "", settings: probe));
+    val details = "{\"group\":" + json.quote(group) + ",\"error\":" + json.quote(res.body) + "}";
+    val h = if (res.status > 0) healthUp() else healthDown(details);
+    return h;
+}
+
+// Register the group's indicator when its key says so; answers 1 when it did.
+pub fn registerGroupHealth(group: string) -> i32 {
+    if (groupHealthEnabled(group) == false) return 0;
+    val _r = rkRegisterHealthIndicator(healthIndicatorId(group), "rakun-client", { -> groupHealth(group) });
+    return 1;
+}

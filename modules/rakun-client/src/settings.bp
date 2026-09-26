@@ -1,0 +1,123 @@
+//// rakun-client — global and per-group client settings (front 13 step 1).
+////
+//// Spring configures every client at once (`spring.http.clients.*`) and lets a
+//// builder override; rakun spells every key it reads `rakun.*` (decision 115
+//// rule 4), so the global keys are:
+////
+////   rakun.http.clients.connect-timeout-millis   2000         TCP connect deadline
+////   rakun.http.clients.read-timeout-millis      1000         response deadline after connect
+////   rakun.http.clients.redirects                dont-follow  follow | dont-follow
+////   rakun.http.clients.max-redirects            3            read only when following
+////   rakun.http.clients.ssl.bundle               ""           front 74 bundle for https
+////
+//// and a `#[httpExchange]` group reads `rakun.http.serviceclient.<group>.*`
+//// (`base-url`, `connect-timeout-millis`, `read-timeout-millis`, `redirects`,
+//// `max-redirects`, `ssl.bundle`, `health-check`), each falling back to the
+//// global key.
+////
+//// NO KEY DISABLES A TIMEOUT. `0`, a negative number or a non-integer is a
+//// refusal naming the key: when the first client is built (the `#[bean]` that
+//// builds it runs during the boot, so the application does not start), in the
+//// core's boot check (`registerClientConfigCheck`, run with every other
+//// configuration check before the first component is built), and at the call
+//// for a group or a builder override.
+//// Defaulting redirects to `dont-follow` is the restrictive choice: a followed
+//// redirect is a request to an address the caller never named.
+
+import {rkValue, rkConfigCheckRegister, toI32} from "rakun";
+import {policyProblem} from "address";
+
+pub type HttpClientSettings(
+    connectTimeoutMillis: i32,
+    readTimeoutMillis: i32,
+    redirects: string,
+    maxRedirects: i32,
+    sslBundle: string,
+)
+
+pub fn clientsPrefix() -> string {
+    return "rakun.http.clients";
+}
+
+pub fn groupPrefix(group: string) -> string {
+    return "rakun.http.serviceclient." + group;
+}
+
+fn digits(s: string) -> bool {
+    val chars = s.split("");
+    return chars.length > 0 && chars.all({ c -> "0123456789".contains(c) });
+}
+
+// `""` when `raw` is a positive integer, else the refusal naming `key`.
+pub fn positiveProblem(key: string, raw: string) -> string {
+    val ok = digits(raw) && toInt(raw) > 0;
+    return if (ok) "" else "rakun-client: " + key + " is `" + raw + "` - a timeout must be a positive number of milliseconds; no value disables it";
+}
+
+pub fn redirectsProblem(key: string, raw: string) -> string {
+    val ok = raw == "follow" || raw == "dont-follow";
+    return if (ok) "" else "rakun-client: " + key + " is `" + raw + "` - one of follow, dont-follow";
+}
+
+fn toInt(s: string) -> i32 {
+    return toI32(s);
+}
+
+// The written value of `key`, else of `fallbackKey`, else `dflt`.
+fn layered(key: string, fallbackKey: string, dflt: string) -> string {
+    val own = rkValue(key).trim();
+    val inherited = rkValue(fallbackKey).trim();
+    return if (own != "") own else if (inherited != "") inherited else dflt;
+}
+
+fn raw(prefix: string, leaf: string, dflt: string) -> string {
+    return layered(prefix + "." + leaf, clientsPrefix() + "." + leaf, dflt);
+}
+
+// Every refusal for the settings under `prefix`, `\n`-joined, `""` when valid.
+pub fn settingsProblemAt(prefix: string) -> string {
+    val c = positiveProblem(prefix + ".connect-timeout-millis", raw(prefix, "connect-timeout-millis", "2000"));
+    val r = positiveProblem(prefix + ".read-timeout-millis", raw(prefix, "read-timeout-millis", "1000"));
+    val d = redirectsProblem(prefix + ".redirects", raw(prefix, "redirects", "dont-follow"));
+    val m = positiveProblem(prefix + ".max-redirects", raw(prefix, "max-redirects", "3"));
+    return [c, r, d, m].filter({ s -> s != "" }).join("\n");
+}
+
+// The global keys and the address lists: what the boot check answers.
+pub fn clientConfigProblem() -> string {
+    return [settingsProblemAt(clientsPrefix()), policyProblem()].filter({ s -> s != "" }).join("\n");
+}
+
+// The settings under `prefix`; a refused value raises naming its key.
+pub fn settingsAt(prefix: string) -> HttpClientSettings {
+    val problem = settingsProblemAt(prefix);
+    assert problem == "", problem;
+    return HttpClientSettings(
+        connectTimeoutMillis: toInt(raw(prefix, "connect-timeout-millis", "2000")),
+        readTimeoutMillis: toInt(raw(prefix, "read-timeout-millis", "1000")),
+        redirects: raw(prefix, "redirects", "dont-follow"),
+        maxRedirects: toInt(raw(prefix, "max-redirects", "3")),
+        sslBundle: raw(prefix, "ssl.bundle", ""),
+    );
+}
+
+pub fn globalSettings() -> HttpClientSettings {
+    val _r = registerClientConfigCheck();
+    val problem = clientConfigProblem();
+    assert problem == "", problem;
+    return settingsAt(clientsPrefix());
+}
+
+pub fn groupSettings(group: string) -> HttpClientSettings {
+    return settingsAt(groupPrefix(group));
+}
+
+// The boot check. `rkConfigCheckRegister` replaces by name, so calling this
+// twice registers one check. A library module's body does not run on erlang
+// (rakun AGENTS.md, front 08 finding 3), so nothing registers it at module
+// load: `RestClient.builder()` and every group client call it, which is the
+// first thing a `#[bean]` building a client does during the boot, and an
+// application may call it from its own entry before `Rakun.run`.
+pub fn registerClientConfigCheck() -> i32 {
+    return rkConfigCheckRegister("rakun-client", { -> clientConfigProblem() });
+}

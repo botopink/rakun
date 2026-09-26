@@ -1,0 +1,120 @@
+//// rakun-client — the address filter (front 13 step 3). SSRF protection.
+////
+//// Every connect this member makes goes through `checkHost`, and there is no
+//// way around it: no key, no builder method and no environment variable turns
+//// it off. Spring's `InetAddressFilter` is an opt-in bean; opt-in is the wrong
+//// default for a control whose absence is a vulnerability (decision 67).
+////
+//// THE RULE, in order:
+////   1. the URL's host is resolved to EVERY address it answers (both families);
+////   2. each address is checked — the built-in deny set first, then the allow
+////      list, then the configured deny list;
+////   3. the built-in deny set is loopback, link-local (the cloud metadata
+////      endpoint), private unicast, unspecified, multicast and broadcast, for
+////      IPv4 and IPv6; its entries cannot be removed;
+////   4. `rakun.http.clients.allow` (a comma-separated CIDR list, written by an
+////      operator per range) re-admits addresses the built-in set refuses;
+////   5. `rakun.http.clients.deny` narrows further and wins over the allow list;
+////   6. ONE refused address refuses the host, so a name answering one public
+////      and one private address is refused — and the address dialled is the
+////      one that was checked, never a second resolution (DNS rebinding).
+////
+//// An IPv4-mapped IPv6 address (`::ffff:10.0.0.1`) is compared as the IPv4
+//// address it carries, so the mapping is no way past an IPv4 entry.
+
+import {rkProp} from "rakun";
+
+#[@External.Erlang("rakun_client", "resolve")]
+pub declare fn rkClientResolve(host: string) -> string;
+
+#[@External.Erlang("rakun_client", "in_cidr")]
+pub declare fn rkClientInCidr(addr: string, cidr: string) -> bool;
+
+#[@External.Erlang("rakun_client", "valid_cidr")]
+pub declare fn rkClientValidCidr(cidr: string) -> bool;
+
+#[@External.Erlang("rakun_client", "normalize")]
+pub declare fn rkClientNormalize(addr: string) -> string;
+
+// The configured half of the filter. The built-in deny set is NOT a field:
+// a policy value cannot carry a smaller one.
+pub type AddressPolicy(allow: Array<string>, deny: Array<string>)
+
+// What the check decided for one host: `addr` is the address to dial (the
+// first IPv4 address, else the first one), `refusal` is `""` when allowed.
+pub type AddressCheck(addr: string, refusal: string)
+
+// The families no configuration removes.
+pub fn builtinDeny() -> Array<string> {
+    return [
+        "127.0.0.0/8",
+        "::1/128",
+        "169.254.0.0/16",
+        "fe80::/10",
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "fc00::/7",
+        "0.0.0.0/8",
+        "::/128",
+        "224.0.0.0/4",
+        "ff00::/8",
+        "255.255.255.255/32",
+    ];
+}
+
+fn csv(raw: string) -> Array<string> {
+    val parts = raw.split(",").map({ p -> p.trim() });
+    return parts.filter({ p -> p != "" });
+}
+
+// The policy the configuration names.
+pub fn configuredPolicy() -> AddressPolicy {
+    return AddressPolicy(
+        allow: csv(rkProp("rakun.http.clients.allow")),
+        deny: csv(rkProp("rakun.http.clients.deny")),
+    );
+}
+
+fn inAny(addr: string, ranges: Array<string>) -> bool {
+    return ranges.any({ r -> rkClientInCidr(addr, r) });
+}
+
+// Is one address allowed? Built-in deny, re-admitted only by `allow`; then
+// `deny` narrows. A text that is not an address is refused.
+pub fn addressAllowed(policy: AddressPolicy, addr: string) -> bool {
+    val canonical = rkClientNormalize(addr);
+    val parsed = canonical != "";
+    val admitted = parsed && ((inAny(canonical, builtinDeny()) == false) || inAny(canonical, policy.allow));
+    return admitted && (inAny(canonical, policy.deny) == false);
+}
+
+// The refusal text for a host whose addresses were `addrs`.
+pub fn blockedProblem(host: string, addr: string) -> string {
+    return "rakun-client: address " + addr + " of host " + host + " is blocked by the address filter (server-side request forgery protection) - an operator re-admits a range with rakun.http.clients.allow";
+}
+
+// Resolve `host`, check every address, answer what to dial or why not.
+pub fn checkHost(policy: AddressPolicy, host: string) -> AddressCheck {
+    val raw = rkClientResolve(host);
+    val addrs = if (raw == "") [] else raw.split("\n");
+    val refused = addrs.filter({ a -> addressAllowed(policy, a) == false });
+    val v4 = addrs.filter({ a -> a.contains(".") && (a.contains(":") == false) });
+    val first = v4.at(0) ?? (addrs.at(0) ?? "");
+    val refusal = if (raw == "") {
+        "rakun-client: host " + host + " did not resolve"
+    } else {
+        if (refused.length > 0) blockedProblem(host, refused.at(0) ?? "") else ""
+    };
+    return AddressCheck(addr: first, refusal: refusal);
+}
+
+// The configured lists must be CIDR ranges; a typo that silently matches
+// nothing would widen or narrow the filter without anyone noticing.
+pub fn policyProblem() -> string {
+    val allow = csv(rkProp("rakun.http.clients.allow")).filter({ r -> rkClientValidCidr(r) == false });
+    val deny = csv(rkProp("rakun.http.clients.deny")).filter({ r -> rkClientValidCidr(r) == false });
+    val a = if (allow.length > 0) "rakun.http.clients.allow: `" + allow.join(",") + "` is not a CIDR range" else "";
+    val d = if (deny.length > 0) "rakun.http.clients.deny: `" + deny.join(",") + "` is not a CIDR range" else "";
+    return [a, d].filter({ s -> s != "" }).join("\n");
+}

@@ -1,0 +1,77 @@
+//// rakun-client — a client group's health indicator (front 13 step 6).
+////
+//// The indicator registers into `rakun-actuator-api`'s registry, which is the
+//// whole of what front 11's host reads for its report: these cells assert the
+//// registry lists `httpClient.<group>` and what the registered check answers.
+//// The host itself is not in this member's dependency graph, by design. Every
+//// test removes the rows it registered — the registry is node-global.
+
+import {testing.asserts} from "std";
+import {Response, rkServe, rkSetProp, rkProp, toI32} from "rakun";
+import {Health, healthIndicatorIds, rkApiHealthRemove, rkApiHealthOwner} from "rakun-actuator-api";
+import {HttpClientSettings} from "settings";
+import {CacheLife} from "cache";
+import {ClientResponse} from "response";
+import {RestClient} from "client";
+import {groupHealth, healthIndicatorId} from "health";
+
+fn stub(method: string, path: string) -> Response {
+    val _l = rkSetProp("test.health.log", rkProp("test.health.log") + method + " " + path + "\n");
+    return Response.withStatus(404, "");
+}
+
+fn port() -> i32 {
+    val _a = rkSetProp("rakun.http.clients.allow", "127.0.0.0/8");
+    val known = rkProp("test.client.health.port");
+    if (known != "") return toI32(known);
+    val _k = rkSetProp("rakun.main.keep-alive", "false");
+    val p = rkServe(0, { m, path, h, q, b -> stub(m, path) });
+    val _s = rkSetProp("test.client.health.port", p.toString());
+    return p;
+}
+
+fn group(name: string, base: string, check: string) -> i32 {
+    val _b = rkSetProp("rakun.http.serviceclient." + name + ".base-url", base);
+    val _h = rkSetProp("rakun.http.serviceclient." + name + ".health-check", check);
+    val _l = rkSetProp("test.health.log", "");
+    return 0;
+}
+
+test "health: with health-check=true the group registers httpClient.<group> and answers UP" {
+    val _g = group("partner", "http://127.0.0.1:" + port().toString() + "/api", "true");
+    val _c = RestClient.forGroup("partner");
+    val ids = healthIndicatorIds();
+    val owner = rkApiHealthOwner("httpClient.partner");
+    val h: Health = groupHealth("partner");
+    val log = rkProp("test.health.log");
+    val _r = rkApiHealthRemove(healthIndicatorId("partner"));
+    assert ids.contains("httpClient.partner");
+    assert owner == "rakun-client";
+    // Any answer inside the connect timeout is reachable — a 404 included.
+    assert h.status == "UP";
+    assert log == "HEAD /api\n";
+}
+
+test "health: an unreachable group answers DOWN naming the group and the reason" {
+    val _g = group("gone", "http://127.0.0.1:1", "true");
+    val h: Health = groupHealth("gone");
+    assert h.status == "DOWN";
+    try asserts.contains(h.details, "\"group\":\"gone\"");
+    try asserts.contains(h.details, "econnrefused");
+}
+
+test "health: a group behind a refused address answers DOWN naming the filter" {
+    val _a = rkSetProp("rakun.http.clients.allow", "");
+    val _g = group("meta", "http://169.254.169.254", "true");
+    val h: Health = groupHealth("meta");
+    assert h.status == "DOWN";
+    try asserts.contains(h.details, "blocked by the address filter");
+}
+
+test "health: with the key unset the group registers nothing and makes no request" {
+    val _g = group("quiet", "http://127.0.0.1:" + port().toString() + "/api", "");
+    val _c = RestClient.forGroup("quiet");
+    val ids = healthIndicatorIds();
+    assert ids.contains("httpClient.quiet") == false;
+    assert rkProp("test.health.log") == "";
+}

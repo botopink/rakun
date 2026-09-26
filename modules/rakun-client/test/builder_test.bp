@@ -1,0 +1,157 @@
+//// rakun-client — the builder and the settings (front 13 step 1).
+////
+//// No socket here: the builder is pure values over the property table. Every
+//// test that writes a `rakun.http.clients.*` key clears it before returning —
+//// the table is node-global and the other files of this member read it.
+
+import {testing.asserts} from "std";
+import {rkSetProp, rkConfigCheckRun} from "rakun";
+import {HttpClientSettings, globalSettings, groupSettings, clientConfigProblem, registerClientConfigCheck} from "settings";
+import {CacheLife} from "cache";
+import {ClientResponse} from "response";
+import {RestClient, RestClientBuilder, joinUrl} from "client";
+
+fn clearClientKeys() -> i32 {
+    val _a = rkSetProp("rakun.http.clients.connect-timeout-millis", "");
+    val _b = rkSetProp("rakun.http.clients.read-timeout-millis", "");
+    val _c = rkSetProp("rakun.http.clients.redirects", "");
+    val _d = rkSetProp("rakun.http.clients.max-redirects", "");
+    val _e = rkSetProp("rakun.http.clients.allow", "");
+    val _f = rkSetProp("rakun.http.clients.deny", "");
+    return 0;
+}
+
+test "builder: the defaults are 2000 ms connect, 1000 ms read, dont-follow, 3 hops" {
+    val _c = clearClientKeys();
+    val s = RestClient.builder().build().settings;
+    assert s.connectTimeoutMillis == 2000;
+    assert s.readTimeoutMillis == 1000;
+    assert s.redirects == "dont-follow";
+    assert s.maxRedirects == 3;
+}
+
+test "builder: a client built with no calls carries the configured global settings" {
+    val _a = rkSetProp("rakun.http.clients.connect-timeout-millis", "1500");
+    val _b = rkSetProp("rakun.http.clients.read-timeout-millis", "700");
+    val _r = rkSetProp("rakun.http.clients.redirects", "follow");
+    val s = RestClient.builder().build().settings;
+    val _c = clearClientKeys();
+    assert s.connectTimeoutMillis == 1500;
+    assert s.readTimeoutMillis == 700;
+    assert s.redirects == "follow";
+}
+
+test "builder: an override applies to that client only" {
+    val _c = clearClientKeys();
+    val tuned = RestClient.builder().connectTimeout(50).readTimeout(60).redirects("follow").maxRedirects(1).build();
+    val plain = RestClient.builder().build();
+    assert tuned.settings.connectTimeoutMillis == 50;
+    assert tuned.settings.readTimeoutMillis == 60;
+    assert tuned.settings.redirects == "follow";
+    assert tuned.settings.maxRedirects == 1;
+    assert plain.settings.connectTimeoutMillis == 2000;
+    assert plain.settings.redirects == "dont-follow";
+}
+
+test "builder: each method answers a new builder and two clients from one builder share no headers" {
+    val base = RestClient.builder().baseUrl("http://a.example").defaultHeader("accept", "text/plain");
+    val left = base.defaultHeader("x-left", "1").build();
+    val right = base.baseUrl("http://b.example").defaultHeader("x-right", "2").build();
+    assert base.headers.length == 1;
+    assert base.baseUrl == "http://a.example";
+    assert left.headers.length == 2;
+    assert right.headers.length == 2;
+    assert left.headers.any({ h -> h.0 == "x-left" });
+    assert left.headers.all({ h -> h.0 != "x-right" });
+    assert right.headers.all({ h -> h.0 != "x-left" });
+    assert left.baseUrl == "http://a.example";
+    assert right.baseUrl == "http://b.example";
+}
+
+test "builder: a zero connect timeout is refused at boot naming the key" {
+    val _r = registerClientConfigCheck();
+    val _z = rkSetProp("rakun.http.clients.connect-timeout-millis", "0");
+    val boot = rkConfigCheckRun();
+    val _c = clearClientKeys();
+    try asserts.contains(boot, "rakun.http.clients.connect-timeout-millis is `0`");
+}
+
+test "builder: building a client over a zero timeout raises naming the key" {
+    val _z = rkSetProp("rakun.http.clients.connect-timeout-millis", "0");
+    try asserts.throwsWith({ ->
+        val _b = RestClient.builder();
+        0;
+    }, "rakun.http.clients.connect-timeout-millis is `0`");
+    val _c = clearClientKeys();
+}
+
+test "builder: a zero read timeout is refused at boot naming the key" {
+    val _r = registerClientConfigCheck();
+    val _z = rkSetProp("rakun.http.clients.read-timeout-millis", "0");
+    val problem = clientConfigProblem();
+    val boot = rkConfigCheckRun();
+    val _c = clearClientKeys();
+    try asserts.contains(problem, "rakun.http.clients.read-timeout-millis is `0`");
+    try asserts.contains(boot, "rakun.http.clients.read-timeout-millis");
+}
+
+test "builder: a valid configuration adds nothing to the boot check" {
+    val _c = clearClientKeys();
+    assert clientConfigProblem() == "";
+}
+
+test "builder: a negative or non-numeric timeout and an unknown redirect mode are refused" {
+    val _a = rkSetProp("rakun.http.clients.connect-timeout-millis", "-5");
+    val _b = rkSetProp("rakun.http.clients.read-timeout-millis", "soon");
+    val _r = rkSetProp("rakun.http.clients.redirects", "always");
+    val problem = clientConfigProblem();
+    val _c = clearClientKeys();
+    try asserts.contains(problem, "connect-timeout-millis is `-5`");
+    try asserts.contains(problem, "read-timeout-millis is `soon`");
+    try asserts.contains(problem, "redirects is `always` - one of follow, dont-follow");
+}
+
+test "builder: a malformed CIDR in the allow list is refused at boot" {
+    val _a = rkSetProp("rakun.http.clients.allow", "10.0.0.0/8, 10.0.0/99");
+    val problem = clientConfigProblem();
+    val _c = clearClientKeys();
+    try asserts.contains(problem, "rakun.http.clients.allow: `10.0.0/99` is not a CIDR range");
+}
+
+test "builder: a zero timeout on the builder raises naming the method" {
+    try asserts.throwsWith({ ->
+        val _b = RestClient.builder().connectTimeout(0);
+        0;
+    }, "RestClientBuilder.connectTimeout is `0`");
+    try asserts.throwsWith({ ->
+        val _b = RestClient.builder().readTimeout(0);
+        0;
+    }, "RestClientBuilder.readTimeout is `0`");
+}
+
+test "builder: a group reads its own keys and falls back to the global ones" {
+    val _g = rkSetProp("rakun.http.clients.read-timeout-millis", "900");
+    val _a = rkSetProp("rakun.http.serviceclient.alpha.connect-timeout-millis", "111");
+    val alpha = groupSettings("alpha");
+    val _u = rkSetProp("rakun.http.serviceclient.alpha.connect-timeout-millis", "");
+    val _c = clearClientKeys();
+    assert alpha.connectTimeoutMillis == 111;
+    assert alpha.readTimeoutMillis == 900;
+}
+
+test "builder: a zero group timeout raises naming the group key" {
+    val _a = rkSetProp("rakun.http.serviceclient.beta.read-timeout-millis", "0");
+    try asserts.throwsWith({ ->
+        val _s = groupSettings("beta");
+        0;
+    }, "rakun.http.serviceclient.beta.read-timeout-millis is `0`");
+    val _u = rkSetProp("rakun.http.serviceclient.beta.read-timeout-millis", "");
+}
+
+test "builder: a path joins the base url with exactly one slash and an absolute url wins" {
+    assert joinUrl("http://h:1", "/a") == "http://h:1/a";
+    assert joinUrl("http://h:1/", "/a") == "http://h:1/a";
+    assert joinUrl("http://h:1/api", "a/b") == "http://h:1/api/a/b";
+    assert joinUrl("http://h:1", "http://other/x") == "http://other/x";
+    assert joinUrl("", "https://other/") == "https://other/";
+}

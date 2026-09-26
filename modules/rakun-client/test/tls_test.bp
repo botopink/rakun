@@ -1,0 +1,98 @@
+//// rakun-client — https to the core's TLS listener (front 13, the transport).
+////
+//// Fresh material from `openssl` (a throwaway CA and a `localhost` leaf it
+//// signed). The server is front 04's listener with `rakun.server.ssl.bundle`
+//// naming a keystore bundle; the client names a verify-only bundle holding the
+//// CA (`.sslBundle(…)`, front 74's registry). The client dials the address the
+//// filter checked and verifies the certificate against the NAME it was given.
+
+import {testing.asserts} from "std";
+import {Response, rkServe, rkSetProp, rkProp, toI32, bundleKey, sslRegister} from "rakun";
+import {HttpClientSettings} from "settings";
+import {CacheLife} from "cache";
+import {ClientResponse} from "response";
+import {RestClient, RestClientBuilder} from "client";
+
+#[@External.Erlang("""(fun() -> __D = string:trim(os:cmd("mktemp -d")), __Q = fun(__C) -> os:cmd("cd " ++ __D ++ " && " ++ __C ++ " 2>/dev/null") end, __Q("openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=rakun-client-test-ca -keyout ca.key -out ca.pem"), __Q("printf 'subjectAltName=DNS:localhost' > leaf.ext"), __Q("openssl req -newkey rsa:2048 -nodes -subj /CN=localhost -keyout key.pem -out leaf.csr"), __Q("openssl x509 -req -in leaf.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 2 -extfile leaf.ext -out cert.pem"), __Q("openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=stranger -keyout stranger.key -out stranger.pem"), unicode:characters_to_binary(__D) end)()""")]
+declare fn issueMaterial() -> string;
+
+#[@External.Erlang("""(fun(__D) -> file:del_dir_r(__D), 0 end)($0)""")]
+declare fn removeTree(dir: string) -> i32;
+
+fn material() -> string {
+    val known: string = rkProp("test.client.tls.dir");
+    if (known != "") return known;
+    val d: string = issueMaterial();
+    val _s = rkSetProp("test.client.tls.dir", d);
+    return d;
+}
+
+fn stub(method: string, path: string) -> Response {
+    return Response.ok("secure " + method + " " + path);
+}
+
+// A TLS listener on an ephemeral port; the next `rkServe` of any file is plain
+// again.
+fn serveTls() -> i32 {
+    val known = rkProp("test.client.tls.port");
+    if (known != "") return toI32(known);
+    val d = material();
+    val _a = rkSetProp(bundleKey("clientsrv", "keystore.certificate"), d + "/cert.pem");
+    val _b = rkSetProp(bundleKey("clientsrv", "keystore.private-key"), d + "/key.pem");
+    val _n = rkSetProp("rakun.ssl.bundle.pem", "clientsrv,clientca,strangerca");
+    val _r = sslRegister("clientsrv");
+    val _s = rkSetProp("rakun.server.ssl.bundle", "clientsrv");
+    val _k = rkSetProp("rakun.main.keep-alive", "false");
+    val p = rkServe(0, { m, path, h, q, b -> stub(m, path) });
+    val _u = rkSetProp("rakun.server.ssl.bundle", "");
+    val _p = rkSetProp("test.client.tls.port", p.toString());
+    return p;
+}
+
+fn trustBundle(name: string, caFile: string) -> string {
+    val _n = rkSetProp("rakun.ssl.bundle.pem", "clientsrv,clientca,strangerca");
+    val _t = rkSetProp(bundleKey(name, "truststore.certificate"), caFile);
+    val _r = sslRegister(name);
+    return name;
+}
+
+fn admitLocal() -> i32 {
+    return rkSetProp("rakun.http.clients.allow", "127.0.0.0/8,::1/128");
+}
+
+test "tls: an https request verified by a trust bundle answers the body" {
+    val port = serveTls();
+    val _a = admitLocal();
+    val bundle = trustBundle("clientca", material() + "/ca.pem");
+    val c = RestClient.builder().baseUrl("https://localhost:" + port.toString()).sslBundle(bundle).build();
+    val res = c.get("/secure").retrieve();
+    assert res.status == 200;
+    assert res.body == "secure GET /secure";
+}
+
+test "tls: a server the trust bundle does not vouch for is refused with -1" {
+    val port = serveTls();
+    val _a = admitLocal();
+    val bundle = trustBundle("strangerca", material() + "/stranger.pem");
+    val c = RestClient.builder().baseUrl("https://localhost:" + port.toString()).sslBundle(bundle).build();
+    val res = c.get("/secure").retrieve();
+    assert res.status == -1;
+    try asserts.contains(res.body, "connect to 127.0.0.1 failed");
+}
+
+test "tls: without a bundle the host trust store is used and a private CA is refused" {
+    val port = serveTls();
+    val _a = admitLocal();
+    val res = RestClient.builder().build().get("https://localhost:" + port.toString() + "/secure").retrieve();
+    assert res.status == -1;
+    try asserts.contains(res.body, "failed");
+}
+
+test "tls: the address filter applies to https as to http" {
+    val _n = rkSetProp("rakun.http.clients.allow", "");
+    val res = RestClient.builder().build().get("https://localhost:1/").retrieve();
+    val _t = removeTree(material());
+    val _m = rkSetProp("test.client.tls.dir", "");
+    assert res.status == -1;
+    try asserts.contains(res.body, "blocked by the address filter");
+}

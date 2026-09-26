@@ -1,0 +1,204 @@
+//// rakun-client — the request chain against a real listener (front 13 step 2).
+////
+//// The stub is the core's own BEAM listener (`rkServe(0, …)` with
+//// `rakun.main.keep-alive=false` answers the bound port instead of blocking)
+//// with a dispatcher of this file's: no route table, no external network. It
+//// records every request it receives in the property table (`test.client.log`)
+//// and answers by path:
+////
+////   /echo…        200, body `METHOD PATH|headersJson|body`
+////   /status/<n>   status n, body `status <n>`
+////   /slow/<ms>    sleeps, then 200 `slow`
+////   /hop/local    302 to `/echo/landed` (same origin)
+////   /hop/self     302 to itself
+////
+//// The stub listens on 127.0.0.1, which the address filter refuses by
+//// default, so every test here re-admits `127.0.0.0/8` explicitly.
+
+import {testing.asserts, io.clock} from "std";
+import {Response, rkServe, rkSetProp, rkProp, toI32} from "rakun";
+import {Span, startSpan, endSpan} from "rakun-actuator-api";
+import {HttpClientSettings} from "settings";
+import {CacheLife} from "cache";
+import {ClientResponse} from "response";
+import {RestClient, RestClientBuilder, RequestSpec} from "client";
+import {retrieveFuture} from "request";
+
+#[@External.Erlang("rakun_request_context", "sleep")]
+declare fn sleepMs(ms: i32) -> i32;
+
+#[@External.Erlang("rakun_runtime", "set_reply_header")]
+declare fn replyHeader(name: string, value: string) -> i32;
+
+fn record(method: string, path: string) -> i32 {
+    return rkSetProp("test.client.log", rkProp("test.client.log") + method + " " + path + "\n");
+}
+
+fn stub(method: string, path: string, headersJson: string, body: string) -> Response {
+    val _l = record(method, path);
+    val parts = path.split("/");
+    val head = parts.at(1) ?? "";
+    val arg = parts.at(2) ?? "";
+    val res = if (head == "status") {
+        Response.withStatus(toI32(arg), "status " + arg)
+    } else if (head == "slow") {
+        val _s = sleepMs(toI32(arg));
+        Response.ok("slow")
+    } else if (head == "hop") {
+        val target = if (arg == "self") "/hop/self" else "/echo/landed";
+        val _h = replyHeader("location", target);
+        Response.withStatus(302, "moved")
+    } else {
+        Response.ok(method + " " + path + "|" + headersJson + "|" + body)
+    };
+    return res;
+}
+
+// Boot the stub once per file run; answer its port.
+fn port() -> i32 {
+    val _a = rkSetProp("rakun.http.clients.allow", "127.0.0.0/8");
+    val known = rkProp("test.client.request.port");
+    if (known != "") return toI32(known);
+    val _k = rkSetProp("rakun.main.keep-alive", "false");
+    val p = rkServe(0, { m, path, h, q, b -> stub(m, path, h, b) });
+    val _s = rkSetProp("test.client.request.port", p.toString());
+    return p;
+}
+
+fn base() -> string {
+    return "http://127.0.0.1:" + port().toString();
+}
+
+fn client() -> RestClient {
+    return RestClient.builder().baseUrl(base()).defaultHeader("accept", "application/json").build();
+}
+
+fn resetLog() -> i32 {
+    return rkSetProp("test.client.log", "");
+}
+
+test "request: every verb reaches the transport with its own verb" {
+    val c = client();
+    val _r = resetLog();
+    assert c.get("/echo/v").retrieve().body.startsWith("GET /echo/v|");
+    assert c.post("/echo/v", "p").retrieve().body.startsWith("POST /echo/v|");
+    assert c.put("/echo/v", "p").retrieve().body.startsWith("PUT /echo/v|");
+    assert c.patch("/echo/v", "p").retrieve().body.startsWith("PATCH /echo/v|");
+    assert c.delete("/echo/v").retrieve().body.startsWith("DELETE /echo/v|");
+    assert c.options("/echo/v").retrieve().body.startsWith("OPTIONS /echo/v|");
+    val head = c.head("/echo/v").retrieve();
+    assert head.status == 200;
+    assert head.body == "";
+    try asserts.equals(rkProp("test.client.log"), "GET /echo/v\nPOST /echo/v\nPUT /echo/v\nPATCH /echo/v\nDELETE /echo/v\nOPTIONS /echo/v\nHEAD /echo/v\n");
+}
+
+test "request: default headers and request headers both arrive, the body intact" {
+    val res = client().post("/echo/orders", "{\"sku\":\"a\"}").header("content-type", "application/json").header("x-tag", "t1").retrieve();
+    assert res.status == 200;
+    try asserts.contains(res.body, "\"accept\":\"application/json\"");
+    try asserts.contains(res.body, "\"content-type\":\"application/json\"");
+    try asserts.contains(res.body, "\"x-tag\":\"t1\"");
+    assert res.body.endsWith("|{\"sku\":\"a\"}");
+}
+
+test "request: the transport owns Host and Content-Length" {
+    val res = client().post("/echo/own", "abc").header("host", "evil.example").header("content-length", "99").retrieve();
+    try asserts.contains(res.body, "\"host\":\"127.0.0.1:" + port().toString() + "\"");
+    try asserts.contains(res.body, "\"content-length\":\"3\"");
+    assert res.body.endsWith("|abc");
+}
+
+test "request: a response header is readable case-insensitively" {
+    val res = client().get("/echo/h").retrieve();
+    assert res.header("Content-Length") == res.body.length.toString();
+    assert res.header("x-absent") == "";
+}
+
+test "request: retrieve and retrieveFuture agree on status, body and headers" {
+    val spec = client().get("/status/203").header("x-same", "1");
+    val now = spec.retrieve();
+    val later = await retrieveFuture(spec);
+    val method = await spec.retrieveFuture();
+    assert now.status == later.status;
+    assert now.body == later.body;
+    assert now.headersJson == later.headersJson;
+    assert method.body == now.body;
+}
+
+test "request: two retrieveFuture calls issued before either is awaited do not overlap on erlang" {
+    val c = client();
+    val started = clock.monotonicMillis();
+    val first = retrieveFuture(c.get("/slow/150"));
+    val second = retrieveFuture(c.get("/slow/150"));
+    val a = await first;
+    val b = await second;
+    val elapsed = clock.monotonicMillis() - started;
+    assert a.body == "slow";
+    assert b.body == "slow";
+    // Eager: each call completed before the next began, so the two sleeps add.
+    assert elapsed >= 300;
+}
+
+test "request: a non-2xx response is returned, not raised" {
+    val res = client().get("/status/503").retrieve();
+    assert res.status == 503;
+    assert res.isOk() == false;
+    assert res.body == "status 503";
+    val created = client().post("/status/201", "x").retrieve();
+    assert created.isOk();
+}
+
+test "request: a read timeout answers status -1 with the reason in the body" {
+    val quick = RestClient.builder().baseUrl(base()).readTimeout(100).build();
+    val res = quick.get("/slow/400").retrieve();
+    assert res.status == -1;
+    try asserts.contains(res.body, "read timeout after 100 ms");
+    try asserts.contains(res.body, "GET " + base() + "/slow/400");
+}
+
+test "request: a refused connection answers status -1 naming the failure" {
+    val res = RestClient.builder().build().get("http://127.0.0.1:1/x").retrieve();
+    assert res.status == -1;
+    try asserts.contains(res.body, "econnrefused");
+}
+
+test "request: a URL that is not absolute http or https answers status -1" {
+    val res = RestClient.builder().build().get("ftp://127.0.0.1/x").retrieve();
+    assert res.status == -1;
+    try asserts.contains(res.body, "not an absolute http or https URL");
+}
+
+test "request: the outbound request carries a traceparent continuing the caller's span" {
+    val outer: Span = startSpan("test.outer", "{}");
+    val res = client().get("/echo/traced").retrieve();
+    val _e = endSpan(outer, "ok");
+    try asserts.contains(res.body, "\"traceparent\":\"00-" + outer.traceId + "-");
+    assert res.body.contains(outer.spanId) == false;
+}
+
+test "request: outside any span the request still starts a trace of its own" {
+    val res = client().get("/echo/fresh").retrieve();
+    try asserts.contains(res.body, "\"traceparent\":\"00-");
+}
+
+test "request: redirects are not followed by default" {
+    val res = client().get("/hop/local").retrieve();
+    assert res.status == 302;
+    assert res.header("location") == "/echo/landed";
+}
+
+test "request: a followed redirect lands on the resolved location" {
+    val follow = RestClient.builder().baseUrl(base()).redirects("follow").build();
+    val res = follow.get("/hop/local").retrieve();
+    assert res.status == 200;
+    assert res.body.startsWith("GET /echo/landed|");
+}
+
+test "request: a redirect loop stops at max-redirects" {
+    val looping = RestClient.builder().redirects("follow").maxRedirects(2).build();
+    val _r = resetLog();
+    val res = looping.get(base() + "/hop/self").retrieve();
+    assert res.status == -1;
+    try asserts.contains(res.body, "more than 2 redirects");
+    assert rkProp("test.client.log") == "GET /hop/self\nGET /hop/self\nGET /hop/self\n";
+}

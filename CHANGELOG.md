@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### HTTP clients — `rakun-client` (botopink front 13)
+
+- `RestClient` over one builder (`RestClient.builder()` → `baseUrl`, `defaultHeader`, `connectTimeout`, `readTimeout`, `redirects`, `maxRedirects`, `sslBundle`, `build`) and one request chain (`get/head/delete/options`, `post/put/patch`, `.header`, `.cached`, `.revalidate`) with two terminal operations: `retrieve()` and `retrieveFuture() -> @Task<ClientResponse>` (eager on erlang; two issued before either is awaited run sequentially).
+- Global settings under `rakun.http.clients.*` (connect 2000 ms, read 1000 ms, `dont-follow`, 3 hops, `ssl.bundle`), per-group under `rakun.http.serviceclient.<group>.*`; a zero, negative or non-integer timeout is refused naming the key (`registerClientConfigCheck`, the builder, group clients).
+- The SSRF address filter, unconditional: all resolved addresses checked, built-in deny for loopback/link-local/private/unspecified/multicast/broadcast (v4 + v6, IPv4-mapped judged as v4), `rakun.http.clients.allow` re-admits per CIDR, `rakun.http.clients.deny` wins; the checked address is the dialled one; every redirect hop re-checked; no off switch.
+- Transport over std `io.net` (HTTP/1.1; Content-Length, chunked, close); https dials the checked address with front 74's bundle options or the host trust store plus a hostname check. Non-2xx returned; no response ⇒ status `-1` with the reason. Every request is an `http.client.request` span and sends its `traceparent`.
+- Redirects (opt-in): 303 / POST-on-301/302 become GET, a cross-origin hop drops credentials, `max-redirects` bounds loops.
+- Response caching through a soft seam front 12 installs (`installResponseCache`), key parts `[method, url, sha256(body)]`; GET/HEAD only (others raise naming the method); `rakun.cache.type=none` and an absent store are direct calls. `CacheLife`/`cacheLifeOf` live here for front 12 to import.
+- `#[httpExchange(group)]` + `#[getExchange]`/`#[postExchange]`/`#[putExchange]`/`#[patchExchange]`/`#[deleteExchange]`: an emitted `Http<Name>` twin and `http<Name>()` factory; path parameters substituted (percent-encoded) by name; located build failures for mismatched `:params`, body-parameter shape, non-`string` types and placement.
+- Opt-in per-group health indicator `httpClient.<group>` in front 11's registry (`.health-check=true`).
+- Host module `rakun_client` (`src/sidecars/rakun_client.erl`). 70 tests green on erlang.
+
 ### rakun-app: `route.bp` handlers (botopink front 25)
 
 - `route_handler.bp`: the seven verb decorators, `registerRoute` (a duplicate

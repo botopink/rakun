@@ -2486,6 +2486,113 @@ application calls it beside `dataSourceBoot()`.
    `-> @Task` helper.
 7. A record method named `length` hijacks `xs.length` in its module (above).
 
+## HTTP clients — `rakun-client` (front 13)
+
+The member `modules/rakun-client` (erlang only) is rakun's one outbound HTTP
+client: `RestClient` over one builder with two terminal operations, global and
+per-client settings, the SSRF address filter every connect goes through,
+response caching over front 12's store (a soft seam), `#[httpExchange]` service
+interfaces and a per-group health indicator. Dependencies: `rakun`,
+`rakun-actuator-api` (spans + health registry). NOT `rakun-cache`: front 12
+depends on this member (its Redis transport), so the cache edge is a runtime slot.
+
+### Files (`botopink.json` `files`, dependency order)
+
+| File | What |
+|---|---|
+| `src/address.bp` | `AddressPolicy`, `addressAllowed`, `checkHost`, `builtinDeny()`, `configuredPolicy()`, `policyProblem()` |
+| `src/settings.bp` | `HttpClientSettings(connectTimeoutMillis, readTimeoutMillis, redirects, maxRedirects, sslBundle)`, `globalSettings`, `groupSettings`, `settingsProblemAt`, `clientConfigProblem`, `registerClientConfigCheck` |
+| `src/response.bp` | `ClientResponse(status, body, headersJson)` with `isOk()`, `header(name)`; `failedResponse(reason)` (status `-1`) |
+| `src/cache.bp` | `CacheLife`, `cacheLifeOf`, the slot: `installResponseCache` / `uninstallResponseCache` / `responseCachePresent` / `responseCacheDisabled` |
+| `src/transport.bp` | `Outbound`, `transportExchange` — one HTTP/1.1 exchange over std `io.net`, redirects, the client span |
+| `src/health.bp` | `groupHealth`, `registerGroupHealth`, `healthIndicatorId` (`httpClient.<group>`) |
+| `src/client.bp` | `RestClient` (`builder()`, `forGroup(g)`, `get/head/delete/options(path)`, `post/put/patch(path, body)`, `exchange(…)`), `RestClientBuilder`, `RequestSpec` (`header`, `cached`, `revalidate`, `retrieve`, `retrieveFuture`), `joinUrl`, `cacheKeyParts`, `substitutePath` |
+| `src/request.bp` | module-fn spellings `retrieveFuture(spec)`, `cached(spec, …)`, `revalidate(spec, n)` (own module: a module fn and a method of one name/arity in one module would be one Erlang function) |
+| `src/exchange.bp` | `#[httpExchange(group)]`, `#[getExchange]`, `#[postExchange]`, `#[putExchange]`, `#[patchExchange]`, `#[deleteExchange]` |
+| `src/sidecars/rakun_client.erl` | host module `rakun_client`: resolve (`inet:getaddrs`, both families), CIDR match (IPv4-mapped IPv6 judged as IPv4), `uri_string` parse/resolve, response head parse (`erlang:decode_packet`) + de-chunking over received bytes, percent-encoding, monotonic ms, the TLS connect, the cache slot (`persistent_term`) |
+
+### Decisions
+
+- **Keys are `rakun.*`** (decision 115 rule 4): `rakun.http.clients.connect-timeout-millis`
+  (2000), `.read-timeout-millis` (1000, a total deadline after connect),
+  `.redirects` (`dont-follow`), `.max-redirects` (3), `.ssl.bundle`, `.allow`, `.deny`;
+  groups `rakun.http.serviceclient.<group>.base-url` (required) + the same leaves
+  (fallback to the global key) + `.health-check` (default false). Spring's
+  `spring.http.client(s).*` / `spring.http.serviceclient.*` / `management.*` are
+  never read.
+- **No key disables a timeout**: `0`, negative or non-integer is refused naming the
+  key. A library module's body does not run on erlang (front 08 finding 3), so the
+  boot check is registered by `registerClientConfigCheck()`, which
+  `RestClient.builder()` and every group client call (the `#[bean]` building a client
+  runs during boot, so the application does not start); an application may call it
+  itself before `Rakun.run`.
+- **The address filter has no bypass.** Every host is resolved to ALL its addresses;
+  one refused address refuses the host; the address dialled is the one checked (no
+  second resolution — DNS rebinding); every redirect hop is checked again. Built-in
+  deny: loopback, link-local (metadata), private unicast, unspecified, multicast,
+  broadcast, v4 and v6 (13 CIDRs); `allow` re-admits per range, `deny` wins over
+  `allow`; malformed CIDRs are a boot refusal. No key/method/env mentions an off
+  switch (a test greps the sources).
+- **Transport is std `io.net`** (`connect/send/recv/close`, `tlsSend/tlsRecv/tlsClose`);
+  requests are HTTP/1.1 with `Connection: close`, read by `Content-Length`, chunked or
+  close. The ONE socket call of the host module is `rakun_client:tls_connect/5`:
+  std's `tlsConnect(host, …)` takes a name and resolves it again, which the filter
+  forbids. It dials the checked address, SNI + hostname check on the given name;
+  options from front 74's bundle (`rakun_ssl:connect_options/2`) when
+  `ssl.bundle` is set, else the host trust store (`public_key:cacerts_get()`) with a
+  full hostname check — no unverified mode.
+- **One client, two terminal operations.** `retrieveFuture()` is eager on erlang: two
+  issued before either is awaited run sequentially (a test asserts it). Non-2xx is
+  returned; a request that never got a response is status `-1` with the reason.
+- **Every request is a client span** `http.client.request` (front 11's `startSpan`),
+  and `traceparent` carries it — the callee continues the caller's trace; outside any
+  span it starts one. The transport owns `Host`, `Content-Length`, `Connection`,
+  `traceparent`; a caller-written header of those names is dropped.
+- **Redirects**: 301/302/303/307/308 with `Location`, resolved against the answering
+  URL; 303 (and 301/302 answering a POST) re-issued as GET without body; a
+  cross-origin hop drops `authorization`, `cookie`, `proxy-authorization`; more than
+  `max-redirects` is `-1`.
+- **The cache seam.** Front 12 calls `installResponseCache(through)` once; a cached
+  request calls `through(name, [method, absoluteUrl, sha256(body)], life, tags, load)`
+  and `load` performs the request, answering `status\nheadersJson\nbody`. Nothing
+  installed ⇒ direct call. `rakun.cache.type=none` is honoured here too (the slot is
+  never called). `.cached`/`.revalidate` on anything but GET/HEAD raises naming the
+  method. `revalidate(n)` = `cached("rakun-client.revalidate", cacheLifeOf(0, n, n), [])`.
+  `CacheLife` is defined HERE because 12 depends on 13: front 12 imports it.
+- **`#[httpExchange(group)]`** reflects a behavior and emits `Http<Name>(client:
+  RestClient) implement <Name>` + `pub fn http<Name>() -> <Name>` (client from
+  `RestClient.forGroup(group)`). The emission names only `RestClient`. Build
+  failures: a `:name` with no parameter (both names in the message), GET/DELETE
+  parameters outside the path, POST/PUT/PATCH without exactly one body parameter,
+  non-`string` parameters or return (no JSON value model), zero or two exchange
+  annotations, placement. Path values are percent-encoded (a `/` cannot add a segment).
+- **Health** is opt-in per group: `forGroup` registers `httpClient.<group>` (owner
+  `rakun-client`) when `.health-check=true`; the check is a HEAD against the base URL
+  with the connect timeout as its whole budget — UP on any response, DOWN with
+  `{"group", "error"}`.
+
+### Consumer notes
+
+- Import `RestClient` WITH its type closure — `HttpClientSettings`, `CacheLife`,
+  `ClientResponse` — or the build reds with `unknown type` (the known "importing a
+  type re-checks its declaration" defect).
+- List `rakun-actuator-api` in the consumer's own `dependencies`, before
+  `rakun-client` (transitive dependencies are not loaded — front 08 finding 2).
+- IPv6: the filter judges v6 addresses, but std `net.connect` cannot dial one
+  (`gen_tcp` without `inet6` answers `nxdomain`), so the transport dials the first IPv4
+  address; a v6-only host fails to connect.
+
+### Tests (erlang) — 70 passed / 0 failed / 0 compile failures
+
+`builder_test.bp` (14), `request_test.bp` (15), `ssrf_test.bp` (11), `cache_test.bp`
+(9), `exchange_test.bp` (6), `exchange_build_test.bp` (7, fixture projects under
+`.botopinkbuild/tmp/rakun-client-fixtures/`), `health_test.bp` (4), `tls_test.bp` (4,
+throwaway CA from `openssl`). The stub server is the core's listener, `rkServe(0, …)`
+with `rakun.main.keep-alive=false` and a per-file dispatcher on 127.0.0.1 (re-admitted
+with `rakun.http.clients.allow=127.0.0.0/8`); no external network. The mixed-DNS case
+writes two answers into OTP's host table (`inet_db`, lookup `[file, native]`) and
+restores it.
+
 ## Validation — the bundled `validation` library (front 14, moved by decision 116 rule 5)
 
 Front 14's member `modules/rakun-validation` is gone: its seven modules are the

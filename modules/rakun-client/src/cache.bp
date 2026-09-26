@@ -1,0 +1,63 @@
+//// rakun-client — response caching over front 12's store: the soft seam
+//// (front 13 step 4).
+////
+//// THE ARROW RUNS THE OTHER WAY. `rakun-cache` (front 12) depends on this
+//// member for its Redis transport, so this member cannot import it. The seam
+//// is therefore a SLOT this member owns: front 12 installs one
+//// through-function (`installResponseCache`) when it loads, and a cached
+//// request calls it with the cache name, the key parts, the lifetime, the tags
+//// and a loader that performs the request. With nothing installed — front 12
+//// absent from the build, or present and not yet wired — the loader runs and
+//// nothing is stored: a cached request degrades to a direct transport call.
+////
+//// THE KEY PARTS are `[method, absoluteUrl, sha256(body)]` — the through
+//// function hands them to front 12's `cacheKey(name, parts)`. Two requests that
+//// differ only in a header share a row; two that differ in the body do not.
+////
+//// THE KILL SWITCH. `rakun.cache.type=none` is honoured here as well as in
+//// front 12: with it set, the slot is never called, so no store sees the
+//// request whatever is installed.
+////
+//// `CacheLife` lives here, not in front 12, for the same reason the slot does:
+//// front 12's `cacheLife(profile)` / `cacheLifeOf(…)` answer this type (they
+//// import it from `rakun-client`), so one lifetime value crosses both members.
+
+import {rkValue} from "rakun";
+
+// Seconds, as front 12 defines them.
+pub type CacheLife(stale: i32, revalidate: i32, expire: i32)
+
+pub fn cacheLifeOf(stale: i32, revalidate: i32, expire: i32) -> CacheLife {
+    return CacheLife(stale: stale, revalidate: revalidate, expire: expire);
+}
+
+#[@External.Erlang("rakun_client", "cache_install")]
+pub declare fn rkClientCacheInstall(through: fn(name: string, parts: Array<string>, life: CacheLife, tags: Array<string>, load: fn() -> string) -> string) -> i32;
+
+#[@External.Erlang("rakun_client", "cache_uninstall")]
+pub declare fn rkClientCacheUninstall() -> i32;
+
+#[@External.Erlang("rakun_client", "cache_present")]
+pub declare fn rkClientCachePresent() -> bool;
+
+#[@External.Erlang("rakun_client", "cache_through")]
+pub declare fn rkClientCacheThrough(name: string, parts: Array<string>, life: CacheLife, tags: Array<string>, load: fn() -> string) -> string;
+
+// Front 12's entry: install the one through-function (a second install
+// replaces the first — one store per node).
+pub fn installResponseCache(through: fn(name: string, parts: Array<string>, life: CacheLife, tags: Array<string>, load: fn() -> string) -> string) -> i32 {
+    return rkClientCacheInstall(through);
+}
+
+pub fn uninstallResponseCache() -> i32 {
+    return rkClientCacheUninstall();
+}
+
+pub fn responseCachePresent() -> bool {
+    return rkClientCachePresent();
+}
+
+// `rakun.cache.type=none`: every cached request reaches the transport.
+pub fn responseCacheDisabled() -> bool {
+    return rkValue("rakun.cache.type").trim().toLower() == "none";
+}

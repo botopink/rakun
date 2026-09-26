@@ -1,0 +1,240 @@
+//// rakun-client — one HTTP/1.1 exchange over std's `io.net` (front 13 step 2).
+////
+//// The transport is std's socket module, not a private host client: this file
+//// assembles a request, dials the address the filter CHECKED (`address.bp`),
+//// writes the bytes with `net.send`, reads with `net.recv` against one read
+//// deadline, and maps the answer onto `ClientResponse`. Parsing the head and
+//// de-chunking the body are host helpers over bytes already received
+//// (`rakun_client.erl`); no OTP HTTP client is involved, and the host module's
+//// only socket call is the TLS connect described next.
+////
+//// HTTPS dials the checked address through `rkClientTlsConnect` (the one
+//// socket call of the host module, because std's `tlsConnect` takes a NAME and
+//// would resolve it again) and then uses std's `tlsSend`/`tlsRecv`/`tlsClose`.
+//// With `ssl.bundle` set the options are front 74's bundle; without it the
+//// host's trust store and a full hostname check. There is no unverified mode.
+////
+//// EVERY REQUEST IS A CLIENT SPAN. `http.client.request` is started through
+//// `rakun-actuator-api` (front 11) and its `traceparent` is sent, so the callee
+//// continues the caller's trace: inside a server span the client span is its
+//// child, outside any span it starts a fresh trace.
+////
+//// REDIRECTS. With `redirects=follow`, a 301/302/303/307/308 carrying
+//// `Location` is followed up to `max-redirects` hops; EVERY hop is resolved
+//// and checked by the address filter again, so a public host redirecting to a
+//// private address is refused. A 303 (and a 301/302 answering a POST) is
+//// re-issued as a GET without a body. A hop to another origin drops
+//// `authorization`, `cookie` and `proxy-authorization`.
+
+import {io.net, io.net.Socket, io.net.TlsSocket, json} from "std";
+import {startSpan, endSpan, traceparentOf} from "rakun-actuator-api";
+import {HttpClientSettings} from "settings";
+import {configuredPolicy, checkHost} from "address";
+import {ClientResponse, failedResponse} from "response";
+import {toI32} from "rakun";
+
+#[@External.Erlang("rakun_client", "url_parts")]
+pub declare fn rkClientUrlParts(url: string) -> string;
+
+#[@External.Erlang("rakun_client", "resolve_url")]
+pub declare fn rkClientResolveUrl(reference: string, base: string) -> string;
+
+#[@External.Erlang("rakun_client", "wire_complete")]
+pub declare fn rkClientWireComplete(raw: string, isHead: bool) -> bool;
+
+#[@External.Erlang("rakun_client", "wire_status")]
+pub declare fn rkClientWireStatus(raw: string) -> i32;
+
+#[@External.Erlang("rakun_client", "wire_headers")]
+pub declare fn rkClientWireHeaders(raw: string) -> string;
+
+#[@External.Erlang("rakun_client", "wire_body")]
+pub declare fn rkClientWireBody(raw: string) -> string;
+
+#[@External.Erlang("rakun_client", "byte_length")]
+pub declare fn rkClientByteLength(text: string) -> i32;
+
+#[@External.Erlang("rakun_client", "tls_connect")]
+pub declare fn rkClientTlsConnect(addr: string, port: i32, host: string, bundle: string, timeoutMillis: i32) -> @Result<TlsSocket, string>;
+
+#[@External.Erlang("rakun_client", "no_handle")]
+pub declare fn rkClientNoHandle() -> any;
+
+#[@External.Erlang("rakun_client", "now_ms")]
+pub declare fn rkClientNowMs() -> i32;
+
+#[@External.Erlang("rakun_client", "encode_segment")]
+pub declare fn rkClientEncodeSegment(value: string) -> string;
+
+// One request as the transport sees it: an absolute URL and the complete
+// header list (defaults first, then the request's own).
+pub type Outbound(
+    method: string,
+    url: string,
+    headers: Array<#(string, string)>,
+    body: string,
+    settings: HttpClientSettings,
+)
+
+// A connection: plain or TLS. The unused half holds a handle nobody reads.
+pub type Conn(tls: bool, plain: Socket, secure: TlsSocket)
+
+pub type Opened(conn: Conn, error: string)
+
+pub type Received(raw: string, error: string)
+
+// The parsed `url_parts` answer.
+pub type Target(scheme: string, host: string, port: i32, path: string)
+
+fn noConn() -> Conn {
+    return Conn(tls: false, plain: Socket(handle: rkClientNoHandle()), secure: TlsSocket(handle: rkClientNoHandle()));
+}
+
+pub fn parseTarget(url: string) -> Target {
+    val raw = rkClientUrlParts(url);
+    val p = raw.split("\n");
+    val port = if (raw == "") 0 else toI32(p.at(2) ?? "0");
+    return Target(scheme: p.at(0) ?? "", host: p.at(1) ?? "", port: port, path: p.at(3) ?? "");
+}
+
+// `host[:port]`, bracketed for IPv6, the port omitted when it is the scheme's.
+pub fn hostHeader(t: Target) -> string {
+    val h = if (t.host.contains(":")) "[" + t.host + "]" else t.host;
+    val dflt = (t.scheme == "http" && t.port == 80) || (t.scheme == "https" && t.port == 443);
+    return if (dflt) h else h + ":" + t.port.toString();
+}
+
+fn origin(t: Target) -> string {
+    return t.scheme + "://" + hostHeader(t);
+}
+
+fn open(t: Target, addr: string, settings: HttpClientSettings) -> Opened {
+    val timeout = settings.connectTimeoutMillis;
+    val opened = if (t.scheme == "https") {
+        case rkClientTlsConnect(addr, t.port, t.host, settings.sslBundle, timeout) {
+            Ok(s) -> Opened(conn: Conn(tls: true, plain: Socket(handle: rkClientNoHandle()), secure: s), error: "");
+            Error(e) -> Opened(conn: noConn(), error: e);
+        }
+    } else {
+        case net.connect(addr, t.port, timeout) {
+            Ok(s) -> Opened(conn: Conn(tls: false, plain: s, secure: TlsSocket(handle: rkClientNoHandle())), error: "");
+            Error(e) -> Opened(conn: noConn(), error: e);
+        }
+    };
+    return opened;
+}
+
+fn connSend(c: Conn, data: string) -> string {
+    val sent = if (c.tls) net.tlsSend(c.secure, data) else net.send(c.plain, data);
+    val err = case sent {
+        Ok(_n) -> "";
+        Error(e) -> e;
+    };
+    return err;
+}
+
+fn connRecv(c: Conn, timeoutMillis: i32) -> Received {
+    val got = if (c.tls) net.tlsRecv(c.secure, 0, timeoutMillis) else net.recv(c.plain, 0, timeoutMillis);
+    val r = case got {
+        Ok(d) -> Received(raw: d, error: "");
+        Error(e) -> Received(raw: "", error: e);
+    };
+    return r;
+}
+
+fn connClose(c: Conn) -> i32 {
+    val _c = if (c.tls) net.tlsClose(c.secure) else net.close(c.plain);
+    return 0;
+}
+
+// Read until the response is complete, the peer closes, or the deadline.
+fn readUntil(c: Conn, isHead: bool, deadline: i32, acc: string) -> Received {
+    val left = deadline - rkClientNowMs();
+    if (left <= 0) return Received(raw: acc, error: "timeout");
+    val chunk = connRecv(c, left);
+    val closedAfterData = chunk.error == "closed" && acc != "";
+    if (closedAfterData) return Received(raw: acc, error: "");
+    if (chunk.error != "") return Received(raw: acc, error: chunk.error);
+    val got = acc + chunk.raw;
+    if (rkClientWireComplete(got, isHead)) return Received(raw: got, error: "");
+    return readUntil(c, isHead, deadline, got);
+}
+
+fn lowerName(h: #(string, string)) -> string {
+    return h.0.toLower();
+}
+
+// The request bytes. `Host`, `Content-Length`, `Connection` and `traceparent`
+// are the transport's; a caller-written header of the same name is dropped.
+pub fn requestText(method: string, t: Target, headers: Array<#(string, string)>, body: string, traceparent: string) -> string {
+    val owned = ["host", "content-length", "connection", "traceparent", "transfer-encoding"];
+    val kept = headers.filter({ h -> owned.contains(lowerName(h)) == false });
+    val lines = kept.map({ h -> h.0 + ": " + h.1 + "\r\n" }).join("");
+    val sendsBody = body != "" || method == "POST" || method == "PUT" || method == "PATCH";
+    val length = if (sendsBody) "Content-Length: " + rkClientByteLength(body).toString() + "\r\n" else "";
+    val tp = if (traceparent != "") "traceparent: " + traceparent + "\r\n" else "";
+    return method + " " + t.path + " HTTP/1.1\r\nHost: " + hostHeader(t) + "\r\n" + lines + tp + length + "Connection: close\r\n\r\n" + body;
+}
+
+fn describe(method: string, url: string, reason: string) -> string {
+    return "rakun-client: " + method + " " + url + ": " + reason;
+}
+
+// One hop: check, dial, write, read. Never raises.
+fn once(out: Outbound, traceparent: string) -> ClientResponse {
+    val t = parseTarget(out.url);
+    if (t.scheme == "") return failedResponse(describe(out.method, out.url, "not an absolute http or https URL"));
+    val check = checkHost(configuredPolicy(), t.host);
+    if (check.refusal != "") return failedResponse(check.refusal);
+    val opened = open(t, check.addr, out.settings);
+    if (opened.error != "") return failedResponse(describe(out.method, out.url, "connect to " + check.addr + " failed: " + opened.error));
+    val sendError = connSend(opened.conn, requestText(out.method, t, out.headers, out.body, traceparent));
+    val deadline = rkClientNowMs() + out.settings.readTimeoutMillis;
+    val got = if (sendError == "") readUntil(opened.conn, out.method == "HEAD", deadline, "") else Received(raw: "", error: sendError);
+    val _c = connClose(opened.conn);
+    val timedOut = got.error == "timeout";
+    if (timedOut) return failedResponse(describe(out.method, out.url, "read timeout after " + out.settings.readTimeoutMillis.toString() + " ms"));
+    if (got.error != "") return failedResponse(describe(out.method, out.url, got.error));
+    val status = rkClientWireStatus(got.raw);
+    if (status < 0) return failedResponse(describe(out.method, out.url, "the answer is not an HTTP/1.1 response"));
+    val body = if (out.method == "HEAD") "" else rkClientWireBody(got.raw);
+    return ClientResponse(status: status, body: body, headersJson: rkClientWireHeaders(got.raw));
+}
+
+pub fn isRedirect(status: i32) -> bool {
+    return status == 301 || status == 302 || status == 303 || status == 307 || status == 308;
+}
+
+fn credentialHeader(h: #(string, string)) -> bool {
+    val n = lowerName(h);
+    return n == "authorization" || n == "cookie" || n == "proxy-authorization";
+}
+
+// The request a redirect answer asks for.
+pub fn redirected(out: Outbound, status: i32, location: string) -> Outbound {
+    val next = rkClientResolveUrl(location, out.url);
+    val asGet = status == 303 || ((status == 301 || status == 302) && out.method == "POST");
+    val method = if (asGet) "GET" else out.method;
+    val body = if (asGet) "" else out.body;
+    val sameOrigin = origin(parseTarget(next)) == origin(parseTarget(out.url));
+    val headers = if (sameOrigin) out.headers else out.headers.filter({ h -> credentialHeader(h) == false });
+    return Outbound(method: method, url: next, headers: headers, body: body, settings: out.settings);
+}
+
+fn follow(out: Outbound, traceparent: string, hops: i32) -> ClientResponse {
+    val res = once(out, traceparent);
+    val location = res.header("location");
+    val wants = out.settings.redirects == "follow" && isRedirect(res.status) && location != "";
+    if (wants == false) return res;
+    if (hops >= out.settings.maxRedirects) return failedResponse(describe(out.method, out.url, "more than " + out.settings.maxRedirects.toString() + " redirects"));
+    return follow(redirected(out, res.status, location), traceparent, hops + 1);
+}
+
+// The whole exchange, inside one `http.client.request` span.
+pub fn transportExchange(out: Outbound) -> ClientResponse {
+    val attrs = "{\"http.request.method\":" + json.quote(out.method) + ",\"url.full\":" + json.quote(out.url) + "}";
+    val span = startSpan("http.client.request", attrs);
+    val res = follow(out, traceparentOf(span), 0);
+    val _e = endSpan(span, res.status.toString());
+    return res;
+}
