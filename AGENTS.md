@@ -2182,7 +2182,15 @@ that exist — a version outside it is a 400 problem naming them; a version in
 `rakun.web.apiversion.sunset.<v>` is set, `Sunset`. With nothing configured the
 entry passes every request through. `installBuiltins` registers seven entries.
 
-### Step 10 — graceful shutdown (`shutdown.bp`; the socket half in `rakun_runtime.erl`)
+### Step 10 — graceful shutdown (`shutdown.bp`; the socket half is front 04's)
+
+The socket half is the core's: `rkStopAccepting`, `rkDrain` and
+`rkConnectionCount` are declared in `modules/rakun/src/runtime.bp` over
+`rakun_runtime.erl`'s listener and asserted there
+(`test/erlang_runtime_server_test.bp` "stop accepting closes the listening
+socket and keeps the open connections"); `shutdown.bp` imports them from
+`rakun` and only orders the sequence.
+
 
 `gracefulShutdown()` is the ORDER, and nothing else: (1) front 76's
 `readinessDrained()` — `rakun_runtime:readiness_drained/0` calls

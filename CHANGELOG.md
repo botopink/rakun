@@ -30,6 +30,10 @@
   refusal is gone — `@Decl` spells every type, so a proxy forwards an `i32[]`
   parameter and an `Array<string>` return; `#[halResource]` names the field's
   spelled type in its refusal.
+- Graceful shutdown's socket half is front 04's: `rkStopAccepting`, `rkDrain`
+  and `rkConnectionCount` are core cells in `runtime.bp`, asserted by the core
+  (a closed listening socket refuses a new connection while an open one still
+  answers); `rakun-web`'s `shutdown.bp` imports them.
 
 ### Static files (botopink front 82)
 
