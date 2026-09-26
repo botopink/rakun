@@ -1621,8 +1621,8 @@ handler mode (no default `Content-Type`, headers appended). `bodyText`,
 `#[serverAction]` on `pub fn name(form: FormData) -> @Task<ActionResult>` (or
 `-> @Task<@Result<ActionResult, E>>`) emits `val __rkAction_<name> =
 rkRegisterAction("<name>", <name>)`; the module imports `rkRegisterAction`.
-Reflection keeps only the return type's head, so the marker refuses a non-`@Task`
-and a `@Task` of anything else fails at its first dispatch. Sidecar
+Reflection spells the return type as written, so the marker refuses any other
+return — `@Task<i32>` included — at build time. Sidecar
 `rakun_actions.erl`: the registry `{module, name} -> fun` (the module read off the
 fun with `erlang:fun_info/2`), the call (an `ActionResult`, `Ok`, `Error` or a
 raise, a `nav:` signal re-thrown), and the body hook.
@@ -2734,13 +2734,11 @@ and `rkTxRun` refuses any propagation but `required` at run time. The proxy runs
 the DEFAULT datasource. The application site imports `transactional`, `rkTxRun` and
 the core's `rkSingleton`.
 
-Reflection keeps only a type's HEAD: `Array<string>` reflects as `Array`, `@Result<…>`
-as `Result`, and `T[]`, `?T` and a function type as `""`; `Method` carries no
-visibility. So the proxy forwards every reflected method (a private one too),
-refuses a method whose PARAMETER type is lossy (`""` or a generic head) or whose
-RETURN type is a generic head, naming the method and parameter, and emits a `""`
-return as a void method — the inner call still runs in the transaction, and a caller
-that used the value fails to compile at its own call site.
+Reflection spells every type as the source writes it (`Array<string>`, `i32[]`,
+`?T`, `fn(i32) -> i32`, `@Task<…>`); `Method` carries no visibility. So the proxy
+forwards every reflected method (a private one too), redeclaring each parameter
+and return type as reflected; a parameter reflection gives no type for is refused
+naming the method and parameter, and a `""` return is a void method.
 
 The statement log (`rkSqlLogOn()`, `rkSqlLogLines()`, `rkSqlLogReset()`) records
 each statement as written with its params (`SELECT … WHERE id = :id  params=[id=1]`)
@@ -3303,7 +3301,7 @@ profile active fails at boot); `rakun.security.password.encoder`;
   on the type); unmarked everywhere is `authenticated`. `#[permitAll]` still reads the
   context, so ANY proxy method outside a request raises. `#[preAuthorize]` fails the
   build naming the supported forms; `#[secured]` with an expression fails too;
-  reflection-lossy parameters fail as for `<Type>Tx`.
+  parameters are forwarded as reflected, as for `<Type>Tx`.
 - **CSRF**: double-submit (`XSRF-TOKEN` cookie, `SameSite=Strict`, readable by
   script; `X-CSRF-Token` header), required on every method but GET/HEAD/OPTIONS/TRACE
   when the request carries AMBIENT credentials: the session cookie OR Basic

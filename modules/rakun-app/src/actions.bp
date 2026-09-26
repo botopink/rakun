@@ -153,13 +153,15 @@ declare fn rkActVerb(req: Request) -> string;
 // `#[serverAction]` on `pub fn name(form: FormData) -> @Task<ActionResult>`
 // (or `-> @Task<@Result<ActionResult, E>>`, whose `Error` is a failed action)
 // emits `val __rkAction_<name> = rkRegisterAction("<name>", <name>);` into
-// the fn's module, which imports `rkRegisterAction`. Reflection keeps only the
-// return type's HEAD, so a `@Task` of anything else is refused at its first
-// dispatch, not here. A decorator body is comment-free and calls no function.
+// the fn's module, which imports `rkRegisterAction`. Reflection spells the
+// return type as written, so any other return — `@Task<i32>` included — is
+// refused here. A decorator body is comment-free and calls no function.
 
 pub fn serverAction(comptime decl: @Decl) {
     if (decl.kind != DeclKind.Fn) decl.fail("#[serverAction] must annotate a function - an action is fn(form: FormData) -> @Task<ActionResult>");
-    if (decl.returnType != "Task") decl.fail("#[serverAction] " + decl.name + " returns `" + decl.returnType + "` - an action returns @Task<ActionResult> or @Task<@Result<ActionResult, E>>, so the dispatcher always awaits it");
+    val rt = decl.returnType.replaceAll(" ", "");
+    val okReturn = rt == "@Task<ActionResult>" || (rt.startsWith("@Task<@Result<ActionResult,") && rt.endsWith(">>"));
+    if (okReturn == false) decl.fail("#[serverAction] " + decl.name + " returns `" + decl.returnType + "` - an action returns @Task<ActionResult> or @Task<@Result<ActionResult, E>>, so the dispatcher always awaits it");
     @emit("val __rkAction_" + decl.name + " = rkRegisterAction(\"" + decl.name + "\", " + decl.name + ");");
 }
 
