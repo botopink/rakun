@@ -1,0 +1,233 @@
+//// rakun-scheduling — the executor: configuration, start, stop (front 16 Step 4).
+////
+//// THE SHAPE (the host half is `rakun_scheduling.erl`). One timer process per
+//// started task, holding nothing but the task's name — its next fire is in the
+//// registry — under a `one_for_one` supervisor that restarts a dead timer; and a
+//// `simple_one_for_one` supervisor that starts a fresh `temporary` worker for
+//// every run. Two tasks due at one instant are two workers. A run that raises
+//// is caught in its worker and recorded as a failure (`failures`, `lastError`);
+//// the timer is untouched and the next fire keeps its schedule.
+////
+//// NO POOL, AND NO POOL-SIZE KEY. A process costs a few hundred bytes and is
+//// started per execution, so there is nothing to size: a key sizing a pool
+//// would either do nothing or introduce a queue that does not otherwise exist.
+//// Spring's and Quartz's thread-count properties are not ported, on purpose.
+////
+//// `@Task` IS NOT THE PARALLELISM. `@Task<T>` lowers eagerly on erlang; a task
+//// returning a future would gain nothing. Parallelism is process count.
+////
+//// THE KEYS (read by `startScheduling()`, after configuration is loaded):
+////
+////   rakun.scheduling.enabled          true   start the scheduler at boot; false
+////                                            registers every task, starts none
+////   rakun.scheduling.<task>.enabled   true   start one task
+////   rakun.scheduling.<task>.cron      —      replace the compiled expression of a
+////                                            cron task without a rebuild
+////   rakun.scheduling.<task>.overlap   skip   skip | allow: a run due while the
+////                                            previous is in flight is skipped
+////                                            (and counted `missed`) or started
+////   rakun.scheduling.timezone         UTC    the zone cron is evaluated in
+////
+//// Every value is checked before any timer starts, and a bad one REFUSES THE
+//// BOOT naming the key: a flag other than true/false, an overlap other than
+//// skip/allow, an unparseable cron override, a cron override on a fixed-rate or
+//// fixed-delay task, and a timezone other than `UTC`/`Z`/`GMT` or a fixed
+//// offset `+HH:MM`/`-HH:MM`. Named zones (`Europe/Paris`) are refused: the BEAM
+//// ships no zone database, and a zone the scheduler cannot evaluate must not
+//// become a schedule that silently runs in UTC.
+////
+//// A MISSED FIRE (the timer was down, the node was busy) does not run late and
+//// does not run twice to catch up; it is counted in `missed`. Catch-up is a
+//// durability question, and durability is front 84's.
+////
+//// SHUTDOWN. `stopScheduling()` stops every timer (no run starts after it
+//// returns), then waits for the runs in flight up to
+//// `rakun.lifecycle.timeout-per-shutdown-phase` (front 07's key, default
+//// 20000 ms), and answers how many were still running. An application calls it
+//// before rakun-web's `gracefulShutdown()` (or from a `#[preDestroy]`).
+////
+//// THE TEST CLOCK. `rkSchedClockSet(millis)` fixes the scheduler's "now";
+//// under it a timer never wakes on its own and fires only when
+//// `rkSchedTick(millis)` moves the clock, so no test waits on wall-clock time.
+
+import {rkProp} from "rakun";
+import {shutdownTimeout} from "rakun-web";
+import {Cron, cronProblem, compileCron, cronWire} from "cron";
+import {TaskInfo, taskNames, rkTaskInfo} from "registry";
+
+// ── the host cells ──────────────────────────────────────────────────────────
+
+#[@External.Erlang("rakun_scheduling", "configure")]
+pub declare fn rkSchedConfigure(name: string, enabled: bool, overlap: string, expression: string, wire: string) -> i32;
+
+// `names` is newline-joined; answers how many timers started.
+#[@External.Erlang("rakun_scheduling", "start")]
+pub declare fn rkSchedStart(names: string, enabled: bool, offsetMinutes: i32) -> i32;
+
+#[@External.Erlang("rakun_scheduling", "stop")]
+pub declare fn rkSchedStop() -> i32;
+
+#[@External.Erlang("rakun_scheduling", "started")]
+pub declare fn rkSchedStarted() -> bool;
+
+#[@External.Erlang("rakun_scheduling", "global_enabled")]
+pub declare fn rkSchedGlobalEnabled() -> bool;
+
+// Moves the (virtual) clock to `at` and lets every started timer fire what is
+// due; answers how many runs started. Does not wait for them.
+#[@External.Erlang("rakun_scheduling", "tick")]
+pub declare fn rkSchedTick(at: i64) -> i32;
+
+// Waits until no run is in flight, up to `timeoutMillis`; answers how many are.
+#[@External.Erlang("rakun_scheduling", "await_idle")]
+pub declare fn rkSchedAwaitIdle(timeoutMillis: i32) -> i32;
+
+#[@External.Erlang("rakun_scheduling", "in_flight")]
+pub declare fn rkSchedInFlight(name: string) -> i32;
+
+#[@External.Erlang("rakun_scheduling", "clock_set")]
+pub declare fn rkSchedClockSet(at: i64) -> i32;
+
+#[@External.Erlang("rakun_scheduling", "clock_clear")]
+pub declare fn rkSchedClockClear() -> i32;
+
+#[@External.Erlang("rakun_scheduling", "now")]
+pub declare fn rkSchedNow() -> i64;
+
+#[@External.Erlang("rakun_scheduling", "timer_alive")]
+pub declare fn rkSchedTimerAlive(name: string) -> bool;
+
+// Kills a task's timer and waits for its supervisor to start another; 1 when a
+// different, live timer took its place.
+#[@External.Erlang("rakun_scheduling", "kill_timer")]
+pub declare fn rkSchedKillTimer(name: string) -> i32;
+
+// The process a task body runs in, as text.
+#[@External.Erlang("rakun_scheduling", "run_pid")]
+pub declare fn rkTaskRunPid() -> string;
+
+// A named latch: `rkSchedGateWait` blocks until `rkSchedGateOpen` is called for
+// the key, or answers false after `timeoutMillis`. How a test holds a run in
+// flight, or proves two runs overlap, without sleeping.
+#[@External.Erlang("rakun_scheduling", "gate_wait")]
+pub declare fn rkSchedGateWait(key: string, timeoutMillis: i32) -> bool;
+
+#[@External.Erlang("rakun_scheduling", "gate_open")]
+pub declare fn rkSchedGateOpen(key: string) -> i32;
+
+#[@External.Erlang("rakun_scheduling", "gate_reset")]
+pub declare fn rkSchedGateReset(key: string) -> i32;
+
+// ── the refusals ────────────────────────────────────────────────────────────
+
+pub fn flagProblem(key: string, raw: string) -> string {
+    return "rakun-scheduling: " + key + " is `" + raw + "` - it is true or false";
+}
+
+pub fn overlapProblem(key: string, raw: string) -> string {
+    return "rakun-scheduling: " + key + " is `" + raw + "` - it is skip or allow";
+}
+
+pub fn cronOverrideProblem(key: string, raw: string, problem: string) -> string {
+    return "rakun-scheduling: " + key + " is `" + raw + "` and does not compile: " + problem;
+}
+
+pub fn cronOnFixedProblem(key: string, trigger: string) -> string {
+    return "rakun-scheduling: " + key + " is set, but the task is a " + trigger + " task - only a #[scheduled] task has a cron expression to replace";
+}
+
+pub fn timezoneProblem(raw: string) -> string {
+    return "rakun-scheduling: rakun.scheduling.timezone is `" + raw + "` - it is UTC or a fixed offset such as +02:00; named zones are refused because the BEAM ships no zone database";
+}
+
+// ── reading the keys ────────────────────────────────────────────────────────
+
+fn flag(key: string) -> bool {
+    val raw: string = rkProp(key).trim();
+    val t = raw.toLower();
+    if ((t == "") || (t == "true")) return true;
+    if (t == "false") return false;
+    @panic(flagProblem(key, raw));
+    return false;
+}
+
+pub fn overlapOf(name: string) -> string {
+    val key = "rakun.scheduling." + name + ".overlap";
+    val raw: string = rkProp(key).trim();
+    val t = raw.toLower();
+    if ((t == "") || (t == "skip")) return "skip";
+    if (t == "allow") return "allow";
+    @panic(overlapProblem(key, raw));
+    return "skip";
+}
+
+fn digit(c: string) -> i32 {
+    if (c == "") return -1;
+    return "0123456789".indexOf(c);
+}
+
+// Minutes east of UTC for `rakun.scheduling.timezone`.
+pub fn timezoneOffsetMinutes() -> i32 {
+    val raw: string = rkProp("rakun.scheduling.timezone").trim();
+    val up = raw.toUpper();
+    if ((up == "") || (up == "UTC") || (up == "Z") || (up == "GMT")) return 0;
+    val cs: string[] = raw.split("");
+    val sign: string = cs.at(0) ?? "";
+    val h1 = digit(cs.at(1) ?? "");
+    val h2 = digit(cs.at(2) ?? "");
+    val colon: string = cs.at(3) ?? "";
+    val m1 = digit(cs.at(4) ?? "");
+    val m2 = digit(cs.at(5) ?? "");
+    val shaped = (cs.length == 6) && ((sign == "+") || (sign == "-")) && (colon == ":") && (h1 >= 0) && (h2 >= 0) && (m1 >= 0) && (m2 >= 0);
+    if (shaped == false) @panic(timezoneProblem(raw));
+    val hours = h1 * 10 + h2;
+    val minutes = m1 * 10 + m2;
+    if ((hours > 14) || (minutes > 59)) @panic(timezoneProblem(raw));
+    val total = hours * 60 + minutes;
+    return if (sign == "-") 0 - total else total;
+}
+
+// The configured cron expression of `name`: its override, or "" for the
+// compiled one. Refuses a bad override naming the key.
+fn cronOverride(name: string, trigger: string) -> string {
+    val key = "rakun.scheduling." + name + ".cron";
+    val raw: string = rkProp(key).trim();
+    if (raw == "") return "";
+    if (trigger != "cron") @panic(cronOnFixedProblem(key, trigger));
+    val problem: string = cronProblem(raw);
+    if (problem != "") @panic(cronOverrideProblem(key, raw, problem));
+    return raw;
+}
+
+// ── start and stop ──────────────────────────────────────────────────────────
+
+// Applies the configuration to `names` and starts their timers (none when
+// `rakun.scheduling.enabled` is false). Every key is checked first; a bad one
+// raises before anything starts. Answers how many timers started. Starting
+// again restarts the named timers from now.
+pub fn startTasks(names: string[]) -> i32 {
+    val enabled: bool = flag("rakun.scheduling.enabled");
+    val offset: i32 = timezoneOffsetMinutes();
+    for (names) { name ->
+        val info: TaskInfo = rkTaskInfo(name);
+        val on: bool = flag("rakun.scheduling." + name + ".enabled");
+        val overlap: string = overlapOf(name);
+        val expr: string = cronOverride(name, info.trigger);
+        val wire: string = if (expr == "") "" else cronWire(compileCron(expr));
+        val _c = rkSchedConfigure(name, on, overlap, expr, wire);
+    };
+    return rkSchedStart(names.join("\n"), enabled, offset);
+}
+
+// Every registered task. The boot call: after configuration is loaded, and
+// after the application module's registrations ran.
+pub fn startScheduling() -> i32 {
+    return startTasks(taskNames());
+}
+
+// Stops every timer, then waits for the runs in flight up to front 07's
+// per-phase shutdown timeout; answers how many were still running.
+pub fn stopScheduling() -> i32 {
+    val _s = rkSchedStop();
+    return rkSchedAwaitIdle(shutdownTimeout());
+}

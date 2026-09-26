@@ -1,0 +1,176 @@
+//// rakun-scheduling — the milestone's schedule scenarios (test-snap.md,
+//// `16-rakun-scheduling`), in the snapshot's own rendering.
+////
+//// `assertSchedule(names, ticks)` renders `task <name> <trigger> <expr>` for the
+//// named tasks, sorted, a blank line, then `<t> fire <name>` for every task
+//// that ran at each tick. The clock is the fixed test clock
+//// (`2026-01-01T00:00:00Z`, a Thursday, is t0): the scheduler is started at t0
+//// under a virtual clock, a tick moves the clock there, and the tick `run <name>`
+//// is `rkRunTaskNow(name)` at the current instant. No test sleeps.
+////
+//// Every scenario's type sits at module level (the registrations run when this
+//// module loads). A scenario starts ONLY its own tasks (`startTasks(names)`),
+//// and stops the scheduler and clears the clock before it returns.
+
+import {testing.asserts, io.clock} from "std";
+import {service, rkScan, rkSingleton, rkEnter, rkDone} from "rakun";
+import {scheduler, scheduled, fixedRate, fixedDelay} from "markers";
+import {rkScheduleCron, rkScheduleFixedRate, rkScheduleFixedDelay, rkRunTaskNow, rkTaskInfo, TaskInfo, scheduleListing} from "registry";
+import {rkFormatUtc, rkI64} from "cron";
+import {startTasks, rkSchedStop, rkSchedTick, rkSchedAwaitIdle, rkSchedClockSet, rkSchedClockClear, rkSchedNow} from "executor";
+
+#[service]
+#[scheduler]
+pub type HousekeepingService {
+    #[scheduled("0 0 * * * *")]
+    pub fn pruneSessions(self: Self) -> i32 {
+        return 0;
+    }
+
+    #[fixedRate(5000)]
+    pub fn heartbeat(self: Self) -> i32 {
+        return 0;
+    }
+
+    #[fixedDelay(30000)]
+    pub fn compact(self: Self) -> i32 {
+        return 0;
+    }
+}
+
+#[service]
+#[scheduler]
+pub type Pulse {
+    #[fixedRate(5000)]
+    pub fn beat(self: Self) -> i32 {
+        return 0;
+    }
+}
+
+#[service]
+#[scheduler]
+pub type Sampler {
+    #[scheduled("*/15 * * * * *")]
+    pub fn sample(self: Self) -> i32 {
+        return 0;
+    }
+}
+
+#[service]
+#[scheduler]
+pub type OfficeHours {
+    #[scheduled("0 30 9-17 * * 1-5")]
+    pub fn halfPast(self: Self) -> i32 {
+        return 0;
+    }
+}
+
+#[service]
+#[scheduler]
+pub type Calendar {
+    #[scheduled("0 0 0 1 * ?")]
+    pub fn monthly(self: Self) -> i32 {
+        return 0;
+    }
+
+    #[scheduled("0 0 0 1 1 ?")]
+    pub fn yearly(self: Self) -> i32 {
+        return 0;
+    }
+
+    #[scheduled("0 0 0 29 2 ?")]
+    pub fn leapDay(self: Self) -> i32 {
+        return 0;
+    }
+}
+
+#[service]
+#[scheduler]
+pub type Reports {
+    #[scheduled("0 0 6,18 * * ?")]
+    pub fn digest(self: Self) -> i32 {
+        return 0;
+    }
+}
+
+fn instant(iso: string) -> i64 {
+    return clock.parseIso8601(iso).unwrapOr(rkI64(0));
+}
+
+fn runsOf(name: string) -> i32 {
+    val t: TaskInfo = rkTaskInfo(name);
+    return t.runs;
+}
+
+// `before` holds `<name>=<runs>` per task; a task whose count moved fired.
+fn fireLines(names: string[], before: string[], at: string) -> string[] {
+    var out: string[] = [];
+    for (names) { n ->
+        if (before.indexOf(n + "=" + runsOf(n).toString()) < 0) out.push(at + " fire " + n);
+    };
+    return out;
+}
+
+fn simulate(names: string[], ticks: string[]) -> string {
+    val _s = rkSchedStop();
+    val _c = rkSchedClockSet(instant("2026-01-01T00:00:00Z"));
+    val _t = startTasks(names);
+    var lines: string[] = [];
+    for (ticks) { tick ->
+        var before: string[] = [];
+        for (names) { n -> before.push(n + "=" + runsOf(n).toString()) };
+        val manual = tick.startsWith("run ");
+        val at: string = if (manual) rkFormatUtc(rkSchedNow()) else tick;
+        if (manual) {
+            val _r = rkRunTaskNow(tick.replace("run ", ""));
+        } else {
+            val _k = rkSchedTick(instant(tick));
+        };
+        val _i = rkSchedAwaitIdle(5000);
+        for (fireLines(names, before, at)) { l -> lines.push(l) };
+    };
+    val _e = rkSchedStop();
+    val _x = rkSchedClockClear();
+    return scheduleListing(names) + "\n\n" + lines.join("\n");
+}
+
+fn sorted(names: string[]) -> string[] {
+    return scheduleListing(names).split("\n").map({ l -> l.split(" ").at(1) ?? "" });
+}
+
+test "schedule: three markers register three tasks and each fires on its own trigger" {
+    val names = sorted(["HousekeepingService.pruneSessions", "HousekeepingService.heartbeat", "HousekeepingService.compact"]);
+    val out = simulate(names, ["2026-01-01T00:00:05Z", "2026-01-01T00:00:30Z", "2026-01-01T01:00:00Z"]);
+    try asserts.equals(out, "task HousekeepingService.compact fixedDelay 30000\ntask HousekeepingService.heartbeat fixedRate 5000\ntask HousekeepingService.pruneSessions cron 0 0 * * * *\n\n2026-01-01T00:00:05Z fire HousekeepingService.heartbeat\n2026-01-01T00:00:30Z fire HousekeepingService.compact\n2026-01-01T00:00:30Z fire HousekeepingService.heartbeat\n2026-01-01T01:00:00Z fire HousekeepingService.compact\n2026-01-01T01:00:00Z fire HousekeepingService.heartbeat\n2026-01-01T01:00:00Z fire HousekeepingService.pruneSessions");
+}
+
+test "schedule: a fixed rate fires from the previous start" {
+    val out = simulate(["Pulse.beat"], ["2026-01-01T00:00:05Z", "2026-01-01T00:00:07Z", "2026-01-01T00:00:10Z", "2026-01-01T00:00:15Z"]);
+    try asserts.equals(out, "task Pulse.beat fixedRate 5000\n\n2026-01-01T00:00:05Z fire Pulse.beat\n2026-01-01T00:00:10Z fire Pulse.beat\n2026-01-01T00:00:15Z fire Pulse.beat");
+}
+
+test "schedule: a step expression fires every fifteen seconds" {
+    val out = simulate(["Sampler.sample"], ["2026-01-01T00:00:15Z", "2026-01-01T00:00:20Z", "2026-01-01T00:00:30Z", "2026-01-01T00:00:45Z", "2026-01-01T00:01:00Z"]);
+    try asserts.equals(out, "task Sampler.sample cron */15 * * * * *\n\n2026-01-01T00:00:15Z fire Sampler.sample\n2026-01-01T00:00:30Z fire Sampler.sample\n2026-01-01T00:00:45Z fire Sampler.sample\n2026-01-01T00:01:00Z fire Sampler.sample");
+}
+
+test "schedule: a range and a weekday list fire on a thursday and not on a saturday" {
+    val out = simulate(["OfficeHours.halfPast"], ["2026-01-01T09:30:00Z", "2026-01-01T17:30:00Z", "2026-01-01T18:30:00Z", "2026-01-03T09:30:00Z", "2026-01-05T09:30:00Z"]);
+    try asserts.equals(out, "task OfficeHours.halfPast cron 0 30 9-17 * * 1-5\n\n2026-01-01T09:30:00Z fire OfficeHours.halfPast\n2026-01-01T17:30:00Z fire OfficeHours.halfPast\n2026-01-05T09:30:00Z fire OfficeHours.halfPast");
+}
+
+test "schedule: next fire crosses a month a year and a leap day" {
+    val names = sorted(["Calendar.monthly", "Calendar.yearly", "Calendar.leapDay"]);
+    val out = simulate(names, ["2026-02-01T00:00:00Z", "2027-01-01T00:00:00Z", "2027-02-28T00:00:00Z", "2028-02-29T00:00:00Z"]);
+    try asserts.equals(out, "task Calendar.leapDay cron 0 0 0 29 2 ?\ntask Calendar.monthly cron 0 0 0 1 * ?\ntask Calendar.yearly cron 0 0 0 1 1 ?\n\n2026-02-01T00:00:00Z fire Calendar.monthly\n2027-01-01T00:00:00Z fire Calendar.monthly\n2027-01-01T00:00:00Z fire Calendar.yearly\n2028-02-29T00:00:00Z fire Calendar.leapDay");
+}
+
+test "schedule: rkRunTaskNow fires a task once out of band" {
+    val out = simulate(["HousekeepingService.pruneSessions"], ["run HousekeepingService.pruneSessions", "2026-01-01T00:30:00Z", "2026-01-01T01:00:00Z"]);
+    try asserts.equals(out, "task HousekeepingService.pruneSessions cron 0 0 * * * *\n\n2026-01-01T00:00:00Z fire HousekeepingService.pruneSessions\n2026-01-01T01:00:00Z fire HousekeepingService.pruneSessions");
+}
+
+test "schedule: a scheduler type with a list expression fires at both instants" {
+    val out = simulate(["Reports.digest"], ["2026-01-01T06:00:00Z", "2026-01-01T12:00:00Z", "2026-01-01T18:00:00Z", "2026-01-02T06:00:00Z"]);
+    try asserts.equals(out, "task Reports.digest cron 0 0 6,18 * * ?\n\n2026-01-01T06:00:00Z fire Reports.digest\n2026-01-01T18:00:00Z fire Reports.digest\n2026-01-02T06:00:00Z fire Reports.digest");
+}

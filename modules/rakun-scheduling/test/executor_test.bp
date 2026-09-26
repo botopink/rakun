@@ -1,0 +1,371 @@
+//// rakun-scheduling — the executor (front 16 Step 4).
+////
+//// No test sleeps. The scheduler runs under the virtual clock (t0 =
+//// `2026-01-01T00:00:00Z`); a timer fires only when `rkSchedTick` moves the clock
+//// to an instant. A run that must still be in flight is HELD on a gate
+//// (`rkSchedGateWait`), and released with `rkSchedGateOpen`; two runs prove they
+//// overlap by each waiting on a gate only the other opens.
+////
+//// Each test starts only its own tasks (`startTasks(names)`), and `finish()`
+//// stops the scheduler, clears the clock and every property the test set.
+
+import {testing.asserts, io: {clock, fs}} from "std";
+import {service, rkScan, rkSingleton, rkEnter, rkDone, rkSetProp, rkProp} from "rakun";
+import {scheduler, scheduled, fixedRate, fixedDelay} from "markers";
+import {rkScheduleCron, rkScheduleFixedRate, rkScheduleFixedDelay, rkTaskInfo, TaskInfo, rkTaskExists} from "registry";
+import {rkI64} from "cron";
+import {
+    startTasks,
+    stopScheduling,
+    rkSchedStop,
+    rkSchedStarted,
+    rkSchedGlobalEnabled,
+    rkSchedTick,
+    rkSchedAwaitIdle,
+    rkSchedClockSet,
+    rkSchedClockClear,
+    rkSchedTimerAlive,
+    rkSchedKillTimer,
+    rkSchedInFlight,
+    rkTaskRunPid,
+    rkSchedGateWait,
+    rkSchedGateOpen,
+    rkSchedGateReset,
+} from "executor";
+
+#[service]
+#[scheduler]
+pub type Twins {
+    #[fixedRate(1000)]
+    pub fn left(self: Self) -> i32 {
+        return meet("left", "right");
+    }
+
+    #[fixedRate(1000)]
+    pub fn right(self: Self) -> i32 {
+        return meet("right", "left");
+    }
+}
+
+#[service]
+#[scheduler]
+pub type Flaky {
+    #[fixedRate(1000)]
+    pub fn sometimes(self: Self) -> i32 {
+        return maybeRaise();
+    }
+}
+
+#[service]
+#[scheduler]
+pub type Slow {
+    #[fixedRate(1000)]
+    pub fn hold(self: Self) -> i32 {
+        val released = rkSchedGateWait("slow.release", 5000);
+        return if (released) 1 else 0;
+    }
+}
+
+#[service]
+#[scheduler]
+pub type Nightly {
+    #[scheduled("0 0 3 * * *")]
+    pub fn compact(self: Self) -> i32 {
+        return 0;
+    }
+
+    #[fixedDelay(1000)]
+    pub fn sweep(self: Self) -> i32 {
+        return 0;
+    }
+}
+
+// Opens this side's gate, then waits for the other side's: both answer 1 only
+// when both runs are in flight at once.
+fn meet(me: string, other: string) -> i32 {
+    val _p = rkSetProp("test.twins." + me + ".pid", rkTaskRunPid());
+    val _o = rkSchedGateOpen("twins." + me);
+    val met = rkSchedGateWait("twins." + other, 3000);
+    return if (met) 1 else 0;
+}
+
+fn maybeRaise() -> i32 {
+    if (rkProp("test.flaky.raise") == "1") @panic("flaky: the disk is full");
+    return 3;
+}
+
+fn t(seconds: i32) -> i64 {
+    val base = clock.parseIso8601("2026-01-01T00:00:00Z").unwrapOr(rkI64(0));
+    return base + rkI64(seconds * 1000);
+}
+
+fn begin(names: string[]) -> i32 {
+    val _s = rkSchedStop();
+    val _c = rkSchedClockSet(t(0));
+    return startTasks(names);
+}
+
+fn finish(props: string[]) -> i32 {
+    val _s = rkSchedStop();
+    val _i = rkSchedAwaitIdle(5000);
+    val _c = rkSchedClockClear();
+    for (props) { p -> val _x = rkSetProp(p, "") };
+    return 0;
+}
+
+fn info(name: string) -> TaskInfo {
+    return rkTaskInfo(name);
+}
+
+// ── processes ───────────────────────────────────────────────────────────────
+
+test "executor: two tasks due at the same instant run in two processes and neither delays the other" {
+    val _g1 = rkSchedGateReset("twins.left");
+    val _g2 = rkSchedGateReset("twins.right");
+    assert begin(["Twins.left", "Twins.right"]) == 2;
+    assert rkSchedTick(t(1)) == 2;
+    assert rkSchedAwaitIdle(5000) == 0;
+    val l: TaskInfo = info("Twins.left");
+    val r: TaskInfo = info("Twins.right");
+    val lp = rkProp("test.twins.left.pid");
+    val rp = rkProp("test.twins.right.pid");
+    val _f = finish(["test.twins.left.pid", "test.twins.right.pid"]);
+    assert l.lastResult == 1;
+    assert r.lastResult == 1;
+    assert lp != rp;
+    assert lp != rkTaskRunPid();
+    assert rp != rkTaskRunPid();
+}
+
+// ── failure, and the supervisor ─────────────────────────────────────────────
+
+test "executor: a task that raises is recorded as a failure and the next fire keeps its schedule" {
+    val before: TaskInfo = info("Flaky.sometimes");
+    val _r = rkSetProp("test.flaky.raise", "1");
+    assert begin(["Flaky.sometimes"]) == 1;
+    assert rkSchedTick(t(1)) == 1;
+    assert rkSchedAwaitIdle(5000) == 0;
+    val failed: TaskInfo = info("Flaky.sometimes");
+    val alive = rkSchedTimerAlive("Flaky.sometimes");
+    val _ok = rkSetProp("test.flaky.raise", "");
+    assert rkSchedTick(t(2)) == 1;
+    assert rkSchedAwaitIdle(5000) == 0;
+    val recovered: TaskInfo = info("Flaky.sometimes");
+    val _f = finish(["test.flaky.raise"]);
+    assert failed.failures == before.failures + 1;
+    assert failed.lastError.contains("flaky: the disk is full");
+    assert failed.nextFireAt == t(2);
+    assert alive;
+    assert recovered.runs == before.runs + 2;
+    assert recovered.lastResult == 3;
+    assert recovered.lastError == "";
+}
+
+test "executor: a dead timer is restarted by its supervisor and fires on schedule" {
+    val before: TaskInfo = info("Flaky.sometimes");
+    assert begin(["Flaky.sometimes"]) == 1;
+    assert rkSchedKillTimer("Flaky.sometimes") == 1;
+    val alive = rkSchedTimerAlive("Flaky.sometimes");
+    val kept: TaskInfo = info("Flaky.sometimes");
+    assert rkSchedTick(t(1)) == 1;
+    assert rkSchedAwaitIdle(5000) == 0;
+    val after: TaskInfo = info("Flaky.sometimes");
+    val _f = finish([]);
+    assert alive;
+    assert kept.nextFireAt == t(1);
+    assert after.runs == before.runs + 1;
+}
+
+// ── overlap ─────────────────────────────────────────────────────────────────
+
+test "executor: overlap skip does not start a run while the previous is in flight and counts it missed" {
+    val _g = rkSchedGateReset("slow.release");
+    val before: TaskInfo = info("Slow.hold");
+    assert begin(["Slow.hold"]) == 1;
+    assert rkSchedTick(t(1)) == 1;
+    assert rkSchedTick(t(2)) == 0;
+    val during: TaskInfo = info("Slow.hold");
+    val _o = rkSchedGateOpen("slow.release");
+    assert rkSchedAwaitIdle(5000) == 0;
+    val after: TaskInfo = info("Slow.hold");
+    val _f = finish([]);
+    assert during.overlap == "skip";
+    assert during.inFlight == 1;
+    assert during.missed == before.missed + 1;
+    assert after.runs == before.runs + 1;
+    assert after.lastResult == 1;
+}
+
+test "executor: overlap allow starts the next run while the previous is in flight" {
+    val _g = rkSchedGateReset("slow.release");
+    val _p = rkSetProp("rakun.scheduling.Slow.hold.overlap", "allow");
+    val before: TaskInfo = info("Slow.hold");
+    assert begin(["Slow.hold"]) == 1;
+    assert rkSchedTick(t(1)) == 1;
+    assert rkSchedTick(t(2)) == 1;
+    val during: TaskInfo = info("Slow.hold");
+    val _o = rkSchedGateOpen("slow.release");
+    assert rkSchedAwaitIdle(5000) == 0;
+    val after: TaskInfo = info("Slow.hold");
+    val _f = finish(["rakun.scheduling.Slow.hold.overlap"]);
+    val _r = rkSchedGateReset("slow.release");
+    assert during.overlap == "allow";
+    assert during.inFlight == 2;
+    assert during.missed == before.missed;
+    assert after.runs == before.runs + 2;
+}
+
+test "executor: a fixed delay measures from the previous finish, so it has no next fire while running" {
+    assert begin(["Nightly.sweep"]) == 1;
+    assert info("Nightly.sweep").nextFireAt == t(1);
+    assert rkSchedTick(t(1)) == 1;
+    assert rkSchedAwaitIdle(5000) == 0;
+    val after: TaskInfo = info("Nightly.sweep");
+    val _f = finish([]);
+    assert after.lastFinishedAt == t(1);
+    assert after.nextFireAt == t(2);
+}
+
+// ── configuration ───────────────────────────────────────────────────────────
+
+test "executor: rakun.scheduling.enabled false registers every task and starts none" {
+    val _p = rkSetProp("rakun.scheduling.enabled", "false");
+    val before: TaskInfo = info("Nightly.sweep");
+    val started = begin(["Nightly.compact", "Nightly.sweep"]);
+    val globally = rkSchedGlobalEnabled();
+    val alive = rkSchedTimerAlive("Nightly.sweep");
+    val fired = rkSchedTick(t(1));
+    val after: TaskInfo = info("Nightly.sweep");
+    val _f = finish(["rakun.scheduling.enabled"]);
+    assert started == 0;
+    assert globally == false;
+    assert alive == false;
+    assert fired == 0;
+    assert after.runs == before.runs;
+    assert rkTaskExists("Nightly.compact");
+    assert rkTaskExists("Nightly.sweep");
+}
+
+test "executor: a per-task enabled false starts the other tasks and not that one" {
+    val _p = rkSetProp("rakun.scheduling.Nightly.sweep.enabled", "false");
+    val started = begin(["Nightly.compact", "Nightly.sweep"]);
+    val sweep = rkSchedTimerAlive("Nightly.sweep");
+    val compact = rkSchedTimerAlive("Nightly.compact");
+    val disabled: TaskInfo = info("Nightly.sweep");
+    val _f = finish(["rakun.scheduling.Nightly.sweep.enabled"]);
+    assert started == 1;
+    assert sweep == false;
+    assert compact;
+    assert disabled.enabled == false;
+}
+
+test "executor: a cron override replaces the compiled expression without a rebuild" {
+    val _p = rkSetProp("rakun.scheduling.Nightly.compact.cron", "0 30 * * * *");
+    val before: TaskInfo = info("Nightly.compact");
+    assert begin(["Nightly.compact"]) == 1;
+    val overridden: TaskInfo = info("Nightly.compact");
+    assert rkSchedTick(t(1800)) == 1;
+    assert rkSchedAwaitIdle(5000) == 0;
+    val _x = rkSetProp("rakun.scheduling.Nightly.compact.cron", "");
+    assert begin(["Nightly.compact"]) == 1;
+    val restored: TaskInfo = info("Nightly.compact");
+    val _f = finish([]);
+    assert overridden.expression == "0 30 * * * *";
+    assert overridden.nextFireAt == t(1800);
+    assert info("Nightly.compact").runs == before.runs + 1;
+    assert restored.expression == "0 0 3 * * *";
+    assert restored.nextFireAt == t(10800);
+}
+
+test "executor: an unparseable cron override refuses the boot naming the key, and starts nothing" {
+    val _s = rkSchedStop();
+    val _p = rkSetProp("rakun.scheduling.Nightly.compact.cron", "0 0 25 * * *");
+    try asserts.throwsWith({ ->
+        val _x = startTasks(["Nightly.sweep", "Nightly.compact"]);
+        0;
+    }, "rakun.scheduling.Nightly.compact.cron is `0 0 25 * * *` and does not compile: rakun-scheduling: cron field 3 (hour) token `25`: 25 is outside 0-23");
+    val alive = rkSchedTimerAlive("Nightly.sweep");
+    val _f = finish(["rakun.scheduling.Nightly.compact.cron"]);
+    assert alive == false;
+}
+
+test "executor: a cron override on a fixed-delay task is refused naming the key" {
+    val _p = rkSetProp("rakun.scheduling.Nightly.sweep.cron", "0 0 * * * *");
+    try asserts.throwsWith({ ->
+        val _x = startTasks(["Nightly.sweep"]);
+        0;
+    }, "rakun.scheduling.Nightly.sweep.cron is set, but the task is a fixedDelay task");
+    val _f = finish(["rakun.scheduling.Nightly.sweep.cron"]);
+}
+
+test "executor: a flag, an overlap or a timezone outside its vocabulary refuses the boot naming the key" {
+    val _a = rkSetProp("rakun.scheduling.enabled", "yes");
+    try asserts.throwsWith({ ->
+        val _x = startTasks(["Nightly.sweep"]);
+        0;
+    }, "rakun.scheduling.enabled is `yes` - it is true or false");
+    val _b = rkSetProp("rakun.scheduling.enabled", "");
+    val _c = rkSetProp("rakun.scheduling.Nightly.sweep.overlap", "queue");
+    try asserts.throwsWith({ ->
+        val _x = startTasks(["Nightly.sweep"]);
+        0;
+    }, "rakun.scheduling.Nightly.sweep.overlap is `queue` - it is skip or allow");
+    val _d = rkSetProp("rakun.scheduling.Nightly.sweep.overlap", "");
+    val _e = rkSetProp("rakun.scheduling.timezone", "Europe/Paris");
+    try asserts.throwsWith({ ->
+        val _x = startTasks(["Nightly.sweep"]);
+        0;
+    }, "rakun.scheduling.timezone is `Europe/Paris` - it is UTC or a fixed offset");
+    val _f = finish(["rakun.scheduling.timezone"]);
+}
+
+test "executor: cron is evaluated in the configured timezone" {
+    val _p = rkSetProp("rakun.scheduling.timezone", "+02:00");
+    assert begin(["Nightly.compact"]) == 1;
+    val at: TaskInfo = info("Nightly.compact");
+    val _f = finish(["rakun.scheduling.timezone"]);
+    assert at.nextFireAt == t(3600);
+}
+
+// ── shutdown ────────────────────────────────────────────────────────────────
+
+test "executor: stopScheduling stops every timer and answers the runs still in flight" {
+    assert begin(["Nightly.compact", "Nightly.sweep"]) == 2;
+    assert rkSchedStarted();
+    assert stopScheduling() == 0;
+    val alive = rkSchedTimerAlive("Nightly.sweep");
+    val fired = rkSchedTick(t(1));
+    val _f = finish([]);
+    assert rkSchedStarted() == false;
+    assert alive == false;
+    assert fired == 0;
+}
+
+// ── the module's shape ──────────────────────────────────────────────────────
+
+fn sources() -> string[] {
+    return ["src/root.bp", "src/cron.bp", "src/registry.bp", "src/markers.bp", "src/executor.bp", "src/endpoint.bp", "src/sidecars/rakun_scheduling.erl"];
+}
+
+test "executor: nothing in the module reads or defines a pool-size key" {
+    for (sources()) { path ->
+        val text: string = try fs.readText(path) catch "";
+        assert text != "";
+        assert text.contains("pool-size") == false;
+        assert text.contains("pool.size") == false;
+        assert text.contains("threadCount") == false;
+        assert text.contains("threadPool") == false;
+    };
+}
+
+test "executor: every declared fn is #[@External.Erlang] and no source names External.Node" {
+    for (sources()) { path ->
+        val text: string = try fs.readText(path) catch "";
+        assert text.contains("External.Node") == false;
+        var previous = "";
+        for (text.split("\n")) { line ->
+            if (line.trim().startsWith("pub declare fn") || line.trim().startsWith("declare fn")) assert previous.startsWith("#[@External.Erlang(");
+            if (line.trim() != "") previous = line.trim();
+        };
+    };
+}

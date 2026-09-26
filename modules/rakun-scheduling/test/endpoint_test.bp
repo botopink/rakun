@@ -1,0 +1,184 @@
+//// rakun-scheduling — the `scheduledtasks` endpoint and the `scheduling`
+//// indicator (front 16 Step 5), through front 04's real dispatcher.
+////
+//// Exposure is front 76's; with nothing installed the host exposes only
+//// `health`. A test that needs `scheduledtasks` installs a stand-in decision
+//// (`installExposure({ id -> true })`) and clears it before it returns. The
+//// scheduler runs under the virtual clock; nothing sleeps.
+
+import {testing.asserts, io.clock, json} from "std";
+import {service, rkScan, rkSingleton, rkEnter, rkDone, rkDispatchHttp, Response} from "rakun";
+import {healthIndicatorIds, endpointIds, Health} from "rakun-actuator-api";
+import {mountActuator, installExposure, clearExposure} from "rakun-actuator";
+import {scheduler, fixedRate} from "markers";
+import {rkScheduleFixedRate, rkTaskInfo, TaskInfo, rkForgetTask} from "registry";
+import {rkI64} from "cron";
+import {startTasks, startScheduling, rkSchedStop, rkSchedTick, rkSchedAwaitIdle, rkSchedClockSet, rkSchedClockClear} from "executor";
+import {mountScheduling, schedulingHealth, listingJson} from "endpoint";
+
+#[service]
+#[scheduler]
+pub type Beacon {
+    #[fixedRate(2000)]
+    pub fn flash(self: Self) -> i32 {
+        return 5;
+    }
+}
+
+fn zero() -> i32 {
+    return 0;
+}
+
+fn t(seconds: i32) -> i64 {
+    val base = clock.parseIso8601("2026-01-01T00:00:00Z").unwrapOr(rkI64(0));
+    return base + rkI64(seconds * 1000);
+}
+
+fn get(path: string) -> Response {
+    return rkDispatchHttp("GET", path, "{}", "{}", "");
+}
+
+fn post(path: string) -> Response {
+    return rkDispatchHttp("POST", path, "{}", "{}", "");
+}
+
+fn mount() -> i32 {
+    val _a = mountActuator();
+    return mountScheduling();
+}
+
+fn begin(names: string[]) -> i32 {
+    val _s = rkSchedStop();
+    val _c = rkSchedClockSet(t(0));
+    return startTasks(names);
+}
+
+fn finish() -> i32 {
+    val _s = rkSchedStop();
+    val _i = rkSchedAwaitIdle(5000);
+    val _e = clearExposure();
+    return rkSchedClockClear();
+}
+
+fn iso(millis: i64) -> string {
+    return json.quote(clock.formatIso8601(millis));
+}
+
+// ── registration with front 11 ──────────────────────────────────────────────
+
+test "endpoint: mountScheduling registers the endpoint and the indicator with front 11" {
+    val _m = mount();
+    val _again = mount();
+    assert endpointIds().indexOf("scheduledtasks") >= 0;
+    assert healthIndicatorIds().indexOf("scheduling") >= 0;
+}
+
+// ── the listing ─────────────────────────────────────────────────────────────
+
+test "endpoint: the listing reports trigger, expression, last start and finish, last result, next fire and the counters" {
+    val _m = mount();
+    val before: TaskInfo = rkTaskInfo("Beacon.flash");
+    assert begin(["Beacon.flash"]) == 1;
+    assert rkSchedTick(t(2)) == 1;
+    assert rkSchedAwaitIdle(5000) == 0;
+    val _o = installExposure({ id -> true });
+    val res: Response = get("/actuator/scheduledtasks");
+    val _f = finish();
+    assert res.status == 200;
+    val body = res.body;
+    try asserts.contains(body, "{\"name\":\"Beacon.flash\",\"trigger\":\"fixedRate\",\"expression\":\"2000\",\"enabled\":true,\"overlap\":\"skip\"");
+    try asserts.contains(body, "\"lastStartedAt\":" + iso(t(2)));
+    try asserts.contains(body, "\"lastFinishedAt\":" + iso(t(2)));
+    try asserts.contains(body, "\"lastResult\":5");
+    try asserts.contains(body, "\"nextFireAt\":" + iso(t(4)));
+    try asserts.contains(body, "\"runs\":" + (before.runs + 1).toString());
+    try asserts.contains(body, "\"failures\":" + before.failures.toString());
+    try asserts.contains(body, "\"missed\":" + before.missed.toString());
+    try asserts.startsWith(body, "{\"tasks\":[");
+}
+
+test "endpoint: timestamps are RFC 3339 through clock.formatIso8601, never raw millis, and null for never" {
+    val _m = mount();
+    val _r = rkScheduleFixedRate("zz.never", "Probe.never", 1000, { -> zero() });
+    assert begin(["Beacon.flash"]) == 1;
+    val body = listingJson();
+    val _f = finish();
+    val _x = rkForgetTask("zz.never");
+    val next: string = clock.formatIso8601(t(2));
+    try asserts.contains(body, "\"nextFireAt\":\"" + next + "\"");
+    assert clock.parseIso8601(next).unwrapOr(rkI64(0)) == t(2);
+    try asserts.matches(next, "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-][0-9]{2}:[0-9]{2})$");
+    try asserts.notContains(body, t(2).toString());
+    try asserts.contains(body, "{\"name\":\"zz.never\",\"trigger\":\"fixedRate\",\"expression\":\"1000\",\"enabled\":true,\"overlap\":\"skip\",\"lastStartedAt\":null,\"lastFinishedAt\":null");
+}
+
+// ── the write ───────────────────────────────────────────────────────────────
+
+test "endpoint: POST run on an unknown name answers 404" {
+    val _m = mount();
+    val _o = installExposure({ id -> true });
+    val res: Response = post("/actuator/scheduledtasks/Nobody.here/run");
+    val _f = finish();
+    assert res.status == 404;
+}
+
+test "endpoint: POST run on a known name answers 202 and the run appears in the next listing" {
+    val _m = mount();
+    val before: TaskInfo = rkTaskInfo("Beacon.flash");
+    val _o = installExposure({ id -> true });
+    val res: Response = post("/actuator/scheduledtasks/Beacon.flash/run");
+    assert rkSchedAwaitIdle(5000) == 0;
+    val listing: Response = get("/actuator/scheduledtasks");
+    val _f = finish();
+    assert res.status == 202;
+    try asserts.contains(listing.body, "\"name\":\"Beacon.flash\"");
+    try asserts.contains(listing.body, "\"runs\":" + (before.runs + 1).toString());
+}
+
+test "endpoint: both routes answer front 11's 404 problem when the caller is not authorized" {
+    val _m = mount();
+    val _c = clearExposure();
+    val before: TaskInfo = rkTaskInfo("Beacon.flash");
+    val listing: Response = get("/actuator/scheduledtasks");
+    val run: Response = post("/actuator/scheduledtasks/Beacon.flash/run");
+    val after: TaskInfo = rkTaskInfo("Beacon.flash");
+    val _f = finish();
+    assert listing.status == 404;
+    assert run.status == 404;
+    try asserts.contains(listing.body, "no endpoint registered as scheduledtasks");
+    try asserts.contains(run.body, "no endpoint registered as scheduledtasks");
+    assert after.runs == before.runs;
+}
+
+// ── health ──────────────────────────────────────────────────────────────────
+
+test "endpoint: scheduling health is UP when every enabled task has a live timer" {
+    val _m = mount();
+    val _s = rkSchedStop();
+    val _c = rkSchedClockSet(t(0));
+    val started = startScheduling();
+    val h: Health = schedulingHealth();
+    val _f = finish();
+    assert started > 0;
+    assert h.status == "UP";
+}
+
+test "endpoint: scheduling health is DOWN naming an enabled task whose timer is not alive" {
+    val _m = mount();
+    val _s = rkSchedStop();
+    val _c = rkSchedClockSet(t(0));
+    val _a = startScheduling();
+    val _r = rkScheduleFixedRate("zz.orphan", "Probe.orphan", 1000, { -> zero() });
+    val h: Health = schedulingHealth();
+    val _x = rkForgetTask("zz.orphan");
+    val _f = finish();
+    assert h.status == "DOWN";
+    try asserts.contains(h.details, "\"timersNotRunning\":[\"zz.orphan\"]");
+}
+
+test "endpoint: a stopped scheduler has no timer to miss and is UP saying so" {
+    val _s = rkSchedStop();
+    val h: Health = schedulingHealth();
+    assert h.status == "UP";
+    try asserts.contains(h.details, "\"started\":false");
+}

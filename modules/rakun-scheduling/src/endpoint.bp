@@ -1,0 +1,136 @@
+//// rakun-scheduling — the `scheduledtasks` endpoint and the `scheduling` health
+//// indicator (front 16 Step 5).
+////
+////   GET  <base>/scheduledtasks            every task: trigger, expression, last
+////                                         start/finish/result, next fire, and
+////                                         the run/failure/missed counters
+////   POST <base>/scheduledtasks/{name}/run run one task now: 202, or 404 for a
+////                                         name no task has
+////
+//// ACCESS IS FRONT 11'S, AND ONLY FRONT 11'S. The GET is an ordinary endpoint
+//// registration (`rkRegisterEndpoint("scheduledtasks", …)`), served by the
+//// host's one route and gated by the host's exposure decision. The POST is a
+//// write, and the host's route is `GET <base>/:endpoint` only, so this module
+//// registers the one extra route itself — and gates it through the SAME
+//// decision (`exposed("scheduledtasks")` from rakun-actuator's endpoint host),
+//// answering the host's own 404 problem detail when it is not exposed. There is
+//// no key here that opens either route or gives the POST a second answer
+//// (decision 67): front 76 decides who reaches `/actuator`.
+////
+//// TIMESTAMPS are RFC 3339 through `clock.formatIso8601`, and `null` for
+//// "never". On erlang, std renders them at the host's UTC offset (front 01's
+//// template leaves out `{offset, "Z"}`), which is still RFC 3339 and parses back
+//// to the same instant.
+////
+//// HEALTH. `schedulingHealth()` is `DOWN` when any enabled task of a started,
+//// enabled scheduler has no live timer process, naming the tasks; otherwise
+//// `UP`. A scheduler that was never started, or is disabled, has no timer to
+//// miss and is `UP` with `started`/`enabled` in the details.
+////
+//// `mountScheduling()` registers the three rows (endpoint, indicator, POST
+//// route). A library module's top-level `val` does not run at load on the
+//// erlang row, so the application calls it at boot — after `mountActuator()`,
+//// whose base path the POST route is registered under.
+
+import {Request, Response, rkRegisterRoute} from "rakun";
+import {io.clock, json} from "std";
+import {
+    Health,
+    EndpointResponse,
+    rkRegisterHealthIndicator,
+    rkRegisterEndpoint,
+} from "rakun-actuator-api";
+import {basePath, exposed, notFoundProblem, render} from "rakun-actuator";
+import {rkI64} from "cron";
+import {TaskInfo, taskNames, rkTaskInfo, rkTaskExists, rkRunTaskAsync} from "registry";
+import {rkSchedStarted, rkSchedGlobalEnabled, rkSchedTimerAlive} from "executor";
+
+#[@External.Erlang("rakun_scheduling", "mount_once")]
+pub declare fn rkSchedMountOnce(key: string) -> bool;
+
+// ── the listing ─────────────────────────────────────────────────────────────
+
+fn instant(millis: i64) -> string {
+    if (millis <= rkI64(0)) return "null";
+    return json.quote(clock.formatIso8601(millis));
+}
+
+pub fn taskJson(t: TaskInfo) -> string {
+    return json.object([
+        #("name", json.quote(t.name)),
+        #("trigger", json.quote(t.trigger)),
+        #("expression", json.quote(t.expression)),
+        #("enabled", if (t.enabled) "true" else "false"),
+        #("overlap", json.quote(t.overlap)),
+        #("lastStartedAt", instant(t.lastStartedAt)),
+        #("lastFinishedAt", instant(t.lastFinishedAt)),
+        #("lastResult", t.lastResult.toString()),
+        #("nextFireAt", instant(t.nextFireAt)),
+        #("runs", t.runs.toString()),
+        #("failures", t.failures.toString()),
+        #("missed", t.missed.toString()),
+        #("inFlight", t.inFlight.toString()),
+    ]);
+}
+
+// `{"tasks":[…]}`, sorted by name.
+pub fn listingJson() -> string {
+    var items: string[] = [];
+    for (taskNames()) { n -> items.push(taskJson(rkTaskInfo(n))) };
+    return json.object([#("tasks", json.array(items))]);
+}
+
+pub fn scheduledTasksRead(req: Request) -> EndpointResponse {
+    return EndpointResponse(status: 200, contentType: "application/json", body: listingJson());
+}
+
+// ── the write ───────────────────────────────────────────────────────────────
+
+pub fn runPath() -> string {
+    return basePath() + "/scheduledtasks/:name/run";
+}
+
+// Both operations as one handler over a `Request`: a request on the run path
+// (`…/scheduledtasks/{name}/run`, the POST route) runs the task, any other
+// answers the listing. It reads the path, not `req.method`: the runtime hands
+// the verb over as text while `Request` declares it an `HttpMethod`, so an enum
+// comparison never matches on erlang. Refused, with the host's 404 problem,
+// whenever the host does not expose `scheduledtasks`.
+pub fn scheduledTasksEndpoint(req: Request) -> Response {
+    if (exposed("scheduledtasks") == false) return notFoundProblem("scheduledtasks", req.path);
+    val name: string = req.param("name");
+    val isRun = (name != "") && req.path.endsWith("/" + name + "/run");
+    if (isRun == false) return render(scheduledTasksRead(req));
+    if (rkTaskExists(name) == false) return notFoundProblem("scheduledtasks/" + name, req.path);
+    val _r = rkRunTaskAsync(name);
+    return Response.withStatus(202, json.object([#("task", json.quote(name)), #("accepted", "true")]));
+}
+
+// ── health ──────────────────────────────────────────────────────────────────
+
+pub fn schedulingHealth() -> Health {
+    val started: bool = rkSchedStarted();
+    val enabled: bool = rkSchedGlobalEnabled();
+    var dead: string[] = [];
+    if (started && enabled) {
+        for (taskNames()) { n ->
+            val t: TaskInfo = rkTaskInfo(n);
+            if (t.enabled && (rkSchedTimerAlive(n) == false)) dead.push(n);
+        };
+    };
+    var quoted: string[] = [];
+    for (dead) { n -> quoted.push(json.quote(n)) };
+    val common = [#("started", if (started) "true" else "false"), #("enabled", if (enabled) "true" else "false")];
+    if (dead.length > 0) return Health(status: "DOWN", details: json.object([#("started", "true"), #("enabled", "true"), #("timersNotRunning", json.array(quoted))]));
+    return Health(status: "UP", details: json.object(common));
+}
+
+// ── mounting ────────────────────────────────────────────────────────────────
+
+pub fn mountScheduling() -> i32 {
+    val _h = rkRegisterHealthIndicator("scheduling", "rakun-scheduling", { -> schedulingHealth() });
+    val _e = rkRegisterEndpoint("scheduledtasks", "rakun-scheduling", "read,write", { req -> scheduledTasksRead(req) });
+    val path: string = runPath();
+    if (rkSchedMountOnce("route " + path) == false) return 0;
+    return rkRegisterRoute("POST", path, { req -> scheduledTasksEndpoint(req) });
+}

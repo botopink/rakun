@@ -34,7 +34,7 @@ refusal is the core's `config_check.bp`.
 | [rakun-hateoas](./rakun-hateoas/) | root · hal | erlang | `-hateoas` | 21 | real code, 14 tests |
 | [rakun-logging](./rakun-logging/) | root · cells · levels · formats · correlation · logging · digest · setup · endpoints | erlang | `-logging` | 17 | real code, 54 tests |
 | [rakun-messaging](./rakun-messaging/) | root | erlang | `-amqp` / `-kafka` / `-activemq` / `-artemis` | 15 · 86 · 90 | scaffold |
-| [rakun-scheduling](./rakun-scheduling/) | root | erlang | `@Scheduled` / `-quartz` | 16 · 84 | scaffold |
+| [rakun-scheduling](./rakun-scheduling/) | root · cron · registry · markers · executor · endpoint | erlang | `@Scheduled` / `-quartz` | 16 · 84 | real code, 67 tests |
 | [rakun-security](./rakun-security/) | root | erlang | `-security`, `-oauth2-client`, `-saml2` | 10 · 79 | scaffold |
 | [rakun-session](./rakun-session/) | root | erlang | `spring-session-jdbc` / `-data-redis` | 18 | scaffold |
 | [rakun-test](./rakun-test/) | root | erlang | `-test` | 19 | empty `pub` surface, 1 inline test |

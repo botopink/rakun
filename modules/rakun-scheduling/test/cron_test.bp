@@ -1,0 +1,121 @@
+//// rakun-scheduling — the cron parser and the next-fire walk (front 16 Step 3).
+////
+//// Every instant here is computed from a FIXED reference (`2026-01-01T00:00:00Z`,
+//// a Thursday, unless a test names another); nothing reads the wall clock.
+//// The comptime half of the refusal corpus — the same inputs through
+//// `#[scheduled]` — is `build_test.bp`.
+
+import {testing.asserts, io.clock} from "std";
+import {Cron, parseCron, cronProblem, cronWire, nextFire, rkFormatUtc, rkI64} from "cron";
+
+fn at(iso: string) -> i64 {
+    return clock.parseIso8601(iso).unwrapOr(rkI64(0));
+}
+
+fn next(expr: string, reference: string) -> string {
+    return nextOffset(expr, reference, 0);
+}
+
+fn nextOffset(expr: string, reference: string, offset: i32) -> string {
+    val problem = cronProblem(expr);
+    if (problem != "") return problem;
+    val c: Cron = parseCron(expr).unwrapOr(Cron(expression: "", seconds: [], minutes: [], hours: [], days: [], months: [], weekdays: []));
+    return rkFormatUtc(nextFire(c, at(reference), offset));
+}
+
+// ── acceptance ──────────────────────────────────────────────────────────────
+
+test "cron: the four reference expressions parse and fire at the expected next instant" {
+    try asserts.equals(next("0 0 * * * *", "2026-01-01T00:00:00Z"), "2026-01-01T01:00:00Z");
+    try asserts.equals(next("*/15 * * * * *", "2026-01-01T00:00:00Z"), "2026-01-01T00:00:15Z");
+    try asserts.equals(next("0 30 9-17 * * 1-5", "2026-01-01T00:00:00Z"), "2026-01-01T09:30:00Z");
+    try asserts.equals(next("0 0 0 1 1 ?", "2026-01-01T00:00:00Z"), "2027-01-01T00:00:00Z");
+}
+
+test "cron: a field compiles to its ascending value list, 7 read as Sunday" {
+    val c: Cron = try parseCron("0,30 */20 9-11 1,15 1-12/6 5-7");
+    assert c.seconds == [0, 30];
+    assert c.minutes == [0, 20, 40];
+    assert c.hours == [9, 10, 11];
+    assert c.days == [1, 15];
+    assert c.months == [1, 7];
+    assert c.weekdays == [0, 5, 6];
+    try asserts.equals(cronWire(c), "0,30|0,20,40|9,10,11|1,15|1,7|0,5,6");
+}
+
+test "cron: a number before a step runs to the end of the field" {
+    val c: Cron = try parseCron("5/20 * * * * *");
+    assert c.seconds == [5, 25, 45];
+}
+
+test "cron: a weekday range skips the weekend - friday evening to monday morning" {
+    try asserts.equals(next("0 30 9-17 * * 1-5", "2026-01-02T17:30:00Z"), "2026-01-05T09:30:00Z");
+}
+
+test "cron: a list fires at both instants of the day" {
+    try asserts.equals(next("0 0 6,18 * * ?", "2026-01-01T06:00:00Z"), "2026-01-01T18:00:00Z");
+    try asserts.equals(next("0 0 6,18 * * ?", "2026-01-01T18:00:00Z"), "2026-01-02T06:00:00Z");
+}
+
+// ── boundaries, against a fixed clock ───────────────────────────────────────
+
+test "cron: next fire crosses a month boundary" {
+    try asserts.equals(next("0 0 0 * * *", "2026-01-31T23:59:59Z"), "2026-02-01T00:00:00Z");
+    try asserts.equals(next("0 0 0 31 * ?", "2026-01-31T00:00:00Z"), "2026-03-31T00:00:00Z");
+}
+
+test "cron: next fire crosses a year boundary" {
+    try asserts.equals(next("0 0 12 * * *", "2026-12-31T12:00:00Z"), "2027-01-01T12:00:00Z");
+    try asserts.equals(next("0 0 0 1 * ?", "2026-12-15T00:00:00Z"), "2027-01-01T00:00:00Z");
+}
+
+test "cron: next fire lands on a leap day and skips a february without one" {
+    try asserts.equals(next("0 0 0 29 2 ?", "2026-01-01T00:00:00Z"), "2028-02-29T00:00:00Z");
+    try asserts.equals(next("0 0 0 * 2 *", "2028-02-28T00:00:00Z"), "2028-02-29T00:00:00Z");
+    try asserts.equals(next("0 0 0 * 2 *", "2027-02-28T00:00:00Z"), "2028-02-01T00:00:00Z");
+}
+
+test "cron: an expression is evaluated at the configured fixed offset" {
+    try asserts.equals(nextOffset("0 0 9 * * *", "2026-01-01T00:00:00Z", 120), "2026-01-01T07:00:00Z");
+    try asserts.equals(nextOffset("0 0 9 * * *", "2026-01-01T00:00:00Z", -180), "2026-01-01T12:00:00Z");
+}
+
+// ── refusals, by field and token ────────────────────────────────────────────
+
+test "cron: L, W, #, MON and JAN are each refused with the field index and the token" {
+    try asserts.contains(cronProblem("0 0 0 L * ?"), "cron field 4 (day-of-month) token `L`: `L` (last) is not supported");
+    try asserts.contains(cronProblem("0 0 0 15W * ?"), "cron field 4 (day-of-month) token `15W`: `W` (nearest weekday) is not supported");
+    try asserts.contains(cronProblem("0 0 0 ? * 5#2"), "cron field 6 (day-of-week) token `5#2`: `#` (nth weekday of the month) is not supported");
+    try asserts.contains(cronProblem("0 0 0 ? * MON"), "cron field 6 (day-of-week) token `MON`: named months and weekdays are not supported");
+    try asserts.contains(cronProblem("0 0 0 1 JAN ?"), "cron field 5 (month) token `JAN`: named months and weekdays are not supported");
+    try asserts.contains(cronProblem("0 0 0 ? * MON-FRI"), "cron field 6 (day-of-week) token `MON-FRI`: named months");
+}
+
+test "cron: a five-field expression is refused asking for six and showing the seconds field" {
+    try asserts.equals(cronProblem("0 0 * * *"), "rakun-scheduling: a cron expression has six fields (second minute hour day-of-month month day-of-week) and `0 0 * * *` has 5 - the seconds field comes first, e.g. `0 0 0 * * *`");
+}
+
+test "cron: a step larger than the field's range is refused" {
+    try asserts.contains(cronProblem("*/60 * * * * *"), "cron field 1 (second) token `*/60`: the step 60 is larger than the field's range 0-59");
+    try asserts.contains(cronProblem("0 0 */24 * * *"), "cron field 3 (hour) token `*/24`: the step 24 is larger than the field's range 0-23");
+    try asserts.contains(cronProblem("0 */0 * * * *"), "cron field 2 (minute) token `*/0`: a step of 0 never advances");
+    assert cronProblem("*/59 * * * * *") == "";
+}
+
+test "cron: out-of-range values, reversed ranges and a misplaced question mark are refused" {
+    try asserts.contains(cronProblem("0 0 25 * * *"), "cron field 3 (hour) token `25`: 25 is outside 0-23");
+    try asserts.contains(cronProblem("0 0 0 0 * ?"), "cron field 4 (day-of-month) token `0`: 0 is outside 1-31");
+    try asserts.contains(cronProblem("0 0 17-9 * * *"), "cron field 3 (hour) token `17-9`: the range runs backwards");
+    try asserts.contains(cronProblem("? 0 0 * * *"), "cron field 1 (second) token `?`: `?` is allowed only in day-of-month and day-of-week");
+    try asserts.contains(cronProblem("0 0 0 1,? * *"), "cron field 4 (day-of-month) token `1,?`: `?` must be the whole field");
+    try asserts.contains(cronProblem("0 0 0 1,,2 * *"), "cron field 4 (day-of-month) token `1,,2`: an empty list item");
+}
+
+test "cron: an expression no date satisfies is refused rather than never firing" {
+    try asserts.contains(cronProblem("0 0 0 30 2 ?"), "never fires");
+}
+
+test "cron: parseCron answers the refusal as its error" {
+    val r = parseCron("0 0 * * *");
+    try asserts.isError(r);
+}

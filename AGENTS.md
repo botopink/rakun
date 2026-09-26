@@ -2788,6 +2788,113 @@ entry a `:param`; values are `encoding.percentEncode`d. `halResponse` /
 `rakun.hateoas.use-hal-as-default-json-media-type=false` and the client did not
 ask for HAL. Depends on `rakun` and `rakun-web`.
 
+## Scheduling — `modules/rakun-scheduling/` (front 16)
+
+In-VM scheduling: three trigger markers, one registry, a supervised executor, the
+`scheduledtasks` endpoint and the `scheduling` health indicator. Depends on `rakun`,
+`rakun-web` (listed directly: `shutdownTimeout()` here, and a transitive of the host),
+`rakun-actuator-api` and `rakun-actuator` (the host: the POST route is gated by its
+`exposed()` decision and answers its `notFoundProblem`). `rakun-data` in `modules.md`'s
+row is front 84's (the durable job store, `src/jobstore/**`, behind this registry).
+A task here lives in ONE node's memory; every node of a cluster runs its own copy —
+an application that cannot tolerate that takes front 84.
+
+| File | Holds |
+|---|---|
+| `src/cron.bp` | `Cron`, `parseCron(expr) -> @Result<Cron, string>`, `compileCron` (raises), `cronProblem(expr)` (`""` or the refusal), `cronWire`, `nextFire(cron, afterMillis, offsetMinutes)`, `rkFormatUtc`, `rkI64` |
+| `src/registry.bp` | `TaskInfo`, the seams `rkScheduleCron(name, owner, expr, task)` / `rkScheduleFixedRate(name, owner, millis, task)` / `rkScheduleFixedDelay(…)`, `rkTaskCount`, `rkTaskNames`, `rkRunTaskNow`, `rkRunTaskAsync`, `rkTaskInfo`, `rkTaskExists`, `rkForgetTask`, `taskNames()`, `scheduleListing(names)` |
+| `src/markers.bp` | `#[scheduler]`, `#[scheduled("<cron>")]`, `#[fixedRate(ms)]`, `#[fixedDelay(ms)]` |
+| `src/executor.bp` | the keys, `startScheduling()`, `startTasks(names)`, `stopScheduling()`, the test clock (`rkSchedClockSet`/`rkSchedTick`/`rkSchedAwaitIdle`), `rkSchedKillTimer`, `rkTaskRunPid`, the gates (`rkSchedGateWait`/`rkSchedGateOpen`/`rkSchedGateReset`) |
+| `src/endpoint.bp` | `scheduledTasksRead(req)`, `scheduledTasksEndpoint(req)`, `listingJson()`, `schedulingHealth()`, `mountScheduling()` |
+| `src/sidecars/rakun_scheduling.erl` | the task table (`rakun_scheduling_tasks`) and meta table, owned by the serialising server process `rakun_scheduling_server`; the supervision tree; the timer loop; the run worker; the calendar walk (`next_cron/3`); the virtual clock; the gates |
+
+Wiring an application: the application module carries the `#[scheduler]` types (their
+registrations run when it loads), then at boot, after configuration is loaded:
+`mountActuator()` → `mountScheduling()` → `startScheduling()`; on the way down,
+`stopScheduling()` before rakun-web's `gracefulShutdown()` (or from a `#[preDestroy]`).
+The consumer imports the seams its markers use beside the markers
+(`rkScheduleCron`, `rkScheduleFixedRate`, `rkScheduleFixedDelay`) and the stereotype's
+`rkScan, rkSingleton, rkEnter, rkDone`.
+
+Decisions:
+
+- **Three markers, not one `#[scheduled(cron:, fixedRate:, …)]`**: markers take
+  positional arguments and declared parameter defaults are never applied to a
+  decorator. `#[scheduler]` stacks under a STEREOTYPE (its closure is
+  `{ -> __rkMake_<Type>().<fn>() }`, so a task and an HTTP handler share one instance;
+  a type without one is refused naming the fix). Refused at comptime, located: a
+  marker off a method, `#[scheduler]` with no trigger method, two triggers on one
+  method, a parameter besides `self` (named), a return type other than `i32`, a
+  non-positive interval, and every cron refusal except "never fires".
+- **Task name = owner = `<Type>.<fn>`** (test-snap.md's rendering), so the keys are
+  `rakun.scheduling.<Type>.<fn>.*` — the README example's `rakun.scheduling.pruneSessions.cron`
+  would collide between two types with one method name. The seams take an `owner`
+  (the README's three-argument form could not name both methods of a duplicate): a
+  second owner under a taken name raises at load naming both; the same owner
+  re-registering replaces its row and keeps the counters.
+- **The cron parser is written twice, on purpose.** `cron.bp` is the ordinary
+  compiled parser (registrations and configuration overrides run it); a decorator
+  body is compiled on its own and can call neither a sibling (`call to undefined
+  function`) nor an imported function ("no decorator host function provides"), so
+  `#[scheduled]` restates the rules inline with the same message text, and
+  `test/build_test.bp` runs one refusal corpus through both and asserts the comptime
+  output contains `cronProblem(expr)` word for word. Dialect: six fields (Spring's),
+  `*`, number, range, step (`*/n`, `a-b/n`, `a/n` = a to the end), lists, `?` as a
+  whole day field (= `*`); day-of-month AND day-of-week must both match; weekday 0–7
+  (0 and 7 Sunday). Refused by name with field index and token: `L`, `W`, `#`, named
+  months/weekdays, other letters, out-of-range values, reversed ranges, step 0 or
+  wider than the field, `?` elsewhere, a field count other than six (the message
+  shows the expression with a seconds field prepended), and (at load only) an
+  expression no date satisfies within 30 years.
+- **The executor is processes, and there is no pool and no key that sizes one.**
+  `rakun_scheduling_sup` (one_for_one) → `rakun_scheduling_timers` (one_for_one, one
+  `permanent` timer per started task, restarted when it dies, resuming from the next
+  fire kept in ETS) and `rakun_scheduling_runs` (simple_one_for_one, one `temporary`
+  worker per run). A process costs a few hundred bytes and is started per execution,
+  so Spring's `spring.task.scheduling.pool.size` and Quartz's
+  `org.quartz.threadPool.threadCount` are NOT ported: the key would do nothing or
+  introduce a queue that does not otherwise exist. `@Task` is not the parallelism
+  (it lowers eagerly on erlang); two tasks due at one instant are two workers. A
+  raise is caught in its worker and recorded (`failures`, `lastError`); the timer
+  is untouched.
+- **Triggers**: `fixedRate` steps from the previous scheduled START; `fixedDelay`
+  has no next fire while its run is in flight and re-arms at finish + delay;
+  `overlap = skip` (default) counts a due run whose previous is in flight as
+  `missed`, `allow` starts it. A timer that finds its next instant past fires once
+  for the latest due instant if it is within 1 s of now, counting every earlier one
+  (and a later one) as `missed` — never late, never catch-up (front 84's). A manual
+  run (`rkRunTaskNow`, `POST …/run`) is out of band: it moves no trigger.
+- **Keys** (all `rakun.*`, decision 115 rule 4; the README's Spring spellings are
+  read as the `rakun.`-prefixed form): `rakun.scheduling.enabled` (default true;
+  false registers every task, starts none), `rakun.scheduling.<task>.enabled`,
+  `rakun.scheduling.<task>.cron` (cron tasks only), `rakun.scheduling.<task>.overlap`
+  (`skip`|`allow`), `rakun.scheduling.timezone` (`UTC`/`Z`/`GMT` or a fixed
+  `±HH:MM`; named zones refused — the BEAM ships no zone database). All are checked
+  before any timer starts; a bad value refuses the boot naming the key. Shutdown
+  reuses rakun-web's `rakun.lifecycle.timeout-per-shutdown-phase`.
+- **The endpoint**: GET is an ordinary registration (`scheduledtasks`, ops
+  `read,write`) served by the host's one route; the POST is a write the host's
+  `GET <base>/:endpoint` cannot carry, so `mountScheduling()` registers
+  `POST <base>/scheduledtasks/:name/run` itself, gated by the host's `exposed("scheduledtasks")`
+  and answering the host's 404 problem when not exposed — no key here opens either
+  route. `schedulingHealth()` returns front 11's `Health` (the README's `HealthReport`
+  is the host's aggregate), registered as `scheduling`: DOWN naming every enabled
+  task of a started, enabled scheduler with no live timer.
+- **No test sleeps**: under `rkSchedClockSet` a timer never wakes on its own and
+  fires only on `rkSchedTick(at)`; a run that must stay in flight is held on a gate.
+  Timestamps in the listing go through `clock.formatIso8601` (RFC 3339; on erlang std
+  renders the host's UTC offset — front 01 finding), `null` for never; the snapshot
+  rendering uses `rkFormatUtc`.
+- **Front 74's watcher**: `sslPoll()` becomes a timer with
+  `rkScheduleFixedRate("rakun.ssl.poll", "rakun-ssl", <rakun.ssl.reload-interval in ms>, { -> sslPoll() })`
+  registered at boot by whoever depends on both (the application, or a starter) —
+  the core cannot depend on this member.
+
+Measured: `modules/rakun-scheduling` 0 → **67 / 0** (0 compile failures) —
+`build_test` 12, `cron_test` 15, `endpoint_test` 9, `executor_test` 16,
+`registry_test` 8, `schedule_test` 7 (the seven test-snap.md scenarios, rendered
+exactly as the snapshots). Suite ~35 s, most of it `build_test`'s fixture builds.
+
 ## Validation — the bundled `validation` library (front 14, moved by decision 116 rule 5)
 
 Front 14's member `modules/rakun-validation` is gone: its seven modules are the

@@ -1,0 +1,276 @@
+//// rakun-scheduling — the cron parser (front 16 Step 3).
+////
+//// Six fields, Spring's dialect rather than Unix's five:
+////
+////     second  minute  hour  day-of-month  month  day-of-week
+////     0-59    0-59    0-23  1-31          1-12   0-7 (0 and 7 are Sunday)
+////
+//// Per field: `*`, a number, a range `9-17`, a step `*/5` · `0-30/10` · `5/15`
+//// (a number before the step runs to the field's end), a comma list of any of
+//// those, and `?` — the whole field, day-of-month or day-of-week only — which
+//// means the same as `*`. Day-of-month and day-of-week must BOTH match, so a
+//// restriction in one reads as expected when the other is `*` or `?`.
+////
+//// REFUSED, by name, with the field index and the token: `L`, `W`, `#`, named
+//// months and weekdays (`JAN`, `MON`), anything else that is not a digit or an
+//// operator, a value outside the field's range, a reversed range, a step of 0
+//// or one wider than the field (`*/60` in seconds), `?` outside the day fields,
+//// and any count of fields other than six. Nothing is accepted and ignored: an
+//// expression either compiles to six value lists or is a refusal.
+////
+//// ONE PARSER AT RUN TIME, A MIRROR AT COMPTIME. This is an ordinary compiled
+//// function; `startScheduling()` runs it over every expression a configuration
+//// override supplies, and every registration runs it at load. `#[scheduled]`
+//// cannot call it: a decorator body is compiled on its own and reaches only the
+//// primitive types' methods (the compiler answers `call to undefined function
+//// cronProblem/1` for a sibling and "no decorator host function provides" for
+//// an imported one). So `markers.bp` carries the same rules inline, and
+//// `test/cron_test.bp` runs one refusal corpus through both and asserts the
+//// same message text.
+////
+//// The compiled form handed to the host is the WIRE, `s|m|h|dom|mon|dow`, each a
+//// comma list of the field's values in ascending order; `rakun_scheduling.erl`
+//// walks the calendar over it and never sees source text.
+
+#[@External.Erlang("rakun_scheduling", "next_cron")]
+pub declare fn rkCronNext(wire: string, afterMillis: i64, offsetMinutes: i32) -> i64;
+
+#[@External.Erlang("rakun_scheduling", "format_utc")]
+pub declare fn rkFormatUtc(epochMillis: i64) -> string;
+
+// An `i32` read as an `i64`: an integer literal is `i32` and botopink has no
+// widening conversion, so a constant instant crosses the host boundary once.
+#[@External.Erlang("rakun_scheduling", "to_i64")]
+pub declare fn rkI64(n: i32) -> i64;
+
+pub type Cron(
+    expression: string,
+    seconds: i32[],
+    minutes: i32[],
+    hours: i32[],
+    days: i32[],
+    months: i32[],
+    weekdays: i32[],
+)
+
+// One field's outcome: `problem` is "" when `values` holds the field.
+pub type CronField(
+    problem: string,
+    values: i32[],
+)
+
+// ── the field table ─────────────────────────────────────────────────────────
+
+pub fn fieldName(index: i32) -> string {
+    if (index == 1) return "second";
+    if (index == 2) return "minute";
+    if (index == 3) return "hour";
+    if (index == 4) return "day-of-month";
+    if (index == 5) return "month";
+    return "day-of-week";
+}
+
+pub fn fieldLow(index: i32) -> i32 {
+    if ((index == 4) || (index == 5)) return 1;
+    return 0;
+}
+
+pub fn fieldHigh(index: i32) -> i32 {
+    if (index <= 2) return 59;
+    if (index == 3) return 23;
+    if (index == 4) return 31;
+    if (index == 5) return 12;
+    return 7;
+}
+
+// ── the refusal texts (shared, word for word, with `markers.bp`) ────────────
+//
+// No double quote in any of them: on the erlang row `throwsWith` reads the `~p`
+// rendering, in which a `"` is escaped.
+
+fn at(index: i32, token: string) -> string {
+    return "rakun-scheduling: cron field " + index.toString() + " (" + fieldName(index) + ") token `" + token + "`";
+}
+
+pub fn fieldCountProblem(expr: string, count: i32) -> string {
+    return "rakun-scheduling: a cron expression has six fields (second minute hour day-of-month month day-of-week) and `" + expr + "` has " + count.toString() + " - the seconds field comes first, e.g. `0 " + expr + "`";
+}
+
+fn letterProblem(index: i32, token: string) -> string {
+    val upper = token.toUpper();
+    val named = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC", "SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
+    var isName = false;
+    for (named) { n ->
+        if (upper.contains(n)) isName = true;
+    };
+    if (token.contains("#")) return at(index, token) + ": `#` (nth weekday of the month) is not supported";
+    if (isName) return at(index, token) + ": named months and weekdays are not supported - write the number";
+    if (upper.contains("L")) return at(index, token) + ": `L` (last) is not supported";
+    if (upper.contains("W")) return at(index, token) + ": `W` (nearest weekday) is not supported";
+    return at(index, token) + ": not a cron token - use digits, `*`, `?`, `,`, `-` and `/`";
+}
+
+fn isDigit(c: string) -> bool {
+    return (c != "") && ("0123456789".indexOf(c) >= 0);
+}
+
+fn allDigits(s: string) -> bool {
+    if (s == "") return false;
+    var ok = true;
+    for (s.split("")) { c ->
+        if (isDigit(c) == false) ok = false;
+    };
+    return ok;
+}
+
+fn number(s: string) -> i32 {
+    var n = 0;
+    for (s.split("")) { c ->
+        n = n * 10 + "0123456789".indexOf(c);
+    };
+    return n;
+}
+
+fn cleanToken(s: string) -> bool {
+    var ok = true;
+    for (s.split("")) { c ->
+        if ("0123456789*?,-/".indexOf(c) < 0) ok = false;
+    };
+    return ok;
+}
+
+fn failed(problem: string) -> CronField {
+    val none: i32[] = [];
+    return CronField(problem: problem, values: none);
+}
+
+// One comma-list item: `*`, `n`, `a-b`, each optionally `/step`.
+fn parseItem(index: i32, item: string) -> CronField {
+    val low = fieldLow(index);
+    val high = fieldHigh(index);
+    val slash: string[] = item.split("/");
+    if (slash.length > 2) return failed(at(index, item) + ": more than one `/`");
+    val base: string = slash.at(0) ?? "";
+    val stepText: string = slash.at(1) ?? "";
+    val hasStep = slash.length == 2;
+    if (hasStep && (allDigits(stepText) == false)) return failed(at(index, item) + ": the step must be a number");
+    val step = if (hasStep) number(stepText) else 1;
+    if (step == 0) return failed(at(index, item) + ": a step of 0 never advances");
+    if (step > high - low) return failed(at(index, item) + ": the step " + step.toString() + " is larger than the field's range " + low.toString() + "-" + high.toString());
+    val dash: string[] = base.split("-");
+    if (dash.length > 2) return failed(at(index, item) + ": more than one `-`");
+    val isStar = base == "*";
+    val isRange = dash.length == 2;
+    val fromText: string = dash.at(0) ?? "";
+    val toText: string = dash.at(1) ?? "";
+    if ((isStar == false) && (allDigits(fromText) == false)) return failed(at(index, item) + ": expected a number, `*` or a range");
+    if (isRange && (allDigits(toText) == false)) return failed(at(index, item) + ": expected a number after `-`");
+    val first = if (isStar) low else number(fromText);
+    val last = if (isStar) high else if (isRange) number(toText) else if (hasStep) high else first;
+    if ((first < low) || (first > high)) return failed(at(index, item) + ": " + first.toString() + " is outside " + low.toString() + "-" + high.toString());
+    if ((last < low) || (last > high)) return failed(at(index, item) + ": " + last.toString() + " is outside " + low.toString() + "-" + high.toString());
+    if (first > last) return failed(at(index, item) + ": the range runs backwards");
+    var values: i32[] = [];
+    var v = first;
+    while (v <= last) {
+        val norm = if ((index == 6) && (v == 7)) 0 else v;
+        values.push(norm);
+        v = v + step;
+    };
+    return CronField(problem: "", values: values);
+}
+
+// One field, as its ascending value list.
+pub fn parseField(index: i32, text: string) -> CronField {
+    val isDay = (index == 4) || (index == 6);
+    val misplacedAny = (text == "?") && (isDay == false);
+    if (misplacedAny) return failed(at(index, text) + ": `?` is allowed only in day-of-month and day-of-week");
+    if (text == "?") return parseField(index, "*");
+    if (cleanToken(text) == false) return failed(letterProblem(index, text));
+    if (text.contains("?")) return failed(at(index, text) + ": `?` must be the whole field");
+    var seen: i32[] = [];
+    var problem = "";
+    for (text.split(",")) { item ->
+        if (problem == "") {
+            val r: CronField = if (item == "") failed(at(index, text) + ": an empty list item") else parseItem(index, item);
+            problem = r.problem;
+            for (r.values) { x -> seen.push(x) };
+        };
+    };
+    if (problem != "") return failed(problem);
+    var sorted: i32[] = [];
+    var v = fieldLow(index);
+    while (v <= fieldHigh(index)) {
+        if (seen.indexOf(v) >= 0) sorted.push(v);
+        v = v + 1;
+    };
+    return CronField(problem: "", values: sorted);
+}
+
+fn fieldsOf(expr: string) -> string[] {
+    var out: string[] = [];
+    for (expr.trim().replaceAll("\t", " ").split(" ")) { f ->
+        if (f != "") out.push(f);
+    };
+    return out;
+}
+
+// "" when `expr` compiles; otherwise the first refusal, field by field.
+pub fn cronProblem(expr: string) -> string {
+    val fields: string[] = fieldsOf(expr);
+    if (fields.length != 6) return fieldCountProblem(expr.trim(), fields.length);
+    var problem = "";
+    var i = 1;
+    for (fields) { f ->
+        if (problem == "") problem = parseField(i, f).problem;
+        i = i + 1;
+    };
+    if (problem != "") return problem;
+    val wire = cronWire(compileUnchecked(expr));
+    if (rkCronNext(wire, rkI64(0), 0) < rkI64(0)) return "rakun-scheduling: the cron expression `" + expr.trim() + "` never fires - no calendar date matches its day-of-month, month and day-of-week together";
+    return "";
+}
+
+fn compileUnchecked(expr: string) -> Cron {
+    val fields: string[] = fieldsOf(expr);
+    return Cron(
+        expression: fields.join(" "),
+        seconds: parseField(1, fields.at(0) ?? "").values,
+        minutes: parseField(2, fields.at(1) ?? "").values,
+        hours: parseField(3, fields.at(2) ?? "").values,
+        days: parseField(4, fields.at(3) ?? "").values,
+        months: parseField(5, fields.at(4) ?? "").values,
+        weekdays: parseField(6, fields.at(5) ?? "").values,
+    );
+}
+
+// The compiled expression; a refusal raises. What a registration and the boot
+// call, where a bad expression must stop the application.
+pub fn compileCron(expr: string) -> Cron {
+    val problem = cronProblem(expr);
+    if (problem != "") @panic(problem);
+    return compileUnchecked(expr);
+}
+
+// The compiled expression, or the refusal as the error.
+pub fn parseCron(expr: string) -> @Result<Cron, string> {
+    val problem = cronProblem(expr);
+    if (problem != "") throw problem;
+    return compileUnchecked(expr);
+}
+
+fn list(xs: i32[]) -> string {
+    var out: string[] = [];
+    for (xs) { x -> out.push(x.toString()) };
+    return out.join(",");
+}
+
+pub fn cronWire(c: Cron) -> string {
+    return list(c.seconds) + "|" + list(c.minutes) + "|" + list(c.hours) + "|" + list(c.days) + "|" + list(c.months) + "|" + list(c.weekdays);
+}
+
+// The first instant strictly after `afterMillis` the expression matches, at a
+// fixed offset of `offsetMinutes` east of UTC; -1 when there is none.
+pub fn nextFire(c: Cron, afterMillis: i64, offsetMinutes: i32) -> i64 {
+    return rkCronNext(cronWire(c), afterMillis, offsetMinutes);
+}

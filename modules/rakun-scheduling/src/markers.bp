@@ -1,0 +1,189 @@
+//// rakun-scheduling — `#[scheduler]` and the three trigger markers (front 16 Step 2).
+////
+//// `#[scheduler]` on a type walks its methods and emits one registration per
+//// trigger marker, the way `#[restController]` emits one route per
+//// `#[getMapping]`. The three markers each take the one argument their trigger
+//// needs, positionally (a labelled optional argument cannot be built: declared
+//// parameter defaults are never applied to a decorator):
+////
+////   #[scheduled("<six-field cron>")]   at each matching instant
+////   #[fixedRate(<millis>)]              every N ms from the previous START
+////   #[fixedDelay(<millis>)]             N ms after the previous FINISH
+////
+//// The emitted line runs at the APPLICATION site, so the consumer imports the
+//// seams by name beside the markers (`rkScheduleCron`, `rkScheduleFixedRate`,
+//// `rkScheduleFixedDelay` — only the ones its markers use). The closure builds
+//// the component through `__rkMake_<Type>()`, the singleton factory the
+//// type's stereotype emits, so a task and an HTTP handler on one component
+//// share one instance. The task's name and owner are `<Type>.<fn>`.
+////
+//// REFUSED AT COMPTIME, each with a message at the annotated declaration: a
+//// marker anywhere but on a method; `#[scheduler]` on anything but a type, on a
+//// type with no stereotype, or on a type with no trigger-annotated method; two
+//// trigger markers on one method; a task method whose parameter list is not
+//// `(self: Self)` (the extra parameter named) or whose return type is not
+//// `i32`; an interval that is not a positive number; and every cron refusal
+//// `cron.bp` makes except "never fires", which needs the calendar and is made
+//// when the registration runs at load.
+////
+//// WHY THE CRON RULES ARE WRITTEN TWICE. A decorator body is compiled on its
+//// own: it reaches the primitive types' methods and nothing else — a sibling
+//// function is `call to undefined function` and an imported one is refused
+//// ("no decorator host function provides"). So `scheduled` below restates the
+//// rules of `cron.bp`'s `cronProblem` with the same message text, and
+//// `test/cron_test.bp` runs one refusal corpus through both. Decorator bodies
+//// are comment-free, use no `.at()` and no optional, and call no sibling (the
+//// comptime rules `context.bp`'s `#[managed]` docblock records).
+
+pub fn scheduler(comptime decl: @Decl) {
+    var stereotype = "";
+    decl.annotations.forEach({ a ->
+        val isStereo = a.name == "component" || a.name == "service" || a.name == "repository" || a.name == "controller" || a.name == "restController" || a.name == "configuration";
+        val st = if (isStereo) a.name else stereotype;
+        stereotype = st;
+    });
+    var tasks = 0;
+    var problem = "";
+    decl.methods.forEach({ m ->
+        var kinds: Array<string> = [];
+        var arg = "";
+        m.annotations.forEach({ a ->
+            val isTrigger = a.name == "scheduled" || a.name == "fixedRate" || a.name == "fixedDelay";
+            if (isTrigger) kinds.push(a.name);
+            val nextArg = if (isTrigger) a.args.join("") else arg;
+            arg = nextArg;
+        });
+        val label = decl.name + "." + m.name;
+        var extra = "";
+        var count = 0;
+        m.params.forEach({ p ->
+            val c = count + 1;
+            count = c;
+            val e = if ((p.name != "self") && (extra == "")) p.name else extra;
+            extra = e;
+        });
+        val isTask = kinds.length > 0;
+        val t = if (isTask) tasks + 1 else tasks;
+        tasks = t;
+        val twoMarkers = if ((kinds.length > 1) && (problem == "")) "#[scheduler] " + label + " carries " + kinds.length.toString() + " trigger markers (" + kinds.join(", ") + ") - one trigger per task; split it into two methods" else problem;
+        problem = twoMarkers;
+        val badParams = isTask && (problem == "") && ((extra != "") || (count != 1));
+        val paramsText = if (extra != "") "has the parameter `" + extra + "`" else "does not take (self: Self)";
+        val withParams = if (badParams) "#[scheduler] " + label + " " + paramsText + " - a scheduled method is (self: Self) -> i32, and a scheduler has no argument to give it" else problem;
+        problem = withParams;
+        val badReturn = isTask && (problem == "") && (m.returnType != "i32");
+        val withReturn = if (badReturn) "#[scheduler] " + label + " returns `" + m.returnType + "` - a scheduled method returns i32, the status recorded with each run" else problem;
+        problem = withReturn;
+        val seam = if (kinds.indexOf("scheduled") >= 0) "rkScheduleCron" else if (kinds.indexOf("fixedRate") >= 0) "rkScheduleFixedRate" else "rkScheduleFixedDelay";
+        if (kinds.length == 1) @emit("val __rkSched_" + decl.name + "_" + m.name + " = " + seam + "(\"" + label + "\", \"" + label + "\", " + arg + ", { -> __rkMake_" + decl.name + "()." + m.name + "() });");
+    });
+    if (decl.kind != DeclKind.Type) decl.fail("#[scheduler] must annotate a type");
+    if (stereotype == "") decl.fail("#[scheduler] needs a stereotype on the same type (#[component], #[service], …) - the stereotype emits the singleton factory each task's closure builds the component through");
+    if (tasks == 0) decl.fail("#[scheduler] on " + decl.name + " finds no method carrying #[scheduled], #[fixedRate] or #[fixedDelay] - a scheduler with no task is a mistake, not an empty schedule");
+    if (problem != "") decl.fail(problem);
+}
+
+pub fn fixedRate(comptime decl: @Decl, millis: i32) {
+    if (decl.kind != DeclKind.Method) decl.fail("#[fixedRate] must annotate a method of a #[scheduler] type");
+    if (millis <= 0) decl.fail("#[fixedRate(" + millis.toString() + ")] - the interval is a positive number of milliseconds");
+}
+
+pub fn fixedDelay(comptime decl: @Decl, millis: i32) {
+    if (decl.kind != DeclKind.Method) decl.fail("#[fixedDelay] must annotate a method of a #[scheduler] type");
+    if (millis <= 0) decl.fail("#[fixedDelay(" + millis.toString() + ")] - the interval is a positive number of milliseconds");
+}
+
+pub fn scheduled(comptime decl: @Decl, expr: string) {
+    var fields: Array<string> = [];
+    expr.trim().replaceAll("\t", " ").split(" ").forEach({ f ->
+        if (f != "") fields.push(f);
+    });
+    val shown = expr.trim();
+    var problem = if (fields.length != 6) "rakun-scheduling: a cron expression has six fields (second minute hour day-of-month month day-of-week) and `" + shown + "` has " + fields.length.toString() + " - the seconds field comes first, e.g. `0 " + shown + "`" else "";
+    var index = 0;
+    fields.forEach({ text ->
+        val i = index + 1;
+        index = i;
+        val name = if (i == 1) "second" else if (i == 2) "minute" else if (i == 3) "hour" else if (i == 4) "day-of-month" else if (i == 5) "month" else "day-of-week";
+        val low = if ((i == 4) || (i == 5)) 1 else 0;
+        val high = if (i <= 2) 59 else if (i == 3) 23 else if (i == 4) 31 else if (i == 5) 12 else 7;
+        val isDay = (i == 4) || (i == 6);
+        val fieldAt = "rakun-scheduling: cron field " + i.toString() + " (" + name + ") token `";
+        var clean = true;
+        text.split("").forEach({ c ->
+            val ok = if (c == "") clean else if ("0123456789*?,-/".indexOf(c) >= 0) clean else false;
+            clean = ok;
+        });
+        val upper = text.toUpper();
+        val isName = upper.contains("JAN") || upper.contains("FEB") || upper.contains("MAR") || upper.contains("APR") || upper.contains("MAY") || upper.contains("JUN") || upper.contains("JUL") || upper.contains("AUG") || upper.contains("SEP") || upper.contains("OCT") || upper.contains("NOV") || upper.contains("DEC") || upper.contains("SUN") || upper.contains("MON") || upper.contains("TUE") || upper.contains("WED") || upper.contains("THU") || upper.contains("FRI") || upper.contains("SAT");
+        val letter = if (text.contains("#")) ": `#` (nth weekday of the month) is not supported" else if (isName) ": named months and weekdays are not supported - write the number" else if (upper.contains("L")) ": `L` (last) is not supported" else if (upper.contains("W")) ": `W` (nearest weekday) is not supported" else ": not a cron token - use digits, `*`, `?`, `,`, `-` and `/`";
+        val fieldProblem = if ((text == "?") && (isDay == false)) fieldAt + text + "`: `?` is allowed only in day-of-month and day-of-week" else if (text == "?") "" else if (clean == false) fieldAt + text + "`" + letter else if (text.contains("?")) fieldAt + text + "`: `?` must be the whole field" else "";
+        val p1 = if (problem == "") fieldProblem else problem;
+        problem = p1;
+        val itemsToo = (problem == "") && (text != "?");
+        if (itemsToo) text.split(",").forEach({ item ->
+            var slashes = 0;
+            var base = "";
+            var stepText = "";
+            item.split("/").forEach({ part ->
+                val k = slashes + 1;
+                slashes = k;
+                val b = if (k == 1) part else base;
+                base = b;
+                val s = if (k == 2) part else stepText;
+                stepText = s;
+            });
+            var stepDigits = stepText != "";
+            var step = 0;
+            stepText.split("").forEach({ c ->
+                val d = (c != "") && ("0123456789".indexOf(c) >= 0);
+                val sd = if (d) stepDigits else false;
+                stepDigits = sd;
+                val sv = if (d) step * 10 + "0123456789".indexOf(c) else step;
+                step = sv;
+            });
+            val hasStep = slashes == 2;
+            val stepValue = if (hasStep) step else 1;
+            var dashes = 0;
+            var fromText = "";
+            var toText = "";
+            base.split("-").forEach({ part ->
+                val k = dashes + 1;
+                dashes = k;
+                val f = if (k == 1) part else fromText;
+                fromText = f;
+                val t = if (k == 2) part else toText;
+                toText = t;
+            });
+            var fromDigits = fromText != "";
+            var first = 0;
+            fromText.split("").forEach({ c ->
+                val d = (c != "") && ("0123456789".indexOf(c) >= 0);
+                val fd = if (d) fromDigits else false;
+                fromDigits = fd;
+                val fv = if (d) first * 10 + "0123456789".indexOf(c) else first;
+                first = fv;
+            });
+            var toDigits = toText != "";
+            var last = 0;
+            toText.split("").forEach({ c ->
+                val d = (c != "") && ("0123456789".indexOf(c) >= 0);
+                val td = if (d) toDigits else false;
+                toDigits = td;
+                val tv = if (d) last * 10 + "0123456789".indexOf(c) else last;
+                last = tv;
+            });
+            val isStar = base == "*";
+            val isRange = dashes == 2;
+            val lo = if (isStar) low else first;
+            val hi = if (isStar) high else if (isRange) last else if (hasStep) high else first;
+            val itemAt = fieldAt + item + "`";
+            val range = low.toString() + "-" + high.toString();
+            val itemProblem = if (item == "") fieldAt + text + "`: an empty list item" else if (slashes > 2) itemAt + ": more than one `/`" else if (hasStep && (stepDigits == false)) itemAt + ": the step must be a number" else if (stepValue == 0) itemAt + ": a step of 0 never advances" else if (stepValue > high - low) itemAt + ": the step " + stepValue.toString() + " is larger than the field's range " + range else if (dashes > 2) itemAt + ": more than one `-`" else if ((isStar == false) && (fromDigits == false)) itemAt + ": expected a number, `*` or a range" else if (isRange && (toDigits == false)) itemAt + ": expected a number after `-`" else if ((lo < low) || (lo > high)) itemAt + ": " + lo.toString() + " is outside " + range else if ((hi < low) || (hi > high)) itemAt + ": " + hi.toString() + " is outside " + range else if (lo > hi) itemAt + ": the range runs backwards" else "";
+            val p2 = if (problem == "") itemProblem else problem;
+            problem = p2;
+        });
+    });
+    if (decl.kind != DeclKind.Method) decl.fail("#[scheduled] must annotate a method of a #[scheduler] type");
+    if (problem != "") decl.fail(problem);
+}

@@ -1,0 +1,134 @@
+//// rakun-scheduling — the registry and its seams (front 16 Steps 1 and 2).
+////
+//// The decorated types sit at module level, so their registrations run when
+//// this module loads, before the first test block. Test files of one member
+//// share a node, so counts here are DELTAS, and every task a test registers by
+//// hand is forgotten before the test returns. The comptime refusals
+//// (placement, two triggers, the parameter list) are `build_test.bp`'s.
+
+import {testing.asserts} from "std";
+import {service, restController, getMapping, rkScan, rkSingleton, rkEnter, rkDone, rkRegisterRoute, rkBuildCount, rkDispatch, rkSetProp, rkProp, Request, Response} from "rakun";
+import {scheduler, scheduled, fixedRate, fixedDelay} from "markers";
+import {
+    TaskInfo,
+    rkScheduleCron,
+    rkScheduleFixedRate,
+    rkScheduleFixedDelay,
+    rkTaskCount,
+    rkTaskNames,
+    rkRunTaskNow,
+    rkTaskInfo,
+    rkForgetTask,
+    taskNames,
+} from "registry";
+import {rkTaskRunPid} from "executor";
+
+#[restController]
+#[scheduler]
+pub type Inventory {
+    #[getMapping("/inventory/audits")]
+    pub fn audits(self: Self, req: Request) -> Response {
+        return Response.ok(rkProp("test.inventory.audits"));
+    }
+
+    #[fixedDelay(60000)]
+    pub fn audit(self: Self) -> i32 {
+        val n = rkProp("test.inventory.audits") + "a";
+        val _s = rkSetProp("test.inventory.audits", n);
+        val _p = rkSetProp("test.inventory.pid", rkTaskRunPid());
+        return 7;
+    }
+}
+
+fn zero() -> i32 {
+    return 0;
+}
+
+test "registry: a #[scheduler] type registers one task per marker under <Type>.<fn>" {
+    val names: string[] = taskNames();
+    assert names.indexOf("Inventory.audit") >= 0;
+    val t: TaskInfo = rkTaskInfo("Inventory.audit");
+    assert t.trigger == "fixedDelay";
+    assert t.expression == "60000";
+    assert t.owner == "Inventory.audit";
+    assert rkTaskNames().contains("Inventory.audit");
+}
+
+test "registry: each seam adds one task, and the count and the sorted names follow" {
+    val before: i32 = rkTaskCount();
+    val _a = rkScheduleCron("zz.cron", "Probe.cron", "0 0 * * * *", { -> zero() });
+    val _b = rkScheduleFixedRate("zz.rate", "Probe.rate", 1000, { -> zero() });
+    val _c = rkScheduleFixedDelay("zz.delay", "Probe.delay", 1000, { -> zero() });
+    assert rkTaskCount() == before + 3;
+    val names: string[] = taskNames();
+    assert names.indexOf("zz.cron") < names.indexOf("zz.delay");
+    assert names.indexOf("zz.delay") < names.indexOf("zz.rate");
+    val _x = rkForgetTask("zz.cron");
+    val _y = rkForgetTask("zz.rate");
+    val _z = rkForgetTask("zz.delay");
+    assert rkTaskCount() == before;
+}
+
+test "registry: two tasks under one name are refused at boot with both method names" {
+    try asserts.throwsWith({ ->
+        val _x = rkScheduleFixedRate("Inventory.audit", "Warehouse.recount", 1000, { -> zero() });
+        0;
+    }, "two scheduled tasks are registered as `Inventory.audit` (`Inventory.audit` and `Warehouse.recount`)");
+    val t: TaskInfo = rkTaskInfo("Inventory.audit");
+    assert t.owner == "Inventory.audit";
+    assert t.trigger == "fixedDelay";
+}
+
+test "registry: the same owner registering again replaces its own row" {
+    val before: i32 = rkTaskCount();
+    val _a = rkScheduleFixedRate("zz.again", "Probe.again", 1000, { -> zero() });
+    val _b = rkScheduleFixedRate("zz.again", "Probe.again", 2000, { -> zero() });
+    assert rkTaskCount() == before + 1;
+    assert rkTaskInfo("zz.again").expression == "2000";
+    val _f = rkForgetTask("zz.again");
+}
+
+test "registry: a bad name, a bad cron and a non-positive interval are refused at registration" {
+    try asserts.throwsWith({ ->
+        val _x = rkScheduleFixedRate("a/b", "Probe.slash", 1000, { -> zero() });
+        0;
+    }, "a task name must be non-empty");
+    try asserts.throwsWith({ ->
+        val _x = rkScheduleCron("zz.bad", "Probe.bad", "0 0 * * *", { -> zero() });
+        0;
+    }, "has 5 - the seconds field comes first");
+    try asserts.throwsWith({ ->
+        val _x = rkScheduleFixedDelay("zz.neg", "Probe.neg", 0, { -> zero() });
+        0;
+    }, "the interval is a positive number of milliseconds");
+    assert rkTaskNames().contains("zz.bad") == false;
+}
+
+test "registry: rkRunTaskNow runs a task once, out of band, and records the run" {
+    val _s = rkSetProp("test.inventory.audits", "");
+    val before: TaskInfo = rkTaskInfo("Inventory.audit");
+    assert rkRunTaskNow("Inventory.audit") == 1;
+    val after: TaskInfo = rkTaskInfo("Inventory.audit");
+    assert rkProp("test.inventory.audits") == "a";
+    assert after.runs == before.runs + 1;
+    assert after.lastResult == 7;
+    assert after.failures == 0;
+    assert after.inFlight == 0;
+    assert after.lastStartedAt > before.lastStartedAt;
+    assert after.lastFinishedAt >= after.lastStartedAt;
+    assert rkProp("test.inventory.pid") != rkTaskRunPid();
+}
+
+test "registry: rkRunTaskNow on an unknown name answers -1 and runs nothing" {
+    assert rkRunTaskNow("Nobody.here") == -1;
+}
+
+test "registry: a task and an HTTP handler on one component share one instance" {
+    val _s = rkSetProp("test.inventory.audits", "");
+    assert rkRunTaskNow("Inventory.audit") == 1;
+    assert rkRunTaskNow("Inventory.audit") == 1;
+    val res: Response = rkDispatch("GET", "/inventory/audits");
+    assert res.status == 200;
+    assert res.body == "aa";
+    assert rkBuildCount("Inventory") == 1;
+}

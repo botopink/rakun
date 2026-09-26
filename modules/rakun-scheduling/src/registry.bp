@@ -1,0 +1,170 @@
+//// rakun-scheduling — the task registry and its three seams (front 16 Step 1).
+////
+//// A task is a NAME, an OWNER (the method that declared it, `<Type>.<fn>` when
+//// `#[scheduler]` emitted it), a TRIGGER (`cron`, `fixedRate`, `fixedDelay`), an
+//// EXPRESSION (the cron text, or the interval in milliseconds), and the closure
+//// that runs it. `#[scheduler]` emits one registration per trigger marker:
+////
+////     val __rkSched_CleanupService_hourly = rkScheduleCron(
+////         "CleanupService.hourly", "CleanupService.hourly", "0 0 * * * *",
+////         { -> __rkMake_CleanupService().hourly() });
+////
+//// The seams are generic over the closure's result, like `rkSingleton<T>`, and
+//// the host records the value when it is an integer (a scheduled method returns
+//// `i32`: a status — `0`, or how many rows it processed).
+////
+//// RULES ENFORCED AT REGISTRATION — at load, which is boot:
+////
+////   · a name is non-empty and holds no whitespace, `/`, `|` or tab (it is a
+////     path segment of `POST …/scheduledtasks/{name}/run` and a key segment of
+////     `rakun.scheduling.<task>.*`);
+////   · two registrations under one name from different owners are refused,
+////     naming both; the same owner registering again replaces its row (a
+////     reloaded module is not a second task) and keeps the counters;
+////   · a cron expression compiles (`cron.bp`) or the registration raises with
+////     the refusal; an interval is a positive number of milliseconds.
+////
+//// Registering starts nothing: timers start in `startScheduling()`
+//// (`executor.bp`), after configuration is loaded.
+
+import {compileCron, cronWire} from "cron";
+
+// ── the host cells ──────────────────────────────────────────────────────────
+
+#[@External.Erlang("rakun_scheduling", "register")]
+pub declare fn rkSchedStore<R>(
+    name: string,
+    owner: string,
+    trigger: string,
+    expression: string,
+    wire: string,
+    intervalMillis: i32,
+    task: fn() -> R,
+) -> i32;
+
+#[@External.Erlang("rakun_scheduling", "owner_of")]
+pub declare fn rkSchedOwner(name: string) -> string;
+
+#[@External.Erlang("rakun_scheduling", "exists")]
+pub declare fn rkTaskExists(name: string) -> bool;
+
+#[@External.Erlang("rakun_scheduling", "count")]
+pub declare fn rkTaskCount() -> i32;
+
+// Newline-joined, sorted.
+#[@External.Erlang("rakun_scheduling", "names")]
+pub declare fn rkTaskNames() -> string;
+
+// Runs the task once, out of band, in a worker process of its own, and waits
+// for it: 1 when it ran and the run is recorded, 0 when `overlap = skip` held it
+// back (counted as missed), -1 when no task has that name.
+#[@External.Erlang("rakun_scheduling", "run_now")]
+pub declare fn rkRunTaskNow(name: string) -> i32;
+
+// The same without waiting for the run to finish.
+#[@External.Erlang("rakun_scheduling", "run_async")]
+pub declare fn rkRunTaskAsync(name: string) -> i32;
+
+#[@External.Erlang("rakun_scheduling", "info")]
+pub declare fn rkTaskInfo(name: string) -> TaskInfo;
+
+#[@External.Erlang("rakun_scheduling", "forget")]
+pub declare fn rkForgetTask(name: string) -> i32;
+
+#[@External.Erlang("rakun_scheduling", "reset_stats")]
+pub declare fn rkResetTaskStats(name: string) -> i32;
+
+// One task as the registry holds it. Instants are epoch milliseconds, 0 for
+// "never" (and `nextFireAt` 0 while a fixed-delay run is in flight, or while the
+// scheduler is stopped). `runs` counts finished runs, failures included.
+pub type TaskInfo(
+    name: string,
+    trigger: string,
+    expression: string,
+    lastStartedAt: i64,
+    lastFinishedAt: i64,
+    lastResult: i32,
+    nextFireAt: i64,
+    runs: i32,
+    failures: i32,
+    missed: i32,
+    owner: string,
+    enabled: bool,
+    overlap: string,
+    inFlight: i32,
+    lastError: string,
+)
+
+// ── the refusals ────────────────────────────────────────────────────────────
+
+pub fn duplicateTaskProblem(name: string, first: string, second: string) -> string {
+    return "rakun-scheduling: two scheduled tasks are registered as `" + name + "` (`" + first + "` and `" + second + "`) - one name is one task, and only one of them could be configured, listed or run by name; give one a distinct name";
+}
+
+pub fn taskNameProblem(name: string) -> string {
+    return "rakun-scheduling: a task name must be non-empty and hold no whitespace, `/`, `|` or tab, and `" + name + "` does not";
+}
+
+pub fn intervalProblem(name: string, trigger: string, millis: i32) -> string {
+    return "rakun-scheduling: task `" + name + "` has #[" + trigger + "(" + millis.toString() + ")] - the interval is a positive number of milliseconds";
+}
+
+fn badName(name: string) -> bool {
+    val dirty = name.contains(" ") || name.contains("/") || name.contains("|") || name.contains("\t") || name.contains("\n");
+    return (name == "") || dirty;
+}
+
+fn claim(name: string, owner: string) -> i32 {
+    if (badName(name)) @panic(taskNameProblem(name));
+    val first: string = rkSchedOwner(name);
+    if ((first != "") && (first != owner)) @panic(duplicateTaskProblem(name, first, owner));
+    return 0;
+}
+
+// ── the three seams ─────────────────────────────────────────────────────────
+
+pub fn rkScheduleCron<R>(name: string, owner: string, expr: string, task: fn() -> R) -> i32 {
+    val _c = claim(name, owner);
+    val cron = compileCron(expr);
+    return rkSchedStore(name, owner, "cron", cron.expression, cronWire(cron), 0, task);
+}
+
+pub fn rkScheduleFixedRate<R>(name: string, owner: string, millis: i32, task: fn() -> R) -> i32 {
+    val _c = claim(name, owner);
+    if (millis <= 0) @panic(intervalProblem(name, "fixedRate", millis));
+    return rkSchedStore(name, owner, "fixedRate", millis.toString(), "", millis, task);
+}
+
+pub fn rkScheduleFixedDelay<R>(name: string, owner: string, millis: i32, task: fn() -> R) -> i32 {
+    val _c = claim(name, owner);
+    if (millis <= 0) @panic(intervalProblem(name, "fixedDelay", millis));
+    return rkSchedStore(name, owner, "fixedDelay", millis.toString(), "", millis, task);
+}
+
+// ── reading the registry ────────────────────────────────────────────────────
+
+pub fn taskNames() -> string[] {
+    val wire: string = rkTaskNames();
+    if (wire == "") {
+        val none: string[] = [];
+        return none;
+    } else return wire.split("\n");
+}
+
+pub fn taskInfo(name: string) -> TaskInfo {
+    return rkTaskInfo(name);
+}
+
+// `task <name> <trigger> <expression>` per task, sorted by name — the rendering
+// the milestone's schedule snapshots pin. An empty `names` lists every task.
+pub fn scheduleListing(names: string[]) -> string {
+    var out: string[] = [];
+    for (taskNames()) { n ->
+        val wanted = (names.length == 0) || (names.indexOf(n) >= 0);
+        if (wanted) {
+            val t: TaskInfo = rkTaskInfo(n);
+            out.push("task " + n + " " + t.trigger + " " + t.expression);
+        };
+    };
+    return out.join("\n");
+}

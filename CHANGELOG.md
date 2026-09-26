@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### rakun-scheduling: in-VM scheduling (botopink front 16)
+
+- `modules/rakun-scheduling`: `#[scheduler]` with `#[scheduled("<six-field cron>")]`,
+  `#[fixedRate(ms)]`, `#[fixedDelay(ms)]`; one registry (`rkScheduleCron` /
+  `rkScheduleFixedRate` / `rkScheduleFixedDelay`, `rkRunTaskNow`, `TaskInfo`); task
+  name `<Type>.<fn>`, duplicates refused at load naming both owners.
+- The cron parser (`cron.bp`): Spring's six fields, `*`/number/range/step/list/`?`;
+  `L`, `W`, `#`, named months and weekdays, out-of-range values and oversized steps
+  refused by field and token — at comptime by `#[scheduled]` (same text, corpus-tested)
+  and at load/boot by the compiled parser. Next fire by a calendar walk in the host,
+  at `rakun.scheduling.timezone` (UTC or a fixed offset).
+- The executor: a supervised timer per task and a fresh worker process per run, no
+  pool and no pool-size key; `overlap` skip/allow with a `missed` counter; failures
+  recorded, dead timers restarted; `rakun.scheduling.enabled`, `.<task>.enabled`,
+  `.<task>.cron` override; bad values refuse the boot naming the key;
+  `startScheduling()` / `stopScheduling()`.
+- `GET /actuator/scheduledtasks` and `POST /actuator/scheduledtasks/{name}/run`
+  behind front 11's exposure; the `scheduling` health indicator (`mountScheduling()`).
+- A virtual clock and gates so no test sleeps. `modules/rakun-scheduling` 0 → **67 / 0**.
+
 ### rakun-hateoas: HAL resources (botopink front 21)
 
 - `modules/rakun-hateoas/src/hal.bp`: `Link` / `link`, the link set,

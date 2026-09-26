@@ -1,0 +1,166 @@
+//// rakun-scheduling — what fails the BUILD (front 16 Steps 2 and 3).
+////
+//// A comptime refusal cannot be asserted from inside the module that carries
+//// it: that module would not compile, and the runner skips a module that does
+//// not compile. So each cell here WRITES a one-file project that depends on
+//// this member by path, runs the compiler on it and asserts the refusal text
+//// and its location in the compiler's output (rakun-data's `sql_build_test.bp`
+//// shape). The projects live under `.botopinkbuild/tmp/rakun-scheduling-fixtures/`
+//// (git-ignored), not under `test/`: the runner compiles every `.bp` below `test/`.
+////
+//// The compiler is `$BOTOPINK_BIN`, else `botopink` on `PATH`, else the
+//// meta-repository's `repository/botopink-lang/zig-out/bin/botopink`. With
+//// none of them the cells FAIL saying so — they never pass vacuously.
+////
+//// The cron corpus asserts the comptime message is WORD FOR WORD the one the
+//// compiled parser gives (`cronProblem`): the decorator restates the parser's
+//// rules because it cannot call it, and this is what keeps the two from drifting.
+
+import {testing.asserts} from "std";
+import {io: {fs, process}} from "std";
+import {cronProblem} from "cron";
+
+fn fixtureRoot() -> string {
+    return process.cwd() + "/.botopinkbuild/tmp/rakun-scheduling-fixtures";
+}
+
+fn compilerCommand() -> string {
+    return "B=\"$BOTOPINK_BIN\"; [ -n \"$B\" ] || B=\"$(command -v botopink)\"; [ -n \"$B\" ] || B=../../../botopink-lang/zig-out/bin/botopink; [ -x \"$B\" ] || { echo \"no botopink compiler: set BOTOPINK_BIN\"; exit 0; }; B=\"$(cd \"$(dirname \"$B\")\" && pwd)/$(basename \"$B\")\"; ";
+}
+
+fn dep(name: string, dir: string) -> string {
+    return "    \"" + name + "\": { \"path\": \"" + dir + "\" }";
+}
+
+// Writes `source` as the root of a project named `name`, builds it for erlang,
+// and answers the compiler's output followed by `exit=<status>`.
+fn buildFixture(name: string, source: string) -> string {
+    val dir = fixtureRoot() + "/" + name;
+    val here = process.cwd();
+    val _m = process.runShell("rm -rf '" + dir + "' && mkdir -p '" + dir + "/src'");
+    val deps = [
+        dep("rakun", here + "/../rakun"),
+        dep("rakun-web", here + "/../rakun-web"),
+        dep("rakun-actuator-api", here + "/../rakun-actuator-api"),
+        dep("rakun-actuator", here + "/../rakun-actuator"),
+        dep("rakun-scheduling", here),
+    ];
+    val manifest = "{\n  \"name\": \"" + name + "\",\n  \"version\": \"0.0.1\",\n  \"src\": \"src/\",\n  \"entry\": \"root.bp\",\n  \"target\": \"erlang\",\n  \"targets\": [\"erlang\"],\n  \"dependencies\": {\n" + deps.join(",\n") + "\n  }\n}\n";
+    val _j = fs.writeText(dir + "/botopink.json", manifest);
+    val _s = fs.writeText(dir + "/src/root.bp", source);
+    return process.runShell(compilerCommand() + "cd '" + dir + "' && \"$B\" build --target erlang --out out 2>&1 < /dev/null; echo \"exit=$?\"");
+}
+
+fn header() -> string {
+    return "import {service, component, rkScan, rkSingleton, rkEnter, rkDone} from \"rakun\";\nimport {scheduler, scheduled, fixedRate, fixedDelay, rkScheduleCron, rkScheduleFixedRate, rkScheduleFixedDelay} from \"rakun-scheduling\";\n\n";
+}
+
+fn task(marker: string, name: string) -> string {
+    return "    " + marker + "\n    pub fn " + name + "(self: Self) -> i32 {\n        return 0;\n    }\n";
+}
+
+fn service(name: string, body: string) -> string {
+    return "#[service]\n#[scheduler]\npub type " + name + " {\n" + body + "}\n";
+}
+
+// ── the control: a well-formed scheduler builds ─────────────────────────────
+
+test "build: a service with all three trigger kinds builds" {
+    val src = header() + service("CleanupService", task("#[scheduled(\"0 0 * * * *\")]", "hourly") + "\n" + task("#[fixedRate(5000)]", "heartbeat") + "\n" + task("#[fixedDelay(30000)]", "drain"));
+    val out = buildFixture("ok", src);
+    try asserts.contains(out, "exit=0");
+}
+
+// ── placement ───────────────────────────────────────────────────────────────
+
+test "build: each trigger marker anywhere but on a method fails with a located message" {
+    val onType = buildFixture("marker-type", header() + "#[service]\n#[scheduled(\"0 0 * * * *\")]\npub type Wrong {\n    pub fn run(self: Self) -> i32 {\n        return 0;\n    }\n}\n");
+    try asserts.contains(onType, "#[scheduled] must annotate a method of a #[scheduler] type");
+    try asserts.contains(onType, "src/root.bp:");
+    try asserts.notContains(onType, "exit=0");
+    val onFn = buildFixture("marker-fn", header() + "#[fixedRate(5000)]\npub fn tick() -> i32 {\n    return 0;\n}\n");
+    try asserts.contains(onFn, "#[fixedRate] must annotate a method of a #[scheduler] type");
+    try asserts.contains(onFn, "src/root.bp:");
+    try asserts.notContains(onFn, "exit=0");
+    val delayOnType = buildFixture("marker-delay", header() + "#[fixedDelay(100)]\npub type Wrong(n: i32)\n");
+    try asserts.contains(delayOnType, "#[fixedDelay] must annotate a method of a #[scheduler] type");
+    try asserts.contains(delayOnType, "src/root.bp:");
+    try asserts.notContains(delayOnType, "exit=0");
+}
+
+test "build: #[scheduler] on a type with no trigger-annotated method fails saying so" {
+    val out = buildFixture("no-trigger", header() + "#[service]\n#[scheduler]\npub type Idle {\n    pub fn run(self: Self) -> i32 {\n        return 0;\n    }\n}\n");
+    try asserts.contains(out, "#[scheduler] on Idle finds no method carrying #[scheduled], #[fixedRate] or #[fixedDelay]");
+    try asserts.contains(out, "src/root.bp:");
+    try asserts.notContains(out, "exit=0");
+}
+
+test "build: #[scheduler] without a stereotype fails naming the fix" {
+    val out = buildFixture("no-stereotype", header() + "#[scheduler]\npub type Bare {\n" + task("#[fixedRate(5000)]", "beat") + "}\n");
+    try asserts.contains(out, "#[scheduler] needs a stereotype on the same type");
+    try asserts.notContains(out, "exit=0");
+}
+
+test "build: a method carrying two trigger markers is refused - one trigger per task" {
+    val out = buildFixture("two-triggers", header() + service("Twice", "    #[scheduled(\"0 0 * * * *\")]\n    #[fixedRate(5000)]\n    pub fn both(self: Self) -> i32 {\n        return 0;\n    }\n"));
+    try asserts.contains(out, "#[scheduler] Twice.both carries 2 trigger markers (scheduled, fixedRate) - one trigger per task");
+    try asserts.notContains(out, "exit=0");
+}
+
+test "build: a task method with a parameter besides self is refused naming it" {
+    val out = buildFixture("extra-param", header() + service("Needy", "    #[fixedRate(5000)]\n    pub fn beat(self: Self, limit: i32) -> i32 {\n        return limit;\n    }\n"));
+    try asserts.contains(out, "#[scheduler] Needy.beat has the parameter `limit` - a scheduled method is (self: Self) -> i32, and a scheduler has no argument to give it");
+    try asserts.notContains(out, "exit=0");
+}
+
+test "build: a task method that does not return i32 is refused" {
+    val out = buildFixture("bad-return", header() + service("Chatty", "    #[fixedRate(5000)]\n    pub fn beat(self: Self) -> string {\n        return \"x\";\n    }\n"));
+    try asserts.contains(out, "#[scheduler] Chatty.beat returns `string` - a scheduled method returns i32");
+    try asserts.notContains(out, "exit=0");
+}
+
+test "build: a non-positive interval is refused" {
+    val out = buildFixture("zero-rate", header() + service("Busy", task("#[fixedRate(0)]", "spin")));
+    try asserts.contains(out, "#[fixedRate(0)] - the interval is a positive number of milliseconds");
+    try asserts.notContains(out, "exit=0");
+}
+
+// ── the cron corpus, at comptime, word for word ─────────────────────────────
+
+fn cronRefused(slug: string, expr: string) -> string {
+    val src = header() + service("Cron" + slug, task("#[scheduled(\"" + expr + "\")]", "run"));
+    return buildFixture("cron-" + slug, src);
+}
+
+fn assertSameRefusal(slug: string, expr: string, needle: string) -> @Result<void, string> {
+    val runtime: string = cronProblem(expr);
+    try asserts.contains(runtime, needle);
+    val out: string = cronRefused(slug, expr);
+    try asserts.contains(out, runtime);
+    try asserts.contains(out, "src/root.bp:");
+    return asserts.notContains(out, "exit=0");
+}
+
+test "build: L, W, #, MON and JAN are each refused at comptime with the field index and the token" {
+    try assertSameRefusal("l", "0 0 0 L * ?", "cron field 4 (day-of-month) token `L`: `L` (last)");
+    try assertSameRefusal("w", "0 0 0 15W * ?", "cron field 4 (day-of-month) token `15W`: `W` (nearest weekday)");
+    try assertSameRefusal("hash", "0 0 0 ? * 5#2", "cron field 6 (day-of-week) token `5#2`: `#`");
+    try assertSameRefusal("mon", "0 0 0 ? * MON", "cron field 6 (day-of-week) token `MON`: named months and weekdays");
+    try assertSameRefusal("jan", "0 0 0 1 JAN ?", "cron field 5 (month) token `JAN`: named months and weekdays");
+}
+
+test "build: a five-field expression is refused at comptime showing the seconds field" {
+    try assertSameRefusal("five", "0 0 * * *", "has 5 - the seconds field comes first, e.g. `0 0 0 * * *`");
+}
+
+test "build: a step larger than the field's range is refused at comptime" {
+    try assertSameRefusal("step", "*/60 * * * * *", "the step 60 is larger than the field's range 0-59");
+    try assertSameRefusal("zero", "0 */0 * * * *", "a step of 0 never advances");
+}
+
+test "build: out-of-range, reversed and misplaced tokens are refused at comptime" {
+    try assertSameRefusal("range", "0 0 25 * * *", "25 is outside 0-23");
+    try assertSameRefusal("back", "0 0 17-9 * * *", "the range runs backwards");
+    try assertSameRefusal("q", "? 0 0 * * *", "`?` is allowed only in day-of-month and day-of-week");
+    try assertSameRefusal("empty", "0 0 0 1,,2 * *", "an empty list item");
+}
