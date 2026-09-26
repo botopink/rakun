@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### The percent codec is std's `encoding` (botopink front 62 step 7)
+
+- `request_context.bp` no longer declares `percentEncode` / `percentDecode` /
+  `hexValue`: a `Set-Cookie` value is `encoding.percentEncode`d, and a cookie
+  or query component is read through `decodeComponent` — `encoding.percentDecode`,
+  keeping an escape that std refuses (`%zz`, `100%`) or that would decode to a
+  control character (`%0A`, `%0D`) exactly as written. `rakun-app`'s
+  `splitQuery` / `encodeQuery` read the same codec. Counts unchanged
+  (`modules/rakun` 335 / 0, `rakun-app` 59 / 0).
+
 ### `.json` configuration reads through std's `json.decode` (botopink front 05, decision 117 rule 7)
 
 - `parseJson` is std's RFC 8259 reader plus a flattener (`a.b.c`, `a[0]`); the
