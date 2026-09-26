@@ -77,11 +77,29 @@ fn outcomeOf(r: @Result<Authentication, string>) -> AuthOutcome {
     return AuthOutcome(auth: r.unwrapOr(anonymous()), presented: true, valid: true);
 }
 
+// Front 79's resource server installs the bearer verifier (RS256 against an
+// issuer's JWKS); without one a bearer token is front 10's HS256 JWT.
+#[@External.Erlang("""(fun(__F) -> persistent_term:put(rakun_security_bearer, __F), 0 end)($0)""")]
+pub declare fn installBearerVerifier(verify: fn(token: string) -> @Result<Authentication, string>) -> i32;
+
+#[@External.Erlang("""(fun() -> persistent_term:erase(rakun_security_bearer), 0 end)()""")]
+pub declare fn clearBearerVerifier() -> i32;
+
+#[@External.Erlang("""(persistent_term:get(rakun_security_bearer, undefined) =/= undefined)""")]
+pub declare fn bearerVerifierInstalled() -> bool;
+
+#[@External.Erlang("""(fun(__T) -> (persistent_term:get(rakun_security_bearer))(__T) end)($0)""")]
+declare fn runBearerVerifier(token: string) -> @Result<Authentication, string>;
+
+fn verifyBearer(token: string) -> @Result<Authentication, string> {
+    return if (bearerVerifierInstalled()) runBearerVerifier(token) else verifyJwt(token);
+}
+
 pub fn authenticate(req: WebRequest) -> AuthOutcome {
     val header: string = req.header("authorization").trim();
     if (header == "") return AuthOutcome(auth: anonymous(), presented: false, valid: true);
     val lower: string = header.toLower();
-    if (lower.startsWith("bearer ")) return outcomeOf(verifyJwt(header.slice(7, header.length()).trim()));
+    if (lower.startsWith("bearer ")) return outcomeOf(verifyBearer(header.slice(7, header.length()).trim()));
     if (lower.startsWith("basic ")) return outcomeOf(verifyBasic(userDetailsService(), header));
     return AuthOutcome(auth: anonymous(), presented: true, valid: false);
 }
@@ -151,7 +169,8 @@ pub fn securityEntry(p: CompiledPolicy, req: WebRequest, chain: Chain) -> Respon
     val _w = rkSecSlotPut("principal", who);
     if (outcome.valid == false) {
         val _i = rkSecNoteDecision("denied " + rendered(d));
-        return unauthorizedResponse();
+        val bearer = bearerVerifierInstalled() && req.header("authorization").trim().toLower().startsWith("bearer ");
+        return if (bearer) withHeader(unauthorizedResponse(), "WWW-Authenticate", "Bearer error=\"invalid_token\"") else unauthorizedResponse();
     };
     val auth: Authentication = outcome.auth;
     if (csrfPasses(req, auth.method) == false) {

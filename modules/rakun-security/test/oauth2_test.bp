@@ -1,0 +1,424 @@
+//// rakun-security — OAuth2 / OIDC (front 79 steps 1–6 and 8) against an
+//// identity provider this node serves on its own listener: discovery, the
+//// JWKS (RSA keys made for the run), the token endpoint. The application is
+//// dispatched in-process through front 18's session filter.
+
+import {testing.asserts} from "std";
+import {async} from "std";
+import {encoding} from "std";
+import {Request, Response, rkDispatchHttp, rkSetProp, rkServe, rkRegisterRoute, rkReplyHeaders} from "rakun";
+import {resetChain, runChain, rkChainSetTerminal, rkChainSetRunner, headerValue, cookieLines} from "rakun-web";
+import {RestClient, ClientResponse} from "rakun-client";
+import {Session, etsRepository, sessionSettings, installSessionWith, optionalSession} from "rakun-session";
+import {Authentication, anonymous, currentAuthentication} from "principal";
+import {SecurityPolicy, PathRule} from "policy";
+import {installSecurityWith, clearBearerVerifier} from "security_filter";
+import {OAuth2Provider, ProviderEndpoints, registerProvider, discover, discoveryFetches, clearProviders, oidcProvider, provider} from "oauth2/provider";
+import {AuthorizationRequest, authorizationRequest, safeReturnTo, installOAuth2Login, idTokenProblem, accessToken, tokenSet} from "oauth2/flow";
+import {installResourceServer, authoritiesOf} from "oauth2/resource";
+import {ClientRegistration, registerClientCredentials, clientCredentialsToken, withClientToken, tokenRequests} from "oauth2/client_credentials";
+import {spMetadata, authnRequest, deflateBase64, inflateBase64, installSaml2} from "saml2/saml2";
+import {oauthJwksFetches, oauthJwksHas, oauthStateCount} from "oauth2_host";
+
+#[@External.Erlang("rakun_runtime", "prop")]
+declare fn prop(key: string) -> string;
+
+#[@External.Erlang("rakun_oauth2", "test_keypair")]
+declare fn keypair(kid: string) -> i32;
+
+#[@External.Erlang("rakun_oauth2", "test_jwks")]
+declare fn jwksOf(kids: string[]) -> string;
+
+#[@External.Erlang("rakun_oauth2", "test_sign")]
+declare fn sign(kid: string, claimsJson: string) -> string;
+
+#[@External.Erlang("""(fun() -> erlang:system_time(second) end)()""")]
+declare fn nowS() -> i32;
+
+#[@External.Erlang("""(fun(__V) -> base64:encode(crypto:hash(sha256, __V), #{mode => urlsafe, padding => false}) end)($0)""")]
+declare fn s256Of(v: string) -> string;
+
+// ── the identity provider ───────────────────────────────────────────────────
+
+fn bump(key: string) -> i32 {
+    val n = prop(key);
+    return rkSetProp(key, (if (n == "") 1 else toInt(n) + 1).toString());
+}
+
+#[@External.Erlang("""(fun(__S) -> try binary_to_integer(__S) catch _:_ -> 0 end end)($0)""")]
+declare fn toInt(s: string) -> i32;
+
+fn issuer() -> string {
+    return prop("test.idp.issuer");
+}
+
+fn json(pairs: Array<#(string, string)>) -> string {
+    return "{" + pairs.map({ p -> "\"" + p._0 + "\":" + p._1 }).join(",") + "}";
+}
+
+fn q(s: string) -> string {
+    return "\"" + s + "\"";
+}
+
+fn idToken(kid: string, nonce: string, aud: string, exp: i32) -> string {
+    return sign(kid, json([#("iss", q(issuer())), #("sub", q("u-42")), #("aud", aud), #("nonce", q(nonce)), #("exp", exp.toString())]));
+}
+
+fn discovery(req: Request) -> Response {
+    val _b = bump("test.idp.discovery");
+    val announced = if (prop("test.idp.lie") == "1") "http://evil.example" else issuer();
+    return Response.ok(json([#("issuer", q(announced)), #("authorization_endpoint", q(issuer() + "/authorize")), #("token_endpoint", q(issuer() + "/token")), #("userinfo_endpoint", q(issuer() + "/userinfo")), #("jwks_uri", q(issuer() + "/jwks"))]));
+}
+
+fn jwks(req: Request) -> Response {
+    val _b = bump("test.idp.jwks");
+    if (prop("test.idp.jwks-down") == "1") return Response.withStatus(500, "down");
+    return Response.ok(jwksOf(prop("test.idp.kids").split(",")));
+}
+
+fn token(req: Request) -> Response {
+    val _b = bump("test.idp.token");
+    val form = encoding.formParse(req.body());
+    val grant = form.filter({ p -> p._0 == "grant_type" }).map({ p -> p._1 }).at(0) ?? "";
+    val mode = prop("test.idp.mode");
+    if (grant == "refresh_token" && mode == "invalid-grant") return Response.withStatus(400, json([#("error", q("invalid_grant"))]));
+    if (grant == "client_credentials") return if (prop("test.idp.cc-sleep") == "1") slowToken() else Response.ok(json([#("access_token", q("cc-token-" + prop("test.idp.token"))), #("expires_in", "300")]));
+    val exp = if (mode == "short") nowS() + 5 else nowS() + 600;
+    val body = if (mode == "no-id") json([#("access_token", q("at-1")), #("expires_in", "600")]) else json([#("access_token", q("at-" + prop("test.idp.token"))), #("refresh_token", q("rt-1")), #("id_token", q(idToken("k1", prop("test.idp.nonce"), q("app"), nowS() + 300))), #("expires_in", (exp - nowS()).toString()), #("scope", q("openid profile"))]);
+    return Response.ok(body);
+}
+
+#[@External.Erlang("""(fun() -> timer:sleep(200), 0 end)()""")]
+declare fn pause() -> i32;
+
+fn slowToken() -> Response {
+    val _p = pause();
+    return Response.ok(json([#("access_token", q("cc-token-slow")), #("expires_in", "300")]));
+}
+
+fn downstream(req: Request) -> Response {
+    val _b = bump("test.api.calls");
+    if (prop("test.api.reject-once") == "1") {
+        val _r = rkSetProp("test.api.reject-once", "");
+        return Response.withStatus(401, "expired");
+    };
+    return Response.ok("seen " + req.header("authorization"));
+}
+
+fn idp() -> string {
+    if (prop("test.idp.issuer") != "") return prop("test.idp.issuer");
+    val _k = keypair("k1");
+    val _l = keypair("k2");
+    val _m = keypair("k3");
+    val _q = rkRegisterRoute("GET", "/idp2/.well-known/openid-configuration", { r -> Response.ok(json([#("issuer", q("http://evil.example")), #("jwks_uri", q("http://x/jwks"))])) });
+    val _s = rkSetProp("test.idp.kids", "k1");
+    val _a = rkSetProp("rakun.http.clients.allow", "127.0.0.0/8");
+    val _d = rkRegisterRoute("GET", "/idp/.well-known/openid-configuration", { r -> discovery(r) });
+    val _j = rkRegisterRoute("GET", "/idp/jwks", { r -> jwks(r) });
+    val _t = rkRegisterRoute("POST", "/idp/token", { r -> token(r) });
+    val _x = rkRegisterRoute("GET", "/api/data", { r -> downstream(r) });
+    val _e = rkSetProp("rakun.main.keep-alive", "false");
+    val port = rkServe(0, { m, p, h, qq, b -> rkDispatchHttp(m, p, h, qq, b) });
+    val _i = rkSetProp("test.idp.issuer", "http://127.0.0.1:" + port.toString() + "/idp");
+    return prop("test.idp.issuer");
+}
+
+fn app() -> OAuth2Provider {
+    val iss = idp();
+    val existing: ?OAuth2Provider = provider("idp");
+    if (existing != null) return existing ?? oidcProvider("idp", "app", "s3cret", iss);
+    val p = oidcProvider("idp", "app", "s3cret", iss);
+    val _r = registerProvider(p);
+    return p;
+}
+
+fn sessions() -> i32 {
+    val _r = resetChain();
+    val _s = rkSetProp("rakun.session.secret", "front-79-session-secret-0123456789abcdef");
+    val _i = installSessionWith(etsRepository("oauth", 60), sessionSettings());
+    val _c = rkChainSetRunner({ m, p, hw, qw, b -> runChain(m, p, hw, qw, b); });
+    return installOAuth2Login();
+}
+
+fn get(path: string, query: string, cookie: string) -> Response {
+    val headers = if (cookie == "") "{}" else "{\"cookie\":\"" + cookie + "\"}";
+    return rkDispatchHttp("GET", path, headers, query, "");
+}
+
+fn queryParam(url: string, name: string) -> string {
+    val qs = url.split("?").at(1) ?? "";
+    return encoding.formParse(qs).filter({ p -> p._0 == name }).map({ p -> p._1 }).at(0) ?? "";
+}
+
+fn sessionCookie() -> string {
+    val raw = cookieLines().filter({ l -> l.startsWith("SESSION=") }).at(0) ?? "";
+    return raw.split(";").at(0) ?? "";
+}
+
+// ── step 1 ──────────────────────────────────────────────────────────────────
+
+test "oauth2: discovery is fetched once per issuer and cached" {
+    val p = app();
+    val before = discoveryFetches(p.issuerUri);
+    val _a = discover(p);
+    val _b = discover(p);
+    assert discoveryFetches(p.issuerUri) == before;
+    assert before == 1;
+}
+
+test "oauth2: a discovery document announcing another issuer refuses the boot naming both" {
+    val iss = idp();
+    val liar = iss.replaceAll("/idp", "/idp2");
+    val bad = OAuth2Provider(id: "liar", clientId: "c", clientSecret: "s", issuerUri: liar + "/", scopes: ["openid"], pkce: true, redirectPath: "/cb", authorizationUri: "", tokenUri: "", userinfoUri: "", jwksUri: "");
+    try asserts.throwsWith({ -> registerProvider(bad) }, "announces the issuer `http://evil.example`, and the configured issuerUri is `" + liar + "`");
+}
+
+test "oauth2: explicit endpoints register with no request; a duplicate id and a public client without PKCE are refused" {
+    val _a = app();
+    val explicit = OAuth2Provider(id: "plain", clientId: "c", clientSecret: "s", issuerUri: "", scopes: ["read"], pkce: false, redirectPath: "/cb", authorizationUri: "http://auth.invalid/a", tokenUri: "http://auth.invalid/t", userinfoUri: "", jwksUri: "http://auth.invalid/k");
+    assert registerProvider(explicit) == 1;
+    try asserts.throwsWith({ -> registerProvider(explicit) }, "a provider `plain` is already registered");
+    val public = OAuth2Provider(id: "pub", clientId: "c", clientSecret: "", issuerUri: "", scopes: [], pkce: false, redirectPath: "/cb", authorizationUri: "http://a", tokenUri: "http://t", userinfoUri: "", jwksUri: "http://k");
+    try asserts.throwsWith({ -> registerProvider(public) }, "provider `pub` has no client secret and no PKCE");
+}
+
+// ── step 2 ──────────────────────────────────────────────────────────────────
+
+test "oauth2: the authorization request carries every parameter, a S256 challenge and fresh secrets" {
+    val p = app();
+    val a = authorizationRequest(p, "/orders?x=1");
+    val b = authorizationRequest(p, "/orders?x=1");
+    for (["response_type", "client_id", "redirect_uri", "scope", "state", "nonce", "code_challenge", "code_challenge_method"]) { k -> assert queryParam(a.url, k) != "", k; };
+    assert queryParam(a.url, "response_type") == "code" && queryParam(a.url, "code_challenge_method") == "S256";
+    assert a.verifier.length() >= 43;
+    assert a.verifier.split("").filter({ c -> "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~".contains(c) == false }).length == 0;
+    assert queryParam(a.url, "code_challenge") == s256Of(a.verifier) && queryParam(a.url, "code_challenge").contains("=") == false;
+    assert a.state != b.state && a.nonce != b.nonce && a.verifier != b.verifier;
+    assert a.url.contains("orders") == false;
+    assert safeReturnTo("https://evil.example/x") == "/" && safeReturnTo("//evil.example") == "/" && safeReturnTo("/ok") == "/ok";
+}
+
+// ── step 3 ──────────────────────────────────────────────────────────────────
+
+test "oauth2: the authorization endpoint redirects and sets a session cookie; an unknown provider is 404" {
+    val _p = app();
+    val _s = sessions();
+    val res = get("/oauth2/authorization/idp", "{}", "");
+    assert res.status == 302;
+    assert headerValue("Location").startsWith(issuer() + "/authorize?"), headerValue("Location");
+    assert sessionCookie().startsWith("SESSION="), cookieLines().join("|");
+    assert get("/oauth2/authorization/unknown", "{}", "").status == 404;
+}
+
+test "oauth2: a callback with no, an unknown or a spent state is 400 and exchanges nothing; error= is 403" {
+    val _p = app();
+    val _s = sessions();
+    val before = toInt(prop("test.idp.token"));
+    assert get("/login/oauth2/code/idp", "{\"code\":\"c\"}", "").status == 400;
+    assert get("/login/oauth2/code/idp", "{\"code\":\"c\",\"state\":\"nope\"}", "").status == 400;
+    val _a = get("/oauth2/authorization/idp", "{}", "");
+    val state = queryParam(headerValue("Location"), "state");
+    val denied = get("/login/oauth2/code/idp", "{\"error\":\"access_denied\",\"error_description\":\"user said no\",\"state\":\"" + state + "\"}", "");
+    assert denied.status == 403 && denied.body.contains("user said no"), denied.body;
+    assert get("/login/oauth2/code/idp", "{\"code\":\"c\",\"state\":\"" + state + "\"}", "").status == 400;
+    assert toInt(prop("test.idp.token")) == before;
+}
+
+fn login(returnTo: string) -> Response {
+    val _a = get("/oauth2/authorization/idp", "{\"returnTo\":\"" + returnTo + "\"}", "");
+    val cookie = sessionCookie();
+    val location = headerValue("Location");
+    val _n = rkSetProp("test.idp.nonce", queryParam(location, "nonce"));
+    val res = get("/login/oauth2/code/idp", "{\"code\":\"the-code-123\",\"state\":\"" + queryParam(location, "state") + "\"}", cookie);
+    val _v = rkSetProp("test.last.verifier", "");
+    return res;
+}
+
+test "oauth2: a successful callback redirects to the stored return path and leaks no secret" {
+    val _p = app();
+    val _s = sessions();
+    val _m = rkSetProp("test.idp.mode", "");
+    val res = login("/orders/7");
+    assert res.status == 302, res.body;
+    assert headerValue("Location") == "/orders/7";
+    assert res.body.contains("the-code-123") == false && res.body.contains("at-") == false;
+    val evil = login("https://evil.example/");
+    assert headerValue("Location") == "/";
+}
+
+// ── step 4 ──────────────────────────────────────────────────────────────────
+
+test "oauth2: an openid token response without an ID token fails the login" {
+    val _p = app();
+    val _s = sessions();
+    val _m = rkSetProp("test.idp.mode", "no-id");
+    val res = login("/x");
+    val _u = rkSetProp("test.idp.mode", "");
+    assert res.status == 401 && res.body.contains("no ID token"), res.body;
+}
+
+test "oauth2: the ID token checks name the claim that failed" {
+    val p = app();
+    val e = discover(p);
+    val _w = rkSetProp("test.idp.kids", "k1");
+    assert idTokenProblem(p, e, idToken("k1", "n1", q("app"), nowS() + 60), "n2") == "rakun oauth2: the ID token's nonce claim does not hold";
+    assert idTokenProblem(p, e, idToken("k1", "n1", q("app"), nowS() - 30), "n1") == "";
+    assert idTokenProblem(p, e, idToken("k1", "n1", q("app"), nowS() - 120), "n1") == "rakun oauth2: the ID token's exp claim does not hold";
+    assert idTokenProblem(p, e, idToken("k1", "n1", "[\"other\",\"app\"]", nowS() + 60), "n1") == "";
+    assert idTokenProblem(p, e, idToken("k1", "n1", "[\"other\"]", nowS() + 60), "n1") == "rakun oauth2: the ID token's aud claim does not hold";
+}
+
+test "oauth2: an unknown kid re-fetches the key set once per window" {
+    val p = app();
+    val e = discover(p);
+    val _w = rkSetProp("rakun.security.oauth2.jwks-refetch-window", "60000");
+    val _k = rkSetProp("test.idp.kids", "k1,k2");
+    val before = oauthJwksFetches(e.issuer);
+    val first = idTokenProblem(p, e, idToken("k2", "n", q("app"), nowS() + 60), "n");
+    val afterFirst = oauthJwksFetches(e.issuer);
+    val second = idTokenProblem(p, e, sign("k3", json([#("iss", q(issuer()))])), "n");
+    val third = idTokenProblem(p, e, sign("k3", json([#("iss", q(issuer()))])), "n");
+    assert first == "" || afterFirst == before, first;
+    assert oauthJwksFetches(e.issuer) - afterFirst <= 1;
+    assert third == "rakun oauth2: the ID token fails its unknown-kid check";
+    val _u = rkSetProp("rakun.security.oauth2.jwks-refetch-window", "");
+}
+
+#[@External.Erlang("""(fun(__S, __K) -> rakun_oauth2:jwks_note_fetch(__S), ets:insert(rakun_oauth2_tab, {{jwks_last, __S}, erlang:monotonic_time(millisecond) - 100000}), 0 end)($0, $1)""")]
+declare fn ageWindow(issuer: string, unused: string) -> i32;
+
+test "oauth2: a failing key-set fetch keeps the cached keys" {
+    val p = app();
+    val e = discover(p);
+    val _k = rkSetProp("test.idp.kids", "k1");
+    val _o = idTokenProblem(p, e, idToken("k1", "n", q("app"), nowS() + 60), "n");
+    val _d = rkSetProp("test.idp.jwks-down", "1");
+    val _a = ageWindow(e.issuer, "");
+    val stillOk = idTokenProblem(p, e, idToken("k1", "n", q("app"), nowS() + 60), "n");
+    val _r = idTokenProblem(p, e, sign("k3", json([#("iss", q(issuer()))])), "n");
+    val _u = rkSetProp("test.idp.jwks-down", "");
+    assert stillOk == "" && oauthJwksHas(e.issuer, "k1");
+}
+
+test "oauth2: a refresh answered invalid_grant ends the session instead of retrying" {
+    val _p = app();
+    val _s = sessions();
+    val _m = rkSetProp("test.idp.mode", "short");
+    val res = login("/x");
+    val cookie = sessionCookie();
+    val _g = rkSetProp("test.idp.mode", "invalid-grant");
+    val _t = rkChainSetTerminal({ method, path, hw, qw, body -> Response.ok("token=" + accessToken("idp") + " session=" + (if (optionalSession() == null) "none" else "live")) });
+    val before = toInt(prop("test.idp.token"));
+    val out = runChain("GET", "/me", "cookie\t" + cookie, "", "");
+    val _u = rkSetProp("test.idp.mode", "");
+    assert res.status == 302;
+    assert out.body == "token= session=none", out.body;
+    assert toInt(prop("test.idp.token")) - before == 1;
+}
+
+// ── step 5 ──────────────────────────────────────────────────────────────────
+
+fn api() -> i32 {
+    val _r = resetChain();
+    val _p = installSecurityWith(SecurityPolicy(rules: [PathRule(pattern: "/open", requirement: "permitAll")], defaultRequirement: "authenticated"));
+    val _i = installResourceServer("idp", "app");
+    return rkChainSetTerminal({ method, path, hw, qw, body ->
+        val a: Authentication = currentAuthentication();
+        Response.ok(a.principal.name + " " + a.principal.authorities.join(","));
+    });
+}
+
+fn bearer(t: string) -> string {
+    return "authorization\tBearer " + t;
+}
+
+test "oauth2: a bearer token's scope and roles become authorities, without the network once the keys are cached" {
+    val p = app();
+    val _a = api();
+    val _k = rkSetProp("test.idp.kids", "k1");
+    val t = sign("k1", json([#("iss", q(issuer())), #("sub", q("svc")), #("aud", q("app")), #("exp", (nowS() + 60).toString()), #("scope", q("orders:read orders:write")), #("roles", "[\"admin\",\"ops\"]")]));
+    val first = runChain("GET", "/x", bearer(t), "", "");
+    val fetches = oauthJwksFetches(discover(p).issuer);
+    val second = runChain("GET", "/x", bearer(t), "", "");
+    val _c = clearBearerVerifier();
+    val _z = resetChain();
+    assert first.status == 200, first.body;
+    assert first.body == "svc SCOPE_orders:read,SCOPE_orders:write,ROLE_admin,ROLE_ops";
+    assert second.status == 200 && oauthJwksFetches(discover(p).issuer) == fetches;
+}
+
+test "oauth2: a malformed bearer is 401 with the invalid_token challenge; no header is anonymous and a protected path 401s" {
+    val _p = app();
+    val _a = api();
+    val bad = runChain("GET", "/x", bearer("not.a.token"), "", "");
+    val challenge = headerValue("WWW-Authenticate");
+    val anon = runChain("GET", "/x", "", "", "");
+    val open = runChain("GET", "/open", "", "", "");
+    val _c = clearBearerVerifier();
+    val _z = resetChain();
+    assert bad.status == 401 && challenge == "Bearer error=\"invalid_token\"", challenge;
+    assert anon.status == 401;
+    assert open.status == 200 && open.body.startsWith("anonymous");
+}
+
+// ── step 6 ──────────────────────────────────────────────────────────────────
+
+fn ccReg(id: string) -> ClientRegistration {
+    return ClientRegistration(id: id, tokenUri: idp() + "/token", clientId: "svc", clientSecret: "svc-secret", scopes: ["api"]);
+}
+
+fn fetchToken(id: string) -> string {
+    return clientCredentialsToken(id);
+}
+
+test "oauth2: concurrent calls through a cold source make one token request" {
+    val _r = registerClientCredentials(ccReg("cold"));
+    val _s = rkSetProp("test.idp.cc-sleep", "1");
+    val results = await async.runAll([
+        { -> async { fetchToken("cold") } },
+        { -> async { fetchToken("cold") } },
+        { -> async { fetchToken("cold") } },
+        { -> async { fetchToken("cold") } },
+    ]);
+    val _u = rkSetProp("test.idp.cc-sleep", "");
+    assert tokenRequests("cold") == 1, tokenRequests("cold").toString();
+    assert results.filter({ t -> t == "cc-token-slow" }).length == 4;
+}
+
+fn callApi(url: string, token: string) -> ClientResponse {
+    return RestClient.builder().defaultHeader("authorization", "Bearer " + token).build().get(url).retrieve();
+}
+
+test "oauth2: a 401 downstream drops the cached token and retries exactly once; a token appears in no failure" {
+    val _r = registerClientCredentials(ccReg("retry"));
+    val _i = rkSetProp("test.api.reject-once", "1");
+    val url = "http://127.0.0.1:" + issuer().split(":").at(2).unwrapOr("0").split("/").at(0).unwrapOr("0") + "/api/data";
+    val before = tokenRequests("retry");
+    val res = withClientToken("retry", { t -> callApi(url, t) });
+    assert res.status == 200 && res.body.startsWith("seen Bearer cc-token-"), res.body;
+    assert tokenRequests("retry") - before == 2;
+    val broken = ClientRegistration(id: "broken", tokenUri: idp() + "/missing", clientId: "svc", clientSecret: "svc-secret", scopes: []);
+    val _b = registerClientCredentials(broken);
+    try asserts.throwsWith({ -> clientCredentialsToken("broken").length() }, "the client-credentials token request of `broken` failed with status 404");
+}
+
+test "oauth2: a registration no client uses is never fetched" {
+    val _r = registerClientCredentials(ccReg("idle"));
+    assert tokenRequests("idle") == 0;
+}
+
+// ── step 8: SAML, cut ───────────────────────────────────────────────────────
+
+test "saml2: the SP metadata, the AuthnRequest round trip and the ACS 501" {
+    val _e = rkSetProp("rakun.security.saml2.entity-id", "https://app.example/saml");
+    val _a = rkSetProp("rakun.security.saml2.acs-url", "https://app.example/saml2/acs");
+    val _i = installSaml2();
+    val meta = rkDispatchHttp("GET", "/saml2/metadata", "{}", "{}", "");
+    assert meta.status == 200 && meta.body.contains("entityID=\"https://app.example/saml\"") && meta.body.contains("Location=\"https://app.example/saml2/acs\"");
+    val xml = authnRequest("id-1", "2026-09-26T00:00:00Z", "https://idp.example/sso");
+    assert inflateBase64(deflateBase64(xml)) == xml;
+    val acs = rkDispatchHttp("POST", "/saml2/acs", "{}", "{}", "SAMLResponse=x");
+    assert acs.status == 501 && acs.body.contains("Exclusive XML Canonicalization (exc-c14n)");
+    val _u = rkSetProp("rakun.security.saml2.entity-id", "");
+    val _v = rkSetProp("rakun.security.saml2.acs-url", "");
+}

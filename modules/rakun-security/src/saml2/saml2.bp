@@ -1,0 +1,43 @@
+//// rakun-security — SAML 2.0 service provider, the cut half (front 79 step 8).
+////
+//// The SP metadata (`/saml2/metadata`) and the `AuthnRequest` over the
+//// HTTP-Redirect binding (raw deflate, base64, URL-encoded) are served. The
+//// assertion consumer service is NOT: verifying an IdP signature needs
+//// Exclusive XML Canonicalization (exc-c14n) of the signed element, which
+//// neither OTP nor std provides, and an assertion checked without it is not
+//// checked. `/saml2/acs` therefore answers 501 naming what is missing.
+//// Configuration: `rakun.security.saml2.entity-id`, `.acs-url`.
+
+import {Request, Response, rkProp, rkRegisterRoute} from "rakun";
+import {withHeader} from "rakun-web";
+
+#[@External.Erlang("""(fun(__X) -> base64:encode(zlib:zip(__X)) end)($0)""")]
+pub declare fn deflateBase64(xml: string) -> string;
+
+#[@External.Erlang("""(fun(__B) -> zlib:unzip(base64:decode(__B)) end)($0)""")]
+pub declare fn inflateBase64(encoded: string) -> string;
+
+pub fn entityId() -> string {
+    return rkProp("rakun.security.saml2.entity-id").trim();
+}
+
+pub fn acsUrl() -> string {
+    return rkProp("rakun.security.saml2.acs-url").trim();
+}
+
+pub fn spMetadata() -> string {
+    return "<md:EntityDescriptor xmlns:md=\"urn:oasis:names:tc:SAML:2.0:metadata\" entityID=\"" + entityId() + "\"><md:SPSSODescriptor protocolSupportEnumeration=\"urn:oasis:names:tc:SAML:2.0:protocol\"><md:AssertionConsumerService Binding=\"urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST\" Location=\"" + acsUrl() + "\" index=\"0\"/></md:SPSSODescriptor></md:EntityDescriptor>";
+}
+
+pub fn authnRequest(id: string, issueInstant: string, destination: string) -> string {
+    return "<samlp:AuthnRequest xmlns:samlp=\"urn:oasis:names:tc:SAML:2.0:protocol\" xmlns:saml=\"urn:oasis:names:tc:SAML:2.0:assertion\" ID=\"" + id + "\" Version=\"2.0\" IssueInstant=\"" + issueInstant + "\" Destination=\"" + destination + "\" AssertionConsumerServiceURL=\"" + acsUrl() + "\"><saml:Issuer>" + entityId() + "</saml:Issuer></samlp:AuthnRequest>";
+}
+
+pub fn acsNotImplemented() -> string {
+    return "rakun saml2: the assertion consumer service is not implemented - verifying an IdP signature needs Exclusive XML Canonicalization (exc-c14n), which neither OTP nor std provides";
+}
+
+pub fn installSaml2() -> i32 {
+    val _m = rkRegisterRoute("GET", "/saml2/metadata", { req -> withHeader(Response.ok(spMetadata()), "Content-Type", "application/samlmetadata+xml") });
+    return rkRegisterRoute("POST", "/saml2/acs", { req -> Response.withStatus(501, acsNotImplemented()) });
+}

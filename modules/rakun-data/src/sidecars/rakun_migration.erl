@@ -127,12 +127,15 @@ now_ms() -> erlang:monotonic_time(millisecond).
 %% Once per driver: the arm has no advisory lock and the node is not
 %% distributed, so the lock is node-local.
 unlocked_warning(Ds) ->
-    Key = {rakun_migration_warned, rakun_sql:ds_arm(Ds)},
-    case persistent_term:get(Key, false) of
-        true -> 0;
-        false ->
-            persistent_term:put(Key, true),
-            Line = iolist_to_binary(["rakun migration: the ", rakun_sql:ds_arm(Ds),
+    Arm = rakun_sql:ds_arm(Ds),
+    Name = binary_to_atom(<<"rakun_migration_warned_", Arm/binary>>),
+    %% Registering a name is atomic: of two processes warning at once, one
+    %% registers and warns, the other finds the name taken.
+    Claim = spawn(fun() -> receive never -> ok end end),
+    case (try register(Name, Claim) catch error:badarg -> false end) of
+        false -> exit(Claim, kill), 0;
+        true ->
+            Line = iolist_to_binary(["rakun migration: the ", Arm,
                                      " driver has no advisory lock and this node is not in a cluster - ",
                                      "the migration lock covers this node only"]),
             persistent_term:put(rakun_migration_warnings, warnings() ++ [Line]),

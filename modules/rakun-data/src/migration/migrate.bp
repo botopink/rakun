@@ -171,7 +171,7 @@ fn sqlFiles(dir: string) -> string[] {
 
 // Every migration file of every location, versioned in version order then
 // repeatables in filename order; the first discovery problem raises.
-pub fn discover() -> MigrationFile[] {
+pub fn discoverMigrations() -> MigrationFile[] {
     var versioned: MigrationFile[] = [];
     var repeatable: MigrationFile[] = [];
     var problem = "";
@@ -205,7 +205,7 @@ pub fn discover() -> MigrationFile[] {
 // Whether migrations run: `enabled` when set; otherwise whether any file exists.
 pub fn migrationEnabled() -> bool {
     val raw = rkProp("rakun.migration.enabled").trim();
-    val files = discover();
+    val files = discoverMigrations();
     if (raw == "false") return false;
     if (raw == "true" && files.length == 0) @panic("rakun migration: rakun.migration.enabled=true and no migration was found in " + migrationLocations().join(", "));
     return files.length > 0;
@@ -382,7 +382,7 @@ fn baseline(ds: string, files: MigrationFile[], history: Migration[]) -> Migrati
 // The migrations on `ds`, under the lock. Raises on any failure.
 pub fn migrateOn(ds: string) -> MigrationReport {
     val _e = ensureDataSource(ds);
-    val files = discover();
+    val files = discoverMigrations();
     if (standalone()) {
         val _w = rkMigUnlockedWarning(ds);
     };
@@ -429,7 +429,7 @@ declare fn lastReport() -> MigrationReport;
 // exit code a CI gate branches on: 1 when anything is pending, else 0.
 pub fn dryRunOn(ds: string) -> i32 {
     val _e = ensureDataSource(ds);
-    val files = discover();
+    val files = discoverMigrations();
     val pending = rkMigWithLock(ds, lockTimeoutMillis(), { -> planLines(ds, files) });
     @print(if (pending.length == 0) "rakun migration: dry run - nothing to apply" else "rakun migration: dry run - would apply " + pending.join(", "));
     return if (pending.length == 0) 0 else 1;
@@ -446,7 +446,7 @@ pub fn appliedMigrationsOn(ds: string) -> Migration[] {
 }
 
 pub fn pendingMigrationsOn(ds: string) -> Migration[] {
-    return plan(discover(), historyOn(ds)).map({ f -> Migration(version: f.version, description: f.description, script: f.script, checksum: f.checksum, installedRank: 0, installedOn: "", executionMillis: 0, success: false) });
+    return plan(discoverMigrations(), historyOn(ds)).map({ f -> Migration(version: f.version, description: f.description, script: f.script, checksum: f.checksum, installedRank: 0, installedOn: "", executionMillis: 0, success: false) });
 }
 
 pub fn appliedMigrations() -> Migration[] {
@@ -463,7 +463,7 @@ pub fn pendingMigrations() -> Migration[] {
 // records a repair row. Never run by configuration.
 pub fn repairMigration(script: string) -> i32 {
     val ds = migrationDataSource();
-    val files = discover().filter({ f -> f.script == script });
+    val files = discoverMigrations().filter({ f -> f.script == script });
     if (files.length == 0) @panic("rakun migration: repair names `" + script + "`, which no location holds");
     val f = files.at(0) ?? MigrationFile(version: "", description: "", script: "", path: "", text: "", checksum: "");
     return rkMigWithLock(ds, lockTimeoutMillis(), { -> repairLocked(ds, f) });
@@ -496,7 +496,7 @@ pub fn ddlAutoProblem() -> string {
     if (mode != "create" && mode != "create-drop") return "";
     val prod = active().filter({ p -> productionProfiles().indexOf(p) >= 0 });
     if (prod.length > 0) return "rakun migration: rakun.migration.ddl-auto=" + mode + " under the production profile `" + (prod.at(0) ?? "") + "` - dropping every entity table is refused there; use validate, or leave the profile";
-    val files = discover();
+    val files = discoverMigrations();
     if (files.length > 0) return "rakun migration: rakun.migration.ddl-auto=" + mode + " beside migration files (" + (files.at(0) ?? MigrationFile(version: "", description: "", script: "", path: "", text: "", checksum: "")).path + ") - one of them owns the schema, not both";
     return "";
 }
@@ -583,7 +583,7 @@ pub fn migrationReportOn(ds: string) -> string {
     val history = historyOn(ds);
     val applied = history.filter({ m -> m.success }).map({ m -> migrationJson(m, "applied") });
     val failed = history.filter({ m -> m.success == false }).map({ m -> migrationJson(m, "failed") });
-    val pending = plan(discover(), history).map({ f -> migrationJson(Migration(version: f.version, description: f.description, script: f.script, checksum: f.checksum, installedRank: 0, installedOn: "", executionMillis: 0, success: false), "pending") });
+    val pending = plan(discoverMigrations(), history).map({ f -> migrationJson(Migration(version: f.version, description: f.description, script: f.script, checksum: f.checksum, installedRank: 0, installedOn: "", executionMillis: 0, success: false), "pending") });
     return "{\"applied\":[" + applied.join(",") + "],\"pending\":[" + pending.join(",") + "],\"failed\":[" + failed.join(",") + "]}";
 }
 

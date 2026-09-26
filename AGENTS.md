@@ -2567,6 +2567,44 @@ sanitizer. Keys are all `rakun.management.*` (03r-t).
 - **Report** — the `access` endpoint (gated like the rest, hidden by
   default): per id, exposed, configured and effective level, listener.
 
+## OAuth2, OIDC, LDAP and SAML — `modules/rakun-security/src/{oauth2,ldap,saml2}/` (front 79)
+
+Host cells: `rakun_oauth2.erl` (random, PKCE S256, the single-use state
+store, the JWKS cache, RS256 verification, claim checks, token caches, single
+flight, test IdP key material) through the root-level `src/oauth2_host.bp`,
+and `rakun_ldap.erl` (eldap bind-and-search, handle accounting, an in-node
+test directory) through `src/ldap_host.bp`.
+
+- **Providers** (`oauth2/provider.bp`) — `registerProvider` at boot: OIDC
+  discovery once per issuer (issuer mismatch refuses naming both), or the
+  explicit `authorizationUri`/`tokenUri`/`jwksUri`; duplicate id and a public
+  client without PKCE refused.
+- **Login** (`oauth2/flow.bp`, `installOAuth2Login()`) —
+  `/oauth2/authorization/:id` (state, nonce, 43-char verifier, S256; the
+  return path server-side, `safeReturnTo`) and `/login/oauth2/code/:id`
+  (state taken before anything, `error=` → 403, code exchange through
+  rakun-client, ID token RS256 + `iss`/`aud`/`nonce`/`exp` within
+  `rakun.security.oauth2.clock-skew`, one JWKS re-fetch per
+  `jwks-refetch-window` for an unknown kid, front 18's `authenticateSession`,
+  302 to the return path). `accessToken(provider)` refreshes within
+  `refresh-margin`; `invalid_grant` ends the session.
+- **Resource server** (`oauth2/resource.bp`) — `installResourceServer(id,
+  audience)` installs front 10's bearer verifier seam
+  (`installBearerVerifier` in `security_filter.bp`): `scope` → `SCOPE_*`,
+  `roles` → `ROLE_*`; a bad bearer is 401 with `Bearer error="invalid_token"`.
+- **Client credentials** (`oauth2/client_credentials.bp`) —
+  `registerClientCredentials`, `clientCredentialsToken(id)` (cached, single
+  flight), `withClientToken(id, call)` (one retry on 401).
+- **LDAP** (`ldap/ldap.bp`) — `ldapAuthenticate(config, user, password)` →
+  authenticated (DN subject, `memberOf` authorities) | rejected (one answer for
+  unknown user and bad password) | unavailable; `registerLdapHealth`.
+- **SAML 2.0** (`saml2/saml2.bp`) — metadata and the Redirect-binding
+  `AuthnRequest`; `/saml2/acs` answers 501: no exc-c14n, no verification.
+
+The front-10 boundary: front 10 owns the chain entry, the context, the
+policy, HS256 and Basic; front 79 plugs in only through
+`installBearerVerifier` and front 18's session.
+
 ## Entities and derived queries — `modules/rakun-data/src/orm/` (front 78)
 
 - **`#[entity("table")]`** (`orm/entity.bp`) on a record emits into its module
