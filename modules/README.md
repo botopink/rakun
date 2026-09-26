@@ -12,12 +12,13 @@ to a sibling or to the umbrella is a located error.
 
 ## Members today
 
-Fourteen members exist. The eleven remaining scaffolds are **kept under their names** by the reconciliation
+Thirteen members exist. The eleven remaining scaffolds are **kept under their names** by the reconciliation
 table of `03-rakun/modules.md` § Verdicts (no rename applied to a scaffold); each is a two-comment
 `src/root.bp` until its front lands, and its manifest lists `files: ["root.bp"]` so it ships one module
-rather than nothing. `targets` follows `03-rakun/modules.md` § Targets. Three members hold real code
-today: the core (`rakun`, fronts 04 · 05 · 06 · 62 · 72 · 74), `rakun-validation` (front 14) and
-`rakun-web` (front 07).
+rather than nothing. `targets` follows `03-rakun/modules.md` § Targets. Two members hold real code
+today: the core (`rakun`, fronts 04 · 05 · 06 · 62 · 72 · 74) and `rakun-web` (front 07). Front 14's
+`rakun-validation` moved to the compiler-bundled library `validation` (decision 116 rule 5); its boot
+refusal is the core's `config_check.bp`.
 
 | Member | `files` | `targets` | Spring Boot 4 | Front(s) | State |
 |---|---|---|---|---|---|
@@ -33,17 +34,14 @@ today: the core (`rakun`, fronts 04 · 05 · 06 · 62 · 72 · 74), `rakun-valid
 | [rakun-security](./rakun-security/) | root | erlang | `-security`, `-oauth2-client`, `-saml2` | 10 · 79 | scaffold |
 | [rakun-session](./rakun-session/) | root | erlang | `spring-session-jdbc` / `-data-redis` | 18 | scaffold |
 | [rakun-test](./rakun-test/) | root | commonJS, erlang | `-test` | 19 | scaffold |
-| [rakun-validation](./rakun-validation/) | root · report · table · messages · spi · constraints · binding · boot · decorators | commonJS, erlang | `-validation` | 14 | real code, 54 tests |
 | [rakun-web](./rakun-web/) | root · filter · error · middleware · cors · convention | erlang | `-webmvc` (websocket is `rakun-websocket`) | 07 · 65 · 82 | real code, 83 tests |
 
 `modules/rakun-web/` stopped being a scaffold with front 07: it carries the filter chain, CORS and
 RFC 9457 problem details, two host files (`src/chain.mjs`, `src/sidecars/rakun_chain.erl`) and four
-test files — see `repository/rakun/AGENTS.md` § The filter chain. `modules/rakun-validation/` stopped
-being one with front 14: the constraint decorators, `#[validated]`, the violation report, two host
-files (`src/validation_host.mjs`, `src/sidecars/rakun_validation.erl`) and seven test files — see
+test files — see `repository/rakun/AGENTS.md` § The filter chain. Front 14's `modules/rakun-validation/` is now the bundled `validation` library — see
 `repository/rakun/AGENTS.md` § Validation, and the section below.
 
-### `rakun-validation` — the one `both — boundary` member (front 14)
+### `validation` — front 14's member, now a bundled library (decision 116 rule 5)
 
 Every other server module is erlang. This one is both, and the reason is the
 mechanism rather than the packaging: `#[validated]` emits a plain botopink
@@ -53,7 +51,7 @@ commonJS and the server and the client run the same predicate instead of two
 predicates that are supposed to agree. What is serialized is only the constraint
 table, and only for a consumer that is not botopink.
 
-Surface, reached with `import {…} from "rakun-validation"`:
+Surface, reached with `import {…} from "validation"`:
 
 | What | Names |
 |---|---|
@@ -113,13 +111,13 @@ Twenty-seven members in all when every front has landed, plus `starters/`. `raku
 import {service, restController, route, getMapping} from "rakun";
 import {Rakun, App, Request, Response} from "rakun";
 import {filter, order, Chain, WebRequest} from "rakun-web";
-import {validated, notBlank, email} from "rakun-validation";
+import {validated, notBlank, email} from "validation";
 // later, per front:
 import {cacheable} from "rakun-cache";
 import {secured} from "rakun-security";
 ```
 
-> **`validated` comes from `rakun-validation`, never from `rakun`, and never
+> **`validated` comes from `validation`, never from `rakun`, and never
 > both.** The core carries a *placement-only* `#[validated]` of its own
 > (`modules/rakun/src/config.bp`, front 05): it checks placement and **emits
 > nothing**, so importing that one leaves `validate<TypeName>` undefined and the
@@ -160,7 +158,7 @@ rakun-<name>/
 - **Decorator-based**: all annotations use `#[decorator]` syntax.
 - **IoC integration**: every component is managed by the core container (`rakun`).
 - **Target per member**: `03-rakun/modules.md` § Targets — erlang for the server modules,
-  `commonJS, erlang` only where the module sits on the boundary (`rakun-validation`, `rakun-test`, `rakun-app`).
+  `commonJS, erlang` only where the module sits on the boundary (`rakun-test`, `rakun-app`; validation is the bundled `validation` library).
 - **Std lib reuse**: use `std.*` modules when possible; `std` is never listed as a dependency.
 - **No compiler changes**: the compiler core knows nothing about rakun modules.
 
@@ -180,7 +178,7 @@ rakun-<name>/
 | `@RabbitListener` / `@KafkaListener` | `#[rabbitListener]` / `#[kafkaListener]` (rakun-messaging) |
 | `@PreAuthorize` | `#[preAuthorize]` (rakun-security) |
 | `@CrossOrigin` | `#[crossOrigin]` (rakun-web) |
-| `@Valid` / `@NotBlank` / `@Size` / `@Email` … | `#[validated]` + the constraint markers (rakun-validation) — an explicit `validate<TypeName>(v)` call, not a parameter hook |
+| `@Valid` / `@NotBlank` / `@Size` / `@Email` … | `#[validated]` + the constraint markers (the bundled `validation`) — an explicit `validate<TypeName>(v)` call, not a parameter hook |
 | Actuator endpoints | `/actuator/*` (rakun-actuator) |
 | `RestClient` / `WebClient` | `RestClient` / `WebClient` (rakun-client) |
 

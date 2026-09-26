@@ -1,4 +1,5 @@
-//// rakun-validation — step 6: boot-time configuration validation.
+//// rakun — boot-time configuration validation (front 14 step 6), over the bundled
+//// `validation` library; moved here from the retired validation member.
 ////
 //// Front 14 owns the CONSTRAINTS; front 05 owns the MOMENT. This file asserts
 //// the half this front can assert: that a record carrying BOTH
@@ -19,20 +20,22 @@
 //// refusal TEXT is asserted directly and the halt is exercised only on the
 //// valid path, where it does not fire.
 ////
-//// NOTE ON `#[validated]`. Front 05 already declares a placement-only
-//// `#[validated]` in `modules/rakun/src/config.bp`. It is NOT the one imported
-//// here: that one checks placement and emits nothing. An application that wants
-//// the emission imports `validated` from `rakun-validation`, and must not
-//// import both names into one module.
+//// NOTE ON `#[validated]`. It is the bundled `validation` library's; front
+//// 05's placement-only marker left `config.bp` when the library landed, because
+//// a same-named decorator in this package shadowed the imported one.
 
-import {validated, notBlank, minValue, maxValue, pattern, sizeBetween} from "decorators";
-import {configurationProperties, defaultValue} from "rakun";
-import {rkSetProp, rkProp, rkValueOr, rkPropIntOr, rkPropBool, rkPropFloat, rkPropList, rkPropDuration, rkPropSize, rkSingleton, rkRegisterConfigKeys} from "rakun";
-import {ValidationReport, Violation} from "report";
-import {constraintTableJson} from "table";
-import {vNotBlank, vMinValueI32, vMaxValueI32, vPattern, vSizeBetween} from "constraints";
-import {vConstraint} from "spi";
-import {propertyKey, violationLine, configProblem, refuseInvalidConfig} from "boot";
+import {decorators.validated, decorators.notBlank, decorators.minValue, decorators.maxValue, decorators.pattern, decorators.sizeBetween} from "validation";
+import {
+    report: {ValidationReport, Violation},
+    table.constraintTableJson,
+    constraints: {vNotBlank, vMinValueI32, vMaxValueI32, vPattern, vSizeBetween},
+    spi.vConstraint,
+    messages.templateFor,
+} from "validation";
+import {configurationProperties, defaultValue};
+import {rkSetProp, rkProp};
+import {rkSingleton, rkValueOr, rkPropBool, rkPropIntOr, rkPropFloat, rkPropList, rkPropDuration, rkPropSize, rkRegisterConfigKeys};
+import {propertyKey, violationLine, configProblem, refuseInvalidConfig, installMessageSource} from "config_check";
 
 #[validated]
 #[configurationProperties("app.billing")]
@@ -105,4 +108,12 @@ test "rakun validation: a valid configuration costs one pass over the violations
 
 test "rakun validation: the configuration record's table crosses like any other" {
     assert constraintsOfBillingConfig() == "{\"type\":\"BillingConfig\",\"fields\":[{\"name\":\"endpoint\",\"constraints\":[{\"code\":\"notBlank\"},{\"code\":\"pattern\",\"regex\":\"^https?://.+$\"}]},{\"name\":\"retryLimit\",\"constraints\":[{\"code\":\"minValue\",\"min\":1},{\"code\":\"maxValue\",\"max\":10}]}]}";
+}
+
+test "rakun validation: rakun's message source answers from rakun's keys" {
+    val _i = installMessageSource();
+    val _p = rkSetProp("rakun.validation.messages.notBlank", "is required");
+    assert templateFor("notBlank", "must not be blank") == "is required";
+    val _q = rkSetProp("rakun.validation.messages.notBlank", "");
+    assert templateFor("notBlank", "must not be blank") == "must not be blank";
 }

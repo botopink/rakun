@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### Bundled `routing` and `validation` (botopink `01-std` fronts 04 and 06; decisions 115, 116)
+
+- **The file-convention grammar, wire and matcher left `file_router.bp`** for the
+  compiler-bundled library `routing` (`segment`, `table`, `match`), imported by name
+  with no dependency entry; rakun keeps the registry, the markers, `PageContext` /
+  `LayoutProps` / `contextOf` and the `app/` scan. The 26 grammar/wire/matcher tests
+  moved with the code (`libs/routing/test/`). `modules/rakun`: 388 → 369 / 0 on
+  commonJS, 386 → 367 / 2 on erlang (−26 moved, +7 `config_check_test.bp`; the two
+  erlang reds are the pinned `server_test.bp:74,80`).
+- **rakun-web's two `:param` grammars are `routing`'s `pattern`**:
+  `middleware.bp`'s `checkMatcher` / `matcherMatches` are `validateMatcher` /
+  `matcherAdmits` over `parsePattern` / `matchPattern` (the empty matcher still runs
+  everywhere — rakun-web's rule), and `filter.bp`'s `routeMatches` is `routeAdmits`;
+  a refused matcher halts with `patternProblem`'s text. 104 / 0 on both rows, as before.
+- **`modules/rakun-validation` is gone** — the bundled `validation` library holds its
+  seven modules (54 tests, both rows). `boot.bp` is `modules/rakun/src/config_check.bp`
+  with its tests; `config_check.installMessageSource()` hands `validation` a
+  `MessageSource` over `rakun.validation.*`, and `Rakun.run` installs it at boot.
+  `config.bp`'s placement-only `#[validated]` is removed: a same-named decorator in the
+  package shadowed the imported one (the registry is keyed by name).
+
+
 > **On the numbers below.** The shared compiler binary was rebuilt partway
 > through front 05 and closed two erlang-backend gaps (module-level `val` side
 > effects, `behavior` method dispatch). The counts in front 05's first two

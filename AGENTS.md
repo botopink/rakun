@@ -82,9 +82,9 @@ rakun/
 │   │   │   ├── decorators.bp  ← the markers AS comptime decorator fns: placement rules +
 │   │   │   │                    the DI/router/scope/bean wiring they `@emit`
 │   │   │   ├── file_router.bp ← the FILE-CONVENTION route table (§ The file-convention
-│   │   │   │                    route table): the segment grammar, the `kind|pattern|
-│   │   │   │                    slot|verb` wire format, the matcher and the four
-│   │   │   │                    markers. `decorators.bp` is frozen, so the markers
+│   │   │   │                    route table): the registry, the `app/` scan and the four
+│   │   │   │                    markers, over the bundled `routing` library's segment
+│   │   │   │                    grammar, `kind|pattern|slot|verb` wire and matcher. `decorators.bp` is frozen, so the markers
 │   │   │   │                    live here, as `#[configurationProperties]` does
 │   │   │   ├── file_router.mjs ← the App-Router REGISTRY, node half: an append-only
 │   │   │   │                    list of (wire line, render fn). Knows no grammar
@@ -152,10 +152,10 @@ rakun/
 │   │       ├── scopes_test.bp ← singleton scope (diamond) · `#[value]` · `#[bean]` (F2-scopes)
 │   │       ├── server_test.bp ← the live HTTP dispatch pipeline (`rkDispatchHttp`): path
 │   │       │                     param · query/header/body · 200/404 (F5)
-│   │       ├── file_router_test.bp ← the segment grammar · the wire-format round
-│   │       │                     trip · matcher precedence and capture · the layout
-│   │       │                     chain · the registry cells. The SAME assertions on
-│   │       │                     both rows
+│   │       ├── file_router_test.bp ← the registry cells, the host table against
+│   │       │                     the matcher, the page context (the grammar, wire and
+│   │       │                     matcher tests moved to `libs/routing/test/`). The SAME
+│   │       │                     assertions on both rows
 │   │       ├── file_router_markers_test.bp ← the four markers at module level and
 │   │       │                     the accessors they emit; no `rkAppReset()`, because
 │   │       │                     a module-load registration cannot be snapshotted in
@@ -191,30 +191,9 @@ rakun/
 │   │                             scan order · singleton/build count · the parseInt rule ·
 │   │                             route order · the `Response` round-trip shape. The same
 │   │                             assertions on BOTH rows — green on commonJS and on erlang
-│   ├── rakun-validation/  ← front 14. The one member whose target is `both — boundary`
-│   │   ├── botopink.json  name rakun-validation · targets [commonJS, erlang] · files:
-│   │   │                    root · report · table · messages · spi · constraints ·
-│   │   │                    binding · boot · decorators (dependency order) · depends on
-│   │   │                    `rakun` via { "workspace": true }
-│   │   ├── src/
-│   │   │   ├── report.bp      ← `Violation` · `ValidationReport` (isValid/merge/toJson/
-│   │   │   │                    toProblemDetail) · `jsonEscape`. NO IMPORTS AT ALL
-│   │   │   ├── table.bp       ← the constraint-table grammar (`<field>|<code>[|<arg>]*`)
-│   │   │   │                    and its JSON. Imports `report` and nothing else
-│   │   │   ├── messages.bp    ← template resolution (locale → global → built-in, over
-│   │   │   │                    front 05's `rkProp`) and `{name}` interpolation
-│   │   │   ├── spi.bp         ← `behavior Constraint` · `registerConstraint` ·
-│   │   │   │                    `vConstraint` (an unregistered name is a VIOLATION)
-│   │   │   ├── constraints.bp ← every predicate. Plain botopink, no host cell — this
-│   │   │   │                    file is why the module's target is `both`
-│   │   │   ├── binding.bp     ← `bindInt`/`bindBool`/`bindRequired`/`bindEpochMillis`
-│   │   │   │                    and the request-scoped accumulator `bindingReport()` drains
-│   │   │   ├── boot.bp        ← what a boot refusal reads like: property KEYS, not field names
-│   │   │   ├── decorators.bp  ← `#[validated]` + the thirteen constraint markers
-│   │   │   ├── validation_host.mjs   ← node half: the SPI registry + the accumulator
-│   │   │   └── sidecars/rakun_validation.erl ← BEAM half: ETS registry (owner process)
-│   │   │                    + the serving process's dictionary for the accumulator
-│   │   └── test/          ← report · constraints · parity · table · binding · spi · config
+│   │                    (front 14's `rakun-validation` member moved to the bundled library
+│   │                    `validation`, decision 116 rule 5; its `boot.bp` is
+│   │                    `modules/rakun/src/config_check.bp` — § Validation)
 │   ├── rakun-web/     ← THE FILTER CHAIN (§ The filter chain): the one ordered chain
 │   │   │                between the socket and the route handler, its two entry
 │   │   │                points, CORS and RFC 9457 problem details. target/targets
@@ -226,8 +205,9 @@ rakun/
 │   │   │   │                    status-0 sentinel · `withHeader`/`withHeaders` ·
 │   │   │   │                    the `Set-Cookie` list · the route read
 │   │   │   ├── middleware.bp  ← `Next` (pass · redirect · permanentRedirect ·
-│   │   │   │                    rewrite), the matcher front 65 owns the grammar
-│   │   │   │                    of, and the one-middleware rule
+│   │   │   │                    rewrite), the matcher (`validateMatcher` /
+│   │   │   │                    `matcherAdmits` over the bundled `routing` `pattern`
+│   │   │   │                    grammar; `""` runs everywhere) and the one-middleware rule
 │   │   │   ├── cors.bp        ← `CorsPolicy`, the three restrictive defaults, the
 │   │   │   │                    preflight, the per-controller mappings
 │   │   │   ├── error.bp       ← `ProblemDetail`, `raiseProblem`, the advice
@@ -329,7 +309,7 @@ a red on that axis would move into the gate rather than be fixed by the widening
 module, so the LAST line is the last module's count and never the run's total):
 inside `modules/rakun`, `botopink test` is **388 / 0** and `botopink test
 --target erlang` is **386 passing / 2 failing**; `modules/rakun-web` is 104 / 0
-and `modules/rakun-validation` 54 / 0 on both rows. Front 72 measured 346 / 0 and
+and `modules/rakun-validation` 54 / 0 on both rows (measured before the member moved to the bundled `validation` library on 2026-09-26; after the move and the grammar's move to `routing`, `modules/rakun` is **369 / 0** on commonJS and **367 / 2** on erlang — the 26 routing tests left, the 7 of `config_check_test.bp` arrived — and `modules/rakun-web` stays 104 / 0 on both). Front 72 measured 346 / 0 and
 344 / 2 on `2e6bb4ac`, having added 44 cells and moved neither red; its baseline
 was 302 / 0 and 300 / 2, and front 06 measured 267/267 and 265/2 on the same two
 reds — the numbers grew with the suite, not with the failures. The two are front 04's own
@@ -531,6 +511,16 @@ file sits: `layout.bp` wraps everything below it, `page.bp` makes the route
 public, `(group)` is transparent to the URL, `@slot` renders into a named prop
 of the parent layout, `_private` is excluded from routing and
 `[slug]` / `[...slug]` / `[[...slug]]` capture instead of matching.
+
+**The grammar, the wire and the matcher are the bundled library `routing`'s**
+(decision 115, `01-std/04-routing-lib`): `segment` (`parseSegment`, `parsePath`,
+`patternOf`, `slotOf`, `pathProblem`), `table` (`RouteEntry`, `writeTable`,
+`parseTable`) and `match` (`matchPath`, `layoutChain`, `paramOf`, `RouteMatch`),
+imported `from "routing"` with no `dependencies` entry — the browser's router
+imports the same code. Their tests moved with them. The sections below describe
+the behaviour rakun relies on; the code is `libs/routing/src/`. `file_router.bp`
+keeps the registry, the markers, `PageContext` / `LayoutProps` / `contextOf` and the
+scan.
 
 **Why the decorator takes the directory as a string.** botopink compiles only
 declared modules, so a `.bp` file is not loadable by path, and `@Decl` carries
@@ -2709,10 +2699,19 @@ stubbed:
 | 9 — compression | `zlib` cells on both hosts, plus the `br` boot refusal. No blocker; it is work |
 | 10 — graceful shutdown | **Blocked, and not on front 76.** Step 2 of the sequence is "close the listening socket, keep every connection process alive" — and the listening socket is `rakun_runtime.erl`'s, in `modules/rakun/`, which front 07 does not own. The drain cannot be written from this member. Front 76's `readinessDrained()` is the SOFT half and the spec says how to land without it; the socket is the hard half |
 
-## Validation — the `both — boundary` member (`rakun-validation`, front 14)
+## Validation — the bundled `validation` library (front 14, moved by decision 116 rule 5)
 
-`modules/rakun-validation/` is the only member of this workspace whose target is
-**both**. Every other server module is erlang. The reason is one paragraph long:
+Front 14's member `modules/rakun-validation` is gone: its seven modules are the
+compiler-bundled library `validation` (`libs/validation/` in the compiler repo,
+`01-std/06-validation-lib`), imported by name with no dependency entry, and the
+one module that names rakun's configuration — the boot refusal — is
+`modules/rakun/src/config_check.bp`, with its tests in
+`modules/rakun/test/config_check_test.bp`. The message lookup is injected:
+`config_check.installMessageSource()` hands `validation` a `MessageSource` over
+rakun's keys (`rakun.validation.locale`, `rakun.validation.messages.<code>`), and
+`Rakun.run` calls it at boot, so every message key is unchanged. The member was
+the only one of this workspace whose target was **both**, and the reason still
+holds for the library:
 
 > The milestone's rule is that three things cross the boundary — the serialized
 > payload, the route table, and the validation constraints ("the server enforces
@@ -2745,15 +2744,14 @@ binding and before the first component is constructed; it never has to know what
 constraints exist. If either side changes the spelling, the build breaks rather
 than a test.
 
-`modules/rakun/src/config.bp` already declares a **placement-only** `#[validated]`
-of its own (front 05, "until 14 lands this is placement only"). It is a different
-decorator: it checks placement and emits nothing. An application that wants the
-emission imports `validated` from `rakun-validation`, and **must not import both
-names into one module**. The call site front 05's comment calls `rkConfigValidate`
-does not exist in the tree; `modules/rakun/**` is not front 14's to edit, so
-`src/boot.bp` ships the other half of the seam — `configProblem` /
-`refuseInvalidConfig`, which render a refusal naming property KEYS rather than
-field names — and the core-side call is front 05's to add.
+`modules/rakun/src/config.bp` no longer declares a placement-only `#[validated]`:
+the decorator registry is keyed by name, so a same-named marker in this package
+shadowed the imported one everywhere in it (`validate<TypeName>` came out
+unbound). `#[validated]` is `validation`'s, imported
+`import {decorators.validated} from "validation";`. `config_check.bp` ships the
+other half of the seam — `configProblem` / `refuseInvalidConfig`, which render a
+refusal naming property KEYS rather than field names; the boot call site
+(front 05's `rkConfigValidate`) is still front 05's to add.
 
 ### What an application must import
 
@@ -2761,10 +2759,9 @@ The emission runs at the APPLICATION site, so the application imports the names
 it references — the same rule `#[service]` lives by:
 
 ```bp
-import {validated, notBlank, sizeBetween, email, minValue, maxValue, pattern} from "rakun-validation";
-import {ValidationReport, Violation} from "rakun-validation";
-import {constraintTableJson} from "rakun-validation";
-import {vNotBlank, vSizeBetween, vEmail, vMinValueI32, vMaxValueI32, vPattern} from "rakun-validation";
+import {decorators.validated, decorators.notBlank, decorators.sizeBetween, decorators.email} from "validation";
+import {report: {ValidationReport, Violation}, table.constraintTableJson} from "validation";
+import {constraints: {vNotBlank, vSizeBetween, vEmail}} from "validation";
 ```
 
 `ValidationReport` and `Violation` are imported **even where the application never

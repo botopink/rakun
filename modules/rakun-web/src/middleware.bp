@@ -27,6 +27,7 @@ import {sub} from "rakun";
 import {WebRequest, Chain, withHeader, segments, registerFilter, orderMiddleware} from "filter";
 import {rkChainPutSignal, sentinelStatus, rkChainNames} from "filter";
 import {rkMetaGet, rkMetaPut} from "filter";
+import {pattern: {parsePattern, matchPattern}} from "routing";
 
 // ── `Next` ──────────────────────────────────────────────────────────────────
 //
@@ -58,68 +59,37 @@ pub type Next {
 
 // ── the matcher ─────────────────────────────────────────────────────────────
 //
-// THE MATCHER GRAMMAR IS FRONT 65'S. Front 07 executes what front 65 compiles
-// and defines no pattern syntax of its own. Front 65 has not landed, so this
-// module executes exactly the three forms front 65's README and `NEXTJS-DOCS.md
-// § 20` name in their own examples — a literal segment, `:param`, and the
-// trailing `:param*` — and REFUSES everything else by name rather than guessing
-// at a semantics front 65 will pick. A glob, a negative lookahead or a
-// character class is a located boot failure saying which front owns it, not a
-// pattern that quietly matches nothing.
+// The `:param` grammar is the bundled library `routing`'s (`pattern`, decision
+// 116 rule 9): a literal segment, `:param` and a trailing `:param*`; every other
+// form (a glob, a character class, a group, `?`, `{`) is refused by name with
+// `patternProblem`, so a matcher front 65 has not compiled is a located boot
+// failure, not a pattern that quietly matches nothing. The one rule that stays
+// here is the Next default: an EMPTY matcher runs the entry on every request.
 
-pub fn matcherProblem(pattern: string, segment: string) -> string {
-    return "rakun-web: the matcher `" + pattern + "` uses `" + segment
-        + "`, which front 65 owns and front 07 does not execute - front 07 runs "
-        + "a literal segment, `:param` and a trailing `:param*`; a glob, a "
-        + "character class or a negative lookahead needs front 65's compiler";
-}
-
-fn unsupportedSegment(seg: string) -> bool {
-    if (seg.contains("*")) return seg.startsWith(":") == false;
-    if (seg.contains("(")) return true;
-    if (seg.contains("[")) return true;
-    if (seg.contains("?")) return true;
-    if (seg.contains("{")) return true;
-    return false;
-}
-
-pub fn checkMatcher(pattern: string) -> i32 {
-    if (pattern == "") return 0;
-    for (segments(pattern)) { seg ->
-        if (unsupportedSegment(seg)) @panic(matcherProblem(pattern, seg));
+// Halts, with `routing`'s refusal, when `matcher` is not a pattern the grammar
+// admits. `""` is admitted (the Next default).
+pub fn validateMatcher(matcher: string) -> i32 {
+    if (matcher == "") return 0;
+    val problem = case parsePattern(matcher) {
+        Ok(_) -> "";
+        Error(e) -> e;
     };
+    if (problem != "") @panic(problem);
     return 0;
 }
 
-// An empty matcher matches every path — an entry with no `#[matcher]` is the
-// Next default, which runs on every request.
-pub fn matcherMatches(pattern: string, path: string) -> bool {
-    if (pattern == "") return true;
-    val _c = checkMatcher(pattern);
-    val want: string[] = segments(path);
-    val have: string[] = segments(pattern);
-    var ok = true;
-    var tail = false;
-    var i = 0;
-    while (i < have.length) {
-        val seg: string = have.at(i).unwrapOr("");
-        if (seg.startsWith(":") && seg.endsWith("*")) {
-            tail = true;
-        } else {
-            val got: string = want.at(i).unwrapOr("");
-            if (i >= want.length) ok = false;
-            if ((seg.startsWith(":") == false) && (seg != got)) ok = false;
-        };
-        i = i + 1;
+// True when `path` runs the entry: every path for the empty matcher, otherwise
+// exactly the paths `routing`'s `matchPattern` accepts.
+pub fn matcherAdmits(matcher: string, path: string) -> bool {
+    if (matcher == "") return true;
+    val _v = validateMatcher(matcher);
+    val parsed = case parsePattern(matcher) {
+        Ok(p) -> p;
+        Error(_) -> [];
     };
-    // `/dashboard/:path*` matches `/dashboard` and everything under it; without
-    // the tail the segment counts must be equal.
-    if (tail) {
-        if (want.length < have.length - 1) ok = false;
-    } else {
-        if (want.length != have.length) ok = false;
-    };
-    return ok;
+    var hit = false;
+    if (matchPattern(parsed, path)) { _ -> hit = true; };
+    return hit;
 }
 
 // ── registration ────────────────────────────────────────────────────────────
@@ -148,7 +118,7 @@ pub fn registerMiddleware<Rq, Ch>(
 ) -> i32 {
     val first: string = rkMetaGet("middleware-owner");
     if (first != "") @panic(twoMiddlewaresProblem(first, owner));
-    val _c = checkMatcher(matcher);
+    val _c = validateMatcher(matcher);
     val _o = rkMetaPut("middleware-owner", owner);
     val _m = rkMetaPut("middleware-matcher", matcher);
     return registerFilter(middlewareEntryName(), orderMiddleware(), entry);
@@ -166,7 +136,7 @@ pub fn middlewareMatcher() -> string {
 // sentinel, which `chainNext` reads as "continue", so the middleware body never
 // runs and the chain behaves as if the entry were not registered.
 pub fn gateByMatcher(req: WebRequest, matcher: string) -> bool {
-    return matcherMatches(matcher, req.target);
+    return matcherAdmits(matcher, req.target);
 }
 
 pub fn skip() -> Response {

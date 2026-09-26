@@ -42,7 +42,9 @@ sidecar naming rule and what is still blocked.
   a route registration per method; the dispatcher matches `(verb, path)` —
   including `:name` params — and runs the handler over `Request`/`Response`, or 404s.
 - **File-convention routing** — `file_router.bp`: a URL that comes from where a
-  file sits. `parseSegment` decodes `blog`, `[slug]`, `[...slug]`, `[[...slug]]`,
+  file sits, over the bundled library `routing` (`import {segment.parseSegment,
+  table.parseTable, match.matchPath} from "routing";` — no dependency to declare).
+  `parseSegment` decodes `blog`, `[slug]`, `[...slug]`, `[[...slug]]`,
   `(group)`, `@slot` and `_private`; `patternOf` builds the URL pattern with
   groups and slots dropped and the bracket spelling kept, and `slotOf` names the
   slot. The table is `kind|pattern|slot|verb` lines — `parseTable` / `writeTable`
@@ -74,7 +76,7 @@ sidecar naming rule and what is still blocked.
   of entries between the socket and the route handler, with `#[filter]` and
   `#[middleware]` as its two entry points, `Next` for redirect/rewrite, CORS with
   deny-all defaults, and RFC 9457 problem details. See § The filter chain below.
-- **Validation** — a separate member, `from "rakun-validation"`, and the only one
+- **Validation** — the bundled library `validation` (`from "validation"`), and the only one
   that compiles for **both** rows: `#[validated]` on a record emits
   `validate<TypeName>` and `constraintsOf<TypeName>` from string comparisons,
   length checks and regex matches alone, so the server and the browser run the
@@ -96,7 +98,7 @@ sidecar naming rule and what is still blocked.
 | `SpringApplication.run(App.class)` | `Rakun.run(App(port: 8080, basePath: "/api"))` |
 | `ApplicationContext` | `Context` (`ctx.resolve<T>()`) — future, declaration-only |
 | `ResponseEntity` | `Response` (`Response.ok(...)`, `Response.json(...)`) |
-| `@Valid` / `@NotBlank` / `@Size` / `@Email` … | `#[validated]` + the constraint markers (`rakun-validation`) — an explicit `validate<TypeName>(v)` call, not a parameter hook |
+| `@Valid` / `@NotBlank` / `@Size` / `@Email` … | `#[validated]` + the constraint markers (the bundled `validation` library) — an explicit `validate<TypeName>(v)` call, not a parameter hook |
 
 The decorators (`service`, `restController`, `route`, `getMapping`, …) are
 symbols **exported by rakun** — import them at the call site before applying them
@@ -1205,27 +1207,21 @@ The tag is a **string**, not a type name: botopink has no typed raise and
 with `about:blank` and a correlation digest; the reason goes to the log under
 that digest and never into the body.
 
-## Validation (`from "rakun-validation"`)
+## Validation (`from "validation"`)
 
-`modules/rakun-validation/` is a separate member. Depend on it with
-`{ "rakun-validation": { "workspace": true } }` inside the workspace.
-
-> **Import `validated` from `rakun-validation`, never from `rakun`, and never
-> both.** The core carries a *placement-only* `#[validated]` of its own
-> (`modules/rakun/src/config.bp`, front 05): it checks that the marker sits on a
-> record-shaped `type` and **emits nothing**. Importing that one instead of this
-> one leaves `validate<TypeName>` undefined, and the failure lands at the call
-> site as an unbound variable rather than at the annotation. Importing BOTH into
-> one module is a duplicate binding. One import line, from
-> `"rakun-validation"`.
+Validation is the bundled library `validation`, shipped with the compiler and
+imported by name — no dependency to declare (decision 116 rule 5). The server
+and the browser run the same predicates from it. rakun hands it rakun's message
+keys at boot (`Rakun.run` installs `config_check.installMessageSource()`), so
+`rakun.validation.locale` and `rakun.validation.messages.<code>` work as before.
 
 ### The record, and the two functions it gets
 
 ```bp
-import {validated, notBlank, sizeBetween, email, minValue, maxValue, pattern} from "rakun-validation";
-import {ValidationReport, Violation} from "rakun-validation";
-import {constraintTableJson} from "rakun-validation";
-import {vNotBlank, vSizeBetween, vEmail, vMinValueI32, vMaxValueI32, vPattern} from "rakun-validation";
+import {validated, notBlank, sizeBetween, email, minValue, maxValue, pattern} from "validation";
+import {ValidationReport, Violation} from "validation";
+import {constraintTableJson} from "validation";
+import {vNotBlank, vSizeBetween, vEmail, vMinValueI32, vMaxValueI32, vPattern} from "validation";
 
 #[validated]
 pub type CreateUserRequest(
@@ -1295,7 +1291,7 @@ absent. The binders make the distinction and record a violation instead of
 yielding a zero. Bind everything, then ask once:
 
 ```bp
-import {bindInt, bindRequired, bindingReport} from "rakun-validation";
+import {bindInt, bindRequired, bindingReport} from "validation";
 
 val name = bindRequired("name", req.query("name"));
 val age = bindInt("age", req.query("age"));
@@ -1311,7 +1307,7 @@ dictionary, so two concurrent requests cannot see each other's violations.
 ### An application constraint
 
 ```bp
-import {Constraint, registerConstraint} from "rakun-validation";
+import {Constraint, registerConstraint} from "validation";
 
 pub type CpfConstraint {
     pub fn code(self: Self) -> string { return "cpf"; }
