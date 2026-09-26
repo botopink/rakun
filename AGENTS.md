@@ -2521,6 +2521,43 @@ here they are `rakun.management.endpoints.web.base-path`, `rakun.management.endp
 `rakun.management.health.<id>.timeout` and `rakun.info.*`.
 
 
+## DevTools — `modules/rakun-devtools/` (front 80)
+
+Dev-profile only (`dev` or `development` resolved). Sidecar
+`rakun_devtools.erl`.
+
+- **Settings** (`settings()`): defaults (roots `src`, poll 300 ms, enabled, no
+  trigger file, no remote secret, no db console) < `$HOME/.config/rakun/
+  devtools.yaml` (`key: value`; malformed → a warning, defaults stand) <
+  `rakun.devtools.<key>` < `RAKUN_DEVTOOLS_<KEY>`.
+- **Watcher** (`startWatcher(projectDir, onChange)`): a polling process under a
+  keeper (killed → restarted, re-snapshotting, no reload); glob excludes; with
+  a trigger file, changes accumulate until it moves; one `onChange` per cycle.
+  mtime + size, so an edit that keeps both within one second is missed.
+- **Reload** (`reloadProject(projectDir)`): the botopink CLI
+  (`rakun.devtools.compiler`, else `BOTOPINK_BIN`, else `botopink`) builds
+  `.rakun-devtools/out`; a compile error prints the compiler's text and loads
+  nothing. Each module whose code changed: its routes (handler funs defined in
+  it), singletons and scan entries (`<module>@@<Type>`) dropped
+  (`rkDevDropModule`), the new code loaded, `_botopink_init/0` re-run. The old
+  version is soft-purged: a process still in it keeps it and the answer
+  counts it (`ok <loaded>|<deferred>`). A component holding an injected
+  singleton keeps that instance until its own module reloads.
+- **Dev defaults** (`installDevDefaults()`): the six keys, only where unset.
+- **Database console** (`db_console.bp`, `installDbConsole()`): `GET
+  /devtools/db?sql=…`, SELECT/WITH only (the parsed first keyword), rows capped
+  (`…db-console.max-rows`, 100), bounded (`…timeout-ms`, 5000).
+- **Remote loading** (`remoteLoad(module, secret, overTls)`): dev profile,
+  a configured `rakun.devtools.remote.secret`, TLS, a constant-time match —
+  then `nl/1`. No key bypasses a guard.
+- **Tracing** (`traceCalls(module, function, limit)`): `dbg` with a required,
+  positive limit; the trace stops itself.
+- **Debugging a live node**: start it named with a cookie (`erl -sname app
+  -setcookie <cookie>`, or `-name app@host`; the release's `vm.args` carries
+  the same two), then `erl -sname dbg -setcookie <cookie> -remsh app@<host>`.
+  The attached shell is a REPL inside the node: `dbg`, `recon_trace` (when
+  present) and `rakun_metrics:snapshot()` run there.
+
 ## Actuator access and probes — `modules/rakun-actuator/src/management.bp` (front 76)
 
 `installManagement()` — after `mountActuator()` and after every module has

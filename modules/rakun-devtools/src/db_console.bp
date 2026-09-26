@@ -1,0 +1,62 @@
+//// rakun-devtools — the read-only database console (front 80 step 6), the
+//// H2 console's analogue: `GET /devtools/db?sql=…` over the application's own
+//// datasource, registered ONLY in a dev profile (outside one the path does not
+//// exist). The statement kind is parsed — the first keyword after comments
+//// and parentheses — and only `SELECT` / `WITH` run; anything else is refused
+//// naming its kind. Rows are capped (`rakun.devtools.db-console.max-rows`,
+//// default 100) and the query bounded (`…timeout-ms`, default 5000).
+
+import {Request, Response, rkProp, rkRegisterRoute, toI32} from "rakun";
+import {Rows, sqlTemplate, defaultDataSourceName} from "rakun-data";
+import {devProfileActive} from "devtools";
+
+#[@External.Erlang("""(fun(__F, __Ms) -> __Me = self(), __P = spawn(fun() -> __Me ! {self(), (try {ok, __F()} catch __C:__R -> {error, iolist_to_binary(io_lib:format("~p", [__R]))} end)} end), receive {__P, {ok, __V}} -> __V; {__P, {error, __E}} -> erlang:error({panic, __E}) after __Ms -> exit(__P, kill), erlang:error({panic, <<"rakun devtools: the query ran past the console's timeout">>}) end end)($0, $1)""")]
+declare fn bounded(work: fn() -> Rows, millis: i32) -> Rows;
+
+// The statement's leading keyword, upper-case, past `--` / `/* */` comments
+// and opening parentheses.
+pub fn statementKind(sql: string) -> string {
+    var lines: string[] = [];
+    for (sql.split("\n")) { l -> if (l.trim().startsWith("--") == false) lines.push(l); };
+    var text = lines.join(" ").trim();
+    while (text.startsWith("/*") && text.indexOf("*/") > 0) {
+        text = text.slice(text.indexOf("*/") + 2, text.length()).trim();
+    };
+    while (text.startsWith("(")) {
+        text = text.slice(1, text.length()).trim();
+    };
+    val word = text.split(" ").at(0) ?? "";
+    return word.split("(").at(0).unwrapOr("").toUpper();
+}
+
+fn maxRows() -> i32 {
+    val raw = rkProp("rakun.devtools.db-console.max-rows").trim();
+    return if (raw == "") 100 else toI32(raw);
+}
+
+fn timeoutMs() -> i32 {
+    val raw = rkProp("rakun.devtools.db-console.timeout-ms").trim();
+    return if (raw == "") 5000 else toI32(raw);
+}
+
+pub fn consoleRead(req: Request) -> Response {
+    val sql = req.query("sql");
+    val kind = statementKind(sql);
+    if (kind != "SELECT" && kind != "WITH") return Response.withStatus(400, "rakun devtools: the console runs SELECT only - this statement is " + (if (kind == "") "empty" else kind));
+    val rows: Rows = bounded({ -> sqlTemplate(defaultDataSourceName()).query(sql, []) }, timeoutMs());
+    val shown = rows.rows.slice(0, if (rows.rows.length > maxRows()) maxRows() else rows.rows.length);
+    val body = rows.columns.join("\t") + "\n" + shown.map({ r -> r.join("\t") }).join("\n");
+    return Response.ok(body);
+}
+
+// Registers `/devtools/db` in a dev profile; answers whether it did.
+pub fn installDbConsole() -> bool {
+    if (devProfileActive() == false) return false;
+    val _r = rkRegisterRoute("GET", "/devtools/db", { req -> consoleRead(req) });
+    return true;
+}
+
+// `<max rows>|<timeout ms>` as configured, with their finite defaults.
+pub fn consoleLimits() -> string {
+    return maxRows().toString() + "|" + timeoutMs().toString();
+}
