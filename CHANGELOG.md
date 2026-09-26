@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Graceful shutdown (botopink front 07 step 10)
+
+- `modules/rakun-web/src/shutdown.bp`: `gracefulShutdown()` — front 76's
+  `readinessDrained()` (a no-op while `rakun_probes` is absent), stop
+  accepting, drain (idle connections closed, in-flight ones finished or killed
+  at `rakun.lifecycle.timeout-per-shutdown-phase` and counted), then front 06's
+  `#[preDestroy]` pass; `installShutdownHook()` on SIGTERM;
+  `rakun.server.shutdown=immediate`.
+- `rakun_runtime.erl`: the acceptor owns the listening socket (a restart no
+  longer leaks the old one); connections mark themselves idle / busy;
+  `readiness_drained/0`, `stop_accepting/0`, `drain/1`, `on_sigterm/1`,
+  `off_sigterm/0`.
+- `rakun-web` 146 / 0 → **154 / 0**; `modules/rakun` 337 / 0.
+
 ### rakun-web: API versioning (botopink front 07 step 8)
 
 - `apiversion.bp`: the version entry at order −150 — header, query or path

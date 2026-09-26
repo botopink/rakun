@@ -2774,11 +2774,34 @@ that exist — a version outside it is a 400 problem naming them; a version in
 `rakun.web.apiversion.sunset.<v>` is set, `Sunset`. With nothing configured the
 entry passes every request through. `installBuiltins` registers seven entries.
 
-### What front 07 did NOT reach
+### Step 10 — graceful shutdown (`shutdown.bp`; the socket half in `rakun_runtime.erl`)
 
-| Step | What it needs |
-|---|---|
-| 10 — graceful shutdown | The listening socket is `rakun_runtime.erl`'s (front 04's), and front 76's `readinessDrained()` is the soft half the spec says how to land without |
+`gracefulShutdown()` is the ORDER, and nothing else: (1) front 76's
+`readinessDrained()` — `rakun_runtime:readiness_drained/0` calls
+`rakun_probes:readiness_drained/0` when that module is loaded and returns at
+once when it is not; this member keeps NO readiness flag; (2)
+`stop_accepting/0` — stop the listener child; (3) `drain/1` — idle keep-alive
+connections close at once, busy ones finish up to
+`rakun.lifecycle.timeout-per-shutdown-phase` (20000 ms) and are then killed and
+counted in `rakun.server.shutdown-log`; (4) front 06's `shutdown()` (the
+`#[preDestroy]` pass, answering the exit code). `installShutdownHook()` puts the
+sequence plus `halt` on SIGTERM (`on_sigterm/1` swaps OTP's
+`erl_signal_handler` for a handler in `rakun_runtime`, `off_sigterm/0` restores
+it); `bootWeb()` does not install it, so a test node is never stopped by a
+signal. `rakun.server.shutdown=immediate` skips 1–3 and still runs
+`#[preDestroy]`. Two things changed in front 04's listener for this: the
+ACCEPTOR now opens the listening socket (it used to be opened in the
+supervisor's `start_listener/2` call, so the supervisor owned it, stopping the
+child did not close it, and every restart leaked the old socket), and each
+connection process marks itself `idle` / `busy` in `rakun_connections` and, once
+draining is set, closes after its response instead of looping.
+`test/shutdown_test.bp` asserts every step over sockets, the pre-drain ordering
+against a stand-in `rakun_probes` compiled from text at run time, and a real
+`kill -TERM` of the test node reaching the installed hook.
+
+Every step of the front's spec is now in. What is still open is recorded in the
+front README (the Definition of done's q-value box names `br` refusal and both
+headers, which hold; the shutdown box waits on front 76 for the readiness half).
 
 ## Validation — the bundled `validation` library (front 14, moved by decision 116 rule 5)
 

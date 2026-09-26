@@ -53,6 +53,13 @@
          serve/2,
          config_check_register/2, config_check_run/0, config_check_reset/0]).
 
+%% ── graceful shutdown (front 07 step 10): the socket half ────────────────────
+-export([readiness_drained/0, stop_accepting/0, drain/1, connection_count/0,
+         on_sigterm/1, off_sigterm/0, now_ms/0, halt_with/1]).
+
+%% ── gen_event callbacks: the SIGTERM hook in `erl_signal_server` ─────────────
+-export([handle_event/2, handle_call/2]).
+
 %% ── server surface with no node twin (`runtime.mjs` is frozen) ───────────────
 -export([set_reply_header/2, reply_headers_json/0, clear_reply_headers/0,
          boot/1, add_failure/3, diagnose/1]).
@@ -79,6 +86,7 @@
 -define(FAILURES, rakun_failures).    %% set:         {Term, Description, Action}
 -define(LOCKS,    rakun_build_locks). %% set:         {Name, Pid} — first construction in flight
 -define(CHECKS,   rakun_config_checks). %% set:       {Name, Seq, Fun} — `#[validated]` records
+-define(CONNS,    rakun_connections). %% set:         {Pid, idle | busy}
 
 -define(DEFAULT_BACKLOG, 128).
 -define(DEFAULT_IDLE_TIMEOUT, 60000).
@@ -134,6 +142,8 @@ start_registry() ->
 start_conn_sup() ->
     supervisor:start_link({local, rakun_conn_sup}, ?MODULE, conn_sup).
 
+init({sigterm, Hook}) ->
+    {ok, Hook};
 init(sup) ->
     Flags = #{strategy => one_for_one, intensity => 5, period => 10},
     Registry = #{id => rakun_registry,
@@ -166,11 +176,13 @@ create_tables() ->
     _ = ets:new(?FAILURES, [set | Common]),
     _ = ets:new(?LOCKS,    [set | Common]),
     _ = ets:new(?CHECKS,   [set | Common]),
+    _ = ets:new(?CONNS,    [set, {write_concurrency, true} | Common]),
     seed_failures(),
     ok.
 
 handle_call(_Request, _From, State) -> {reply, ok, State}.
 handle_cast(_Msg, State) -> {noreply, State}.
+handle_info(_Info, Hook) when is_function(Hook) -> {ok, Hook};   %% the SIGTERM gen_event handler
 handle_info(_Info, State) -> {noreply, State}.
 terminate(_Reason, _State) -> ok.
 code_change(_Old, State, _Extra) -> {ok, State}.
@@ -718,13 +730,27 @@ start_listener(Port, Dispatcher) ->
     Backlog = prop_int_default(<<"rakun.server.backlog">>, ?DEFAULT_BACKLOG),
     Opts = [binary, {packet, http_bin}, {active, false},
             {reuseaddr, true}, {backlog, Backlog}],
-    case gen_tcp:listen(Port, Opts) of
-        {ok, LSock} ->
-            {ok, Bound} = inet:port(LSock),
-            _ = set_prop(<<"rakun.server.bound-port">>, integer_to_binary(Bound)),
-            {ok, proc_lib:spawn_link(fun() -> accept_loop(LSock, Dispatcher) end)};
-        {error, Reason} ->
-            {error, {listen, Reason, Port}}
+    %% The ACCEPTOR opens the listening socket, so the socket's owner is the
+    %% child the supervisor stops: terminating `rakun_listener` closes it
+    %% (graceful shutdown's "stop accepting"), and a restart rebinds rather
+    %% than leaving the old socket open in the supervisor.
+    Parent = self(),
+    Pid = proc_lib:spawn_link(fun() ->
+        case gen_tcp:listen(Port, Opts) of
+            {ok, LSock} ->
+                {ok, Bound} = inet:port(LSock),
+                _ = set_prop(<<"rakun.server.bound-port">>, integer_to_binary(Bound)),
+                Parent ! {self(), listening},
+                accept_loop(LSock, Dispatcher);
+            {error, Reason} ->
+                Parent ! {self(), {error, Reason}}
+        end
+    end),
+    receive
+        {Pid, listening} -> {ok, Pid};
+        {Pid, {error, Reason}} -> {error, {listen, Reason, Port}}
+    after 5000 ->
+        {error, {listen, timeout, Port}}
     end.
 
 bound_port() ->
@@ -767,20 +793,27 @@ connection(Sock, Dispatcher) ->
 serve_requests(Sock, Dispatcher) ->
     Idle = prop_int_default(<<"rakun.server.idle-timeout">>, ?DEFAULT_IDLE_TIMEOUT),
     _ = clear_reply_headers(),
+    true = ets:insert(?CONNS, {self(), idle}),
     case read_request(Sock, Idle) of
         {ok, Verb, Path, Headers} ->
+            true = ets:insert(?CONNS, {self(), busy}),
             Body = read_body(Sock, Headers, Idle),
             {RawPath, Query} = split_query(Path),
             Response = run_handler(Dispatcher, Verb, RawPath, Headers, Query, Body),
             KeepAlive = write_response(Sock, Response),
             _ = clear_reply_headers(),
-            case KeepAlive of
+            Draining = persistent_term:get(rakun_draining, false),
+            case KeepAlive andalso not Draining of
                 true -> serve_requests(Sock, Dispatcher);
-                false -> gen_tcp:close(Sock)
+                false -> close_connection(Sock)
             end;
         _ ->
-            gen_tcp:close(Sock)
+            close_connection(Sock)
     end.
+
+close_connection(Sock) ->
+    _ = ets:delete(?CONNS, self()),
+    gen_tcp:close(Sock).
 
 read_request(Sock, Idle) ->
     _ = inet:setopts(Sock, [{packet, http_bin}]),
@@ -914,6 +947,113 @@ keep_alive_or_return(Bound) ->
         _ ->
             receive after infinity -> Bound end
     end.
+
+%% ═══ graceful shutdown: the socket half (front 07 step 10) ═══════════════════
+%% Front 07's `shutdown.bp` orders the sequence; these are the pieces that need
+%% the listener and the connection processes, which live here.
+%%
+%%   1. `readiness_drained/0` — front 76's call when `rakun_probes` is loaded
+%%      (it flips readiness false and returns after the pre-drain period), an
+%%      immediate return when it is not. Nothing here keeps a readiness flag.
+%%   2. `stop_accepting/0` — stop the listener child: the acceptor owns the
+%%      listening socket, so the socket closes and a new connection is refused,
+%%      while every connection process stays alive.
+%%   3. `drain/1` — an IDLE keep-alive connection is closed at once; a BUSY one
+%%      finishes its request (and then closes, because draining is set), up to
+%%      the timeout, after which it is killed and counted.
+%% Both timestamps are `now_ms/0` (monotonic) and are written to the property
+%% table, so one run can compare them.
+
+now_ms() ->
+    erlang:monotonic_time(millisecond).
+
+readiness_drained() ->
+    ensure_started(),
+    case code:ensure_loaded(rakun_probes) of
+        {module, rakun_probes} ->
+            case erlang:function_exported(rakun_probes, readiness_drained, 0) of
+                true -> _ = rakun_probes:readiness_drained(), ok;
+                false -> ok
+            end;
+        _ ->
+            ok
+    end,
+    At = now_ms(),
+    _ = set_prop(<<"rakun.lifecycle.readiness-drained-at">>, integer_to_binary(At)),
+    At.
+
+stop_accepting() ->
+    ensure_started(),
+    persistent_term:put(rakun_draining, true),
+    _ = supervisor:terminate_child(rakun_sup, rakun_listener),
+    _ = supervisor:delete_child(rakun_sup, rakun_listener),
+    At = now_ms(),
+    _ = set_prop(<<"rakun.server.stopped-accepting-at">>, integer_to_binary(At)),
+    At.
+
+connection_count() ->
+    ensure_started(),
+    length(live_connections()).
+
+live_connections() ->
+    [{P, S} || {P, S} <- ets:tab2list(?CONNS), is_process_alive(P)].
+
+%% Answers `<<"Drained|Killed">>`: how many busy connections finished inside the
+%% timeout, and how many were still running at it and were killed.
+drain(TimeoutMs) ->
+    ensure_started(),
+    [exit(P, kill) || {P, idle} <- live_connections()],
+    Busy = [P || {P, busy} <- live_connections()],
+    Deadline = now_ms() + TimeoutMs,
+    Left = await_connections(Busy, Deadline),
+    [exit(P, kill) || P <- Left],
+    [ets:delete(?CONNS, P) || P <- Left],
+    persistent_term:erase(rakun_draining),
+    Line = iolist_to_binary(io_lib:format("rakun: shutdown drained ~b request(s), killed ~b at the ~b ms timeout",
+                                          [length(Busy) - length(Left), length(Left), TimeoutMs])),
+    _ = set_prop(<<"rakun.server.shutdown-log">>, Line),
+    iolist_to_binary([integer_to_binary(length(Busy) - length(Left)), <<"|">>,
+                      integer_to_binary(length(Left))]).
+
+await_connections(Pids, Deadline) ->
+    Alive = [P || P <- Pids, is_process_alive(P)],
+    case Alive =:= [] orelse now_ms() >= Deadline of
+        true -> Alive;
+        false -> timer:sleep(10), await_connections(Alive, Deadline)
+    end.
+
+%% SIGTERM: OTP's `erl_signal_server` delivers it as an event once the signal is
+%% set to `handle`. The default handler (`erl_signal_handler`) would stop the
+%% node at once, so it is swapped for this module's handler, which spawns the
+%% hook; `off_sigterm/0` restores it. The hook is `shutdown.bp`'s sequence.
+on_sigterm(Hook) ->
+    ensure_started(),
+    ok = os:set_signal(sigterm, handle),
+    _ = gen_event:delete_handler(erl_signal_server, {?MODULE, sigterm}, []),
+    _ = gen_event:delete_handler(erl_signal_server, erl_signal_handler, []),
+    ok = gen_event:add_handler(erl_signal_server, {?MODULE, sigterm}, {sigterm, Hook}),
+    0.
+
+off_sigterm() ->
+    _ = gen_event:delete_handler(erl_signal_server, {?MODULE, sigterm}, []),
+    _ = case lists:member(erl_signal_handler, gen_event:which_handlers(erl_signal_server)) of
+            true -> ok;
+            false -> gen_event:add_handler(erl_signal_server, erl_signal_handler, [])
+        end,
+    ok = os:set_signal(sigterm, default),
+    0.
+
+handle_event(sigterm, Hook) ->
+    _ = spawn(fun() -> Hook() end),
+    {ok, Hook};
+handle_event(_Other, Hook) ->
+    {ok, Hook}.
+
+handle_call(_Request, Hook) ->
+    {ok, ok, Hook}.
+
+halt_with(Status) ->
+    erlang:halt(Status).
 
 %% ═══ small helpers ═══════════════════════════════════════════════════════════
 

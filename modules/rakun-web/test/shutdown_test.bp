@@ -1,0 +1,166 @@
+//// rakun-web — graceful shutdown (front 07 step 10), over real sockets.
+////
+//// Each test boots the core's listener on an ephemeral port
+//// (`rakun.main.keep-alive=false`, so `rkServe` answers the port), runs the
+//// sequence, and reads what a client saw through a host cell that speaks
+//// HTTP/1.1 in bytes. Concurrency is `async.runAll`: one process per thunk, so
+//// the client and the shutdown genuinely overlap. Front 76 is absent here; the
+//// one test that needs its `readinessDrained()` loads a STAND-IN
+//// `rakun_probes` module, compiled from text at run time, and removes it after.
+
+import {async} from "std";
+import {Request, Response, rkSetProp, rkProp, rkRegisterRoute, rkServe, rkDispatchHttp, rkRegisterLifecycle, toI32} from "rakun";
+import {ShutdownReport, gracefulShutdown, rkNowMs, rkConnectionCount, rkOnSigterm, rkOffSigterm} from "shutdown";
+
+// ── host cells for the test ─────────────────────────────────────────────────
+
+#[@External.Erlang("rakun_request_context", "sleep")]
+declare fn sleepMs(ms: i32) -> i32;
+
+// `status|body`, `closed` when the server closed the connection before a whole
+// response, `refused` when the connect failed.
+#[@External.Erlang("""(fun(__Port, __Path) -> case gen_tcp:connect("127.0.0.1", __Port, [binary, {active, false}], 1000) of {error, _} -> <<"refused">>; {ok, __S} -> ok = gen_tcp:send(__S, [<<"GET ">>, __Path, <<" HTTP/1.1", 13, 10, "Host: x", 13, 10, 13, 10>>]), __Loop = fun __Loop(__Acc) -> case binary:split(__Acc, <<13, 10, 13, 10>>) of [__H, __B] -> case re:run(__H, <<"(?i)content-length: *([0-9]+)">>, [{capture, [1], binary}]) of {match, [__L]} -> case byte_size(__B) >= binary_to_integer(__L) of true -> {ok, __H, __B}; false -> case gen_tcp:recv(__S, 0, 5000) of {ok, __M} -> __Loop(<<__Acc/binary, __M/binary>>); _ -> closed end end; _ -> {ok, __H, __B} end; _ -> case gen_tcp:recv(__S, 0, 5000) of {ok, __M} -> __Loop(<<__Acc/binary, __M/binary>>); _ -> closed end end end, __R = __Loop(<<>>), gen_tcp:close(__S), case __R of closed -> <<"closed">>; {ok, __Hd, __Bd} -> [_, __St | _] = binary:split(__Hd, <<" ">>, [global]), <<__St/binary, "|", __Bd/binary>> end end end)($0, $1)""")]
+declare fn httpGet(port: i32, path: string) -> string;
+
+// A stand-in for front 76's `rakun_probes:readiness_drained/0`: it records when
+// readiness went false, then waits `ms` — the pre-drain period.
+#[@External.Erlang("""(fun(__Ms) -> __Src = ["-module(rakun_probes).", "-export([readiness_drained/0]).", "readiness_drained() -> persistent_term:put(rakun_probe_ready_false_at, erlang:monotonic_time(millisecond)), timer:sleep(" ++ integer_to_list(__Ms) ++ "), ok."], __Forms = [begin {ok, __T, _} = erl_scan:string(__L), {ok, __F} = erl_parse:parse_form(__T), __F end || __L <- __Src], {ok, __Mod, __Bin} = compile:forms(__Forms), {module, __Mod} = code:load_binary(__Mod, "rakun_probes.erl", __Bin), 0 end)($0)""")]
+declare fn loadProbeStandIn(preDrainMs: i32) -> i32;
+
+#[@External.Erlang("""(fun() -> code:purge(rakun_probes), code:delete(rakun_probes), code:purge(rakun_probes), persistent_term:erase(rakun_probe_ready_false_at), 0 end)()""")]
+declare fn unloadProbeStandIn() -> i32;
+
+#[@External.Erlang("""persistent_term:get(rakun_probe_ready_false_at, 0)""")]
+declare fn probeReadyFalseAt() -> i32;
+
+#[@External.Erlang("""(fun() -> os:cmd("kill -TERM " ++ os:getpid()), 0 end)()""")]
+declare fn sendSigterm() -> i32;
+
+// ── the application under shutdown ──────────────────────────────────────────
+
+fn slow(req: Request) -> Response {
+    val _s = sleepMs(toI32(rkProp("test.down.slow-ms")));
+    val _d = rkSetProp("test.down.slow-done", "yes");
+    return Response.ok("slow");
+}
+
+fn fast(req: Request) -> Response {
+    return Response.ok("fast");
+}
+
+fn start(slowMs: i32) -> i32 {
+    if (rkProp("test.down.routes") != "yes") {
+        val _m = rkSetProp("test.down.routes", "yes");
+        val _a = rkRegisterRoute("GET", "/down/slow", { r -> slow(r) });
+        val _b = rkRegisterRoute("GET", "/down/fast", { r -> fast(r) });
+    };
+    val _t = rkSetProp("test.down.slow-ms", slowMs.toString());
+    val _d = rkSetProp("test.down.slow-done", "");
+    val _k = rkSetProp("rakun.main.keep-alive", "false");
+    return rkServe(0, { m, p, h, q, b -> rkDispatchHttp(m, p, h, q, b) });
+}
+
+fn shutdownAfter(ms: i32) -> string {
+    val _w = sleepMs(ms);
+    val r: ShutdownReport = gracefulShutdown();
+    return r.drained.toString() + "|" + r.killed.toString() + "|" + (r.stoppedAcceptingAt - r.readinessAt).toString();
+}
+
+fn reset() -> i32 {
+    val _s = rkSetProp("rakun.server.shutdown", "");
+    return rkSetProp("rakun.lifecycle.timeout-per-shutdown-phase", "");
+}
+
+// ── the tests ───────────────────────────────────────────────────────────────
+
+test "rakun-web shutdown: a request in flight completes and its response reaches the client" {
+    val port: i32 = start(300);
+    val results = await async.runAll([
+        { -> async { httpGet(port, "/down/slow") } },
+        { -> async { shutdownAfter(60) } },
+    ]);
+    val _r = reset();
+    assert (results.at(0) ?? "") == "200|slow";
+    assert (results.at(1) ?? "").startsWith("1|0|");
+}
+
+test "rakun-web shutdown: a new connection after the socket stops accepting is refused" {
+    val port: i32 = start(10);
+    assert httpGet(port, "/down/fast") == "200|fast";
+    val _s = gracefulShutdown();
+    val _r = reset();
+    assert httpGet(port, "/down/fast") == "refused";
+}
+
+test "rakun-web shutdown: a request still running at the timeout is killed and counted in the log line" {
+    val port: i32 = start(2000);
+    val _t = rkSetProp("rakun.lifecycle.timeout-per-shutdown-phase", "100");
+    val results = await async.runAll([
+        { -> async { httpGet(port, "/down/slow") } },
+        { -> async { shutdownAfter(60) } },
+    ]);
+    val _r = reset();
+    assert (results.at(0) ?? "") == "closed";
+    assert (results.at(1) ?? "").startsWith("0|1|");
+    assert rkProp("rakun.server.shutdown-log").contains("killed 1 at the 100 ms timeout");
+    assert rkProp("test.down.slow-done") == "";
+}
+
+test "rakun-web shutdown: with front 76 absent readinessDrained returns at once and the steps still run in order" {
+    val port: i32 = start(10);
+    val before: i32 = rkNowMs();
+    val r: ShutdownReport = gracefulShutdown();
+    val _r = reset();
+    assert r.readinessAt - before < 50;
+    assert r.readinessAt <= r.stoppedAcceptingAt;
+    assert r.stoppedAcceptingAt <= r.preDestroyAt;
+    assert httpGet(port, "/down/fast") == "refused";
+}
+
+test "rakun-web shutdown: readiness goes false at least the pre-drain period before the socket stops accepting" {
+    val _p = loadProbeStandIn(200);
+    val port: i32 = start(10);
+    val r: ShutdownReport = gracefulShutdown();
+    val readyFalseAt: i32 = probeReadyFalseAt();
+    val _u = unloadProbeStandIn();
+    val _r = reset();
+    assert readyFalseAt != 0;
+    assert r.stoppedAcceptingAt - readyFalseAt >= 200;
+    assert httpGet(port, "/down/fast") == "refused";
+}
+
+test "rakun-web shutdown: the #[preDestroy] pass runs after the drain, not before" {
+    val port: i32 = start(200);
+    val _h = rkRegisterLifecycle("DownProbe", "close", "pre", 0, { -> rkSetProp("test.down.seen-at-destroy", rkProp("test.down.slow-done") + "/" + rkConnectionCount().toString()) });
+    val results = await async.runAll([
+        { -> async { httpGet(port, "/down/slow") } },
+        { -> async { shutdownAfter(60) } },
+    ]);
+    val _r = reset();
+    assert (results.at(0) ?? "") == "200|slow";
+    assert rkProp("test.down.seen-at-destroy") == "yes/0";
+}
+
+test "rakun-web shutdown: rakun.server.shutdown=immediate skips the drain" {
+    val port: i32 = start(10);
+    val _i = rkSetProp("rakun.server.shutdown", "immediate");
+    val r: ShutdownReport = gracefulShutdown();
+    val stillServing: string = httpGet(port, "/down/fast");
+    val _r = reset();
+    assert r.immediate;
+    assert r.stoppedAcceptingAt == 0;
+    assert stillServing == "200|fast";
+}
+
+test "rakun-web shutdown: SIGTERM runs the installed hook instead of stopping the node" {
+    val _p = rkSetProp("test.down.sigterm", "");
+    val _o = rkOnSigterm({ -> rkSetProp("test.down.sigterm", "yes") });
+    val _k = sendSigterm();
+    var waited = 0;
+    while ((rkProp("test.down.sigterm") != "yes") && (waited < 100)) {
+        val _s = sleepMs(10);
+        waited = waited + 1;
+    };
+    val _f = rkOffSigterm();
+    assert rkProp("test.down.sigterm") == "yes";
+}

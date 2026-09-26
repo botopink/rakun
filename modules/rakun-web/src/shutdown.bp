@@ -1,0 +1,105 @@
+//// rakun-web — graceful shutdown (front 07 step 10), the ORDER of it.
+////
+//// One call spanning two fronts (`contracts.md` § 5c): front 76 owns the
+//// readiness state, this front owns the drain, and neither re-implements the
+//// other's half. The sequence, and why it is in this order:
+////
+////   1. await front 76's `readinessDrained()` — it flips readiness false and
+////      returns after `rakun.lifecycle.pre-drain-period`, long enough for a
+////      load balancer to see the probe and stop sending. With front 76 absent
+////      the call returns at once. THIS MODULE KEEPS NO READINESS FLAG.
+////   2. stop accepting — close the listening socket, keep every connection
+////      process alive. A balancer must stop sending BEFORE the socket stops
+////      accepting, or the drain only moves the dropped requests to it.
+////   3. drain — idle keep-alive connections close at once; a request in flight
+////      finishes, up to `rakun.lifecycle.timeout-per-shutdown-phase` (default
+////      20000 ms), after which it is killed and counted in the log line.
+////   4. front 06's `#[preDestroy]` pass (`shutdown()`), which answers the exit
+////      code;
+////   5. stop the node with it — only the SIGTERM hook does this; the sequence
+////      itself returns, so it can be asserted.
+////
+//// `rakun.server.shutdown=immediate` skips 1–3: "kill it now" is a legitimate
+//// operational request, the one weakening switch this front has, and it only
+//// changes WHEN the node stops, never whether `#[preDestroy]` runs.
+////
+//// The socket half is `rakun_runtime.erl`'s (front 04's listener): the
+//// acceptor owns the listening socket, so stopping the listener child closes
+//// it.
+
+import {rkProp, toI32, shutdown} from "rakun";
+
+#[@External.Erlang("rakun_runtime", "readiness_drained")]
+pub declare fn rkReadinessDrained() -> i32;
+
+#[@External.Erlang("rakun_runtime", "stop_accepting")]
+pub declare fn rkStopAccepting() -> i32;
+
+// `"<drained>|<killed>"`.
+#[@External.Erlang("rakun_runtime", "drain")]
+pub declare fn rkDrain(timeoutMs: i32) -> string;
+
+#[@External.Erlang("rakun_runtime", "connection_count")]
+pub declare fn rkConnectionCount() -> i32;
+
+#[@External.Erlang("rakun_runtime", "on_sigterm")]
+pub declare fn rkOnSigterm(hook: fn() -> i32) -> i32;
+
+#[@External.Erlang("rakun_runtime", "off_sigterm")]
+pub declare fn rkOffSigterm() -> i32;
+
+#[@External.Erlang("rakun_runtime", "now_ms")]
+pub declare fn rkNowMs() -> i32;
+
+#[@External.Erlang("rakun_runtime", "halt_with")]
+pub declare fn rkHaltWith(status: i32) -> i32;
+
+// What one shutdown did, for the log and for a test.
+pub type ShutdownReport(
+    immediate: bool,
+    readinessAt: i32,
+    stoppedAcceptingAt: i32,
+    drained: i32,
+    killed: i32,
+    preDestroyAt: i32,
+    exitCode: i32,
+)
+
+pub fn shutdownTimeout() -> i32 {
+    val raw: string = rkProp("rakun.lifecycle.timeout-per-shutdown-phase");
+    if (raw == "") return 20000 else return toI32(raw);
+}
+
+pub fn isImmediate() -> bool {
+    return rkProp("rakun.server.shutdown") == "immediate";
+}
+
+pub fn gracefulShutdown() -> ShutdownReport {
+    val immediate: bool = isImmediate();
+    val readyAt: i32 = if (immediate) 0 else rkReadinessDrained();
+    val closedAt: i32 = if (immediate) 0 else rkStopAccepting();
+    val drainedWire: string = if (immediate) "0|0" else rkDrain(shutdownTimeout());
+    val counts: string[] = drainedWire.split("|");
+    val exit: i32 = shutdown();
+    val destroyedAt: i32 = rkNowMs();
+    return ShutdownReport(
+        immediate: immediate,
+        readinessAt: readyAt,
+        stoppedAcceptingAt: closedAt,
+        drained: toI32(counts.at(0) ?? "0"),
+        killed: toI32(counts.at(1) ?? "0"),
+        preDestroyAt: destroyedAt,
+        exitCode: exit,
+    );
+}
+
+// The production hook: SIGTERM runs the sequence, then stops the node with
+// front 06's exit code. `bootWeb()` does not install it — an application calls
+// `installShutdownHook()` once it serves, so a test node is never stopped by a
+// stray signal.
+pub fn installShutdownHook() -> i32 {
+    return rkOnSigterm({ ->
+        val report: ShutdownReport = gracefulShutdown();
+        rkHaltWith(report.exitCode);
+    });
+}
