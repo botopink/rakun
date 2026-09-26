@@ -2521,6 +2521,38 @@ here they are `rakun.management.endpoints.web.base-path`, `rakun.management.endp
 `rakun.management.health.<id>.timeout` and `rakun.info.*`.
 
 
+## Packaging and release — `modules/rakun-release/` (front 81)
+
+Generates files; changes no running code. Sidecar `rakun_release.erl` (term
+rendering, a deterministic ustar writer, `deterministic` beam compiles, tree
+hashes, module facts).
+
+- **Layout** of `<name>-<version>.tar` (`buildTarball`): `bin/<name>` (the
+  boot script: `foreground | start | stop`), `lib/<app>-<vsn>/ebin/*.beam`,
+  `releases/<vsn>/{<name>.rel, vm.args, sys.config}` — entries sorted, mtime
+  0, so two builds of one commit are the same bytes. No source, no
+  `.botopinkbuild/`. An application without a directory fails the build.
+  Booting it waits on the toolchain row "a built erlang program cannot load
+  its `.erl` sidecars".
+- **Renders**: `renderRel` (kernel, stdlib first; a duplicate refused),
+  `renderVmArgs` (`-mode embedded`; the cookie is `${<cookieEnv>}`),
+  `renderSysConfig` (erlang term; `rakun.web.static.use-last-modified=false`
+  always).
+- **Layer split** (`renderDockerfile`, `layerHashes`): four `COPY
+  --from=builder` in change-rate order — `erts`, `otp`, `framework`,
+  `application` — into a non-root runtime whose entry point is the boot
+  script.
+- **systemd** (`renderSystemdUnit`: `foreground`, `Restart=on-failure`) and
+  **Kubernetes** (`renderDeployment`: front 76's `livenessPath()` /
+  `readinessPath()`, a grace period that must exceed front 07's drain).
+- **Upgrades** (`upgradeInstructions`, `renderAppup`): `load_module` for a
+  body change, `update … supervisor`, `update … {advanced, []}` for a
+  gen_server whose `state` record changed and exports `code_change/3` — else
+  refused naming the module.
+- **SBOM** (`sbom.bp`): CycloneDX 1.5 over front 73's resolved dependencies,
+  path dependencies with a SHA-256 of their tree; `registerSbomEndpoint(file)`
+  serves it at `sbom`.
+
 ## DevTools — `modules/rakun-devtools/` (front 80)
 
 Dev-profile only (`dev` or `development` resolved). Sidecar

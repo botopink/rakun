@@ -1,0 +1,182 @@
+//// rakun-release — the release files (front 81). Every file a test writes is
+//// under BOTOPINK_TEST_TMPDIR.
+
+import {testing.asserts} from "std";
+import {io: {fs, env}} from "std";
+import {Response, rkSetProp, rkDispatchHttp} from "rakun";
+import {mountActuator} from "rakun-actuator/actuator";
+import {installExposure, clearExposure} from "rakun-actuator/endpoint_host";
+import {readinessPath, livenessPath} from "rakun-actuator/management";
+import {
+    VmArgs, Release, renderRel, renderVmArgs, renderSysConfig, rkRelConsult, orderedApplications, buildTarball,
+    renderDockerfile, layerHashes, renderSystemdUnit, renderDeployment, upgradeInstructions, renderAppup, rkRelRead,
+} from "release";
+import {Component, components, sbomDocument, registerSbomEndpoint, sbomMediaType} from "sbom";
+
+#[@External.Erlang("""(fun(__P) -> ok = filelib:ensure_dir(__P), 0 end)($0)""")]
+declare fn ensureDir(file: string) -> i32;
+#[@External.Erlang("""(fun(__F) -> {ok, __T} = erl_tar:table(binary_to_list(__F)), [list_to_binary(__N) || __N <- __T] end)($0)""")]
+declare fn tarNames(file: string) -> string[];
+
+fn tmp(name: string) -> string {
+    val dir: string = env.read("BOTOPINK_TEST_TMPDIR") ?? "";
+    if (dir == "") @panic("BOTOPINK_TEST_TMPDIR is not set - botopink test sets it");
+    return dir + "/rakun-release/" + name;
+}
+
+fn write(file: string, text: string) -> i32 {
+    val _d = ensureDir(file);
+    val _w = fs.writeText(file, text);
+    return 0;
+}
+
+fn rel(apps: string[]) -> Release {
+    return Release(name: "shop", version: "1.2.0", erts: "15.0", applications: apps, vmArgs: VmArgs(nodeName: "shop@127.0.0.1", cookieEnv: "SHOP_COOKIE", schedulers: 4, maxProcesses: 262144, embedded: true), configProfile: "prod");
+}
+
+// ── step 1 ──────────────────────────────────────────────────────────────────
+
+test "release: the .rel puts kernel and stdlib first; a duplicate application is refused naming it" {
+    val text = renderRel(rel(["shop", "stdlib", "rakun", "kernel"]));
+    assert text == "{release, {\"shop\", \"1.2.0\"},\n {erts, \"15.0\"},\n [\n  {kernel, \"*\"},\n  {stdlib, \"*\"},\n  {shop, \"1.2.0\"},\n  {rakun, \"1.2.0\"}\n ]}.\n", text;
+    try asserts.throwsWith({ -> orderedApplications(["shop", "rakun", "shop"]).length }, "the application `shop` is listed twice");
+}
+
+test "release: vm.args is embedded unless asked, and the cookie is a reference, never a value" {
+    val args = renderVmArgs(rel(["shop"]));
+    assert args.contains("-mode embedded") && args.contains("-setcookie $" + "{SHOP_COOKIE}");
+    val r = rel(["shop"]);
+    val interactive = Release(name: r.name, version: r.version, erts: r.erts, applications: r.applications, vmArgs: VmArgs(nodeName: "n", cookieEnv: "C", schedulers: 1, maxProcesses: 1, embedded: false), configProfile: "");
+    assert renderVmArgs(interactive).contains("-mode embedded") == false;
+}
+
+test "release: sys.config round-trips a quote, a newline and UTF-8, and renders the same bytes twice" {
+    val props: Array<#(string, string)> = [#("app.motto", "say \"hi\"\nthen olá — ✓")];
+    val text = renderSysConfig(rel(["shop"]), props);
+    val back = rkRelConsult(text);
+    assert back.filter({ p -> p._0 == "app.motto" }).map({ p -> p._1 }).at(0) == "say \"hi\"\nthen olá — ✓", text;
+    assert renderSysConfig(rel(["shop"]), props) == text && renderRel(rel(["shop"])) == renderRel(rel(["shop"]));
+    assert back.filter({ p -> p._0 == "rakun.web.static.use-last-modified" }).map({ p -> p._1 }).at(0) == "false";
+}
+
+// ── step 2 and 7: the tarball ───────────────────────────────────────────────
+
+fn appSources(dir: string, body: string) -> i32 {
+    val _a = write(dir + "/shop@main.erl", "-module('shop@main').\n-export([hello/0]).\nhello() -> <<\"" + body + "\">>.\n");
+    return write(dir + "/.botopinkbuild/cache.txt", "cache");
+}
+
+test "release: two builds in two directories are the same bytes, with no source and nothing outside the applications" {
+    val src = tmp("src");
+    val _s = appSources(src, "hi");
+    val a = tmp("one/shop.tar");
+    val b = tmp("elsewhere/two/shop.tar");
+    val _x = buildTarball(rel(["shop"]), [#("shop", src)], [], a);
+    val _y = buildTarball(rel(["shop"]), [#("shop", src)], [], b);
+    assert rkRelRead(a) == rkRelRead(b);
+    val names = tarNames(a);
+    assert names.join(",") == "bin/shop,lib/shop-1.2.0/ebin/shop@main.beam,releases/1.2.0/shop.rel,releases/1.2.0/sys.config,releases/1.2.0/vm.args", names.join(",");
+}
+
+test "release: an application with no directory fails the build naming it" {
+    try asserts.throwsWith({ -> buildTarball(rel(["ghost"]), [#("ghost", tmp("nowhere"))], [], tmp("g.tar")) }, "the application `ghost` is not on the code path");
+}
+
+// ── step 3: the Dockerfile ──────────────────────────────────────────────────
+
+test "release: the Dockerfile copies four layers in change-rate order into a non-root runtime with the release script as entry" {
+    val d = renderDockerfile(rel(["shop"]), "botopink/builder:1", "debian:stable-slim", "shop");
+    val copies = d.split("\n").filter({ l -> l.startsWith("COPY --from=builder") });
+    assert copies.length == 4;
+    assert (copies.at(0) ?? "").contains("/erts ") && (copies.at(1) ?? "").contains("/otp ") && (copies.at(2) ?? "").contains("/framework ") && (copies.at(3) ?? "").contains("/application ");
+    val runtime = d.split("FROM debian:stable-slim").at(1) ?? "";
+    assert runtime.contains("botopink") == false && runtime.contains("COPY . .") == false && runtime.contains("RUN rakun") == false;
+    assert runtime.contains("USER shop") && runtime.contains("WORKDIR /opt/shop");
+    assert runtime.contains("ENTRYPOINT [\"/opt/shop/bin/shop\", \"foreground\"]") && runtime.contains("sh -c") == false;
+}
+
+test "release: changing one application file changes only the application layer's hash" {
+    val base = tmp("layers");
+    for (["erts", "otp", "framework", "application"]) { l -> val _w = write(base + "/" + l + "/f.txt", l); };
+    val dirs: Array<#(string, string)> = ["erts", "otp", "framework", "application"].map({ l -> #(l, base + "/" + l) });
+    val before = layerHashes(dirs);
+    val _c = write(base + "/application/f.txt", "application v2");
+    val after = layerHashes(dirs);
+    assert before.at(0) == after.at(0) && before.at(1) == after.at(1) && before.at(2) == after.at(2);
+    assert before.at(3) != after.at(3);
+}
+
+// ── step 4 ──────────────────────────────────────────────────────────────────
+
+test "release: the systemd unit runs the foreground script as its user, restarting on failure" {
+    val u = renderSystemdUnit(rel(["shop"]), "shop", "shop", 5);
+    assert u.contains("ExecStart=/opt/shop/bin/shop foreground") && u.contains("Restart=on-failure") && u.contains("RestartSec=5");
+    assert u.contains("User=shop") && u.contains("Group=shop") && u.contains("User=root") == false;
+}
+
+test "release: the Deployment's probes are front 76's paths, and a grace period inside the drain is refused" {
+    val k = renderDeployment(rel(["shop"]), "shop:1.2.0", 8080, 30);
+    assert k.contains("path: " + readinessPath()) && k.contains("path: " + livenessPath());
+    assert k.contains("terminationGracePeriodSeconds: 30");
+    try asserts.throwsWith({ -> renderDeployment(rel(["shop"]), "shop:1.2.0", 8080, 20).length() }, "terminationGracePeriodSeconds 20 does not exceed the shutdown drain of 20000 ms");
+}
+
+// ── step 5: the upgrade plan ────────────────────────────────────────────────
+
+fn module(dir: string, name: string, text: string) -> i32 {
+    return write(dir + "/" + name + ".erl", text);
+}
+
+test "release: a body change loads, a supervisor updates as one, a state change without code_change refuses" {
+    val v1 = tmp("up/v1");
+    val v2 = tmp("up/v2");
+    val _a = module(v1, "calc", "-module(calc).\n-export([f/0]).\nf() -> 1.\n");
+    val _b = module(v2, "calc", "-module(calc).\n-export([f/0]).\nf() -> 2.\n");
+    val _c = module(v1, "top_sup", "-module(top_sup).\n-behaviour(supervisor).\n-export([init/1]).\ninit(_) -> {ok, {#{}, []}}.\n");
+    val _d = module(v2, "top_sup", "-module(top_sup).\n-behaviour(supervisor).\n-export([init/1]).\ninit(_) -> {ok, {#{}, [#{id => w, start => {w, start_link, []}}]}}.\n");
+    val plan = upgradeInstructions(v1, v2);
+    assert plan.join(",") == "{load_module, calc},{update, top_sup, supervisor}", plan.join(",");
+    val appup = renderAppup("shop", "1.1.0", "1.2.0", plan);
+    assert appup == "{\"1.2.0\",\n [{\"1.1.0\", [{load_module, calc}, {update, top_sup, supervisor}]}],\n [{\"1.1.0\", [{load_module, calc}, {update, top_sup, supervisor}]}]}.\n";
+    val w1 = tmp("up/w1");
+    val w2 = tmp("up/w2");
+    val _e = module(w1, "cart", "-module(cart).\n-behaviour(gen_server).\n-export([init/1]).\n-record(state, {items}).\ninit(_) -> {ok, #state{items = []}}.\n");
+    val _f = module(w2, "cart", "-module(cart).\n-behaviour(gen_server).\n-export([init/1]).\n-record(state, {items, total}).\ninit(_) -> {ok, #state{items = [], total = 0}}.\n");
+    try asserts.throwsWith({ -> upgradeInstructions(w1, w2).length }, "cart changes its gen_server state and declares no code_change/3");
+}
+
+// ── step 6: the SBOM ────────────────────────────────────────────────────────
+
+fn manifest(dir: string, name: string, deps: string) -> string {
+    val file = dir + "/botopink.json";
+    val _w = write(file, "{\"name\": \"" + name + "\", \"version\": \"0.3.0\", \"dependencies\": {" + deps + "}}");
+    return file;
+}
+
+test "release: the SBOM names every dependency once, hashes a path dependency's tree, and is valid when empty" {
+    val root = tmp("sbom");
+    val _l = manifest(root + "/lib", "lib", "");
+    val _s = write(root + "/lib/src/a.bp", "one");
+    val _m = manifest(root + "/mid", "mid", "\"lib\": {\"path\": \"../lib\"}");
+    val app = manifest(root + "/app", "app", "\"mid\": {\"path\": \"../mid\"}, \"lib\": {\"path\": \"../lib\"}");
+    val first = components(app);
+    val _c = write(root + "/lib/src/a.bp", "two");
+    val second = components(app);
+    assert first.map({ c -> c.name + "@" + c.version + ":" + c.source }).join(",") == "mid@0.3.0:path,lib@0.3.0:path";
+    assert (first.at(1) ?? Component(name: "", version: "", source: "", hash: "")).hash != (second.at(1) ?? Component(name: "", version: "", source: "", hash: "")).hash;
+    val empty = sbomDocument("solo", "1.0.0", manifest(root + "/solo", "solo", ""));
+    assert empty.contains("\"bomFormat\":\"CycloneDX\"") && empty.contains("\"specVersion\":\"1.5\"") && empty.contains("\"components\":[]"), empty;
+}
+
+test "release: front 11 serves the SBOM file unmodified with its media type" {
+    val file = tmp("sbom-file/bom.json");
+    val doc = sbomDocument("shop", "1.2.0", manifest(tmp("sbom-file/app"), "shop", ""));
+    val _w = write(file, doc);
+    val _m = mountActuator();
+    val _r = registerSbomEndpoint(file);
+    val _x = installExposure({ id -> id == "sbom" });
+    val res = rkDispatchHttp("GET", "/actuator/sbom", "{}", "{}", "");
+    val _c = clearExposure();
+    assert res.status == 200 && res.body == doc;
+    assert sbomMediaType() == "application/vnd.cyclonedx+json";
+}
