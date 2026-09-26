@@ -1,0 +1,126 @@
+//// rakun-cache — the boot check, the `caches` endpoint and the `cache` health
+//// indicator. Front 12 step 8.
+////
+//// `installCache()` refuses a bad configuration (an unknown provider or
+//// eviction, a cache resolving to Redis with no `rakun.cache.redis.url`),
+//// creates the caches `rakun.cache.names` lists and mounts the endpoint and
+//// the indicator.
+////
+//// `GET <base>/caches` lists every cache created — listed at boot or created
+//// on first use — with its provider and entry count. `DELETE <base>/caches`
+//// empties every cache; `DELETE <base>/caches/:name` empties one, 204, and an
+//// unknown name is 404. The actuator host routes one segment
+//// (`GET <base>/:endpoint`), so the two DELETEs are this module's own routes,
+//// refused by the same `exposed("caches")` check: unexposed, all three answer
+//// the host's 404, the answer an unknown id gets. There is no key here that
+//// changes that — front 11 (and 76's access rule) decide who reaches
+//// `/actuator`.
+
+import {json} from "std";
+import {Request, Response, rkProp, rkRegisterRoute} from "rakun";
+import {rkSessRedis} from "rakun-session";
+import {EndpointResponse, endpointJson, Health, healthDown, rkRegisterEndpoint, rkRegisterHealthIndicator} from "rakun-actuator-api";
+import {exposed, basePath, notFoundProblem} from "rakun-actuator";
+import {CacheSettings, cacheSettings, cacheNames, globalProvider, providerProblem, evictionProblem, redisUrlProblem, cacheEvictAll} from "cache";
+import {rkCacheSize, rkCacheOwnerAlive, rkCacheClearName} from "cache_host";
+
+pub type CacheEntryCount(name: string, provider: string, entries: i32)
+
+fn listedNames() -> Array<string> {
+    return rkProp("rakun.cache.names").split(",").map({ n -> n.trim() }).filter({ n -> n != "" });
+}
+
+fn providerOk(p: string) -> bool {
+    return p == "none" || p == "ets" || p == "redis";
+}
+
+fn evictionOk(e: string) -> bool {
+    return e == "" || e == "lru" || e == "lfu" || e == "ttl-only";
+}
+
+// `""` when the configuration boots; otherwise the first problem, naming the key.
+pub fn cacheConfigProblem() -> string {
+    val global = globalProvider();
+    if (providerOk(global) == false) return providerProblem("rakun.cache.type", global);
+    var problem = "";
+    var wantsRedis = global == "redis";
+    for (listedNames()) { n ->
+        val own = rkProp("rakun.cache." + n + ".type");
+        val ev = rkProp("rakun.cache." + n + ".eviction");
+        if (problem == "" && own != "" && providerOk(own) == false) problem = providerProblem("rakun.cache." + n + ".type", own);
+        if (problem == "" && evictionOk(ev) == false) problem = evictionProblem("rakun.cache." + n + ".eviction", ev);
+        if (own == "redis") wantsRedis = true;
+    };
+    if (problem != "") return problem;
+    if (global != "none" && wantsRedis && rkProp("rakun.cache.redis.url") == "") return redisUrlProblem();
+    return "";
+}
+
+pub fn installCache() -> i32 {
+    val problem = cacheConfigProblem();
+    if (problem != "") @panic(problem);
+    for (listedNames()) { n -> val _s: CacheSettings = cacheSettings(n); };
+    return mountCacheEndpoint();
+}
+
+pub fn cacheEntryCounts() -> Array<CacheEntryCount> {
+    return cacheNames().map({ n -> CacheEntryCount(name: n, provider: cacheSettings(n).provider, entries: rkCacheSize(n)) });
+}
+
+pub fn cachesListing() -> string {
+    val rows = cacheEntryCounts().map({ c ->
+        json.object([#("name", json.quote(c.name)), #("provider", json.quote(c.provider)), #("entries", c.entries.toString())])
+    });
+    return json.object([#("caches", json.array(rows))]);
+}
+
+pub fn cachesRead(req: Request) -> EndpointResponse {
+    return endpointJson(cachesListing());
+}
+
+pub fn cachesDeleteOne(req: Request) -> Response {
+    if (exposed("caches") == false) return notFoundProblem("caches", req.path);
+    val name: string = req.param("name");
+    val known = cacheNames().filter({ n -> n == name }).length > 0;
+    if (known == false) return notFoundProblem("caches", req.path);
+    val _c = cacheEvictAll(name);
+    return Response.withStatus(204, "");
+}
+
+pub fn cachesDeleteAll(req: Request) -> Response {
+    if (exposed("caches") == false) return notFoundProblem("caches", req.path);
+    for (cacheNames()) { n -> val _c = cacheEvictAll(n); };
+    return Response.withStatus(204, "");
+}
+
+// UP when every provider in use answers; DOWN naming the first that does not.
+pub fn cacheHealth() -> Health {
+    var providers: Array<string> = [];
+    val global = globalProvider();
+    if (global != "none") providers.push(global);
+    for (cacheNames()) { n ->
+        val p = cacheSettings(n).provider;
+        if (p != "none" && providers.filter({ q -> q == p }).length == 0) providers.push(p);
+    };
+    var down = "";
+    for (providers) { p ->
+        if (down == "" && p == "ets") {
+            val _warm = rkCacheSize("");
+            if (rkCacheOwnerAlive() == false) down = json.object([#("provider", json.quote("ets")), #("reason", json.quote("the ETS owner process is not running"))]);
+        };
+        if (down == "" && p == "redis") {
+            val url = rkProp("rakun.cache.redis.url");
+            val reply = if (url == "") "err " + redisUrlProblem() else rkSessRedis(url, ["PING"], 2000);
+            if (reply.startsWith("ok ") == false) down = json.object([#("provider", json.quote("redis")), #("reason", json.quote(reply.slice(4, reply.length())))]);
+        };
+    };
+    if (down != "") return healthDown(down);
+    return Health(status: "UP", details: json.object([#("providers", json.array(providers.map({ p -> json.quote(p) })))]));
+}
+
+pub fn mountCacheEndpoint() -> i32 {
+    val _e = rkRegisterEndpoint("caches", "rakun-cache", "read", { req -> cachesRead(req) });
+    val _h = rkRegisterHealthIndicator("cache", "rakun-cache", { -> cacheHealth() });
+    val _a = rkRegisterRoute("DELETE", basePath() + "/caches", { req -> cachesDeleteAll(req) });
+    return rkRegisterRoute("DELETE", basePath() + "/caches/:name", { req -> cachesDeleteOne(req) });
+}

@@ -28,7 +28,7 @@ refusal is the core's `config_check.bp`.
 | [rakun-app](./rakun-app/) | root · file_router · ssr · route_handler | erlang | (Next.js `app/` router, server half) | 22 · 23 · 24 · 25 · 60 · 61 · 63 · 64 · 66 | real code, 53 tests |
 | [rakun-actuator-api](./rakun-actuator-api/) | root · contract · registration · span | erlang | `spring-boot-actuator` (the API half) | 11 (Step 0) | real code, 10 tests |
 | [rakun-actuator](./rakun-actuator/) | root · endpoint_host · health · info · registry_endpoints · instrumentation · actuator | erlang | `-actuator` (host) | 11 · 76 · 87 | real code, 38 tests |
-| [rakun-cache](./rakun-cache/) | root | erlang | `-cache` | 12 | scaffold |
+| [rakun-cache](./rakun-cache/) | root · cache_host · cache · cached · cache_endpoint | erlang | `-cache` | 12 | real code, 50 tests |
 | [rakun-client](./rakun-client/) | root · address · settings · response · cache · transport · health · client · request · exchange | erlang | `RestClient` / `WebClient` | 13 | real code, 70 tests |
 | [rakun-data](./rakun-data/) | root · datasource · sql | erlang | `-data-jpa` / `-data-jdbc` / `-data-mongodb` / `-data-redis` | 08 · 09 · 77 · 78 | real code, 77 tests |
 | [rakun-hateoas](./rakun-hateoas/) | root · hal | erlang | `-hateoas` | 21 | real code, 14 tests |

@@ -1,0 +1,194 @@
+//// rakun-cache — the store, the providers, the kill switch, eviction, the
+//// customizer fold and single flight (front 12 step 3).
+
+import {rkSetProp, rkPropInt} from "rakun";
+import {io: {clock}} from "std";
+import {CacheScope, CacheSettings, CachePolicy, cachePolicy, cacheLife, cacheLifeOf, cacheThrough, cacheFn, cacheSettings, cacheSize, resetCaches, registerCacheCustomizer, clearCacheCustomizers, rkCacheEnabled} from "cache";
+import {rkCacheKeysOf, rkCacheRespDoubleStart, rkCacheRespDoubleLog, rkCacheRespDoubleStop, rkCacheSpawnMany, rkCacheFlightsLed, rkCacheOwnerFacts, rkCacheSpawnCrash} from "cache_host";
+
+fn boot(provider: string) -> i32 {
+    val _t = rkSetProp("rakun.cache.type", provider);
+    val _l = rkSetProp("store.loads", "0");
+    val _c = clearCacheCustomizers();
+    return resetCaches();
+}
+
+fn load() -> string {
+    val n = rkPropInt("store.loads") + 1;
+    val _s = rkSetProp("store.loads", n.toString());
+    return "v" + n.toString();
+}
+
+fn loads() -> i32 {
+    return rkPropInt("store.loads");
+}
+
+fn policy(name: string) -> CachePolicy {
+    return cachePolicy(CacheScope.Shared, name, cacheLife("hours"), []);
+}
+
+test "store: rakun.cache.type=none runs the loader on every call and keeps nothing" {
+    val _b = boot("none");
+    assert cacheThrough(policy("st-none"), ["k"], { -> load() }) == "v1";
+    assert cacheThrough(policy("st-none"), ["k"], { -> load() }) == "v2";
+    assert cacheFn("st-none-fn", ["k"], cacheLife("hours"), [], { -> load() }) == "v3";
+    assert cacheFn("st-none-fn", ["k"], cacheLife("hours"), [], { -> load() }) == "v4";
+    assert cacheSize("st-none") == 0 && cacheSize("st-none-fn") == 0;
+    assert rkCacheEnabled("st-none") == false;
+}
+
+test "store: the default is none - no key set means no caching" {
+    val _t = rkSetProp("rakun.cache.type", "");
+    val _r = resetCaches();
+    assert cacheSettings("st-default").provider == "none";
+}
+
+test "store: with a provider, a second call with the same keys does not run the loader" {
+    val _b = boot("ets");
+    assert cacheThrough(policy("st-hit"), ["k"], { -> load() }) == "v1";
+    assert cacheThrough(policy("st-hit"), ["k"], { -> load() }) == "v1";
+    assert loads() == 1;
+    assert cacheSize("st-hit") == 1;
+}
+
+test "store: two calls with different keys both run the loader" {
+    val _b = boot("ets");
+    assert cacheThrough(policy("st-two"), ["a"], { -> load() }) == "v1";
+    assert cacheThrough(policy("st-two"), ["b"], { -> load() }) == "v2";
+    assert loads() == 2;
+}
+
+test "store: a Remote policy reaches Redis even when the default provider is ets" {
+    val _b = boot("ets");
+    val port = rkCacheRespDoubleStart();
+    val _u = rkSetProp("rakun.cache.redis.url", "redis://127.0.0.1:" + port.toString());
+    val remote = cachePolicy(CacheScope.Remote, "st-remote", cacheLifeOf(0, 60, 120), ["prices"]);
+    assert cacheThrough(remote, ["p", "1"], { -> load() }) == "v1";
+    assert cacheThrough(remote, ["p", "1"], { -> load() }) == "v1";
+    val log = rkCacheRespDoubleLog();
+    val _s = rkCacheRespDoubleStop();
+    val _z = rkSetProp("rakun.cache.redis.url", "");
+    assert loads() == 1;
+    assert cacheSize("st-remote") == 0;
+    assert log.filter({ l -> l.startsWith("GET rakun:cache:st-remote:") }).length == 2;
+    assert log.filter({ l -> l.startsWith("SET rakun:cache:st-remote:") && l.endsWith(" v1 EX 120") }).length == 1;
+    assert log.filter({ l -> l.startsWith("SADD rakun:cache:tag:prices ") }).length == 1;
+}
+
+test "store: the Redis provider round-trips through rakun.cache.type=redis" {
+    val _b = boot("redis");
+    val port = rkCacheRespDoubleStart();
+    val _u = rkSetProp("rakun.cache.redis.url", "redis://127.0.0.1:" + port.toString());
+    assert cacheThrough(policy("st-redis"), ["k"], { -> load() }) == "v1";
+    assert cacheThrough(policy("st-redis"), ["k"], { -> load() }) == "v1";
+    val _s = rkCacheRespDoubleStop();
+    val _z = rkSetProp("rakun.cache.redis.url", "");
+    assert loads() == 1;
+    assert cacheSettings("st-redis").provider == "redis";
+}
+
+test "store: a Redis that does not answer runs the loader instead of failing the call" {
+    val _b = boot("redis");
+    val _u = rkSetProp("rakun.cache.redis.url", "redis://127.0.0.1:1");
+    assert cacheThrough(policy("st-redis-down"), ["k"], { -> load() }) == "v1";
+    assert cacheThrough(policy("st-redis-down"), ["k"], { -> load() }) == "v2";
+    val _z = rkSetProp("rakun.cache.redis.url", "");
+}
+
+fn fill(name: string, keys: Array<string>) -> i32 {
+    for (keys) { k -> val _v = cacheThrough(policy(name), [k], { -> k }); };
+    return cacheSize(name);
+}
+
+fn has(name: string, part: string) -> bool {
+    val _before = loads();
+    val v = cacheThrough(policy(name), [part], { -> load() });
+    return v == part;
+}
+
+test "store: max-entries under lru evicts the least recently used and the size stops growing" {
+    val _b = boot("ets");
+    val _m = rkSetProp("rakun.cache.st-lru.max-entries", "3");
+    assert fill("st-lru", ["a", "b", "c"]) == 3;
+    val _touch = cacheThrough(policy("st-lru"), ["a"], { -> "x" });
+    assert fill("st-lru", ["d"]) == 3;
+    assert fill("st-lru", ["e"]) == 3;
+    assert has("st-lru", "a");
+    assert has("st-lru", "b") == false;
+    val _z = rkSetProp("rakun.cache.st-lru.max-entries", "");
+}
+
+test "store: max-entries under lfu evicts the least often read" {
+    val _b = boot("ets");
+    val _m = rkSetProp("rakun.cache.st-lfu.max-entries", "3");
+    val _e = rkSetProp("rakun.cache.st-lfu.eviction", "lfu");
+    assert fill("st-lfu", ["a", "b", "c"]) == 3;
+    val _r1 = cacheThrough(policy("st-lfu"), ["a"], { -> "x" });
+    val _r2 = cacheThrough(policy("st-lfu"), ["a"], { -> "x" });
+    val _r3 = cacheThrough(policy("st-lfu"), ["c"], { -> "x" });
+    val _r4 = cacheThrough(policy("st-lfu"), ["b"], { -> "x" });
+    val _r5 = cacheThrough(policy("st-lfu"), ["c"], { -> "x" });
+    assert fill("st-lfu", ["d"]) == 3;
+    assert has("st-lfu", "a") && has("st-lfu", "c");
+    assert has("st-lfu", "b") == false;
+    val _z = rkSetProp("rakun.cache.st-lfu.max-entries", "");
+    val _y = rkSetProp("rakun.cache.st-lfu.eviction", "");
+}
+
+test "store: max-entries under ttl-only evicts the entry nearest its expiry" {
+    val _b = boot("ets");
+    val _m = rkSetProp("rakun.cache.st-ttl.max-entries", "2");
+    val _e = rkSetProp("rakun.cache.st-ttl.eviction", "ttl-only");
+    val longLived = cachePolicy(CacheScope.Shared, "st-ttl", cacheLifeOf(0, 900, 900), []);
+    val shortLived = cachePolicy(CacheScope.Shared, "st-ttl", cacheLifeOf(0, 30, 30), []);
+    val _a = cacheThrough(longLived, ["long"], { -> "long" });
+    val _s = cacheThrough(shortLived, ["short"], { -> "short" });
+    val _c = cacheThrough(longLived, ["third"], { -> "third" });
+    assert cacheSize("st-ttl") == 2;
+    assert cacheThrough(longLived, ["long"], { -> "reloaded" }) == "long";
+    assert cacheThrough(shortLived, ["short"], { -> "reloaded" }) == "reloaded";
+    val _z = rkSetProp("rakun.cache.st-ttl.max-entries", "");
+    val _y = rkSetProp("rakun.cache.st-ttl.eviction", "");
+}
+
+test "store: a customizer changes the settings a cache is created with, in registration order" {
+    val _b = boot("ets");
+    val _c1 = registerCacheCustomizer({ name, s -> CacheSettings(name: s.name, provider: s.provider, ttlSeconds: s.ttlSeconds, maxEntries: 7, eviction: s.eviction) });
+    val _c2 = registerCacheCustomizer({ name, s -> CacheSettings(name: s.name, provider: s.provider, ttlSeconds: s.ttlSeconds, maxEntries: s.maxEntries + 1, eviction: "lfu") });
+    val s = cacheSettings("st-custom");
+    val _z = clearCacheCustomizers();
+    assert s.maxEntries == 8;
+    assert s.eviction == "lfu";
+}
+
+test "store: a customizer cannot re-enable a cache the kill switch turned off" {
+    val _b = boot("none");
+    val _c = registerCacheCustomizer({ name, s -> CacheSettings(name: s.name, provider: "ets", ttlSeconds: s.ttlSeconds, maxEntries: s.maxEntries, eviction: s.eviction) });
+    val s = cacheSettings("st-killed");
+    assert s.provider == "none";
+    assert cacheThrough(policy("st-killed"), ["k"], { -> load() }) == "v1";
+    assert cacheThrough(policy("st-killed"), ["k"], { -> load() }) == "v2";
+    val _z = clearCacheCustomizers();
+}
+
+test "store: concurrent misses on one key run the loader once and all read its value" {
+    val _b = boot("ets");
+    val before = rkCacheFlightsLed();
+    val values = rkCacheSpawnMany(8, { i ->
+        cacheThrough(policy("st-flight"), ["same"], { ->
+            val _w = clock.sleep(150);
+            load();
+        });
+    });
+    assert loads() == 1;
+    assert values.filter({ v -> v == "v1" }).length == 8;
+    assert rkCacheFlightsLed() - before == 1;
+}
+
+test "store: the ETS table is owned by the cache's own process, not by a worker" {
+    val _b = boot("ets");
+    val out = rkCacheSpawnCrash({ -> cacheThrough(policy("st-crash"), ["k"], { -> "written by a worker" }) });
+    assert out.contains("worker_crashed");
+    assert cacheThrough(policy("st-crash"), ["k"], { -> "lost" }) == "written by a worker";
+    assert rkCacheOwnerFacts() == "owner=rakun_cache_owner alive=true caller=not-owner";
+}

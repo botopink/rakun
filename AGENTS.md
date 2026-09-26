@@ -215,7 +215,12 @@ rakun/
 │   │                    rkDispatchHttp), `context.bp` (resetSingletons/resetContext/contextSnapshot);
 │   │                    test/ holds one file per piece plus the std-mocks + #[bean] pairing.
 │   │                    Re-exports nothing from std and ships no mocking code
-│   └── rakun-<area>/  ← the ten remaining scaffolds (actuator · cache · client ·
+│   ├── rakun-cache/   ← CACHING (§ Caching, front 12): `cache.bp` (keys, lifetimes,
+│   │                    settings, `cacheThrough`, the verbs), `cached.bp` (the
+│   │                    `#[cached]` twin), `cache_endpoint.bp`, `cache_host.bp` over
+│   │                    `sidecars/rakun_cache.erl`; test/fixtures/{twin,imports} are
+│   │                    consumer projects `consumer_test.bp` copies and runs
+│   └── rakun-<area>/  ← the remaining scaffolds (actuator · client ·
 │                        data · hateoas · logging · messaging · scheduling · security ·
 │                        session): `botopink.json` (files [root.bp] · targets per
 │                        `specs/1.0.10-beta/03-rakun/modules.md` § Targets · dependencies
@@ -3169,6 +3174,87 @@ one connection per command).
   truncated to 8 characters), its own `DELETE <base>/sessions/:id` route behind
   the same `exposed("sessions")` check, and the `session` health indicator (DOWN
   naming the arm and the probe's reason).
+
+## Caching — `modules/rakun-cache/` (front 12)
+
+Depends on `rakun`, `rakun-session` (the private scope's session id and the
+Redis wire, `rkSessRedis`, reused rather than copied — no `rakun-client` edge)
+and, through it, `rakun-web`, `rakun-data`, `rakun-scheduling`,
+`rakun-actuator-api`, `rakun-actuator` (listed in the manifest: a transitive
+dependency is not loaded). Sidecar `rakun_cache.erl`: ONE ETS table for every
+cache keyed by `{name, key}` (no atom per cache name), owned by
+`rakun_cache_owner`; the names table (resolved settings), the customizers, single
+flight, background refresh, the monotonic clock with a test offset, the
+invalidation log and trace, the twin lookup and a RESP double for the tests.
+
+- **One primitive** (`cache.bp`) — `cacheThrough(policy, keys, load)`;
+  `cacheFn(name, keys, life, tags, load)` (Next's `unstable_cache`),
+  `cacheWith(policy)` (a module's default policy, the file-level `'use cache'`
+  stand-in) and the twin's `cacheMethod` all call it. Policy:
+  `cachePolicy(CacheScope.Shared|Remote|Private, name, life, tags)`.
+- **Key** — `cacheKey(ns, parts)` = `ns + ":" + hash.strongCacheKey(parts)`
+  (length-framed parts, SHA-256 truncated to 32 hex: no part forges a boundary;
+  not `contentHash`, which collides on purpose). A private key is
+  `cacheKey(ns + "/private", [sessionId, parts…])`. Import `cacheKey` from
+  `"rakun-cache/cache"`: `from "rakun-cache"` is refused as ambiguous with std's
+  `hash.cacheKey`.
+- **Lifetimes** — `cacheLife(profile)` (the six Next profiles; unknown → 0/60/3600),
+  `cacheLifeOf(stale, revalidate, expire)`. `expire <= 0` inherits
+  `rakun.cache.<name>.ttl-seconds`, `revalidate <= 0` is the expiry. Freshness is
+  `freshness(ageMs, marked, life)`: ≥ expire miss · marked stale · < revalidate
+  fresh · < revalidate + stale stale · else miss. A stale read returns the row
+  and starts ONE background refresh per key (`drainRefreshes()` waits for them;
+  the loader then runs outside the request process).
+- **Single flight** — concurrent misses on one key run the loader once, in the
+  first caller's process; the others wait for its value (a raising leader lets
+  them retry).
+- **Providers** — `rakun.cache.type` = `none` (default) · `ets` · `redis`, per
+  cache `rakun.cache.<name>.type`, `.ttl-seconds` (3600), `.max-entries` (10000,
+  0 unbounded; the row just written is never the one evicted), `.eviction` (`lru`
+  · `lfu` · `ttl-only`), `rakun.cache.names`, `rakun.cache.redis.url`. `Remote`
+  is always Redis, `Private` always ETS; `none` beats every per-cache key and
+  every customizer (`registerCacheCustomizer(fn(name, settings) -> settings)`,
+  folded in registration order before the kill switch — functions, not
+  `CacheCustomizer` values: a behavior-typed call does not lower on erlang when
+  two types implement it). Redis rows are `SET rakun:cache:<key> v EX <expire>`
+  plus a set per tag and per cache; Redis has no stale window, so on it
+  `revalidateTag` deletes; a Redis that does not answer runs the loader.
+  JCache, Hazelcast, Infinispan, Couchbase, Caffeine, Cache2k and Mnesia are
+  declined (the README records why).
+- **Private scope** — keyed on `optionalSession()` (rakun-session); a request with
+  no session runs the loader and stores nothing.
+- **Verbs** — `revalidateTag(tag)` (marks stale), `updateTag(tag)` (expires now:
+  read-your-own-writes), `revalidatePath(path)` (marks the rows tagged
+  `path:<path>`). `rkCachePhase()` reads front 62's phase (`none` outside a
+  request): render refuses all three, `updateTag` is legal only in `action`.
+  Seams: `revalidatedTags()`, `revalidatedPaths()` (call order, never cleared
+  implicitly), `clearRevalidated()`; `cacheTraceOn()` / `cacheTrace()`
+  (`miss|hit|revalidate|bypass|error key=<ns>:<parts> [tags]`); `resetCaches()`.
+- **The twin** (`cached.bp`) — `#[cached]` on a `behavior` emits
+  `Cached<Name>(inner) implement <Name>` and `cached<Name>(inner)` into the
+  behavior's module: `#[cacheable(name)]` methods go through `cacheMethod` (key
+  `[method, args…]`, non-string args `toString()`d, rows tagged with the cache
+  name, must return `string`), `#[cacheEvict(name, true)]` clears the cache and
+  `(name, false)` the rows `[m, args…]` of every `#[cacheable(name)]` method `m`
+  — both AFTER the delegate returns; unannotated methods delegate. The module
+  imports `cacheMethod`, `cacheEvictAll`, `cacheEvictKeys`. **Three erlang rules**
+  (`language-gaps.md`): the implementation lives in ANOTHER module than the
+  behavior (two local implementers make a behavior-typed call a bare local
+  call); other modules reach the twin with `cachedTwin("<Name>", inner)` (an
+  emitted declaration is not importable, and an imported fn returning a
+  behavior does not unify with the importer's view of it); one `#[cached]`
+  behavior per module. `test/fixtures/twin` is the working shape:
+  `#[configuration]` + `#[bean] … -> ProductCatalog { return
+  cachedTwin("ProductCatalog", self.real); }` injects the twin into every
+  `catalog: ProductCatalog` field.
+- **Endpoint and health** (`cache_endpoint.bp`) — `installCache()` refuses a bad
+  configuration naming the key (`cacheConfigProblem()`), creates the listed
+  caches and mounts `caches` (GET: name, provider, entries), its own `DELETE
+  <base>/caches` and `DELETE <base>/caches/:name` (204; unknown 404) behind
+  `exposed("caches")`, and the `cache` health indicator (UP listing the
+  providers, DOWN naming the first that does not answer).
+- **Not reached** — the qualified import `import {cache} from "rakun-cache"`
+  (a workspace module cannot be imported as a namespace).
 
 ## Static files — `modules/rakun-web/src/static.bp` (front 82)
 

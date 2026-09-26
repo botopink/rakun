@@ -1,0 +1,523 @@
+//// rakun-cache — the one store, the one key protocol and the one lifetime
+//// model, with both entry points on top. Front 12 steps 1–3, 5–7.
+////
+//// `cacheThrough(policy, keys, load)` is the primitive. `#[cacheable]` twins
+//// (`cached.bp`) and `cacheFn` call it, so a row written by one entry point is
+//// read by the other: same key, same store, same `revalidateTag`.
+////
+//// THE KEY. `cacheKey(namespace, parts)` is std's `hash.strongCacheKey`:
+//// every part framed as `<length>:<part>` before hashing, so no part can
+//// forge a boundary (`["a", "b"]` and `["a\u001fb"]` are two keys whatever
+//// the separator), hashed with SHA-256 truncated to 32 hex characters —
+//// fixed width, provider independent. Not `contentHash`: a key carries
+//// request input and a session id, and djb2 collides on purpose. A private
+//// key mixes the session id in as the first part under the namespace
+//// `<name>/private`, so it can never equal a shared key.
+////
+//// FRESHNESS, read against the cache's monotonic clock (`rkCacheNow`), on the
+//// age of the row in milliseconds:
+////
+//// | age | marked by `revalidateTag` | answer |
+//// |---|---|---|
+//// | ≥ expire | any | miss — the row is dropped, the loader runs |
+//// | < expire | yes | stale — served once, a refresh is scheduled |
+//// | < revalidate | no | fresh |
+//// | < revalidate + stale | no | stale — served, a refresh is scheduled |
+//// | otherwise | no | miss |
+////
+//// `expire <= 0` inherits `rakun.cache.<name>.ttl-seconds` (3600);
+//// `revalidate <= 0` is the expiry (Spring's shape: fresh until it expires,
+//// never stale).
+////
+//// PROVIDERS. `none` (the default, and the kill switch), `ets`, `redis`.
+//// `CacheScope.Remote` is always Redis and `CacheScope.Private` always ETS —
+//// unless `rakun.cache.type=none`, which beats every per-cache setting and
+//// every customizer: it is checked after the customizer fold.
+
+import {hash, json} from "std";
+import {rkProp, toI32, requestLive, requestPhase, phaseName} from "rakun";
+import {Session, optionalSession, rkSessRedis} from "rakun-session";
+import {
+    rkCacheRowPut, rkCacheRowGet, rkCacheRowMarked, rkCacheRowDelete, rkCacheClearName, rkCacheClearAll,
+    rkCacheSize, rkCacheEvictOne, rkCacheMarkTag, rkCacheExpireTag,
+    rkCacheNamePut, rkCacheNameGet, rkCacheNames, rkCacheNamesClear,
+    rkCacheCustomizerAdd, rkCacheCustomizers, rkCacheCustomizersClear,
+    rkCacheFlight, rkCacheRefresh, rkCacheDrain,
+    rkCacheNow, rkCacheWide, rkCacheClockReset,
+    rkCacheLogAdd, rkCacheLogged, rkCacheLogClear, rkCacheTraceLine,
+    rkCacheTwin, rkCacheTraceOn, rkCacheTraced,
+} from "cache_host";
+
+// ── Step 1 — scopes, policies, keys ─────────────────────────────────────────
+
+pub type CacheScope {
+    Shared,
+    Remote,
+    Private,
+}
+
+pub fn scopeTag(scope: CacheScope) -> string {
+    val tag = case scope {
+        CacheScope.Shared -> "shared";
+        CacheScope.Remote -> "remote";
+        CacheScope.Private -> "private";
+    };
+    return tag;
+}
+
+pub type CacheLife(stale: i32, revalidate: i32, expire: i32)
+
+pub type CachePolicy(
+    scope: CacheScope,
+    name: string,
+    life: CacheLife,
+    tags: Array<string>,
+)
+
+pub fn cachePolicy(scope: CacheScope, name: string, life: CacheLife, tags: Array<string>) -> CachePolicy {
+    return CachePolicy(scope: scope, name: name, life: life, tags: tags);
+}
+
+pub fn cacheKey(namespace: string, parts: Array<string>) -> string {
+    return namespace + ":" + hash.strongCacheKey(parts);
+}
+
+// The key a private row lives under: the session id is the first part.
+pub fn privateKey(namespace: string, sessionId: string, parts: Array<string>) -> string {
+    var all: Array<string> = [sessionId];
+    for (parts) { p -> all.push(p); };
+    return cacheKey(namespace + "/private", all);
+}
+
+// The readable pre-hash form the trace prints: `<namespace>:<parts joined by ,>`.
+pub fn keyForm(namespace: string, parts: Array<string>) -> string {
+    return namespace + ":" + parts.join(",");
+}
+
+// ── Step 2 — lifetimes ──────────────────────────────────────────────────────
+
+pub fn cacheLife(profile: string) -> CacheLife {
+    val out = case profile {
+        "seconds" -> CacheLife(stale: 30, revalidate: 1, expire: 60);
+        "minutes" -> CacheLife(stale: 300, revalidate: 60, expire: 3600);
+        "hours" -> CacheLife(stale: 300, revalidate: 3600, expire: 86400);
+        "days" -> CacheLife(stale: 300, revalidate: 86400, expire: 604800);
+        "weeks" -> CacheLife(stale: 300, revalidate: 604800, expire: 2592000);
+        "max" -> CacheLife(stale: 300, revalidate: 2592000, expire: 31536000);
+        _ -> CacheLife(stale: 0, revalidate: 60, expire: 3600);
+    };
+    return out;
+}
+
+pub fn cacheLifeOf(stale: i32, revalidate: i32, expire: i32) -> CacheLife {
+    return CacheLife(stale: stale, revalidate: revalidate, expire: expire);
+}
+
+// The life a row is written with: `expire <= 0` takes the cache's TTL,
+// `revalidate <= 0` is the expiry.
+pub fn effectiveLife(life: CacheLife, ttlSeconds: i32) -> CacheLife {
+    val expire = if (life.expire > 0) life.expire else ttlSeconds;
+    val revalidate = if (life.revalidate > 0) life.revalidate else expire;
+    val stale = if (life.stale > 0) life.stale else 0;
+    return CacheLife(stale: stale, revalidate: revalidate, expire: expire);
+}
+
+fn secondsMs(n: i32) -> i64 {
+    return rkCacheWide(n) * 1000;
+}
+
+// `fresh`, `stale` or `miss` for a row of this age (ms) — the table above.
+pub fn freshness(ageMs: i64, marked: bool, life: CacheLife) -> string {
+    if (ageMs >= secondsMs(life.expire)) return "miss";
+    if (marked) return "stale";
+    if (ageMs < secondsMs(life.revalidate)) return "fresh";
+    if (ageMs < secondsMs(life.revalidate + life.stale)) return "stale";
+    return "miss";
+}
+
+// ── settings, the customizer fold and the kill switch ───────────────────────
+
+pub type CacheSettings(
+    name: string,
+    provider: string,
+    ttlSeconds: i32,
+    maxEntries: i32,
+    eviction: string,
+)
+
+// The shape a customizer has. A caller registers the function, not a value of
+// this behavior: a call through a behavior-typed value does not lower on
+// erlang when two types implement it (`language-gaps.md`), so the manager
+// holds `fn(name, settings) -> settings` values, in registration order.
+pub behavior CacheCustomizer {
+    fn customize(self: Self, name: string, settings: CacheSettings) -> CacheSettings;
+}
+
+pub fn registerCacheCustomizer(customize: fn(name: string, settings: CacheSettings) -> CacheSettings) -> i32 {
+    return rkCacheCustomizerAdd(customize);
+}
+
+pub fn clearCacheCustomizers() -> i32 {
+    return rkCacheCustomizersClear();
+}
+
+fn propOr(key: string, fallback: string) -> string {
+    val v = rkProp(key);
+    return if (v == "") fallback else v;
+}
+
+fn propIntOr(key: string, fallback: i32) -> i32 {
+    val v = rkProp(key);
+    if (v == "") return fallback;
+    return toI32(v);
+}
+
+pub fn globalProvider() -> string {
+    return propOr("rakun.cache.type", "none");
+}
+
+fn validProvider(p: string) -> bool {
+    return p == "none" || p == "ets" || p == "redis";
+}
+
+fn validEviction(e: string) -> bool {
+    return e == "lru" || e == "lfu" || e == "ttl-only";
+}
+
+pub fn providerProblem(key: string, value: string) -> string {
+    return "rakun-cache: " + key + " is `" + value + "` - it must be none, ets or redis";
+}
+
+pub fn evictionProblem(key: string, value: string) -> string {
+    return "rakun-cache: " + key + " is `" + value + "` - it must be lru, lfu or ttl-only";
+}
+
+pub fn redisUrlProblem() -> string {
+    return "rakun-cache: rakun.cache.redis.url is required when a cache resolves to redis (rakun.cache.type=redis, rakun.cache.<name>.type=redis or a CacheScope.Remote policy)";
+}
+
+// The settings a cache is CREATED with: the properties, then every
+// customizer in registration order, then the kill switch.
+pub fn resolveSettings(name: string) -> CacheSettings {
+    val global = globalProvider();
+    val own = rkProp("rakun.cache." + name + ".type");
+    val provider = if (own == "") global else own;
+    if (validProvider(global) == false) @panic(providerProblem("rakun.cache.type", global));
+    if (validProvider(provider) == false) @panic(providerProblem("rakun.cache." + name + ".type", provider));
+    val eviction = propOr("rakun.cache." + name + ".eviction", "lru");
+    if (validEviction(eviction) == false) @panic(evictionProblem("rakun.cache." + name + ".eviction", eviction));
+    val base = CacheSettings(
+        name: name,
+        provider: provider,
+        ttlSeconds: propIntOr("rakun.cache." + name + ".ttl-seconds", 3600),
+        maxEntries: propIntOr("rakun.cache." + name + ".max-entries", 10000),
+        eviction: eviction,
+    );
+    val customizers: Array<fn(name: string, settings: CacheSettings) -> CacheSettings> = rkCacheCustomizers();
+    var folded = base;
+    for (customizers) { c -> folded = c(name, folded); };
+    val killed = if (global == "none") "none" else folded.provider;
+    return CacheSettings(name: name, provider: killed, ttlSeconds: folded.ttlSeconds, maxEntries: folded.maxEntries, eviction: folded.eviction);
+}
+
+// The settings of a cache, created on first use and kept.
+pub fn cacheSettings(name: string) -> CacheSettings {
+    val known: ?CacheSettings = rkCacheNameGet(name);
+    if (known != null) return known ?? resolveSettings(name);
+    val made = resolveSettings(name);
+    val _p = rkCacheNamePut(name, made);
+    return made;
+}
+
+pub fn rkCacheEnabled(name: string) -> bool {
+    return cacheSettings(name).provider != "none";
+}
+
+// Every cache created so far (listed at boot or created on first use).
+pub fn cacheNames() -> Array<string> {
+    return rkCacheNames();
+}
+
+pub fn cacheSize(name: string) -> i32 {
+    return rkCacheSize(name);
+}
+
+// Forgets every row, every created cache, the invalidation log, the trace and
+// the clock offset. Customizers are kept: `clearCacheCustomizers()`.
+pub fn resetCaches() -> i32 {
+    val _d = rkCacheDrain();
+    val _r = rkCacheClearAll();
+    val _n = rkCacheNamesClear();
+    val _t = rkCacheLogClear("tag");
+    val _p = rkCacheLogClear("path");
+    val _x = rkCacheLogClear("trace");
+    return rkCacheClockReset();
+}
+
+// ── Step 3 — cacheThrough ───────────────────────────────────────────────────
+
+pub type CacheRow(value: string, writtenAt: i64, life: CacheLife)
+
+fn trace(outcome: string, policy: CachePolicy, keys: Array<string>) -> i32 {
+    return rkCacheTraceLine(outcome + " key=" + keyForm(policy.name, keys) + " [" + policy.tags.join(",") + "]");
+}
+
+// The provider a policy's row lives with.
+pub fn providerFor(policy: CachePolicy) -> string {
+    val s = cacheSettings(policy.name);
+    if (s.provider == "none") return "none";
+    val p = case policy.scope {
+        CacheScope.Remote -> "redis";
+        CacheScope.Private -> "ets";
+        CacheScope.Shared -> s.provider;
+    };
+    return p;
+}
+
+// The session a private row belongs to, `""` when the request has none.
+pub fn privateSessionId() -> string {
+    val s: ?Session = optionalSession();
+    if (s == null) return "";
+    val found: Session = s ?? noSessionValue();
+    return found.id;
+}
+
+fn noSessionValue() -> Session {
+    return Session(id: "", principal: "", attributes: [], createdAt: rkCacheWide(0), lastAccessedAt: rkCacheWide(0), maxInactiveSeconds: 0);
+}
+
+fn store(policy: CachePolicy, key: string, value: string, life: CacheLife) -> i32 {
+    val now = rkCacheNow();
+    val row = CacheRow(value: value, writtenAt: now, life: life);
+    val _p = rkCacheRowPut(policy.name, key, row, policy.tags, now + secondsMs(life.expire));
+    val s = cacheSettings(policy.name);
+    if (s.maxEntries > 0 && rkCacheSize(policy.name) > s.maxEntries) {
+        val _e = rkCacheEvictOne(policy.name, s.eviction, key);
+    };
+    return 1;
+}
+
+fn etsThrough(policy: CachePolicy, key: string, keys: Array<string>, load: fn() -> string) -> string {
+    val life = effectiveLife(policy.life, cacheSettings(policy.name).ttlSeconds);
+    val found: ?CacheRow = rkCacheRowGet(policy.name, key);
+    val row: CacheRow = found ?? CacheRow(value: "", writtenAt: rkCacheWide(0), life: life);
+    val state = if (found == null) "miss" else freshness(rkCacheNow() - row.writtenAt, rkCacheRowMarked(policy.name, key), row.life);
+    if (state == "fresh") {
+        val _t = trace("hit", policy, keys);
+        return row.value;
+    };
+    if (state == "stale") {
+        val _t = trace("revalidate", policy, keys);
+        val _r = rkCacheRefresh(policy.name + "\n" + key, { ->
+            val v = load();
+            store(policy, key, v, life);
+        });
+        return row.value;
+    };
+    val _t = trace("miss", policy, keys);
+    val _d = if (found != null) rkCacheRowDelete(policy.name, key) else 0;
+    return rkCacheFlight(policy.name + "\n" + key, { ->
+        val v = load();
+        val _s = store(policy, key, v, life);
+        v;
+    });
+}
+
+// ── the Redis provider ──────────────────────────────────────────────────────
+//
+// A row is `SET rakun:cache:<key> <value> EX <expire>`, and its key joins one
+// set per tag (`rakun:cache:tag:<tag>`) and one per cache
+// (`rakun:cache:name:<name>`). Redis expires rows itself; it has no stale
+// window, so on this provider `revalidateTag` and `updateTag` both delete.
+// A Redis that does not answer is not a crash: the loader runs, uncached.
+
+pub fn redisUrl() -> string {
+    val url = rkProp("rakun.cache.redis.url");
+    if (url == "") @panic(redisUrlProblem());
+    return url;
+}
+
+fn redis(args: Array<string>) -> string {
+    return rkSessRedis(redisUrl(), args, 2000);
+}
+
+fn redisValue(reply: string) -> string {
+    return reply.slice(3, reply.length());
+}
+
+fn redisThrough(policy: CachePolicy, key: string, keys: Array<string>, load: fn() -> string) -> string {
+    val life = effectiveLife(policy.life, cacheSettings(policy.name).ttlSeconds);
+    val rkey = "rakun:cache:" + key;
+    val got = redis(["GET", rkey]);
+    if (got.startsWith("ok ")) {
+        val _t = trace("hit", policy, keys);
+        return redisValue(got);
+    };
+    if (got.startsWith("err ")) {
+        val _t = trace("error", policy, keys);
+        return load();
+    };
+    val _t = trace("miss", policy, keys);
+    return rkCacheFlight("redis\n" + rkey, { ->
+        val v = load();
+        val _s = redis(["SET", rkey, v, "EX", life.expire.toString()]);
+        val _n = redis(["SADD", "rakun:cache:name:" + policy.name, rkey]);
+        for (policy.tags) { t -> val _a = redis(["SADD", "rakun:cache:tag:" + t, rkey]); };
+        v;
+    });
+}
+
+fn redisDropSet(setKey: string) -> i32 {
+    if (rkProp("rakun.cache.redis.url") == "") return 0;
+    val members = redis(["SMEMBERS", setKey]);
+    if (members.startsWith("ok ") == false) return 0;
+    val keys = redisValue(members).split("\n").filter({ k -> k != "" });
+    for (keys) { k -> val _d = redis(["DEL", k]); };
+    val _s = redis(["DEL", setKey]);
+    return keys.length;
+}
+
+// ── the primitive ───────────────────────────────────────────────────────────
+
+pub fn cacheThrough(policy: CachePolicy, keys: Array<string>, load: fn() -> string) -> string {
+    val provider = providerFor(policy);
+    if (provider == "none") {
+        val _t = trace("miss", policy, keys);
+        return load();
+    };
+    val isPrivate = policy.scope == CacheScope.Private;
+    val sid = if (isPrivate) privateSessionId() else "";
+    if (isPrivate && sid == "") {
+        val _t = trace("bypass", policy, keys);
+        return load();
+    };
+    val key = if (isPrivate) privateKey(policy.name, sid, keys) else cacheKey(policy.name, keys);
+    if (provider == "redis") return redisThrough(policy, key, keys, load);
+    return etsThrough(policy, key, keys, load);
+}
+
+// ── Step 5 — tags and the three revalidation verbs ──────────────────────────
+
+// The phase the request process is in, or `none` outside a request.
+pub fn rkCachePhase() -> string {
+    if (requestLive()) return phaseName(requestPhase());
+    return "none";
+}
+
+pub fn renderProblem(verb: string) -> string {
+    return "rakun-cache: " + verb + " is not legal during render - call it from a server action or a route handler";
+}
+
+pub fn updateTagProblem(phase: string) -> string {
+    return "rakun-cache: updateTag is legal only inside a server action (the phase is " + phase + ")";
+}
+
+pub fn revalidateTag(tag: string) -> i32 {
+    val phase = rkCachePhase();
+    if (phase == "render") @panic(renderProblem("revalidateTag"));
+    val _l = rkCacheLogAdd("tag", tag);
+    val _r = rkCacheTraceLine("revalidate key=* [" + tag + "]");
+    return rkCacheMarkTag(tag) + redisDropSet("rakun:cache:tag:" + tag);
+}
+
+pub fn updateTag(tag: string) -> i32 {
+    val phase = rkCachePhase();
+    if (phase != "action") @panic(updateTagProblem(phase));
+    val _l = rkCacheLogAdd("tag", tag);
+    val _r = rkCacheTraceLine("expire key=* [" + tag + "]");
+    return rkCacheExpireTag(tag) + redisDropSet("rakun:cache:tag:" + tag);
+}
+
+pub fn revalidatePath(path: string) -> i32 {
+    val phase = rkCachePhase();
+    if (phase == "render") @panic(renderProblem("revalidatePath"));
+    val _l = rkCacheLogAdd("path", path);
+    return rkCacheMarkTag("path:" + path) + redisDropSet("rakun:cache:tag:path:" + path);
+}
+
+// The test seams: what was invalidated, in call order. They clear nothing.
+pub fn revalidatedPaths() -> Array<string> {
+    return rkCacheLogged("path");
+}
+
+pub fn revalidatedTags() -> Array<string> {
+    return rkCacheLogged("tag");
+}
+
+pub fn clearRevalidated() -> i32 {
+    val _t = rkCacheLogClear("tag");
+    return rkCacheLogClear("path");
+}
+
+// Waits for every scheduled refresh to land (tests; a shutdown hook).
+pub fn drainRefreshes() -> i32 {
+    return rkCacheDrain();
+}
+
+// ── Step 6 — the function-wrapping entry point ──────────────────────────────
+
+pub fn cacheFn(name: string, keys: Array<string>, life: CacheLife, tags: Array<string>, load: fn() -> string) -> string {
+    return cacheThrough(cachePolicy(CacheScope.Shared, name, life, tags), keys, load);
+}
+
+// ── Step 7 — the module-level fallback ──────────────────────────────────────
+//
+// LANGUAGE GAP: no module-level annotation, so a file-level `'use cache'` has
+// no spelling. A module binds its default policy once —
+// `val cached = cacheWith(cachePolicy(…))` — and every call site writes
+// `cached(keys, { -> … })` with no policy of its own.
+
+pub fn cacheWith(policy: CachePolicy) -> fn(keys: Array<string>, load: fn() -> string) -> string {
+    return { keys, load -> cacheThrough(policy, keys, load) };
+}
+
+// ── what a `#[cached]` twin calls ───────────────────────────────────────────
+//
+// The twin's cacheable method is `cacheMethod("<cache>", ["<method>", args…],
+// { -> self.inner.<method>(args…) })`: a Spring-shaped policy (fresh until the
+// cache's TTL, never stale) tagged with the cache name, so `revalidateTag(
+// "<cache>")` reaches a decorator's rows too.
+
+pub fn cacheMethod(name: string, parts: Array<string>, load: fn() -> string) -> string {
+    return cacheThrough(CachePolicy(scope: CacheScope.Shared, name: name, life: CacheLife(stale: 0, revalidate: 0, expire: 0), tags: [name]), parts, load);
+}
+
+// `#[cacheEvict(name, true)]`: every row of the cache.
+pub fn cacheEvictAll(name: string) -> i32 {
+    val _t = rkCacheTraceLine("evict key=" + name + ":* []");
+    return rkCacheClearName(name) + redisDropSet("rakun:cache:name:" + name);
+}
+
+// `#[cacheEvict(name, false)]`: the rows keyed by these parts (the twin passes
+// one per cacheable method of that cache, each `[method, args…]`).
+pub fn cacheEvictKeys(name: string, keys: Array<Array<string>>) -> i32 {
+    var n = 0;
+    for (keys) { parts ->
+        val _t = rkCacheTraceLine("evict key=" + keyForm(name, parts) + " []");
+        val key = cacheKey(name, parts);
+        n = n + rkCacheRowDelete(name, key);
+        if (rkProp("rakun.cache.redis.url") != "" && cacheSettings(name).provider == "redis") {
+            val _d = redis(["DEL", "rakun:cache:" + key]);
+        };
+    };
+    return n;
+}
+
+// The caching twin of `inner`, from ANY module: `val c: ProductCatalog =
+// cachedTwin("ProductCatalog", real)`. An `@emit`ted declaration cannot be
+// imported (`language-gaps.md`), so `cached<Name>(inner)` — which `#[cached]`
+// also emits — reaches only the behavior's own module.
+pub fn cachedTwin<B, I>(behaviorName: string, inner: I) -> B {
+    val twin: B = rkCacheTwin(behaviorName, inner);
+    return twin;
+}
+
+// The outcome trace: `miss|hit|revalidate|bypass|error key=<ns>:<parts> [tags]`,
+// `revalidate|expire key=* [tag]`, `evict key=…`. Off until turned on.
+pub fn cacheTraceOn() -> i32 {
+    return rkCacheTraceOn();
+}
+
+pub fn cacheTrace() -> Array<string> {
+    return rkCacheTraced();
+}
