@@ -30,7 +30,7 @@ refusal is the core's `config_check.bp`.
 | [rakun-actuator](./rakun-actuator/) | root · endpoint_host · health · info · registry_endpoints · instrumentation · management · actuator | erlang | `-actuator` (host) | 11 · 76 · 87 | real code, 77 tests |
 | [rakun-cache](./rakun-cache/) | root · cache_host · cache · cached · cache_endpoint | erlang | `-cache` | 12 | real code, 55 tests |
 | [rakun-client](./rakun-client/) | root · address · settings · response · cache · transport · health · client · request · exchange | erlang | `RestClient` / `WebClient` | 13 | real code, 70 tests |
-| [rakun-data](./rakun-data/) | root · datasource · sql · migration | erlang | `-data-jpa` / `-data-jdbc` / `-data-mongodb` / `-data-redis` | 08 · 09 · 77 · 78 | real code, 100 tests |
+| [rakun-data](./rakun-data/) | root · datasource · sql · orm_host · migration_host · orm · migration | erlang | `-data-jpa` / `-data-jdbc` / `-data-mongodb` / `-data-redis` | 08 · 09 · 77 · 78 | real code, 128 tests |
 | [rakun-hateoas](./rakun-hateoas/) | root · hal | erlang | `-hateoas` | 21 | real code, 14 tests |
 | [rakun-logging](./rakun-logging/) | root · cells · levels · formats · correlation · logging · digest · setup · endpoints | erlang | `-logging` | 17 | real code, 54 tests |
 | [rakun-metrics](./rakun-metrics/) | root · registry · bus · vm · tracing · export · endpoints · install | erlang | Micrometer + `-actuator` (prometheus) + tracing | 75 | real code, 41 tests |

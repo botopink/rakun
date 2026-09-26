@@ -2567,6 +2567,40 @@ sanitizer. Keys are all `rakun.management.*` (03r-t).
 - **Report** — the `access` endpoint (gated like the rest, hidden by
   default): per id, exposed, configured and effective level, listener.
 
+## Entities and derived queries — `modules/rakun-data/src/orm/` (front 78)
+
+- **`#[entity("table")]`** (`orm/entity.bp`) on a record emits into its module
+  `__rkEntity_<T>_table/_columns/_fromRow/_params`, the writes
+  `_insert/_update/_delete` (each in a transaction; `…In(tx, …)` twins),
+  `_byId`, `<T>Columns` + `<T>Col()` (column-name constants) and `<T>Meta()`
+  (an `EntityMeta`, registered with `rakun_orm` for front 77). Fields:
+  `#[id]` (one), `#[generated]` (`INSERT … RETURNING`), `#[column("x")]`
+  (else snake_case), `#[version]` (i32, `WHERE … AND version = :v`, a stale
+  write raises naming table, id and both versions), `#[createdAt]` /
+  `#[updatedAt]` (ISO µs), `#[createdBy]` / `#[updatedBy]` (front 10's
+  principal, `""` outside a request), `#[transient]`. Types: string, i32,
+  bool. `#[revisions]` adds `<table>_revisions` (one row per write, same
+  transaction) and exactly three reads: `_revisionsOf`, `_revisionAt`,
+  `_revisionNumbers`.
+- **`#[entityRepository("T")]` + `#[derived]`** (`orm/repository.bp`, the
+  comptime half: no `Param` import there) parse the method name
+  (find/findAll/findFirst/findTop/count/exists/delete, Distinct, And/Or left to
+  right, the operator keywords, IgnoringCase / AllIgnoringCase, OrderBy) and
+  emit `__rkDerivedSql_<Repo>_<m>()` and `__rkDerived_<Repo>_<m>(sql, …)`,
+  checking the parameter count and the return type; columns are read through
+  `<T>Col()`, so an unknown field fails the build there. A trailing
+  `Pageable` with `Page<T>` (page + count) or `Slice<T>` (size + 1).
+  `#[belongsTo("Owner", "field", "Target", "field")]` on a record of the two
+  (`?Target` for a left join) emits `__rkJoin_<R>_sql()` / `_fromRow`.
+- **Run time** (`orm/query.bp`): `Sort`, `Pageable`, `Page<T>`, `Slice<T>`,
+  `pagedSql` (sort fields validated against the columns, size 0 refused), and
+  the typed builder `queryOf(<T>Meta()).where(<T>Col().x, Op.Eq, v)…toSql()` /
+  `.fetch(sql)` — the same bytes a derived query produces.
+- The ETS arm (front 08's `rakun_sql.erl`) grew what the suite runs:
+  `< > <= >=`, `BETWEEN`, `IS [NOT] NULL`, `[NOT] LIKE`, `[NOT] IN`,
+  `lower()`, `OFFSET`, `DISTINCT`, `INSERT … RETURNING` (next integer id).
+  No JOIN.
+
 ## Schema migrations — `modules/rakun-data/src/migration/migrate.bp` (front 77)
 
 `migrationBoot()` at boot: refuses a bad `rakun.migration.ddl-auto`, registers
@@ -2590,8 +2624,14 @@ the `migrations` endpoint, and — when migrations are on — runs them (or, wit
   rewrite of a recorded checksum.
 - **ddl-auto** — `create`/`create-drop` refused under
   `rakun.migration.production-profiles` (default `prod,production`) and beside
-  migration files; `validate` allowed everywhere. The entity half (validate
-  and create against front 78's metadata) waits on front 78.
+  migration files; `validate` allowed everywhere. `ddlAutoOn(ds)`: `validate`
+  diffs every entity table (front 78's metadata) against the live columns
+  (`schemaDiff`: missing table, missing / extra column, type where the arm
+  reports one); `create` drops and creates them; `create-drop` also drops them
+  in a `#[preDestroy]`-time lifecycle hook.
+- Host cells live in the ROOT-LEVEL `src/migration_host.bp` (and front 78's in
+  `src/orm_host.bp`): a sidecar called only from a module in a folder is
+  never shipped (language-gaps.md).
 - Tests: `test/migration_test.bp` (ETS arm; each test its own datasource).
 
 ## Observability — `modules/rakun-metrics/` (front 75)

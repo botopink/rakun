@@ -42,38 +42,10 @@ import {Param, param} from "sql/params";
 import {Row, Rows} from "sql/rows";
 import {SqlTemplate, Tx, sqlTemplate} from "sql/template";
 import {defaultDataSourceName, ensureDataSource} from "datasource";
-import {Request} from "rakun";
+import {rkMigLiveColumns, rkMigWithLock, rkMigSplit, compareVersions, rkMigTry, rkMigTableCount, rkMigNowIso, rkMigNowMs, rkMigUnlockedWarning, rkMigWarnings, rkMigLockEvents} from "migration_host";
+import {Request, rkRegisterLifecycle} from "rakun";
+import {entityTables, entityColumns, entityColumnType} from "orm/entity";
 import {EndpointResponse, rkRegisterEndpoint} from "rakun-actuator-api";
-
-#[@External.Erlang("rakun_migration", "with_lock")]
-declare fn rkMigWithLock<T>(ds: string, timeoutMs: i32, work: fn() -> T) -> T;
-
-#[@External.Erlang("rakun_migration", "split")]
-pub declare fn rkMigSplit(text: string) -> string[];
-
-#[@External.Erlang("rakun_migration", "compare")]
-pub declare fn compareVersions(a: string, b: string) -> i32;
-
-#[@External.Erlang("rakun_migration", "try_run")]
-declare fn rkMigTry(work: fn() -> i32) -> string;
-
-#[@External.Erlang("rakun_migration", "table_count")]
-declare fn rkMigTableCount(ds: string) -> i32;
-
-#[@External.Erlang("rakun_migration", "now_iso")]
-declare fn rkMigNowIso() -> string;
-
-#[@External.Erlang("rakun_migration", "now_ms")]
-declare fn rkMigNowMs() -> i32;
-
-#[@External.Erlang("rakun_migration", "unlocked_warning")]
-declare fn rkMigUnlockedWarning(ds: string) -> i32;
-
-#[@External.Erlang("rakun_migration", "warnings")]
-pub declare fn rkMigWarnings() -> string[];
-
-#[@External.Erlang("rakun_migration", "lock_events")]
-pub declare fn rkMigLockEvents() -> string[];
 
 // Stable sorts by a comparator answering <0, 0 or >0 (std has none), one per
 // element type so the comparator's field reads are static.
@@ -529,6 +501,78 @@ pub fn ddlAutoProblem() -> string {
     return "";
 }
 
+// The schema front 78's entities declare against the live one: `""`, or the
+// first difference — a missing table, a missing column, an extra column, or a
+// type that disagrees where the live side reports types (`col:type`).
+pub fn schemaDiff(table: string, expected: string, live: string) -> string {
+    if (live == "!missing") return "rakun migration: ddl-auto=validate - the table `" + table + "` does not exist";
+    val want = expected.split("|").filter({ c -> c != "" });
+    val have = live.split("|").filter({ c -> c != "" });
+    val haveNames = have.map({ c -> c.split(":").at(0) ?? "" });
+    val wantNames = want.map({ c -> c.split(":").at(0) ?? "" });
+    var problem = "";
+    for (want) { w ->
+        val name = w.split(":").at(0) ?? "";
+        val wt = w.split(":").at(1) ?? "";
+        val at = haveNames.indexOf(name);
+        if (problem == "" && at < 0) problem = "rakun migration: ddl-auto=validate - the table `" + table + "` has no column `" + name + "`";
+        val ht = (have.at(at) ?? "").split(":").at(1) ?? "";
+        if (problem == "" && at >= 0 && ht != "" && wt != "" && ht != wt) problem = "rakun migration: ddl-auto=validate - the column `" + table + "." + name + "` is " + ht + " and the entity declares " + wt;
+    };
+    for (haveNames) { h ->
+        if (problem == "" && wantNames.indexOf(h) < 0) problem = "rakun migration: ddl-auto=validate - the table `" + table + "` has a column `" + h + "` no entity declares";
+    };
+    return problem;
+}
+
+fn expectedOf(table: string) -> string {
+    return entityColumns(table).split("|").map({ c -> c + ":" + entityColumnType(table, c) }).join("|");
+}
+
+// `validate` against every entity table on `ds`.
+pub fn ddlValidateOn(ds: string) -> string {
+    var problem = "";
+    for (entityTables()) { t ->
+        if (problem == "") problem = schemaDiff(t, expectedOf(t), rkMigLiveColumns(ds, t));
+    };
+    return problem;
+}
+
+// `create`: every entity table dropped and created from the metadata.
+pub fn ddlCreateOn(ds: string) -> i32 {
+    var n = 0;
+    for (entityTables()) { t ->
+        val cols = entityColumns(t).split("|").map({ c -> c + " " + entityColumnType(t, c) });
+        val _d = sql(ds).update("DROP TABLE IF EXISTS " + t, []);
+        val _c = sql(ds).update("CREATE TABLE " + t + " (" + cols.join(", ") + ")", []);
+        n = n + 1;
+    };
+    return n;
+}
+
+pub fn ddlDropOn(ds: string) -> i32 {
+    for (entityTables()) { t -> val _d = sql(ds).update("DROP TABLE IF EXISTS " + t, []); };
+    return 0;
+}
+
+// Runs the configured ddl-auto on `ds` (after its refusals).
+pub fn ddlAutoOn(ds: string) -> i32 {
+    val problem = ddlAutoProblem();
+    if (problem != "") @panic(problem);
+    val mode = ddlAuto();
+    if (mode == "validate") {
+        val diff = ddlValidateOn(ds);
+        if (diff != "") @panic(diff);
+    };
+    if (mode == "create" || mode == "create-drop") {
+        val _c = ddlCreateOn(ds);
+    };
+    if (mode == "create-drop") {
+        val _l = rkRegisterLifecycle("rakun-data", "ddl-drop", "pre", 0, { -> ddlDropOn(ds) });
+    };
+    return 0;
+}
+
 // ── the actuator body ───────────────────────────────────────────────────────
 
 fn migrationJson(m: Migration, state: string) -> string {
@@ -565,8 +609,7 @@ declare fn halt(code: i32) -> i32;
 // the endpoint either way.
 pub fn migrationBoot() -> i32 {
     val _e = registerMigrationsEndpoint();
-    val problem = ddlAutoProblem();
-    if (problem != "") @panic(problem);
+    val _d = ddlAutoOn(migrationDataSource());
     if (migrationEnabled() == false) return 0;
     if (flag("rakun.migration.dry-run", false)) return halt(dryRunOn(migrationDataSource()));
     return migrate().applied;

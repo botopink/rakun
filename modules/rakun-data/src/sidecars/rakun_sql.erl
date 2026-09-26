@@ -900,8 +900,14 @@ parse_insert(R0, Sql) ->
                  end,
     R4 = expect(R3, <<"VALUES">>, Sql),
     {Tuples, R5} = value_tuples(R4, [], Sql),
-    done(R5, Sql),
-    {insert, Name, Cols, Tuples}.
+    case R5 of
+        [K, {word, Ret}] ->
+            case kw(K, <<"RETURNING">>) of
+                true -> {insert_returning, Name, Cols, Tuples, low(Ret)};
+                false -> done(R5, Sql)
+            end;
+        _ -> done(R5, Sql), {insert, Name, Cols, Tuples}
+    end.
 
 single_ident([{word, W}], _Sql) -> low(W);
 single_ident([T | _], Sql) -> unsupported(show(T), Sql);
@@ -942,7 +948,14 @@ keyword(W) ->
                          <<"LIKE">>, <<"IN">>, <<"IS">>, <<"NOT">>, <<"BETWEEN">>, <<"AS">>,
                          <<"ON">>, <<"SET">>, <<"VALUES">>, <<"INTO">>, <<"OFFSET">>, <<"DISTINCT">>]).
 
-parse_select(R0, Sql) ->
+parse_select([D | R0], Sql) when element(1, D) =:= word ->
+    case kw(D, <<"DISTINCT">>) of
+        true -> {select, N, I, W, O, L} = parse_select(R0, Sql), {select_distinct, N, I, W, O, L};
+        false -> parse_select_items([D | R0], Sql)
+    end;
+parse_select(R0, Sql) -> parse_select_items(R0, Sql).
+
+parse_select_items(R0, Sql) ->
     {Items, R1} = projection(R0, [], Sql),
     case R1 of
         [] ->
@@ -1028,12 +1041,77 @@ and_expr(R0, Sql) ->
 pred([{sym, $(} | R0], Sql) ->
     {E, R1} = or_expr(R0, Sql),
     {E, expect_sym(R1, $), Sql)};
-pred([A, {sym, $=}, B | R], Sql) -> {{eq, operand(A, Sql), operand(B, Sql)}, R};
-pred([A, {op, <<"<>">>}, B | R], Sql) -> {{ne, operand(A, Sql), operand(B, Sql)}, R};
-pred([_A, Op | _], Sql) -> unsupported(show(Op), Sql);
+pred([{word, W}, {sym, $(}, A, {sym, $)} | R], Sql) ->
+    case up(W) of
+        <<"LOWER">> -> pred_rest({lower, operand(A, Sql)}, R, Sql);
+        _ -> unsupported(up(W), Sql)
+    end;
+pred([A | R], Sql) when element(1, A) =:= word; element(1, A) =:= param; element(1, A) =:= str; element(1, A) =:= num ->
+    case R of
+        [{sym, _} | _] -> pred_rest(operand(A, Sql), R, Sql);
+        [{op, _} | _] -> pred_rest(operand(A, Sql), R, Sql);
+        [{word, _} | _] -> pred_rest(operand(A, Sql), R, Sql);
+        _ -> unsupported(show(A), Sql)
+    end;
 pred([T | _], Sql) -> unsupported(show(T), Sql);
 pred([], Sql) -> fail("rakun-data ets arm: WHERE with no predicate: ~s", [Sql]).
 
+%% The right side of a predicate whose left operand is `L`.
+pred_rest(L, [{sym, $=} | R], Sql) -> {B, R1} = rhs(R, Sql), {{eq, L, B}, R1};
+pred_rest(L, [{op, <<"<>">>} | R], Sql) -> {B, R1} = rhs(R, Sql), {{ne, L, B}, R1};
+pred_rest(L, [{op, <<"<=">>} | R], Sql) -> {B, R1} = rhs(R, Sql), {{cmp, '=<', L, B}, R1};
+pred_rest(L, [{op, <<">=">>} | R], Sql) -> {B, R1} = rhs(R, Sql), {{cmp, '>=', L, B}, R1};
+pred_rest(L, [{sym, $<} | R], Sql) -> {B, R1} = rhs(R, Sql), {{cmp, '<', L, B}, R1};
+pred_rest(L, [{sym, $>} | R], Sql) -> {B, R1} = rhs(R, Sql), {{cmp, '>', L, B}, R1};
+pred_rest(L, [{word, W} | R], Sql) ->
+    case up(W) of
+        <<"BETWEEN">> ->
+            {Lo, R1} = rhs(R, Sql),
+            R2 = expect(R1, <<"AND">>, Sql),
+            {Hi, R3} = rhs(R2, Sql),
+            {{between, L, Lo, Hi}, R3};
+        <<"IS">> ->
+            case R of
+                [N1, N2 | R1] -> case kw(N1, <<"NOT">>) andalso kw(N2, <<"NULL">>) of
+                                     true -> {{notnull, L}, R1};
+                                     false -> case kw(N1, <<"NULL">>) of
+                                                  true -> {{isnull, L}, [N2 | R1]};
+                                                  false -> unsupported(show(N1), Sql)
+                                              end
+                                 end;
+                [N1] -> case kw(N1, <<"NULL">>) of true -> {{isnull, L}, []}; false -> unsupported(show(N1), Sql) end;
+                _ -> unsupported(<<"IS">>, Sql)
+            end;
+        <<"LIKE">> -> {B, R1} = rhs(R, Sql), {{like, L, B}, R1};
+        <<"IN">> -> {B, R1} = in_list(R, Sql), {{in, L, B}, R1};
+        <<"NOT">> ->
+            case R of
+                [K | R1] -> case up(element(2, K)) of
+                                <<"LIKE">> -> {B, R2} = rhs(R1, Sql), {{'not', {like, L, B}}, R2};
+                                <<"IN">> -> {B, R2} = in_list(R1, Sql), {{'not', {in, L, B}}, R2};
+                                _ -> unsupported(show(K), Sql)
+                            end;
+                _ -> unsupported(<<"NOT">>, Sql)
+            end;
+        _ -> unsupported(up(W), Sql)
+    end;
+pred_rest(_L, [Op | _], Sql) -> unsupported(show(Op), Sql);
+pred_rest(_L, [], Sql) -> fail("rakun-data ets arm: a predicate with no operator: ~s", [Sql]).
+
+rhs([{word, W}, {sym, $(}, A, {sym, $)} | R], Sql) ->
+    case up(W) of
+        <<"LOWER">> -> {{lower, operand(A, Sql)}, R};
+        _ -> unsupported(up(W), Sql)
+    end;
+rhs([A | R], Sql) -> {operand(A, Sql), R};
+rhs([], Sql) -> fail("rakun-data ets arm: a predicate with no right side: ~s", [Sql]).
+
+%% `(v, v, …)` after IN; a single parameter holding a comma-separated list is
+%% one element here and is split at evaluation.
+in_list([{sym, $(} | R], Sql) ->
+    {Groups, R1} = until_close(R, 0, [], [], Sql),
+    {[single_value(G, Sql) || G <- Groups], R1};
+in_list(R, Sql) -> {B, R1} = rhs(R, Sql), {[B], R1}.
 order_by([A, B | R], Sql) ->
     case kw(A, <<"ORDER">>) andalso kw(B, <<"BY">>) of
         true -> order_keys(R, [], Sql);
@@ -1057,17 +1135,24 @@ order_keys(R0, Acc, Sql) ->
         _ -> {lists:reverse([{Col, Dir} | Acc]), R2}
     end.
 
-limit([T, {num, N} | R], _Sql) ->
+limit([T, {num, N} | R], Sql) ->
     case kw(T, <<"LIMIT">>) of
-        true -> {binary_to_integer(N), R};
+        true -> offset(binary_to_integer(N), R, Sql);
         false -> {none, [T, {num, N} | R]}
     end;
-limit([T, {param, N} | R], _Sql) ->
+limit([T, {param, N} | R], Sql) ->
     case kw(T, <<"LIMIT">>) of
-        true -> {{param, N}, R};
+        true -> offset({param, N}, R, Sql);
         false -> {none, [T, {param, N} | R]}
     end;
 limit(R, _Sql) -> {none, R}.
+
+offset(Lim, [T, V | R], _Sql) when element(1, V) =:= num; element(1, V) =:= param ->
+    case kw(T, <<"OFFSET">>) of
+        true -> {{offset, Lim, case V of {num, N} -> binary_to_integer(N); P -> P end}, R};
+        false -> {Lim, [T, V | R]}
+    end;
+offset(Lim, R, _Sql) -> {Lim, R}.
 
 parse_update(R0, Sql) ->
     {Name, R1} = ident(R0, Sql),
@@ -1152,15 +1237,30 @@ apply_stmt(Ds, {insert, Name, Cols0, Tuples}, Params) ->
            end || T <- Tuples],
     true = ets:insert(?DATA, {{Ds, Name}, Cols, Rows ++ New}),
     {ok, {count, length(New)}};
+apply_stmt(Ds, {insert_returning, Name, Cols0, Tuples, Ret}, Params) ->
+    {Cols, Rows} = table(Ds, Name),
+    RI = col_index(Ret, Cols, Name),
+    Next = lists:max([0 | [try binary_to_integer(lists:nth(RI, R)) catch _:_ -> 0 end || R <- Rows]]),
+    {ok, {count, _}} = apply_stmt(Ds, {insert, Name, Cols0, Tuples}, Params),
+    {Cols2, Rows2} = table(Ds, Name),
+    {Old, New} = lists:split(length(Rows), Rows2),
+    {Filled, _} = lists:mapfoldl(fun(R, K) ->
+                                         case lists:nth(RI, R) of
+                                             null -> {set_cells(R, [{RI, integer_to_binary(K + 1)}]), K + 1};
+                                             _ -> {R, K}
+                                         end
+                                 end, Next, New),
+    true = ets:insert(?DATA, {{Ds, Name}, Cols2, Old ++ Filled}),
+    {ok, {rows, [Ret], [[lists:nth(RI, R)] || R <- Filled]}};
+apply_stmt(Ds, {select_distinct, Name, Items, Where, Order, Limit}, Params) ->
+    {ok, {rows, C, Rs}} = apply_stmt(Ds, {select, Name, Items, Where, Order, none}, Params),
+    Uniq = lists:reverse(lists:foldl(fun(R, Acc) -> case lists:member(R, Acc) of true -> Acc; false -> [R | Acc] end end, [], Rs)),
+    {ok, {rows, C, window(Limit, Uniq, Params)}};
 apply_stmt(Ds, {select, Name, Items, Where, Order, Limit}, Params) ->
     {Cols, Rows} = table(Ds, Name),
     Hit = [R || R <- Rows, holds(Where, R, Cols, Name, Params)],
     Sorted = sort_rows(Order, Hit, Cols, Name),
-    Limited = case Limit of
-                  none -> Sorted;
-                  {param, _} = P -> lists:sublist(Sorted, binary_to_integer(value(P, Params)));
-                  N -> lists:sublist(Sorted, N)
-              end,
+    Limited = window(Limit, Sorted, Params),
     case Items of
         [{count, Alias}] -> {ok, {rows, [Alias], [[integer_to_binary(length(Limited))]]}};
         [star] -> {ok, {rows, Cols, Limited}};
@@ -1189,6 +1289,13 @@ apply_stmt(Ds, {delete, Name, Where}, Params) ->
     true = ets:insert(?DATA, {{Ds, Name}, Cols, Keep}),
     {ok, {count, length(Rows) - length(Keep)}}.
 
+window(none, Rows, _Params) -> Rows;
+window({offset, Lim, Off}, Rows, Params) ->
+    O = case Off of {param, _} = P -> binary_to_integer(value(P, Params)); N -> N end,
+    window(Lim, lists:nthtail(min(O, length(Rows)), Rows), Params);
+window({param, _} = P, Rows, Params) -> lists:sublist(Rows, binary_to_integer(value(P, Params)));
+window(N, Rows, _Params) -> lists:sublist(Rows, N).
+
 set_cells(R, Idx) ->
     [case lists:keyfind(I, 1, Idx) of {_, V} -> V; false -> Old end
      || {I, Old} <- lists:zip(lists:seq(1, length(R)), R)].
@@ -1200,14 +1307,57 @@ holds({eq, A, B}, R, Cols, T, P) -> same(eval(A, R, Cols, T, P), eval(B, R, Cols
 holds({ne, A, B}, R, Cols, T, P) ->
     X = eval(A, R, Cols, T, P),
     Y = eval(B, R, Cols, T, P),
-    X =/= null andalso Y =/= null andalso not same(X, Y).
+    X =/= null andalso Y =/= null andalso not same(X, Y);
+holds({cmp, Op, A, B}, R, Cols, T, P) ->
+    X = eval(A, R, Cols, T, P),
+    Y = eval(B, R, Cols, T, P),
+    X =/= null andalso Y =/= null andalso compare(Op, key(X), key(Y));
+holds({between, A, Lo, Hi}, R, Cols, T, P) ->
+    holds({cmp, '>=', A, Lo}, R, Cols, T, P) andalso holds({cmp, '=<', A, Hi}, R, Cols, T, P);
+holds({isnull, A}, R, Cols, T, P) -> eval(A, R, Cols, T, P) =:= null;
+holds({notnull, A}, R, Cols, T, P) -> eval(A, R, Cols, T, P) =/= null;
+holds({like, A, B}, R, Cols, T, P) ->
+    X = eval(A, R, Cols, T, P),
+    Y = eval(B, R, Cols, T, P),
+    X =/= null andalso Y =/= null andalso like(X, Y);
+holds({in, A, Bs}, R, Cols, T, P) ->
+    X = eval(A, R, Cols, T, P),
+    Vals = lists:append([case eval(B, R, Cols, T, P) of
+                             null -> [];
+                             V -> [string:trim(E) || E <- binary:split(V, <<",">>, [global])]
+                         end || B <- Bs]),
+    X =/= null andalso lists:member(X, Vals);
+holds({'not', E}, R, Cols, T, P) -> not holds(E, R, Cols, T, P).
 
 %% SQL's NULL: equal to nothing, not even NULL.
 same(null, _) -> false;
 same(_, null) -> false;
 same(X, Y) -> X =:= Y.
 
+
+
+compare('<', X, Y) -> X < Y;
+compare('>', X, Y) -> X > Y;
+compare('=<', X, Y) -> X =< Y;
+compare('>=', X, Y) -> X >= Y.
+
+%% SQL LIKE: `%` any run, `_` one character.
+like(X, Pat) ->
+    Re = << <<(case C of $% -> <<".*">>; $_ -> <<".">>; _ -> re_escape(C) end)/binary>> || <<C/utf8>> <= Pat >>,
+    re:run(X, <<"^", Re/binary, "$">>, [unicode, dotall]) =/= nomatch.
+
+re_escape(C) ->
+    case lists:member(C, ".^$*+?()[]{}|\\") of
+        true -> <<$\\, C/utf8>>;
+        false -> <<C/utf8>>
+    end.
+
 eval({col, C}, R, Cols, T, _P) -> lists:nth(col_index(C, Cols, T), R);
+eval({lower, A}, R, Cols, T, P) ->
+    case eval(A, R, Cols, T, P) of
+        null -> null;
+        V -> string:lowercase(V)
+    end;
 eval(V, _R, _Cols, _T, P) -> value(V, P).
 
 sort_rows([], Rows, _Cols, _T) -> Rows;

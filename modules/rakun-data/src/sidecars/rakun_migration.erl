@@ -9,7 +9,7 @@
 
 -module(rakun_migration).
 -export([with_lock/3, split/1, compare/2, try_run/1, table_count/1, now_iso/0,
-         now_ms/0, unlocked_warning/1, warnings/0, lock_events/0, hold_lock/2, release_held/0]).
+         now_ms/0, unlocked_warning/1, live_columns/2, warnings/0, lock_events/0, hold_lock/2, release_held/0]).
 
 %% Runs `Fun` holding the lock; answers `Fun()`'s value, or raises
 %% `rakun migration: could not take the migration lock within <ms> ms`.
@@ -141,3 +141,20 @@ unlocked_warning(Ds) ->
     end.
 
 warnings() -> persistent_term:get(rakun_migration_warnings, []).
+
+%% The live columns of `Table` as `col|col` (ETS arm) or `col:type|…`
+%% (information_schema), or `!missing` when the table does not exist.
+live_columns(Ds, Table) ->
+    case rakun_sql:ds_arm(Ds) of
+        <<"ets">> ->
+            case ets:lookup(rakun_sql_data, {Ds, Table}) of
+                [{_, Cols, _}] -> iolist_to_binary(lists:join(<<"|">>, Cols));
+                [] -> <<"!missing">>
+            end;
+        _ ->
+            case rakun_sql:exec(Ds, <<"SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = $1">>, [Table]) of
+                #{ok := true, rows := []} -> <<"!missing">>;
+                #{ok := true, rows := Rows} -> iolist_to_binary(lists:join(<<"|">>, [[C, <<":">>, T] || [C, T] <- Rows]));
+                _ -> <<"!missing">>
+            end
+    end.

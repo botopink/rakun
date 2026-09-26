@@ -1,0 +1,164 @@
+//// rakun-data — the run-time half of front 78's queries: paging (`Sort`,
+//// `Pageable`, `Page<T>`, `Slice<T>`), the join helpers and the typed builder
+//// (the jOOQ analogue). The comptime half — the name grammar and the
+//// decorators — is `orm/repository.bp`, which imports none of this: a
+//// decorator module that imports `sql/params`' `Param` loses the reflection
+//// `Param` (language-gaps.md).
+
+import {Param, param} from "sql/params";
+import {Row, Rows} from "sql/rows";
+import {SqlTemplate} from "sql/template";
+import {EntityMeta} from "orm/entity";
+
+pub type Sort(field: string, descending: bool)
+
+pub type Pageable(page: i32, size: i32, sort: Sort[])
+
+pub type Page<T>(content: T[], page: i32, size: i32, totalElements: i32) {
+    pub fn totalPages(self: Self<T>) -> i32 {
+        return if (self.size <= 0) 0 else (self.totalElements + self.size - 1) / self.size;
+    }
+
+    pub fn hasNext(self: Self<T>) -> bool {
+        return self.page + 1 < self.totalPages();
+    }
+}
+
+pub type Slice<T>(content: T[], page: i32, size: i32, hasNext: bool)
+
+// ── run-time helpers the emitted code calls ─────────────────────────────────
+
+pub fn pageSizeProblem(size: i32) -> string {
+    return "rakun-data: a page size of " + size.toString() + " is refused - a page holds at least one row";
+}
+
+// `base` with the pageable's sort appended (every field a column of `meta`,
+// else a refusal naming it) and `limit`/`offset` placeholders.
+pub fn pagedSql(base: string, p: Pageable, meta: EntityMeta, extra: i32) -> string {
+    if (p.size <= 0) @panic(pageSizeProblem(p.size));
+    val cols = meta.columns.split("|");
+    val bad = p.sort.filter({ s -> cols.indexOf(s.field) < 0 });
+    if (bad.length > 0) @panic("rakun-data: the sort field `" + (bad.at(0) ?? Sort(field: "", descending: false)).field + "` is not a column of " + meta.table + " - columns: " + cols.join(", "));
+    val order = if (p.sort.length == 0) "" else " order by " + p.sort.map({ s -> s.field + (if (s.descending) " desc" else " asc") }).join(", ");
+    return base + order + " limit :__limit offset :__offset";
+}
+
+pub fn pageParams(ps: Param[], p: Pageable, extra: i32) -> Param[] {
+    var out: Param[] = [];
+    for (ps) { x -> out.push(x); };
+    out.push(param("__limit", (p.size + extra).toString()));
+    out.push(param("__offset", (p.page * p.size).toString()));
+    return out;
+}
+
+pub fn countOf(rows: Rows) -> i32 {
+    return (rows.first() ?? Row(columns: ["n"], values: ["0"])).int("n");
+}
+
+// `a.id AS a__id, a.name AS a__name` for a joined half.
+pub fn joinColumns(meta: EntityMeta, alias: string) -> string {
+    return meta.columns.split("|").map({ c -> alias + "." + c + " AS " + alias + "__" + c }).join(", ");
+}
+
+// The half of a joined row under `alias`, with the prefix removed.
+pub fn unprefixed(r: Row, alias: string) -> Row {
+    var cols: string[] = [];
+    var vals: string[] = [];
+    var i = 0;
+    for (r.columns) { c ->
+        if (c.startsWith(alias + "__")) {
+            cols.push(c.slice(alias.length() + 2, c.length()));
+            vals.push(r.values.at(i) ?? "");
+        };
+        i = i + 1;
+    };
+    return Row(columns: cols, values: vals);
+}
+
+// ── the typed builder (the jOOQ analogue) ───────────────────────────────────
+
+pub type Op {
+    Eq,
+    Ne,
+    Lt,
+    Gt,
+    Le,
+    Ge,
+    Like,
+}
+
+pub fn opText(op: Op) -> string {
+    val t = case op {
+        Op.Eq -> "=";
+        Op.Ne -> "<>";
+        Op.Lt -> "<";
+        Op.Gt -> ">";
+        Op.Le -> "<=";
+        Op.Ge -> ">=";
+        Op.Like -> "like";
+    };
+    return t;
+}
+
+pub type QueryBuilder(
+    meta: EntityMeta,
+    clauses: string[],
+    params: Param[],
+    order: string[],
+    limitN: i32,
+    offsetN: i32,
+) {
+    pub fn where(self: Self, column: string, op: Op, value: string) -> QueryBuilder {
+        return self.cond("", column, op, value);
+    }
+
+    pub fn and(self: Self, column: string, op: Op, value: string) -> QueryBuilder {
+        return self.cond("and ", column, op, value);
+    }
+
+    pub fn or(self: Self, column: string, op: Op, value: string) -> QueryBuilder {
+        return self.cond("or ", column, op, value);
+    }
+
+    pub fn cond(self: Self, conn: string, column: string, op: Op, value: string) -> QueryBuilder {
+        val k = self.params.length;
+        var cs: string[] = [];
+        for (self.clauses) { c -> cs.push(c); };
+        cs.push((if (cs.length == 0) "" else conn) + column + " " + opText(op) + " :p" + k.toString());
+        var ps: Param[] = [];
+        for (self.params) { p -> ps.push(p); };
+        ps.push(param("p" + k.toString(), value));
+        return QueryBuilder(meta: self.meta, clauses: cs, params: ps, order: self.order, limitN: self.limitN, offsetN: self.offsetN);
+    }
+
+    pub fn orderBy(self: Self, column: string, descending: bool) -> QueryBuilder {
+        var os: string[] = [];
+        for (self.order) { o -> os.push(o); };
+        os.push(column + (if (descending) " desc" else " asc"));
+        return QueryBuilder(meta: self.meta, clauses: self.clauses, params: self.params, order: os, limitN: self.limitN, offsetN: self.offsetN);
+    }
+
+    pub fn limit(self: Self, n: i32) -> QueryBuilder {
+        return QueryBuilder(meta: self.meta, clauses: self.clauses, params: self.params, order: self.order, limitN: n, offsetN: self.offsetN);
+    }
+
+    pub fn offset(self: Self, n: i32) -> QueryBuilder {
+        return QueryBuilder(meta: self.meta, clauses: self.clauses, params: self.params, order: self.order, limitN: self.limitN, offsetN: n);
+    }
+
+    pub fn toSql(self: Self) -> string {
+        val w = if (self.clauses.length == 0) "" else " where " + self.clauses.join(" ");
+        val o = if (self.order.length == 0) "" else " order by " + self.order.join(", ");
+        val l = if (self.limitN > 0) " limit " + self.limitN.toString() else "";
+        val f = if (self.offsetN > 0) " offset " + self.offsetN.toString() else "";
+        return "select " + self.meta.columns.replaceAll("|", ", ") + " from " + self.meta.table + w + o + l + f;
+    }
+
+    pub fn fetch(self: Self, sql: SqlTemplate) -> Rows {
+        return sql.query(self.toSql(), self.params);
+    }
+}
+
+pub fn queryOf(meta: EntityMeta) -> QueryBuilder {
+    return QueryBuilder(meta: meta, clauses: [], params: [], order: [], limitN: 0, offsetN: 0);
+}
