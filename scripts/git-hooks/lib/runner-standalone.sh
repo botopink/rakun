@@ -70,7 +70,7 @@ runStandaloneGate() {
     #     names no module of onze (decision 77), and `ssr.bp` keeps no tag list
     #     of its own — the void and raw-text sets are front 94's, passed in as
     #     `ElementView` fields.
-    local ssr="modules/rakun/src/ssr.bp"
+    local ssr="modules/rakun-app/src/ssr.bp"
     if [ -f "$ssr" ]; then
         if grep -q 'renderToString' "$ssr"; then
             fail "ssr.bp calls renderToString — the frozen renderer escapes nothing; a single call is the whole hole"
@@ -79,14 +79,14 @@ runStandaloneGate() {
         # allowed occurrences are all `contracts.md § 2` STRINGS — the
         # `data-onze-*` markers, the `__onze` payload id, `__onzeFill`, and
         # front 22's `onze.appDir` property key — plus prose in comments.
-        if grep -rn 'from "onze' modules/rakun/src/ 2>/dev/null | grep -q .; then
-            fail "modules/rakun/src/ imports a module of onze (decision 77)"
+        if grep -rn 'from "onze' modules/rakun/src/ modules/rakun-app/src/ 2>/dev/null | grep -q .; then
+            fail "modules/rakun/src/ or modules/rakun-app/src/ imports a module of onze (decision 77)"
         fi
-        if grep -rn 'onze' modules/rakun/src/ 2>/dev/null \
+        if grep -rn 'onze' modules/rakun/src/ modules/rakun-app/src/ 2>/dev/null \
             | grep -vE '\.bp:[0-9]+: *//' \
             | grep -v 'data-onze-' | grep -v '__onze' \
             | grep -v 'onze\.appDir' | grep -q .; then
-            fail "modules/rakun/src/ names onze outside the contract-2 marker strings (decision 77)"
+            fail "modules/rakun/src/ or modules/rakun-app/src/ names onze outside the contract-2 marker strings (decision 77)"
         fi
         local voidtag
         for voidtag in area base col embed hr img input link meta source track wbr; do

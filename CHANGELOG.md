@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+### The package cut: `rakun-app` and `rakun-test` (botopink front 95)
+
+- **`modules/rakun-app/` is new**, the server half of the Next.js `app/` router
+  `specs/1.0.10-beta/03-rakun/modules.md` § The cut splits out of the core: front
+  22's `file_router.bp` (+ `file_router.mjs`, `sidecars/rakun_file_router.erl`) and
+  front 23's `ssr.bp` (+ `ssr.mjs`, `sidecars/rakun_ssr.erl`) moved with their four
+  suites and the `test/fixtures/{routing,conflict-both,conflict-roots,middleware}`
+  trees. A relocation only: the edits are the import lines the move changes
+  (`from "http"`/`"runtime"`/`"config"` → `from "rakun"`; the request context
+  `from "rakun/request_context"`, because a bare `from "rakun"` finds std's
+  `encoding.percentDecode` too and the compiler refuses the ambiguity). Nothing in
+  the core imported either module. The member declares no `targets`, so it
+  inherits the workspace's two. `modules/rakun`: 369 → 310 / 0 on commonJS,
+  367 → 308 / 2 on erlang (the same two reds); `modules/rakun-app`: 59 / 0 on both
+  rows. `examples/rakun-ssr` imports the pipeline `from "rakun-app"` and prints
+  what it printed before.
+- **`modules/rakun-test/` has its one inline test** — the core resolves from the
+  test member (`toI32("42") == 42`), 1 / 1 on both rows; the `pub` surface stays
+  empty until front 19.
+- The pre-commit hook's front-23 greps read `modules/rakun-app/src/ssr.bp`.
+
 ### Bundled `routing` and `validation` (botopink `01-std` fronts 04 and 06; decisions 115, 116)
 
 - **The file-convention grammar, wire and matcher left `file_router.bp`** for the

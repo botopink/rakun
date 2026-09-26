@@ -203,11 +203,12 @@ located refusal naming the file and the line, never a silent mis-parse. See
 
 ## File-convention routing
 
-`#[restController]` routes by decorator and is untouched. `file_router.bp` is
+`#[restController]` routes by decorator and is untouched. `file_router.bp` (the
+`rakun-app` member — add `"rakun-app": { "workspace": true }` or its path) is
 the other model — a URL that comes from where a file sits:
 
 ```bp
-import {layout, page, PageContext, LayoutProps, ctxParam, rkAppLayout, rkAppPage} from "rakun";
+import {layout, page, PageContext, LayoutProps, ctxParam, rkAppLayout, rkAppPage} from "rakun-app";
 
 #[layout("")]
 pub fn rootLayout(props: LayoutProps<Element>) -> Element { … }
@@ -453,7 +454,7 @@ carrying its `|` separator.
 
 ## Server-side rendering
 
-`from "rakun"` gives you the render pipeline: a URL in, an ordered list of HTML
+`from "rakun-app"` gives you the render pipeline: a URL in, an ordered list of HTML
 chunks out, with every string that came from a request, a database or a file
 escaped on the way.
 
@@ -463,7 +464,7 @@ rakun does not know what an element is. It declares no dependency on a UI
 library, so the six things a walker needs are handed to it as a record:
 
 ```bp
-import {ElementView, renderNode} from "rakun";
+import {ElementView, renderNode} from "rakun-app";
 import {Element, isVoidTag, isRawTextTag} from "jhonstart";
 
 pub fn jhonstartView() -> ElementView<Element> {
