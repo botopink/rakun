@@ -1,202 +1,220 @@
-%%% rakun — the SSR pipeline's BEAM half: the node twin `src/ssr.mjs` left with
-%%% front 04 Step 10 (decision 113).
+%%% rakun — the page path's BEAM half (front 23): the chunk writer.
 %%%
-%%% WHAT LIVES HERE AND WHY. botopink has no top-level mutable state, and three
-%%% of the things this front holds are not values a string table can hold: the
-%%% installed `RenderHooks` (a record of seven FUNCTIONS — decision 77), the
-%%% gather over unstarted THUNKS, and two per-render ordinals. That is front
-%%% 22's test — "is the thing being stored pure?" — and a closure is not.
+%%% WHAT LIVES HERE AND WHY. A page renderer the orchestrator registers writes its status,
+%%% its headers and its chunks through a `ChunkWriter` (`ssr.bp`); this module
+%%% is what those four functions reach. It never builds a byte of a body: a
+%%% chunk goes to the socket as it was handed over, or — when the request came
+%%% in without a socket (`rkDispatchHttp` from a test) — into a buffer the
+%%% dispatch answers as one `Response`. The node twin `src/ssr.mjs` left with
+%%% front 04 Step 10, and the HTML render left for the HTML library (its front 30)
+%%% (decision 113): rakun builds no HTML.
 %%%
-%%% WHAT DOES NOT LIVE HERE. The escaping, the walker, the composition order,
-%%% the payload format, the document shell and the chunk protocol are botopink
-%%% in `ssr.bp`, compiled to erlang. This module never sees HTML.
+%%% THE STATE IS THE SERVING PROCESS'S. rakun serves each request in its own
+%%% process, so the writer's state — status, headers, started, closed, the
+%%% buffer — is that process's dictionary, reset by `begin/0` at the start of
+%%% every page dispatch. Two requests in flight cannot see one another's writer.
+%%%
+%%% ON THE SOCKET. The connection process of front 04's listener records its
+%%% socket (`rakun_conn_socket`) before it runs the handler. The first `write/1`
+%%% (or a `close/0` with nothing written) sends the head — status, the headers
+%%% the renderer set over the defaults, the response headers other entries
+%%% queued, and `Transfer-Encoding: chunked` (or `Content-Length: 0`) — and
+%%% marks the request `rakun_streamed`, which tells the acceptor not to write a
+%%% second response. Every chunk after it is one HTTP/1.1 chunk, written as it
+%%% is handed over, so the first chunk is on the wire before the last is made.
 %%%
 %%% MODULE ATOM. `src/sidecars/rakun_ssr.erl`, never `src/ssr.erl`:
-%%% `shipErlSidecars` skips a qualifier atom matching a module the build
-%%% emitted, rakun emits `rakun/ssr`, and the skip is SILENT. Every rakun
-%%% sidecar is `rakun_<name>.erl`.
-%%%
-%%% PROCESS-LOCAL, DELIBERATELY. rakun serves each request in its own BEAM
-%%% process, which is where emilia's sheet already lives, so the hooks, the
-%%% depth and the navigation counter are the serving process's dictionary and
-%%% not an ETS area: two requests in flight must not see one another's hooks.
-%%% `all/1`'s children are spawned FROM that process and answer back to it.
+%%% `shipErlSidecars` skips a qualifier atom matching an emitted module, and the
+%%% skip is silent.
 -module(rakun_ssr).
 
--export([set_hooks/1, has_hooks/0, hooks_or/1,
-         set_selected/1, selected_depth/0, next_nav/0,
-         next_island/0, next_hole/0,
-         payload_keys/1, payload_text/2,
-         all/1, settled_order/0, concurrent/0, reset/0]).
+-export([begin_page/0, set_status/1, set_header/2, write/1, close/0,
+         status/0, header/1, closed/0, started/0, streamed/0, body/0, guard/1,
+         page_request/2, set_fallback/1, clear_fallback/0]).
 
--define(HOOKS, rakun_ssr_hooks).
--define(SELECTED, rakun_ssr_selected).
--define(NAV, rakun_ssr_nav).
--define(ORDER, rakun_ssr_order).
--define(ISLAND, rakun_ssr_island).
--define(HOLE, rakun_ssr_hole).
+-define(STATE, rakun_ssr_writer).
 
-%% ═══ the installed hooks ═════════════════════════════════════════════════════
+%% ═══ the writer ══════════════════════════════════════════════════════════════
 
-set_hooks(H) ->
-    _ = erlang:put(?HOOKS, H),
+begin_page() ->
+    put(?STATE, #{status => 200, headers => [], started => false,
+                  closed => false, buffer => []}),
     0.
 
-has_hooks() ->
-    erlang:get(?HOOKS) =/= undefined.
-
-hooks_or(Fallback) ->
-    case erlang:get(?HOOKS) of
-        undefined -> Fallback;
-        H -> H
+state() ->
+    case get(?STATE) of
+        undefined -> _ = begin_page(), get(?STATE);
+        S -> S
     end.
 
-%% ═══ the two per-render ordinals ═════════════════════════════════════════════
-%%
-%% `selected` is the layout depth. It is a slot rather than a field of
-%% `LayoutProps` because that record is front 22's and carries three fields;
-%% widening it would touch a file this front does not own, and a fourth
-%% positional argument is not expressible while a declared parameter default is
-%% never applied.
+refuse(Call, Why) ->
+    erlang:error({rakun_chunk_writer,
+                  iolist_to_binary([<<"rakun: ChunkWriter.">>, Call, <<" ">>, Why])}).
 
-set_selected(Depth) ->
-    _ = erlang:put(?SELECTED, Depth),
-    Depth.
-
-selected_depth() ->
-    case erlang:get(?SELECTED) of
-        undefined -> 0;
-        D -> D
+set_status(Code) ->
+    S = state(),
+    case S of
+        #{closed := true} -> refuse(<<"setStatus">>, <<"after close">>);
+        #{started := true} -> refuse(<<"setStatus">>, <<"after the first write - the status is already on the wire">>);
+        _ -> put(?STATE, S#{status := Code}), ok
     end.
 
-next_nav() ->
-    N = case erlang:get(?NAV) of
-            undefined -> 0;
-            V -> V
-        end + 1,
-    _ = erlang:put(?NAV, N),
-    N.
-
-%% ═══ the two ordinal counters ═══════════════════════════════════════════════
-%%
-%% Island ordinals are 0-based (`i0`, `i1`, …) and hole ordinals are 1-based
-%% (`h1`, `h2`, …) — `contracts.md § 2` spells both, and neither is derived from
-%% a route, a pattern or a position in the tree.
-
-next_island() ->
-    N = case erlang:get(?ISLAND) of
-            undefined -> -1;
-            V -> V
-        end + 1,
-    _ = erlang:put(?ISLAND, N),
-    N.
-
-next_hole() ->
-    N = case erlang:get(?HOLE) of
-            undefined -> 0;
-            V -> V
-        end + 1,
-    _ = erlang:put(?HOLE, N),
-    N.
-
-%% ═══ the payload round trip ══════════════════════════════════════════════════
-%%
-%% OTP's own `json:decode/1` (OTP 27 and later), against `JSON.parse` on the
-%% node row: two parsers this front did not write, so a document whose payload
-%% is not valid JSON fails on BOTH rows. A parser of our own would have been a
-%% second implementation of the very thing under test.
-%%
-%% The keys come back SORTED because a map has no order and an object's
-%% insertion order is not the contract; the field SET is.
-
-payload_keys(Json) ->
-    M = json:decode(to_bin(Json)),
-    join_bins(lists:sort(maps:keys(M))).
-
-payload_text(Json, Key) ->
-    M = json:decode(to_bin(Json)),
-    case maps:get(to_bin(Key), M, undefined) of
-        undefined -> <<>>;
-        V when is_binary(V) -> V;
-        V -> iolist_to_binary(json:encode(V))
+set_header(Name, Value) ->
+    S = state(),
+    case S of
+        #{closed := true} -> refuse(<<"setHeader">>, <<"after close">>);
+        #{started := true} -> refuse(<<"setHeader">>, <<"after the first write - the headers are already on the wire">>);
+        #{headers := Hs} ->
+            Key = string:lowercase(Name),
+            Kept = [H || {K, _, _} = H <- Hs, K =/= Key],
+            put(?STATE, S#{headers := Kept ++ [{Key, Name, Value}]}),
+            ok
     end.
 
-join_bins([]) -> <<>>;
-join_bins([H | T]) ->
-    lists:foldl(fun(X, Acc) -> <<Acc/binary, ",", X/binary>> end, H, T).
-
-to_bin(B) when is_binary(B) -> B;
-to_bin(L) when is_list(L) -> list_to_binary(L).
-
-%% ═══ the gather over unstarted thunks ════════════════════════════════════════
-%%
-%% `@Task<T>` lowers EAGERLY on this row — decision 120, and `libs/std/src/http.bp`
-%% says the same — so a task is a value that has already been computed and
-%% awaiting two of them runs them one after the other at full latency. The
-%% concurrency therefore comes from PROCESSES: one `spawn_monitor` per thunk,
-%% the results gathered by INDEX, and the order they settled in recorded on the
-%% side, because a gather by index cannot also answer it.
-%%
-%% A child that dies without answering takes the gather down with it, naming the
-%% index: a render that silently drops one of its sections is worse than one
-%% that fails.
-
-all(Thunks) ->
-    Fs = lists:reverse(lists:foldl(fun(F, Acc) -> [F | Acc] end, [], Thunks)),
-    N = length(Fs),
-    Self = self(),
-    Children =
-        [begin
-             {Pid, Ref} =
-                 spawn_monitor(fun() -> Self ! {rakun_ssr_done, I, F()} end),
-             {I, Pid, Ref}
-         end
-         || {I, F} <- lists:zip(lists:seq(0, N - 1), Fs)],
-    {Values, Order} = gather(Children, #{}, []),
-    _ = erlang:put(?ORDER, join_ints(lists:reverse(Order))),
-    [maps:get(I, Values) || I <- lists:seq(0, N - 1)].
-
-gather([], Values, Order) ->
-    {Values, Order};
-gather(Children, Values, Order) ->
-    receive
-        {rakun_ssr_done, I, V} ->
-            {value, {I, _Pid, Ref}, Rest} =
-                lists:keytake(I, 1, Children),
-            erlang:demonitor(Ref, [flush]),
-            gather(Rest, maps:put(I, V, Values), [I | Order]);
-        {'DOWN', Ref, process, _Pid, Reason} ->
-            case lists:keyfind(Ref, 3, Children) of
-                {I, _P, Ref} ->
-                    erlang:error({rakun_ssr_thunk_died, I, Reason});
-                false ->
-                    gather(Children, Values, Order)
-            end
+write(Chunk) ->
+    S = state(),
+    case S of
+        #{closed := true} -> refuse(<<"write">>, <<"after close">>);
+        _ ->
+            S1 = case maps:get(started, S) of
+                     true -> S;
+                     false -> start(S, chunked)
+                 end,
+            case socket() of
+                none ->
+                    put(?STATE, S1#{buffer := [Chunk | maps:get(buffer, S1)]});
+                Sock ->
+                    put(?STATE, S1),
+                    Size = integer_to_binary(byte_size(Chunk), 16),
+                    _ = send(Sock, [Size, <<"\r\n">>, Chunk, <<"\r\n">>])
+            end,
+            ok
     end.
 
-join_ints([]) -> <<>>;
-join_ints([H | T]) ->
-    lists:foldl(fun(X, Acc) ->
-                        <<Acc/binary, ",", (integer_to_binary(X))/binary>>
-                end,
-                integer_to_binary(H), T).
-
-settled_order() ->
-    case erlang:get(?ORDER) of
-        undefined -> <<>>;
-        O -> O
+close() ->
+    S = state(),
+    case S of
+        #{closed := true} -> refuse(<<"close">>, <<"after close">>);
+        #{started := false} ->
+            S1 = start(S, empty),
+            put(?STATE, S1#{closed := true}),
+            ok;
+        _ ->
+            case socket() of
+                none -> ok;
+                Sock -> _ = send(Sock, <<"0\r\n\r\n">>)
+            end,
+            put(?STATE, S#{closed := true}),
+            ok
     end.
 
-%% This row spawns. The node row cannot, and says so; the one timing assertion
-%% in `test/ssr_test.bp` reads this cell rather than claiming the same shape on
-%% both rows.
-concurrent() -> true.
+%% The head goes out with the first chunk, or with `close` when nothing was
+%% written — which is how a renderer answers a 307 with `location` and no body.
+start(S = #{status := Status, headers := Hs}, Framing) ->
+    case socket() of
+        none -> ok;
+        Sock ->
+            Defaults = [{<<"content-type">>, <<"Content-Type">>, <<"text/html; charset=utf-8">>}],
+            Own = [K || {K, _, _} <- Hs],
+            Merged = [D || {K, _, _} = D <- Defaults, not lists:member(K, Own)] ++ Hs,
+            Queued = queued_headers(Own),
+            Frame = case Framing of
+                        chunked -> <<"Transfer-Encoding: chunked\r\n">>;
+                        empty -> <<"Content-Length: 0\r\n">>
+                    end,
+            Lines = [[N, <<": ">>, V, <<"\r\n">>] || {_, N, V} <- Merged ++ Queued],
+            _ = send(Sock, [<<"HTTP/1.1 ">>, integer_to_binary(Status), <<" ">>, reason(Status),
+                            <<"\r\n">>, Lines, Frame, <<"Connection: keep-alive\r\n\r\n">>]),
+            put(rakun_streamed, true)
+    end,
+    S#{started := true}.
 
-reset() ->
-    _ = erlang:erase(?ISLAND),
-    _ = erlang:erase(?HOLE),
-    _ = erlang:erase(?HOOKS),
-    _ = erlang:erase(?SELECTED),
-    _ = erlang:erase(?NAV),
-    _ = erlang:erase(?ORDER),
-    0.
+%% Response headers another entry queued for this request (rakun-web's
+%% `withHeader` mirrors into front 04's accumulator), minus any the renderer set.
+queued_headers(Own) ->
+    case get(rakun_reply_headers) of
+        undefined -> [];
+        List -> [{K, N, V} || {K, N, V} <- List, not lists:member(K, Own)]
+    end.
+
+socket() ->
+    case get(rakun_conn_socket) of
+        undefined -> none;
+        Sock -> Sock
+    end.
+
+send(Sock, Data) ->
+    rakun_runtime:t_send(Sock, Data).
+
+reason(200) -> <<"OK">>;
+reason(201) -> <<"Created">>;
+reason(204) -> <<"No Content">>;
+reason(301) -> <<"Moved Permanently">>;
+reason(302) -> <<"Found">>;
+reason(303) -> <<"See Other">>;
+reason(307) -> <<"Temporary Redirect">>;
+reason(308) -> <<"Permanent Redirect">>;
+reason(400) -> <<"Bad Request">>;
+reason(404) -> <<"Not Found">>;
+reason(500) -> <<"Internal Server Error">>;
+reason(_) -> <<"OK">>.
+
+%% ═══ what the dispatch reads back ════════════════════════════════════════════
+
+status() -> maps:get(status, state()).
+
+header(Name) ->
+    Key = string:lowercase(Name),
+    case [V || {K, _, V} <- maps:get(headers, state()), K =:= Key] of
+        [V | _] -> V;
+        [] -> <<>>
+    end.
+
+closed() -> maps:get(closed, state()).
+
+started() -> maps:get(started, state()).
+
+streamed() -> get(rakun_streamed) =:= true.
+
+body() -> iolist_to_binary(lists:reverse(maps:get(buffer, state()))).
+
+%% Run the renderer; answer `<<>>`, or the reason it raised. A raise is a failed
+%% render — a `nav:` reason included, because page signals are the HTML library's
+%% (decision 117 rule 1) and rakun translates none of them.
+guard(Thunk) ->
+    try Thunk() of
+        _ -> <<>>
+    catch
+        error:{rakun_chunk_writer, Why} -> Why;
+        Class:Reason -> iolist_to_binary(io_lib:format("~p:~0p", [Class, Reason]))
+    end.
+
+%% ═══ the request a renderer is handed ════════════════════════════════════════
+%% The core's request value carries the path parameters the CORE router bound —
+%% none, on the page path. This one carries the page pattern's parameters
+%% (`name\tvalue` lines) and marks the render dynamic on a query read
+%% (front 62's `markDynamic("searchParams")`, which raises under `strict`).
+page_request(Req, ParamsWire) ->
+    Params = maps:from_list([list_to_tuple(binary:split(L, <<"\t">>))
+                             || L <- binary:split(ParamsWire, <<"\n">>, [global]), L =/= <<>>,
+                                length(binary:split(L, <<"\t">>)) =:= 2]),
+    Query = maps:get(query, Req),
+    Req#{params => Params,
+         param => fun(_Self, N) ->
+                          case maps:find(N, Params) of
+                              {ok, V} -> V;
+                              error -> <<>>
+                          end
+                  end,
+         query => fun(Self, N) ->
+                          _ = 'rakun@request_context':markDynamic(<<"searchParams">>),
+                          Query(Self, N)
+                  end}.
+
+%% ═══ the page path as the core router's fallback ═════════════════════════════
+
+set_fallback(Fun) ->
+    rakun_runtime:set_fallback(Fun).
+
+clear_fallback() ->
+    rakun_runtime:clear_fallback().

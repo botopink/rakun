@@ -2,9 +2,10 @@
 %%% with front 04 Step 10 (decision 113).
 %%%
 %%% WHAT LIVES HERE AND WHY. botopink has no top-level mutable state, so a
-%%% registry lives in the host. This one is the App-Router table, filled by the
-%%% module-load `val`s the four markers in `file_router.bp` emit, and it holds a
-%%% registered render FUNCTION, which no string store can hold.
+%%% registry lives in the host. This one is the App-Router table, filled at
+%%% boot through `rkAppRegisterEntry` / `rkAppRegisterPage` /
+%%% `rkAppRegisterHandler`, and it holds a registered renderer or handler
+%%% FUNCTION, which no string store can hold.
 %%%
 %%% WHAT DOES NOT LIVE HERE. The segment grammar, the wire format and the
 %%% matcher are botopink, compiled to erlang. This module never parses a
@@ -29,8 +30,7 @@
 %%% start an application to hold four rows.
 -module(rakun_file_router).
 
--export([register_page/2, register_layout/2, register_template/2,
-         register_default/2, register_handler/2,
+-export([store/2, store_entry/1,
          register_source/2, sources/0,
          table/0, count/0, has_render/1, render/2, reset/0]).
 
@@ -92,14 +92,13 @@ next_seq() ->
     ets:update_counter(?SEQ, seq, {2, 1}, {seq, 0}).
 
 %% ═══ the cells of `src/file_router.bp` ═══════════════════════════════════════
-%% One cell per convention so the botopink side can type each render function
-%% differently; the body is the same append for all five.
+%% Two appends: a record with the function that answers it (a page renderer, a
+%% route handler), and a record with none (a UI record the orchestrator copies
+%% in). The botopink side validates the kind and refuses a second page for one
+%% pattern before it calls either.
 
-register_page(Record, Render) -> add(Record, Render).
-register_layout(Record, Render) -> add(Record, Render).
-register_template(Record, Render) -> add(Record, Render).
-register_default(Record, Render) -> add(Record, Render).
-register_handler(Record, Handle) -> add(Record, Handle).
+store(Record, Fun) -> add(Record, Fun).
+store_entry(Record) -> add(Record, none).
 
 add(Record, Fun) ->
     ensure(),

@@ -1,157 +1,58 @@
-//// rakun — the file-convention route table: the segment grammar, the wire
-//// format, the matcher and the four markers that fill the registry.
+//// rakun — the file-convention route table (front 22): the registry that
+//// holds it, the page renderers and route handlers registered beside it, and
+//// the `app/` scan that keeps it honest.
 ////
 //// `#[restController]` + `#[getMapping]` (`decorators.bp`) route by DECORATOR and
 //// that model is untouched. This module is the other one: a URL that comes from
-//// where a file sits, a layout that wraps everything below it, a segment that
-//// captures part of the path, a folder that is transparent to the URL and a
-//// folder that renders into a named slot of its parent. Front 23 nests layouts
-//// off `layoutChain`, front 25 registers `route.bp` handlers into the same
-//// table, front 27 asks whether a `Link` target is worth prefetching and front
-//// 61 hangs `@slot` off the same tree.
+//// where a file sits. The table's records are `kind|pattern|slot|verb` lines;
+//// the grammar, the wire and the matcher are the bundled library `routing`
+//// (decision 115), which the browser's router imports too, so the two sides
+//// cannot disagree about which route a URL is.
 ////
-//// WHY THE ARGUMENT IS A STRING. botopink compiles only declared modules
-//// (`pub mod` in the package root), so a `.bp` file is not loadable by path, and
-//// `@Decl` carries no source location — a decorator cannot learn which file it
-//// was written in. A file-convention router in botopink is therefore
-//// REGISTRATION-driven and the app-relative directory reaches the decorator as
-//// an argument, which `scanProblem` below checks against the real tree.
+//// WHAT A RECORD HOLDS, AND WHO PUTS IT THERE (decisions 113, 114). The route
+//// table is rakun's; what a UI convention file declares belongs to the HTML
+//// library, and rakun names none of its types. The application's orchestrator
+//// copies the UI records (`L`, `T`, `D`, `S`, `E`, `N`) into this table at boot
+//// through `rkAppRegisterEntry`; a page reaches it through front 23's
+//// `page(pattern, render)` → `rkAppRegisterPage`, with one OPAQUE renderer this
+//// module stores and never calls; a `route.bp` handler reaches it through
+//// front 25's `rkAppRegisterHandler`. The UI decorators, the page context, the
+//// layout props and the per-route parameter accessors are the HTML library's
+//// (its front 30).
 ////
-//// WHY THERE IS AN `.erl` HERE AND NOT IN `config.bp`. Front 05
-//// refused its sidecar because its work was PURE — document readers — and an
-//// erlang-only cell is a located node-row diagnostic at its call site. Nothing
-//// about that applies to a REGISTRY: botopink has no top-level mutable state, so
-//// the table has to live in the host, exactly as `rkRegisterRoute`'s does, and a
-//// registered render function is a closure that no string store can hold. Every
-//// cell below is `@External.Erlang("rakun_file_router")` (the node twin
-//// `file_router.mjs` left with front 04's Step 10, decision 113). What is NOT in
-//// the host is the part front 05's argument was really about: the grammar, the
-//// wire format and the matcher are botopink, so the
-//// browser and the BEAM cannot disagree about which route a URL is — and since
-//// decision 115 they are not here at all but in the bundled library `routing`,
-//// which the browser's router imports too.
+//// THE REGISTRY LIVES IN THE HOST (`src/sidecars/rakun_file_router.erl`)
+//// because botopink has no top-level mutable state and a registered renderer is
+//// a closure no string store can hold — the reason `rkRegisterRoute`'s table
+//// lives in `rakun_runtime.erl`. The atom is `rakun_file_router`, never
+//// `file_router`: `shipErlSidecars` skips an atom matching an emitted module
+//// basename, silently.
 ////
 //// LANGUAGE NOTES this file is written around (measured, not guessed; the full
 //// list is in `AGENTS.md` § Language notes):
-////   * `String.slice`/`chars`/`lines`/`words`/`charCodeAt` kill the commonJS
-////     module before a test runs; every substring is built through `charOf`/`sub`.
-////   * A declared parameter default is still not applied at a call site, on
-////     either row, so every call passes every argument.
+////   * A declared parameter default is still not applied at a call site, so
+////     every call passes every argument.
 ////   * `&&` and `||` inside an `if (…)` head need their own parentheses.
-////   * A `//` comment inside a braced block is fatal on the node row, and a
-////     decorator body cannot call a sibling function — so the four markers below
-////     are comment-free and inline their segment walk instead of sharing one.
+////   * On erlang a `return` inside an `if` nested in an `if` block is dropped
+////     (`language-gaps.md`): every early return here is at the top level.
 
-import {collections.Dict, io.fs} from "std";
+import {io.fs} from "std";
 import {Request} from "rakun";
 import {rkProp} from "rakun";
 import {
     segment: {parseSegment, parsePath, patternOf, slotOf, pathProblem, kindName},
     table: {RouteEntry, writeTable, parseTable},
-    match: {RouteMatch, splitPath},
+    match: {splitPath},
 } from "routing";
 
-// ── steps 1, 3 and 4: the grammar, the wire and the matcher ──────────────────
-//
-// They live in the bundled library `routing` (decision 115, `01-std/04-routing-lib`):
-// `segment` (the folder grammar), `table` (the `kind|pattern|slot|verb` wire) and
-// `match` (the precedence order and the layout chain) — one implementation the
-// server and the browser both import, so the two cannot disagree about which
-// route a URL is. This module keeps the registry, the markers and the `app/`
-// scan built on them.
+// ── step 2: the registry — table records and opaque page renderers ──────────
 
-// ── step 2: what a registered route is handed ───────────────────────────────
-//
-// `Element` is jhonstart's type, not rakun's — rakun declares no dependency on
-// it and must not learn one — so everything that would name it is GENERIC in
-// `El`, the same trick `rkRegisterRoute<Req>` and `rkSingleton<T>` use to stay
-// typed without naming the caller's types.
-//
-// `LayoutProps` is ONE record rather than three parameters because a declared
-// parameter default is still not applied at a call site (measured on this
-// binary, on BOTH rows, for a free fn and for a record field alike — the
-// compiler's `docs.md` says otherwise). A layout that uses no slot would
-// otherwise still have to spell out an empty `slots:` argument at every call
-// site the registry generates. One uniform arity is the only shape that
-// survives the gap.
+// Store one finished `kind|pattern|slot|verb` record, with the function that
+// answers it (a page renderer, a route handler) or with none.
+#[@External.Erlang("rakun_file_router", "store")]
+pub declare fn rkAppStore<F>(record: string, fun: F) -> i32;
 
-pub type PageContext(
-    pathname: string,
-    pattern: string,
-    params: Dict<string, string>,
-    query: Dict<string, string>,
-    rest: string[],
-)
-
-pub type LayoutProps<El>(
-    route: PageContext,
-    children: El,
-    slots: Dict<string, El>,
-)
-
-// A `PageContext` for a matched URL. The query is the caller's — front 23 hands
-// what the request carried, a test hands an empty dict.
-pub fn contextOf(m: RouteMatch, pathname: string, query: Dict<string, string>) -> PageContext {
-    return PageContext(
-        pathname: pathname,
-        pattern: m.entry.pattern,
-        params: m.params,
-        query: query,
-        rest: m.rest,
-    );
-}
-
-pub fn emptyParams() -> Dict<string, string> {
-    return Dict.empty();
-}
-
-// ── the registry ────────────────────────────────────────────────────────────
-//
-// Each cell carries BOTH host forms, which is what makes this shape legal where
-// front 05's was not: `botopink test` compiles every `test/*.bp` on both rows
-// with no per-target gate, so a cell with only an `@External.Erlang` form is a
-// located diagnostic on the commonJS row at its call site. Nothing here is
-// erlang-only.
-//
-// The cells take the FINISHED `kind|pattern|slot|verb` line, never the raw
-// segment: the grammar and the wire format stay in botopink, compiled twice,
-// and neither host knows how to build a record. The `rkApp*` wrappers below are
-// what the markers emit and what keeps the front's own surface
-// `(seg, render)`.
-
-#[@External.Erlang("rakun_file_router", "register_page")]
-pub declare fn rkAppRegisterPage<El>(
-    record: string,
-    render: fn(route: PageContext) -> @Task<El>,
-) -> i32;
-
-#[@External.Erlang("rakun_file_router", "register_layout")]
-pub declare fn rkAppRegisterLayout<El>(
-    record: string,
-    render: fn(props: LayoutProps<El>) -> El,
-) -> i32;
-
-#[@External.Erlang("rakun_file_router", "register_template")]
-pub declare fn rkAppRegisterTemplate<El>(
-    record: string,
-    render: fn(props: LayoutProps<El>) -> El,
-) -> i32;
-
-#[@External.Erlang("rakun_file_router", "register_default")]
-pub declare fn rkAppRegisterDefault<El>(
-    record: string,
-    render: fn(props: LayoutProps<El>) -> El,
-) -> i32;
-
-// Front 25's `route.bp` handlers register into the SAME table as `R` records,
-// through a cell declared here and generic over the response type — so this
-// front never has to know what a `HandlerResponse` is and front 25 never has to
-// declare a host cell.
-#[@External.Erlang("rakun_file_router", "register_handler")]
-pub declare fn rkAppRegisterHandler<Res>(
-    record: string,
-    handle: fn(req: Request) -> Res,
-) -> i32;
+#[@External.Erlang("rakun_file_router", "store_entry")]
+pub declare fn rkAppStoreEntry(record: string) -> i32;
 
 #[@External.Erlang("rakun_file_router", "table")]
 pub declare fn rkAppTable() -> string;
@@ -163,158 +64,71 @@ pub declare fn rkAppCount() -> i32;
 pub declare fn rkAppHasRender(record: string) -> bool;
 
 // The stored function, or `fallback` when nothing registered that record.
-// Total and typed: an optional function type is a shape neither row reads
-// comfortably, and front 23 needs a value it can call either way.
+// Total and typed: front 23 needs a value it can call either way.
 #[@External.Erlang("rakun_file_router", "render")]
 pub declare fn rkAppRender<F>(record: string, fallback: F) -> F;
 
 #[@External.Erlang("rakun_file_router", "reset")]
 pub declare fn rkAppReset() -> i32;
 
-// Where each registration was WRITTEN. The wire record carries the URL pattern,
-// not the app-relative directory, and the scan has to check the DIRECTORY the
-// marker was given against the real tree and name the function that got it
-// wrong. So the raw pair is kept beside the table rather than squeezed into a
-// fifth field of a four-field record.
+// Where each registration was WRITTEN — the app-relative directory and the
+// function that registered it — kept beside the table for the scan, which
+// names that function when the directory does not exist.
 #[@External.Erlang("rakun_file_router", "register_source")]
 pub declare fn rkAppRegisterSource(seg: string, fnName: string) -> i32;
 
 #[@External.Erlang("rakun_file_router", "sources")]
 pub declare fn rkAppSources() -> string;
 
-// The one place a `kind`, a segment and a verb become a wire record. It HALTS
-// on a segment that may not be registered — a `_`-prefixed folder, an empty
-// segment, a `|` or a newline — which is the right moment for that refusal: the
-// call is a module-load `val`, so the program stops at load rather than serving
-// something surprising.
-pub fn entryLine(kind: string, seg: string, verb: string) -> string {
+// The eight kind letters of the wire (contract 1).
+pub fn entryKinds() -> string[] {
+    return ["L", "T", "P", "D", "R", "S", "E", "N"];
+}
+
+pub fn unknownKindProblem(kind: string) -> string {
+    return "rakun routing: `" + kind + "` is not a route kind - the kinds are " + entryKinds().join(", ");
+}
+
+pub fn duplicatePageProblem(pattern: string) -> string {
+    return "rakun routing: a page is already registered for `" + pattern + "` - the table never holds two pages for one URL";
+}
+
+// The one place a kind, an app-relative segment, a slot and a verb become a
+// wire record. It HALTS on a segment that may not be registered — a
+// `_`-prefixed folder, a `|` or a newline — because a registration is a boot
+// step and the program should stop there rather than serve something
+// surprising. `slot` names the slot explicitly; `""` takes the one the segment
+// spells (`@team`), if any.
+pub fn entryLine(kind: string, seg: string, slot: string, verb: string) -> string {
     val segs = parsePath(seg);
-    return writeTable(
-        [RouteEntry(kind: kind, pattern: patternOf(segs), slot: slotOf(segs), verb: verb)],
-    );
+    val slotName: string = if (slot == "") slotOf(segs) else slot;
+    return writeTable([RouteEntry(kind: kind, pattern: patternOf(segs), slot: slotName, verb: verb)]);
 }
 
-pub fn rkAppPage<El>(seg: string, render: fn(route: PageContext) -> @Task<El>) -> i32 {
-    return rkAppRegisterPage(entryLine("P", seg, ""), render);
+// How the orchestrator copies one of the HTML library's UI records into the table.
+pub fn rkAppRegisterEntry(kind: string, seg: string, slot: string) -> i32 {
+    val known: bool = entryKinds().filter({ k -> k == kind }).length > 0;
+    if (known == false) @panic(unknownKindProblem(kind));
+    return rkAppStoreEntry(entryLine(kind, seg, slot, ""));
 }
 
-pub fn rkAppLayout<El>(seg: string, render: fn(props: LayoutProps<El>) -> El) -> i32 {
-    return rkAppRegisterLayout(entryLine("L", seg, ""), render);
+// What front 23's `page(pattern, render)` calls. The renderer is opaque here:
+// stored beside its `P` record, handed back to the dispatch, never called.
+pub fn rkAppRegisterPage<R>(seg: string, render: R) -> i32 {
+    val record: string = entryLine("P", seg, "", "");
+    if (rkAppHasRender(record)) @panic(duplicatePageProblem(parseTable(record).at(0).map({ e -> e.pattern }).unwrapOr(seg)));
+    return rkAppStore(record, render);
 }
 
-pub fn rkAppTemplate<El>(seg: string, render: fn(props: LayoutProps<El>) -> El) -> i32 {
-    return rkAppRegisterTemplate(entryLine("T", seg, ""), render);
-}
-
-pub fn rkAppDefault<El>(seg: string, render: fn(props: LayoutProps<El>) -> El) -> i32 {
-    return rkAppRegisterDefault(entryLine("D", seg, ""), render);
-}
-
-pub fn rkAppHandler<Res>(verb: string, seg: string, handle: fn(req: Request) -> Res) -> i32 {
-    return rkAppRegisterHandler(entryLine("R", seg, verb), handle);
+// Front 25's `route.bp` handlers register into the SAME table as `R` records.
+pub fn rkAppRegisterHandler<Res>(verb: string, seg: string, handle: fn(req: Request) -> Res) -> i32 {
+    return rkAppStore(entryLine("R", seg, "", verb), handle);
 }
 
 // The registered table, parsed. The server reads it from its own registry and
-// the client rebuilds it out of the `"t"` field of front 23's payload with the
-// same `parseTable`, which is what makes the two sides agree.
+// the client rebuilds it out of the payload's `t` with the same `parseTable`.
 pub fn appTable() -> RouteEntry[] {
     return parseTable(rkAppTable());
-}
-
-// ── what an emitted accessor reads ──────────────────────────────────────────
-// A `PageContext` reached through a TYPED parameter, which is the shape the
-// emitted code has; `route.params.at(name)` written inline would be read off an
-// untyped binder at some call sites and lower to a property read.
-
-pub fn ctxParam(route: PageContext, name: string) -> string {
-    return route.params.at(name).unwrapOr("");
-}
-
-pub fn ctxRest(route: PageContext) -> string[] {
-    return route.rest;
-}
-
-// ── step 2 and step 6: the four markers ─────────────────────────────────────
-//
-// One decorator per file convention, each taking the APP-RELATIVE DIRECTORY of
-// the file it sits in. `default` is a reserved keyword, so the `default.bp`
-// marker is spelled `#[defaultView]` — the only name in the set that does not
-// match its file.
-//
-// Each body does three things, in the order rakun's own component markers do
-// them: it `@emit`s the registration, it `@emit`s the per-route parameter
-// accessor, and then it enforces placement with `decl.fail`. The `@emit`s run
-// first because a failed outcome discards the contributions.
-//
-// THREE RESTRICTIONS SHAPE THESE BODIES AND NONE IS NEGOTIABLE. A decorator
-// body cannot call a sibling function — the evaluator emits only the decorator
-// function into the eval script — which is why the segment walk is inlined in
-// each of the four rather than shared, exactly as `decorators.bp` copies its
-// field-injection block six times. A `//` comment anywhere in the body breaks
-// the flattened emit, so the bodies are comment-free and the prose lives here.
-// And nothing optional works in a comptime body — no `.at(i)`, no `?T` — so the
-// walk uses `split` / `forEach` / `push` / `join` / `startsWith` / `replaceAll`
-// only, and everything a field needs is pushed in the SAME pass.
-//
-// THE REGISTRATION IS A LAMBDA, NOT A BARE NAME. `rkAppPage("blog",
-// blogPostPage)` compiles on the node row and is `variable 'BlogPostPage' is
-// unbound` on the erlang one: a named function used as a VALUE is not lowered
-// to a `fun name/1`. `{ route -> blogPostPage(route) }` is the same value and
-// lowers on both, and it is what `decorators.bp` already emits for a controller
-// method. Recorded in `AGENTS.md`, not worked around anywhere else.
-//
-// THE RETURN TYPE A `@Decl` CARRIES HAS NO TYPE ARGUMENT. `decl.returnType` is
-// `"Task"` for `-> @Task<Element>`, `"Element"` for `-> Element` and `""`
-// for a type. So a page is checked to be a `Task` and a layout to be anything
-// that is not one; the required spelling is in the MESSAGE, which is as close to
-// "naming the required return type" as the reflection allows.
-
-pub fn page(comptime decl: @Decl, seg: string) {
-    @emit("val __rkPage_" + decl.name + " = rkAppPage(\"" + seg + "\", { route -> " + decl.name + "(route) });");
-    @emit("val __rkSrc_" + decl.name + " = rkAppRegisterSource(\"" + seg + "\", \"" + decl.name + "\");");
-    var lets: Array<string> = [];
-    var sigs: Array<string> = [];
-    var fields: Array<string> = [];
-    seg.split("/").forEach({ raw ->
-        if (raw.startsWith("[")) {
-            val bare = raw.replaceAll("[", "").replaceAll("]", "").replaceAll(".", "");
-            val isList = raw.startsWith("[[") || raw.startsWith("[.");
-            val reader = if (isList) "ctxRest(route)" else "ctxParam(route, \"" + bare + "\")";
-            val shown = if (isList) "string[]" else "string";
-            lets.push("val " + bare + " = " + reader + ";");
-            sigs.push(bare + ": " + shown);
-            fields.push(bare);
-        };
-    });
-    @emit("pub fn " + decl.name + "Params(route: PageContext) -> #(" + sigs.join(", ") + ") { " + lets.join(
-            " "
-        ) + " return #(" + fields.join(", ") + "); }");
-    if (decl.kind != DeclKind.Fn) decl.fail("#[page] must annotate a function");
-    if (decl.returnType != "Task") decl.fail("#[page] must annotate a fn returning @Task<Element> — every page is async so the render pipeline has one shape to drive");
-}
-
-pub fn layout(comptime decl: @Decl, seg: string) {
-    @emit("val __rkLayout_" + decl.name + " = rkAppLayout(\"" + seg + "\", { props -> " + decl.name + "(props) });");
-    @emit("val __rkSrc_" + decl.name + " = rkAppRegisterSource(\"" + seg + "\", \"" + decl.name + "\");");
-    if (decl.kind != DeclKind.Fn) decl.fail("#[layout] must annotate a function");
-    if (decl.returnType == "") decl.fail("#[layout] must annotate a fn(props: LayoutProps) -> Element");
-    if (decl.returnType == "Task") decl.fail("#[layout] must annotate a fn(props: LayoutProps) -> Element — a layout is synchronous, only a page is a @Task");
-}
-
-pub fn template(comptime decl: @Decl, seg: string) {
-    @emit("val __rkTemplate_" + decl.name + " = rkAppTemplate(\"" + seg + "\", { props -> " + decl.name + "(props) });");
-    @emit("val __rkSrc_" + decl.name + " = rkAppRegisterSource(\"" + seg + "\", \"" + decl.name + "\");");
-    if (decl.kind != DeclKind.Fn) decl.fail("#[template] must annotate a function");
-    if (decl.returnType == "") decl.fail("#[template] must annotate a fn(props: LayoutProps) -> Element");
-    if (decl.returnType == "Task") decl.fail("#[template] must annotate a fn(props: LayoutProps) -> Element — a template is synchronous, only a page is a @Task");
-}
-
-pub fn defaultView(comptime decl: @Decl, seg: string) {
-    @emit("val __rkDefault_" + decl.name + " = rkAppDefault(\"" + seg + "\", { props -> " + decl.name + "(props) });");
-    @emit("val __rkSrc_" + decl.name + " = rkAppRegisterSource(\"" + seg + "\", \"" + decl.name + "\");");
-    if (decl.kind != DeclKind.Fn) decl.fail("#[defaultView] must annotate a function");
-    if (decl.returnType == "") decl.fail("#[defaultView] must annotate a fn(props: LayoutProps) -> Element");
-    if (decl.returnType == "Task") decl.fail("#[defaultView] must annotate a fn(props: LayoutProps) -> Element — a default view is synchronous, only a page is a @Task");
 }
 
 // ── step 5: the scan ────────────────────────────────────────────────────────
@@ -360,10 +174,12 @@ pub fn conventionKind(file: string) -> string {
     if (file == "layout.bp") return "L" else if (file == "template.bp") return "T" else if (file == "page.bp") return "P" else if (file == "default.bp") return "D" else if (file == "route.bp") return "R" else if (file == "loading.bp") return "S" else if (file == "error.bp") return "E" else if (file == "not-found.bp") return "N" else return "";
 }
 
-// `appDir` is CONFIGURATION, not a literal (front 05): `app` or `src/app`, so
-// moving the tree between the two layouts changes one config line and no source.
+// `appDir` is CONFIGURATION, not a literal (front 05): `rakun.appDir`, `app` or
+// `src/app` (`app` when unset), so moving the tree between the two layouts
+// changes one config line and no source. The orchestrator writes the key at
+// boot; rakun reads only `rakun.*` keys (decision 115 rule 4).
 pub fn appDirOf() -> string {
-    val configured = rkProp("onze.appDir");
+    val configured = rkProp("rakun.appDir");
     if (configured == "") return "app" else return configured;
 }
 

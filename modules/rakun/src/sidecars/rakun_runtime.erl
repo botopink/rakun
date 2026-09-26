@@ -54,6 +54,7 @@
          config_check_register/2, config_check_run/0, config_check_reset/0]).
 
 %% ── graceful shutdown (front 07 step 10): the socket half ────────────────────
+-export([set_fallback/1, clear_fallback/0, t_send/2]).
 -export([readiness_drained/0, stop_accepting/0, drain/1, connection_count/0,
          on_sigterm/1, off_sigterm/0, now_ms/0, halt_with/1]).
 
@@ -466,7 +467,13 @@ dispatch_http(Verb, Path, HeadersJson, QueryJson, Body) ->
 
 handle(Verb, Path, HeadersJson, QueryJson, Body, _Chain) ->
     case match(Verb, Path) of
-        nomatch -> not_found();
+        nomatch ->
+            case persistent_term:get(rakun_fallback, undefined) of
+                undefined -> not_found();
+                Fallback ->
+                    Headers = lower_keys(decode_object(HeadersJson)),
+                    Fallback(request(Verb, Path, #{}, decode_object(QueryJson), Headers, Body))
+            end;
         {ok, Handler, Params} ->
             Headers = lower_keys(decode_object(HeadersJson)),
             Handler(request(Verb, Path, Params, decode_object(QueryJson), Headers, Body))
@@ -474,6 +481,17 @@ handle(Verb, Path, HeadersJson, QueryJson, Body, _Chain) ->
 
 not_found() ->
     #{status => 404, body => <<>>}.
+
+%% A router-level fallback for a request no route matched: front 23's page
+%% dispatch installs one, so a URL the `app/` table answers reaches it and
+%% everything else stays this router's 404. One slot, node-wide.
+set_fallback(Fun) ->
+    persistent_term:put(rakun_fallback, Fun),
+    0.
+
+clear_fallback() ->
+    _ = persistent_term:erase(rakun_fallback),
+    0.
 
 %% ═══ reply headers ═══════════════════════════════════════════════════════════
 %% `Response` is `(status: i32, body: string)` and `src/http.bp` is frozen, so
@@ -918,13 +936,20 @@ serve_requests(Sock, Dispatcher) ->
     Idle = prop_int_default(<<"rakun.server.idle-timeout">>, ?DEFAULT_IDLE_TIMEOUT),
     _ = clear_reply_headers(),
     true = ets:insert(?CONNS, {self(), idle}),
+    put(rakun_conn_socket, Sock),
+    erase(rakun_streamed),
     case read_request(Sock, Idle) of
         {ok, Verb, Path, Headers} ->
             true = ets:insert(?CONNS, {self(), busy}),
             Body = read_body(Sock, Headers, Idle),
             {RawPath, Query} = split_query(Path),
             Response = run_handler(Dispatcher, Verb, RawPath, Headers, Query, Body),
-            KeepAlive = write_response(Sock, Response),
+            %% A handler that streamed (front 23's chunk writer) already wrote
+            %% its head and its chunks; the acceptor writes nothing more.
+            KeepAlive = case get(rakun_streamed) of
+                            true -> true;
+                            _ -> write_response(Sock, Response)
+                        end,
             _ = clear_reply_headers(),
             Draining = persistent_term:get(rakun_draining, false),
             case KeepAlive andalso not Draining of

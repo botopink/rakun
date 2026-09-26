@@ -150,42 +150,31 @@ rakun/
 │   │   │                23 out of the core — `specs/1.0.10-beta/03-rakun/modules.md` § The cut):
 │   │   │                files [root.bp, file_router.bp, ssr.bp], targets [erlang],
 │   │   │                depends on `rakun` by `{ "workspace": true }`; imports the
-│   │   │                core `from "rakun"` (the request context `from "rakun/request_context"`,
-│   │   │                because std's `encoding` also declares `percentDecode`)
+│   │   │                core `from "rakun"` (the request context `from "rakun/request_context"`)
 │   │   ├── src/
 │   │   │   ├── root.bp        ← `pub mod file_router; pub mod ssr;`
-│   │   │   ├── file_router.bp ← the FILE-CONVENTION route table (§ The file-convention
-│   │   │   │                    route table): the registry, the `app/` scan and the four
-│   │   │   │                    markers, over the bundled `routing` library's segment
-│   │   │   │                    grammar, `kind|pattern|slot|verb` wire and matcher. `decorators.bp` is frozen, so the markers
-│   │   │   │                    live here, as `#[configurationProperties]` does
-│   │   │   ├── sidecars/rakun_file_router.erl ← the same registry on the BEAM, in
-│   │   │   │                    ETS behind a dedicated owner process
-│   │   │   ├── ssr.bp         ← THE SSR PIPELINE (§ The SSR pipeline): the escaping
-│   │   │   │                    walker, the composition order, `RenderHooks`, the
-│   │   │   │                    payload, the document and the chunk protocol.
-│   │   │   │                    Generic in `El` throughout — rakun declares no
-│   │   │   │                    dependency on jhonstart and gains none here
-│   │   │   └── sidecars/rakun_ssr.erl ← the same cells on the BEAM, in the serving
-│   │   │                        process's dictionary; `all/1` spawns one monitored
-│   │   │                        child per thunk, because `@Task` is eager there
+│   │   │   ├── file_router.bp ← THE ROUTE TABLE (§ The file-convention route table):
+│   │   │   │                    the registry (`rkAppRegisterEntry` / `rkAppRegisterPage` /
+│   │   │   │                    `rkAppRegisterHandler`) and the `app/` scan, over the bundled
+│   │   │   │                    `routing` library's grammar, wire and matcher
+│   │   │   ├── sidecars/rakun_file_router.erl ← the registry on the BEAM, in ETS
+│   │   │   │                    behind a dedicated owner process
+│   │   │   ├── ssr.bp         ← THE PAGE PATH (§ The page path): `ChunkWriter`,
+│   │   │   │                    `PageRenderer`, `page`, `servePage`, `servePages`, the
+│   │   │   │                    query codec. Builds no HTML (decision 113)
+│   │   │   └── sidecars/rakun_ssr.erl ← the chunk writer: the serving process's
+│   │   │                        state; chunked HTTP/1.1 on the socket, a buffer without one
 │   │   └── test/            (+ `test/fixtures/{routing,conflict-both,conflict-roots,middleware}`)
-│   │       ├── file_router_test.bp ← the registry cells, the host table against
-│   │       │                     the matcher, the page context (the grammar, wire and
-│   │       │                     matcher tests moved to `libs/routing/test/`). The SAME
-│   │       │                     assertions on both rows
-│   │       ├── file_router_markers_test.bp ← the four markers at module level and
-│   │       │                     the accessors they emit; no `rkAppReset()`, because
-│   │       │                     a module-load registration cannot be snapshotted in
-│   │       │                     its own module
-│   │       ├── file_router_scan_test.bp ← the scan over real fixture trees under
-│   │       │                     `test/fixtures/{routing,conflict-both,conflict-roots,
-│   │       │                     middleware}`: the conflicts, the `_` skip, `app` vs
-│   │       │                     `src/app`, the root `middleware.bp`
-│   │       └── ssr_test.bp    ← the SSR pipeline: the rendered page, the escaping
-│   │                             walker, the composition order, the payload round
-│   │                             trip, the chunk protocol and the two entry points.
-│   │                             Every cell runs on BOTH rows
+│   │       ├── file_router_test.bp ← the registry: entries, pages, handlers, the
+│   │       │                     refusals, the table against the bundled matcher
+│   │       ├── file_router_scan_test.bp ← the scan over real fixture trees: the
+│   │       │                     conflicts, the `_` skip, `app` vs `src/app`, the root
+│   │       │                     `middleware.bp`, `rakun.appDir`
+│   │       └── ssr_test.bp    ← the page path: 404 with no renderer, the chunks in
+│   │                             order, a renderer's own 307 / 404, the writer's
+│   │                             refusals, the phase, a `nav:` raise as a 500, params
+│   │                             and the dynamic mark, and over a socket the chunked
+│   │                             bytes and the first chunk arriving before the last
 │   ├── rakun-web/     ← THE FILTER CHAIN (§ The filter chain): the one ordered chain
 │   │   │                between the socket and the route handler, its two entry
 │   │   │                points, CORS and RFC 9457 problem details. target/targets
@@ -514,292 +503,40 @@ HTTP on the BEAM until the `build` path ships and loads the sidecar too.
    carries `method`, `path`, `params`, `query`, `headers` and `body`, so closing
    the gap is an emitter change, not a runtime one.
 
-## The file-convention route table
+## The file-convention route table — `modules/rakun-app/src/file_router.bp` (front 22)
 
-`modules/rakun-app/src/file_router.bp` is the second routing model, beside — not
-instead of — `#[restController]` + `#[getMapping]`. A URL comes from where a
-file sits: `layout.bp` wraps everything below it, `page.bp` makes the route
-public, `(group)` is transparent to the URL, `@slot` renders into a named prop
-of the parent layout, `_private` is excluded from routing and
-`[slug]` / `[...slug]` / `[[...slug]]` capture instead of matching.
+The route table is rakun's; what a UI convention file DECLARES belongs to the
+HTML library, and rakun names none of its types (decisions 113, 114). The
+grammar, the `kind|pattern|slot|verb` wire and the matcher are the bundled
+library `routing` (decision 115) — `segment`, `table`, `match` — which the
+browser's router imports too, so the two sides cannot disagree about which
+route a URL is. The wire is `routing`'s `writeTable` form: trailing empty
+fields are dropped (`L|/blog`, `P|/dashboard|team`, `R|/api/posts||GET`).
 
-**The grammar, the wire and the matcher are the bundled library `routing`'s**
-(decision 115, `01-std/04-routing-lib`): `segment` (`parseSegment`, `parsePath`,
-`patternOf`, `slotOf`, `pathProblem`), `table` (`RouteEntry`, `writeTable`,
-`parseTable`) and `match` (`matchPath`, `layoutChain`, `paramOf`, `RouteMatch`),
-imported `from "routing"` with no `dependencies` entry — the browser's router
-imports the same code. Their tests moved with them. The sections below describe
-the behaviour rakun relies on; the code is `libs/routing/src/`. `file_router.bp`
-keeps the registry, the markers, `PageContext` / `LayoutProps` / `contextOf` and the
-scan.
+**The registry** (host: `src/sidecars/rakun_file_router.erl`, an ETS table
+behind a dedicated owner process — a renderer is a closure no string store can
+hold). Three doors, each validated in botopink before the host appends:
 
-**Why the decorator takes the directory as a string.** botopink compiles only
-declared modules, so a `.bp` file is not loadable by path, and `@Decl` carries
-no source location — a decorator cannot learn which file it was written in. The
-router is therefore REGISTRATION-driven: the app-relative directory of the
-convention file reaches the marker as an argument, and the scan checks that
-argument against the real tree under `appDir`.
-
-### The segment grammar
-
-`parseSegment` is the only place the bracket and parenthesis spellings are
-decoded, and it is pure and total. `parsePath` splits an app-relative directory
-into `Segment`s and HALTS on one that may not be registered; the refusal text is
-`pathProblem`'s, a function of its own, for the reason `durationProblem` is one
-(a test can read the message without the halt taking the test down).
-`patternOf` drops groups and slots and keeps the bracket spelling, so
-`(marketing)/about` is `/about` and `dashboard/@team/settings` is
-`/dashboard/settings` with `slotOf` answering `team`.
-
-| Folder | `SegmentKind` | `name` | In the URL |
-|---|---|---|---|
-| `blog` | `Static` | `blog` | `blog` |
-| `[slug]` | `Dynamic` | `slug` | `[slug]` |
-| `[...slug]` | `CatchAll` | `slug` | `[...slug]` |
-| `[[...slug]]` | `OptionalCatchAll` | `slug` | `[[...slug]]` |
-| `(marketing)` | `Group` | `marketing` | — transparent |
-| `@team` | `Slot` | `team` | — the entry's `slot` field |
-| `_drafts` | `Private` | `drafts` | — refused on a registered path |
-
-Neither `|` nor a newline may appear in a segment name: they are the wire
-format's field and record separators, and `pathProblem` names the segment that
-holds one.
-
-### The wire format
-
-The table crosses the boundary as a LINE-ORIENTED BLOB, not as JSON: std's
-`json` is `string -> @Result<string, string>` with no structured walker, and the
-parser has to compile to the BEAM as well as to the browser. One record per
-line, `\n`-separated, in registration order:
-
-```text
-kind|pattern|slot|verb
-```
-
-| Letter | Convention | Registered by |
+| Door | Who calls it | What it adds |
 |---|---|---|
-| `L` | `layout.bp` | front 22 |
-| `T` | `template.bp` | front 22 |
-| `P` | `page.bp` | front 22 |
-| `D` | `default.bp` | front 22 |
-| `R` | `route.bp` | front 25 |
-| `S` | `loading.bp` | front 30 |
-| `E` | `error.bp` | front 31 |
-| `N` | `not-found.bp` | front 31 |
+| `rkAppRegisterEntry(kind, seg, slot)` | the orchestrator, copying the HTML library's UI records at boot | an `L`/`T`/`D`/`S`/`E`/`N` record (a kind outside the eight letters is refused naming it) |
+| `rkAppRegisterPage(seg, render)` | front 23's `page(pattern, render)` | a `P` record and the OPAQUE renderer; a second page for one pattern is refused naming it |
+| `rkAppRegisterHandler(verb, seg, handle)` | front 25 | an `R` record and the handler |
 
-**Trailing empty fields are dropped.** A root layout is `L|/`, a slot entry is
-`D|/dashboard|team` and a handler is `R|/api/posts||GET`. That is what makes the
-front's rule "no line terminates with a trailing `|`" true of the common record,
-whose slot and verb are both empty; a fixed four-field record would end in `|`
-by construction. `parseTable` reads a short line back as empty fields, so the
-round trip is unaffected — and no consumer splits a line by hand, because
-`parseTable` IS the reader on both rows.
+`rkAppTable()` is the table in registration order (the payload's `t`),
+`appTable()` parses it, `rkAppRender(record, fallback)` hands a stored function
+back, `rkAppRegisterSource(seg, fnName)` keeps where each registration was
+written for the scan. The UI decorators, the page context, the layout props and
+the parameter accessors this member used to carry left for the HTML library
+(front 30); the markers' test file left with them.
 
-### The matcher
-
-`matchPath(table, pathname) -> ?RouteMatch` and
-`layoutChain(table, pattern) -> RouteEntry[]` are botopink, compiled to both
-targets. Precedence is applied SEGMENT BY SEGMENT, highest first — static (3),
-dynamic (2), catch-all (1), optional catch-all (0) — and compared
-lexicographically, so `/blog/new` beats `/blog/[slug]` and `/shop/[id]` beats
-`/shop/[...rest]`. Two candidates with the same score are decided by
-REGISTRATION order, the rule `rkDispatch` already follows.
-
-- A route is PUBLIC only when a `P` or an `R` entry claims it. A pattern
-  carrying nothing but an `L` entry answers `null`.
-- A slot entry (`slot != ""`) is not a candidate: front 61 matches it separately
-  against the same URL.
-- `/shop/[...slug]` does not match `/shop`; `/docs/[[...slug]]` matches `/docs`
-  with `rest` empty.
-- `layoutChain` walks the pattern's ancestors root-first. Group segments never
-  appear, because `patternOf` dropped them before the entry was written.
-
-**Read a bound parameter with `paramOf(m, name)`, not `m.params.at(name)`.** A
-`RouteMatch` reached through the optional binder — `if (matchPath(…)) { m -> … }`
-— has lost its type at that name, so `m.params.at(…)` lowers to a property read
-and `.unwrapOr` is not a function on it. `paramOf` takes a TYPED parameter and
-is the form fronts 23 and 26 should use. The same rule bit `parseTable`: a `val`
-bound inside a `loop` lambda needs its annotation (`val f: string[] = …`).
-
-### The registry, and why this front ships a `.mjs` and an `.erl` where front 05 refused to
-
-Front 05 wrote its readers in botopink and shipped no sidecar, for three
-measured reasons: `botopink test` compiles every `test/*.bp` on BOTH rows with
-no per-target gate, so a cell carrying only an `@External.Erlang` form is a
-located node-row diagnostic at its CALL SITE; `runtime.mjs` is frozen, so an
-erlang-only cell has no node twin; and `shipErlSidecars` ships only a sidecar
-whose atom appears in emitted output, so an unreferenced one is skipped
-silently. All three still hold. None of them says "never ship a sidecar" — they
-say **a cell with one host form is a compile error, and a cell nobody names is a
-run-time death**.
-
-This front's work is not front 05's. Front 05's was PURE: document readers, one
-implementation over `std`, and a sidecar would have been a second copy of
-something botopink can do. A REGISTRY is not pure. botopink has no top-level
-mutable state, which is the same reason `runtime.mjs` holds the scan list and
-the router table; and a registered render function is a CLOSURE, which no string
-property table can hold. So the table lives in the host on both rows:
-`src/file_router.mjs` and `src/sidecars/rakun_file_router.erl`.
-
-What makes the shape legal here:
-
-- **Every cell carries both forms.** `rkAppRegisterPage` / `…Layout` /
-  `…Template` / `…Default` / `…Handler`, `rkAppTable`, `rkAppCount`,
-  `rkAppHasRender`, `rkAppRender` and `rkAppReset` each declare an
-  `@External.Node("./file_router.mjs", …)` and an
-  `@External.Erlang("rakun_file_router", …)`. Neither row has a call with no
-  binding, so neither row reds.
-- **`runtime.mjs` is frozen; `file_router.mjs` is this front's own file.** The
-  freeze is on a file, not on the idea of a node host.
-- **The atom is named in emitted output.** `file_router.bp` is compiled and
-  emits `rakun_file_router:register_page(…)`, so `shipErlSidecars` finds and
-  copies `src/sidecars/rakun_file_router.erl` — verified by LOOKING, at
-  `.botopinkbuild/test-out/rakun_file_router.erl`, not by trusting exit 0. The
-  atom is `rakun_file_router` and never `file_router`, because rakun emits
-  `rakun/file_router` and a matching sidecar is skipped in silence.
-
-**"The same matcher compiled twice" is one matcher, not two.** The spec's phrase
-means the botopink matcher compiled to two TARGETS; it does not mean a JS
-matcher beside an erlang one. The two host files hold no grammar, no wire format
-and no matching: each cell is handed the finished `kind|pattern|slot|verb` LINE
-and appends it beside its function, and `table()` joins the lines back. Neither
-host knows the format. That is what makes "the two sides cannot disagree about
-which route a URL is" a property rather than a hope — and it is the same
-conclusion front 05 reached, applied to the half of this front that is pure.
-
-**What a BUILT program still cannot do on the BEAM.** `shipErlSidecars` is
-called only from `test_cmd.zig`, so `botopink build --target erlang` copies no
-`.erl` sidecar and `__bp_load_siblings/0` is emitted only under the TEST flag
-(front 04's § Blocked, third gap). `rakun_file_router.erl` inherits that
-exactly: it is shipped and loaded under `botopink test --target erlang`, where
-every assertion in this front runs, and a BUILT erlang program would die with
-`undefined function rakun_file_router:table/0` for the same reason a built one
-already dies on `rakun_runtime:serve/2`. Nothing in this front makes that worse
-and nothing in this front can fix it — it is the toolchain's.
-
-**`targets` still reads `["commonJS"]`, deliberately.** All 48 of this front's
-assertions are green on both rows, but the member's erlang row still carries
-front 04's `request/6` reds (`{badkey,param}` / `{badkey,query}`), not this
-front's. Widening `targets` now would move a known red into `botopink-lib-test`
-rather than fix anything, which is the call front 04 and front 05 each made for
-the same reason, and front 06 after them. `erlang` joins in the change that
-closes them. (The counts this paragraph carried were front 22's and are
-superseded by the measurement in § Tree.)
-
-**Table ownership on the BEAM.** An ETS table dies with the process that created
-it, and a registration runs in whatever process loaded the module, so
-`rakun_file_router` creates its tables in a dedicated owner process registered
-under `rakun_app_routes_owner`; a second caller losing the race finds the table
-already there. It deliberately does not reuse `rakun_runtime`'s supervision
-tree: the two sidecars are shipped independently, and a file-convention program
-that never touches the DI container should not start an application to hold four
-rows.
-
-### The four markers
-
-`#[layout(seg)]`, `#[template(seg)]`, `#[page(seg)]` and `#[defaultView(seg)]`
-live in `file_router.bp` because `decorators.bp` is frozen — the same reason
-`#[configurationProperties]` lives in `config.bp`. `default` is a reserved
-keyword, so the `default.bp` marker is `#[defaultView]`: the only name in the
-set that does not match its file. Front 25's verb markers register `route.bp`
-handlers into the same table as `R` records, through `rkAppRegisterHandler<Res>`,
-which is declared here and generic over the response type — so this front never
-learns what a `HandlerResponse` is and front 25 declares no host cell.
-
-Each body `@emit`s the registration, `@emit`s the per-route parameter accessor,
-and then enforces placement, in that order: the `@emit`s run first because a
-failed outcome discards the contributions.
-
-| Written | Refused with |
-|---|---|
-| `#[page]` on a type | `#[page] must annotate a function` |
-| `#[page]` on a fn returning `Element` | `#[page] must annotate a fn returning @Task<Element> — every page is async so the render pipeline has one shape to drive` |
-| `#[layout]` on a fn returning `@Task<…>` | `#[layout] must annotate a fn(props: LayoutProps) -> Element — a layout is synchronous, only a page is a @Task` |
-| `#[page()]`, `#[page(1)]` | the automatic argument check, with no code in this front |
-
-Three measurements shape these bodies and one of them is new:
-
-- **A named function used as a VALUE does not lower on the erlang row.**
-  `rkAppPage("blog", blogPostPage)` compiles on node and is
-  `variable 'BlogPostPage' is unbound` on erlang. The markers therefore emit
-  `{ route -> blogPostPage(route) }`, which is the same value, lowers on both,
-  and is what `decorators.bp` already emits for a controller method.
-- **`decl.returnType` carries no type argument.** It is `"Task"` for
-  `-> @Task<Element>`, `"Element"` for `-> Element` and `""` for a type. So a
-  page is checked to BE a `Task` and a layout to be anything that is not one;
-  the required spelling is in the message, which is as close to "naming the
-  required return type" as the reflection allows.
-- **An `@emit`ted module-load `val` lands at the END of the emitted module**,
-  after every hand-written module-level `val`. A registration therefore cannot
-  be snapshotted in the module that hosts it — which is why the markers have
-  their own test file: `botopink test` runs each test FILE in its own process
-  (measured), so `test/file_router_markers_test.bp` never sees the
-  `rkAppReset()` the registry-cell assertions next door need.
-
-### The emitted parameter accessor
-
-`#[page("blog/[slug]")] pub fn blogPostPage(…)` also emits
-
-```bp
-pub fn blogPostPageParams(route: PageContext) -> #(slug: string) {
-    val slug = ctxParam(route, "slug");
-    return #(slug);
-}
-```
-
-A catch-all emits `val slug = ctxRest(route);` and types the field `string[]`; a
-route with no dynamic segment emits `-> #()`. The reads go through `ctxParam` /
-`ctxRest` rather than `route.params.at(name).unwrapOr("")` for the reason
-`paramOf` exists: an inline read off a value whose type was lost lowers to a
-property read and `.unwrapOr` is not a function on it. A consumer therefore
-imports `ctxParam` and `ctxRest` beside the markers, the way a module declaring
-components imports `rkScan` and `rkSingleton`.
-
-The accessors only exist under `botopink test`, never under `botopink check`:
-`check` skips decorator invocation and reports every `@emit`ted name as unbound.
-That is a known gotcha, not this front's.
-
-### The scan
-
-`scanAppDir(root, appDir) -> ScanReport` reads the real tree and answers the
-entries it implies, the project-root `middleware.bp` and the problems. It is
-BOTOPINK, over `std`'s `fs`, and not the two host files the front's text puts it
-in — for front 05's reasons, applied one level up: a scan written twice can
-disagree twice, and an erlang-only cell cannot be asserted from a `.bp` test at
-all, so every rule below would have been taken on trust. `fs.list`, `fs.exists`
-and `fs.stat` each carry both host forms, so one implementation answers on both
-rows and `test/file_router_scan_test.bp` proves it against real fixture trees.
-
-`appDir` is CONFIGURATION: `appDirOf()` is `rkProp("onze.appDir")` with `app` as
-the default, so moving a tree between `app/` and `src/app/` changes one config
-line and no source — asserted by scanning the same fixture under both layouts
-and comparing the tables.
-
-| Rule | Refusal |
-|---|---|
-| a segment holds `page.bp` and `route.bp` | ``rakun routing: `both` holds both page.bp and route.bp — a segment is a page or an endpoint, never both`` |
-| two root layouts' subtrees claim one URL | ``rakun routing: `/about` is claimed by both `(marketing)` and `(shop)` — two root layouts whose subtrees match one URL`` |
-| a registered segment with no directory | ``rakun routing: `blog/[id]` was registered by `typoPage` but there is no directory `app/blog/[id]``` |
-| a directory holding a convention file that registered nothing | ``rakun routing: `app/blog/[slug]` holds page.bp but nothing registered it — the marker's argument is what puts a route in the table`` |
-| a `_`-prefixed directory | skipped by `walkSegments`; nothing inside is registered, `page.bp` included |
-| a project-root `middleware.bp` | discovered as `report.middleware`, with no `pub mod` line naming it, and handed to front 07. A project with none scans clean and says nothing |
-
-A refusal is a STRING, not a halt, for the reason `durationProblem` is a
-function of its own: front 50's CLI prints it and stops, a boot check prints it
-and stops, and a test reads it without the halt taking the test down.
-
-`rkAppRegisterSource(seg, fnName)` is what makes the third row possible. The
-wire record carries the URL PATTERN, not the app-relative directory, so the raw
-pair each marker was written with is kept beside the table — `rkAppSources()`
-answers `seg|fnName` lines — rather than squeezed into a fifth field of a
-four-field record.
-
-**A directory walk is rakun's, not std's.** The front's text says front 01
-closes it; `libs/std` has no `walk` today, so `childDirs` / `walkSegments` are
-here, over `fs.list`. A name is a directory when listing it succeeds:
-`fs.stat` would say so more directly, but its `FileStat` carries an `i64` field
-and an integer literal is `i32` with no widening, so the `catch` value of a
-`try fs.stat(…)` cannot be written at all.
+**The scan** (`scanAppDir`, botopink over std's `fs`) reads `rakun.appDir`
+(`app` when unset; the orchestrator writes it — rakun reads no `onze.` key,
+decision 115 rule 4), walks the tree and refuses: a segment holding both
+`page.bp` and `route.bp`, two root layouts meeting at one URL, a registered
+segment with no directory (naming the function), a directory holding a
+convention file nothing registered. `_`-prefixed folders are skipped. A root
+`middleware.bp` beside `botopink.json` is discovered by the same scan.
 
 ## The request context
 
@@ -844,285 +581,6 @@ most restrictive behaviour wins with no knob around it. A library that has to
 work inside and outside a request takes the values as parameters. `requestLive()`
 exists for a DISPATCHER deciding whether it already opened a frame, not for an
 accessor deciding whether to answer.
-
-### `RenderHooks` — the one seam, and it points inwards (decision 77)
-
-A framework built on this pipeline has three things to add to a document:
-stylesheet `<link>`s and blocking scripts in the head, the deferred bundle tags
-after the payload, and a style sink that decides WHEN the sheet is serialised.
-None of it may be reached for from here — an edge from rakun to a bundler would
-make the server depend on the toolchain that packages it, and rakun would stop
-being usable without one.
-
-```bp
-pub type RenderHooks(
-    headExtra: fn(string) -> string,           // route -> extra <head> markup
-    bodyExtra: fn(string) -> string,           // route -> markup after the payload tag
-    islandAttr: fn(i32) -> #(string, string),  // ordinal -> the marker pair
-    openSink: fn() -> i32,                     // before anything renders
-    collectHead: fn() -> string,               // once, after the shell
-    collectChunk: fn(string) -> string,        // holeId -> the block before that chunk
-    closeSink: fn() -> string,                 // after the last chunk
-)
-pub fn defaultHooks() -> RenderHooks
-pub fn setHooks(h: RenderHooks) -> i32
-pub fn hooks() -> RenderHooks
-```
-
-`defaultHooks()` is a working document: no extra tags, the marker pair of
-`contracts.md § 2`, and a sink that collects nothing. The record is filled FIELD
-BY FIELD — `withHeadExtra` / `withBodyExtra` / `withIslandAttr` /
-`withCollectHead` / `withSink` each replace one field and leave the other six at
-their defaults, because botopink has no record-update expression and a caller
-spelling all seven to change one is a caller who will get one of them wrong.
-
-`grep` `modules/rakun/src/` for `onze` and the only hits are the `data-onze-*`
-marker names and `__onzeFill` — `contracts.md § 2` STRINGS, not module
-references. `Onze.run` installs its own record at boot, one line in ITS code;
-`islandAttr` is jhonstart front 29's, because the marker belongs to whoever
-decides which components are islands, while the ordinals are assigned here.
-
-**`void` is not a value in botopink**, so `openSink` answers `i32` — the shape
-every rakun cell that does something rather than computing something already
-has. The front's text spells it `fn() -> void`.
-
-**`emilia.flush()` is not called here and may not be.** The front's § *The
-document* still says the pipeline calls it once per document; decision 77
-replaced that with the four sink fields, filled by front 69 and installed by
-`Onze.run`, so `repository/rakun/` names no module of onze and none of emilia
-either. The consequence is visible in one acceptance: a document rendered
-through `defaultHooks()` carries **no** `<style>`, where the front's text says
-"exactly one". The suite asserts zero for the default and exactly one through a
-hooks record whose `collectHead` answers a block.
-
-### Step 4 — the document and the payload
-
-```bp
-pub type Payload(build, pathname, pattern, params, query, table,
-                 islands, actions, styles, holes, dynamic, kinds, slots)
-pub fn writePayload(p: Payload) -> string
-pub fn payloadEscape(json: string) -> string
-pub fn document(head: string, body: string, p: Payload) -> @Task<string>
-```
-
-The payload is one `<script id="__onze" type="application/json">`, the last
-thing in `<body>` before the client bundle, and its key table is
-`contracts.md § 2` — `v b p r m q t i a s h d`, plus `k` and `z`, which this
-front ALLOCATES and fronts 60 and 61 write. `k` and `z` are separate blobs
-joined on `pattern` rather than extra columns in the route table, so contract 1
-stays untouched and its round-trip test keeps testing four fields.
-
-`kinds` and `slots` are fields of the record because the front's step-4 sketch
-of `Payload` predates its own key table by two keys: a key with no field cannot
-be written.
-
-**Payload escaping.** `<`, `>` and `&` become `\u003c`, `\u003e`, `\u0026`,
-and U+2028 / U+2029 become `\u2028` / `\u2029`. `</script` is therefore
-UNREPRESENTABLE inside the block rather than filtered out of it, which is the
-property that makes an inert `application/json` script safe to carry
-attacker-controlled strings. The two line separators are found BY CODE POINT and
-never by a literal: a non-ASCII string literal raises `badarg` on the erlang row
-before any of this front's code runs, so the needle could not be written. The
-positive case — a payload actually carrying U+2028 — is for the same reason not
-expressible as a cell, which is front 62's non-ASCII-cookie gap one library
-later; the guard is asserted on the escape output instead.
-
-**The round trip is one test, not two half-tests.** `rkSsrPayloadKeys` and
-`rkSsrPayloadText` parse the emitted block with a JSON parser this front did not
-write — `JSON.parse` on node, OTP's own `json:decode/1` on the BEAM (OTP 27 and
-later) — so a document whose payload is not valid JSON fails on BOTH rows. The
-keys come back SORTED, because a map has no order and an object's insertion
-order is not the contract; the field SET is. A reader of our own would have been
-a second implementation of the thing under test, which is the failure mode the
-round trip exists to prevent.
-
-**Island ordinals are assigned here, in render order** — `i0`, `i1`, … —
-through `nextIslandOrdinal()`, and the attribute pair is read through
-`RenderHooks.islandAttr`, so the marker and the payload index cannot disagree.
-Hole ordinals are `h1`, `h2`, … in shell order. Neither is derived from a route,
-a pattern or a position in the tree; fronts 29, 30 and 68 designed against that.
-
-**What is NOT written here.** The build id `b` is front 03's content hash of the
-build, which does not exist on this binary; `Payload.build` is whatever the
-caller passes and `render` reads `rakun.build.id` from front 04's property
-table. The contract-4 class-name fixture — the literal hex class the document's
-`<style>` and the payload's `s` must share with
-`emilia/test/integration_test.bp` — is not asserted here either: it needs emilia
-to be a dependency of rakun, and `s` arrives through the style sink's
-`emittedClasses`, so the assertion belongs to front 69 or 68, where both sides
-of the comparison exist.
-
-### Steps 5 and 6 — the chunk protocol and the two entry points
-
-```bp
-pub fn render<El>(v: ElementView<El>, pathname: string, query: string) -> @Task<RenderedPage>
-pub fn renderAll<T>(thunks: Array<fn() -> @Task<T>>) -> @Task<Array<T>>
-pub fn markupAll<El>(v: ElementView<El>, resolved: Array<El>) -> string[]
-pub fn streamChunks(head, shell, ids: string[], markups: string[], p: Payload) -> RenderedPage
-pub fn beginRender(id, pathname, query, strict) -> i64
-pub fn endRender() -> string
-```
-
-**The phase word is not bookkeeping.** `render` enters
-`setPhase(RequestPhase.Render)` and restores the previous phase when it is
-done, because that is the same word front 12's `rkCachePhase()` reads to decide
-whether a revalidation is legal. The phase table of `contracts.md § 5` is
-ENFORCED, and the suite proves it by writing a cookie from a render and reading
-the refusal.
-
-**`beginRender` / `endRender` are two halves, deliberately.** front 62's
-contract says `endRequest()` must run on the failure path too, or the next
-request on a keep-alive connection starts inside this one's frame. botopink has
-no `finally` and a raise is not catchable from a `.bp` body, so the bracket is
-the DISPATCHER's; this front provides the two halves rather than pretending one
-call can hold it. On the BEAM the frame dies with the serving process, which is
-why it is process-local; on node it would survive, which is why the rule is
-written here as well as in front 62.
-
-**`@Task` is not concurrency on the target this front compiles for.** It
-lowers EAGERLY on erlang (decision 120), so a task is a value that has already
-been computed and two of them awaited together have already run in sequence, at
-full latency — and no assertion over the markup would ever say so. A `@Task` fn
-also cannot `await` inside a `loop` or a closure. So the pipeline never awaits
-in a loop and never hands anything an already-started task: it builds an
-`Array<fn() -> @Task<El>>` — unstarted THUNKS — and `renderAll` gathers them
-in ONE await, one spawned process per thunk. The PARAMETER TYPE is what makes
-"no call site passes an already-started task" checkable: a value does not fit
-where a function is required.
-
-The suite measures it: two 50 ms loaders finish under 100 ms on the row that
-spawns and take 100 ms on the row that cannot, and the cell asserts
-`fast == concurrentRow()` rather than claiming one shape for both. The same
-test written over already-started tasks takes 100 ms on BOTH rows and looks
-correct in every other respect, which is the whole reason the thunk type is
-pinned.
-
-**The streaming entry is three calls and not one, and that is a compiler gap.**
-A parameter typed `Array<fn() -> @Task<El>>` in a function that also takes an
-`ElementView<El>` is refused with `generic-arg-skip-forbidden: cannot skip a
-defaulted argument while providing a later one`, reported on the token AFTER the
-parameter and at any position in the list; each half compiles alone, the two
-together do not, and wrapping the thunk in a record (`Hole<El>`) hits the same
-refusal. So the gather keeps its own function and the chunk protocol keeps its
-own, where nothing is generic:
-
-```bp
-val resolved = await renderAll(bodies);
-val page = streamChunks(head, shell, ids, markupAll(v, resolved), payload);
-```
-
-1. **Shell** — doctype, head, open body, the composed tree with each boundary
-   rendered as `<div data-onze-h="h1">…fallback…</div>`; the payload's `h`
-   lists every hole still open.
-2. **Fill** — one per boundary, in RESOLUTION order:
-   `<template data-onze-f="h1">…</template><script>__onzeFill("h1")</script>`.
-3. **Tail** — the payload script, the sink's closing block, the body extra.
-
-The ids stay in SHELL order while the fills go out in the order the gather
-SETTLED in — which a gather by index cannot also answer, so the host records it
-on the side and `settledOrder()` reads it back. Two boundaries that resolve out
-of order therefore produce two fill chunks in resolution order, each carrying
-its own markup, and every id in `h` is filled by exactly one chunk. A boundary
-that resolved before the shell flush is simply not in the list: it was rendered
-inline, and there is no hole and no fill chunk for it.
-
-`__onzeFill` lives in `ssr.mjs` and is idempotent by construction — a second
-call for one id finds no template, or no hole, and leaves the DOM unchanged.
-**Its DOM-level assertion is not a cell in this suite and cannot be**: it is
-browser code, so there is no erlang twin to pair it with, and a node-only
-`declare fn` would red the erlang row at its call site (front 05's first
-measurement). What this suite asserts is the PROTOCOL — one fill chunk per hole
-id, the `<template>` + `<script>__onzeFill("…")</script>` shape, the ids. The
-DOM half belongs to front 68's bundle test, where a DOM exists.
-
-### What jhonstart front 26 consumes from this front
-
-Front 26 (the client router) and the chain behind it — 27 to 32 — wait on this
-front. This is the surface they may rely on; none of it changes without a note
-here.
-
-| What | Where | Shape |
-|---|---|---|
-| The element adapter | `ElementView<El>` + `nodeView` | front 26 writes ONE adapter for jhonstart's `Element`: `make`/`tagOf`/`valueOf`/`attrsOf`/`childrenOf` plus front 94's `isVoidTag`/`isRawTextTag`. Every field is a LAMBDA (`{ t -> isVoidTag(t) }`), never a bare function name |
-| The escaping walker | `renderNode(v, e)` · `raw(v, html)` | the only renderer any milestone path may call on untrusted data; `renderToString` escapes nothing and still writes `</input>` |
-| Composition | `compose(v, chain, route, nav, page)` | `chain` is front 22's `RouteMatch.chain`, already root-first. `nav` is the navigation counter the `data-onze-t` key carries |
-| The layout depth | `selected()` | front 26's `selected`, root layout `0`. A call and not a field of `LayoutProps`, which is front 22's three-field record |
-| The payload | `Payload` · `writePayload` · `payloadEscape` · `payloadOf(document)` | `contracts.md § 2` verbatim, `v`=1. `p`/`m`/`q`/`r` are front 26's router state one-to-one; `segments` is derived from `r`, never transported |
-| The document | `document(head, body, p)` | `head` is front 32's `renderHead(m)` output. The body sits inside `<div data-onze-root="">` |
-| The seam | `RenderHooks` · `defaultHooks()` · `setHooks` · the six `with*` fillers | front 29 defines `islandAttr`; `Onze.run` installs the record |
-| Islands | `nextIslandOrdinal()` · `islandId(n)` · `island(v, h, n, inner)` | ordinals `i0`, `i1`, … in render order, assigned HERE; the component name and props live in the payload's `i`, never on the element |
-| Holes | `nextHoleOrdinal()` · `holeId(n)` · `holeMarker(v, n, fallback)` · `fillChunk(id, markup)` | ordinals `h1`, `h2`, … in shell order, assigned HERE, never route-derived |
-| The page | `RenderedPage` · `chunkCount` · `chunkAt` · `bodyOf` · `toResponse` | read a chunk through the typed accessor, not `page.chunks.at(i)` |
-| Entry points | `render(v, pathname, query)` · `beginRender` / `endRender` | `endRender()` runs on the failure path too — it is the dispatcher's bracket |
-| The search params | `searchParams(route)` · `searchParam(route, name)` | reading them MARKS the render dynamic |
-
-**One call-site rule for all of it, and it only shows on the erlang row:** a
-function-valued record field must be read into a local before it is called —
-`val tagOf = v.tagOf; tagOf(e)`, never `v.tagOf(e)`.
-
-**One hole front 26 should know about.** `searchParams(route)` marks the render
-dynamic; `route.query` is a public field of front 22's `PageContext` and a
-direct read of it is a field read this front cannot intercept. The marking is
-therefore enforced for everyone who goes through the accessor and for nobody
-who does not, which is weaker than the front's own text ("the marking is done by
-the accessor, not by a developer remembering to declare it"). Closing it means
-either dropping `query` from `PageContext` or making it private — both are front
-22's file, and neither is this front's to change. Recorded, not smoothed over.
-
-### The gate's own greps
-
-`examples/rakun-ssr/` is the consumer half, and it is a RUN rather than a claim:
-`botopink run` prints the document, and the program halts with a named refusal
-if the title reaches the browser unescaped or the payload is not `v1`. (Since the
-erlang-only move it builds but does not run: a built erlang program neither ships
-nor loads its sidecars — § Module tree, "What the move costs".)
-
-`scripts/git-hooks/lib/runner-standalone.sh` stage 1b enforces three claims of
-this front's *Definition of done*, because each of them is one edit away from
-being false and none of them is visible in a test:
-
-- `ssr.bp` contains no `renderToString` — a single call is the whole hole.
-- `modules/rakun/src/` imports no module of onze and names `onze` only in the
-  `contracts.md § 2` strings (`data-onze-*`, `__onze`, `__onzeFill`) and front
-  22's `onze.appDir` property key (decision 77).
-- `ssr.bp` spells no void tag — the set is front 94's `isVoidTag`, arriving as
-  an `ElementView` field.
-
-### Language notes this module is written around
-
-Beyond the two call-site rules above, five measurements shaped this file and
-each of them cost a red:
-
-- **`await` inside an `if`/`else` block of a `@Task` body is emitted inside
-  a NON-ASYNC arrow IIFE on the commonJS row** — botopink's `if` is an
-  expression — and node refuses the file at LOAD with `SyntaxError: await is
-  only valid in async functions`, taking the whole test FILE down rather than
-  one cell. `render` therefore looks the page function up for both arms and
-  awaits once, at the body's own level.
-- **The optional binder is a closure.** `if (matchPath(…)) { m -> … }` may not
-  `await` inside it, so `render` unpacks the match into locals and every await
-  happens below.
-- **`xs.at(i).unwrapOr(…)` reads the element back UNWRAPPED** both inside a
-  function generic in `El` and at a call site where the array came off a RECORD
-  FIELD — `{case_clause, <<"…">>}` on the erlang row. Read through a typed
-  PARAMETER (`chunkAt(page, 0)`) or walk with a `loop` binder. It is the same
-  shape `paramOf`, `headerOf` and `ctxParam` already exist for.
-- **A local `val` or a PARAMETER may shadow a module-level `pub fn` of the same
-  name for an IMPORTER.** A parameter named `raw` in `jsonString(raw: string)`
-  made a test importing `pub fn raw` fail with `expected Node, got bool`. The
-  parameters are `plain` and `text` now.
-- **`std`'s `querystring` does LESS than `splitQuery` / `encodeQuery`, and that
-  — not loading — is why the two bodies are still here.** `querystring.parse`
-  does not percent-decode (`a=%20b` reads back as the literal `%20b`) and
-  splits a chunk on EVERY `=`, losing the `=c` of `a=b=c`; `querystring.stringify`
-  does not percent-encode, so `#("a b", "c;d")` serialises as `a b=c;d`. std
-  says so itself — "the call site should pre-escape". `route.query` is a decoded
-  dict and the form grammar cuts at the first `=`, so both differences matter.
-  Swapping both bodies for the std calls leaves every OTHER cell in this
-  repository GREEN, which is why the cell `splitQuery / encodeQuery
-  percent-code, which std's querystring does not` exists: it reds on all three
-  lines when the swap is made, measured. The percent codec is NOT written a
-  second time — `percentEncode` / `percentDecode` are front 62's.
 
 ### Why this front ships BOTH host files where front 05 shipped none
 
@@ -2032,193 +1490,51 @@ of `T` with the string is unchecked. Both halves are language gaps, recorded in
 the front's README; dropping the generic and returning `any` would lose the type
 everywhere, and the string is the smaller cost.
 
-## The SSR pipeline
+## The page path — `modules/rakun-app/src/ssr.bp` (front 23)
 
-`modules/rakun-app/src/ssr.bp` is where a URL becomes bytes. Front 22 finds the
-page and the layout chain, front 62 opens the request scope, front 06 resolves
-what the render asks the container for — and this file composes, escapes,
-renders, wraps the result in a document, writes the payload the browser
-reconnects through, and hands front 04's transport an ordered list of chunks.
-
-### `Element` is generic here, and that is not a style choice
-
-`Element` is jhonstart's type. rakun declares no dependency on jhonstart and
-must not learn one — the rule that already made every signature in
-`file_router.bp` generic in `El`. A walker, though, has to be able to ask a tree
-six questions, so the questions arrive as a record of function values:
+rakun BUILDS NO HTML (decision 113). The walker, the escaping, the layout
+composition, the document, the payload, the island and hole ordinals and the
+fill protocol are the HTML library's (its front 30); they left this member with
+their tests, and `examples/rakun-ssr` now shows the page path with plain-text
+renderers. What stays is the seam, and it points inwards (decision 114):
 
 ```bp
-pub type ElementView<El>(
-    make: fn(string, string, Array<#(string, string)>, El[]) -> El,
-    tagOf: fn(El) -> string,
-    valueOf: fn(El) -> string,
-    attrsOf: fn(El) -> Array<#(string, string)>,
-    childrenOf: fn(El) -> El[],
-    isVoid: fn(string) -> bool,
-    isRawText: fn(string) -> bool,
-)
+pub type ChunkWriter(setStatus: fn(code: i32) -> void, setHeader: fn(name: string, value: string) -> void,
+                     write: fn(chunk: string) -> @Task<void>, close: fn() -> @Task<void>)
+pub type PageRenderer = fn(req: Request, out: ChunkWriter) -> @Task<void>;
+pub fn page(pattern: string, render: PageRenderer) -> i32      // front 22's rkAppRegisterPage
+pub fn servePage(req: Request, out: ChunkWriter) -> @Task<i32> // the status written
 ```
 
-`isVoid` and `isRawText` are front 94's `isVoidTag` / `isRawTextTag`, **passed
-in**. That is the point: the front's own text says the void set is not restated
-here, because two lists that must agree will not agree for long and the second
-one is always the stale one. `grep` this module for a tag name and there is one
-— `"div"`, the element a template wrapper and an island marker are — and no set
-of any kind. The same seam shape as `RenderHooks`, one type-level out.
-
-`make` takes the four parts in one order — tag, value, attrs, children — where
-jhonstart's `Element` spells them in another. An adapter that maps them is one
-line in the library that owns the element type; front 26 writes it, this front
-never sees it.
-
-`Node` + `nodeView(isVoid, isRawText)` is rakun's own element, for a rakun
-application that ships no UI library and for this front's own assertions. It is
-not a second `Element`: nothing in the pipeline mentions it, and its two
-predicates are still parameters.
-
-### Two call-site rules, both erlang-only, both measured here
-
-- **A function-valued record FIELD must be read into a local before it is
-  called.** `v.tagOf(e)` lowers to a METHOD call — `tagOf(V, E)` — and the
-  erlang row reds with `function tagOf/2 undefined`; the commonJS row is
-  perfectly happy, which is what makes it worth writing down. `val tagOf =
-  v.tagOf; tagOf(e)` is the same value and lowers on both rows. Every call
-  through `ElementView` and `RenderHooks` in this module and in its consumers is
-  written that way.
-- **A named function used as a value does not lower on erlang.** Build a view or
-  a hooks record with `{ t -> isVoidTag(t) }`, never `isVoidTag`. Front 22
-  measured it for the four markers; it applies to every field of both records.
-
-Two more the front hit and worked around rather than reported second-hand:
-
-- **`xs.at(i).unwrapOr(…)` reads the element back UNWRAPPED inside a function
-  generic in `El`.** `compose` died with `{case_clause, {file_router__t__routeentry, …}}`
-  on the erlang row — the record itself in the clause, not an optional around
-  it. The same expression in `file_router.bp`, in a non-generic function, is
-  correct. `compose` walks `chain.reverse()` with a `loop` binder instead, which
-  is the shape the front's own gap table already prefers.
-- **A local `val` may shadow a module-level `pub fn` of the same name for an
-  IMPORTER.** `renderIn` bound `val raw = isRawText(tag);` beside the module's
-  `pub fn raw(v, html) -> El`, and a test file importing `raw` was told
-  `expected Node, got bool` — the local's type, reaching a consumer. The local is
-  `rawBody` now. Two minutes, if the error had not been read in the right file.
-
-### Step 1 — the rendered page
-
-`http.bp` is frozen and `Response(status, body)` carries no header list and no
-streaming body, so the pipeline answers with a record of its own:
-
-```bp
-pub type RenderedPage(status: i32, headers: Array<#(string, string)>, chunks: string[])
-pub fn renderedPage(status: i32, chunks: string[]) -> RenderedPage
-pub fn toResponse(page: RenderedPage) -> Response
-```
-
-`Content-Type: text/html; charset=utf-8` is on every `RenderedPage` this front
-produces — `htmlHeaders()` is not a parameter — and `toResponse` is the ONLY
-place the chunks are joined, which is exactly what the streaming path refuses to
-do. When `http.bp` unfreezes, `RenderedPage` collapses into `Response` and
-`toResponse` disappears.
-
-### Step 2 — composition order is a function, and it is tested
-
-```bp
-pub fn compose<El>(v: ElementView<El>, chain: RouteEntry[], route: PageContext,
-                   nav: i32, page: El) -> El
-```
-
-For each segment, root-first, the page is wrapped from the inside out: `page`,
-then `N` not-found, `S` loading, `E` error, `T` template, `L` layout. So the
-outermost element is the root layout and the nesting reads
-`layout > template > error > loading > not-found > page`, asserted on the markup
-string rather than in prose. A convention nobody registered contributes NO
-wrapper — the nesting shrinks, it does not gain an empty `div`.
-
-The chain is front 22's: `matchPath(…)`'s `chain` field is ALREADY the root-first
-`L` list, so a caller holding a match never calls `layoutChain` a second time.
-
-A `T` wrapper is the one place this front adds an element of its own: a `div`
-carrying `data-onze-t="<pattern>#<nav>"`, the key that makes a template re-mount
-on the client while the layout around it does not. Two renders of one route
-carry two different keys, because `nav` is a counter and not a hash of the
-route.
-
-**`selected`, the layout depth, is a slot and not a field.** Front 26's router
-state maps one-to-one onto the payload's `p`/`m`/`q`/`r` with one exception —
-`selected` is per-layout rather than per-document. `LayoutProps(route, children,
-slots)` is front 22's record and carries three fields; widening it would touch a
-file this front does not own, and a fourth positional argument is not
-expressible while a declared parameter default is never applied. So the pipeline
-writes the depth before each layout render and a layout reads it back with
-`selected()` — root layout `0`, the next one down `1`. A three-deep chain yields
-`0, 1, 2`, asserted by a layout that renders its own depth as its tag.
-
-**`registerBoundary(kind, pattern, render)`** puts an `S`, an `E` or an `N`
-record in front 22's table with its render beside it, through front 22's own
-public cell. Fronts 30 and 31 own those MARKERS; until they land this is how a
-boundary gets registered, and nothing here writes a wire record by hand.
-
-### Step 3 — escaping is the render, not a step before it
-
-`renderNode(v, e)` is a full re-implementation of the walk in
-`jhonstart/element.bp`, and it is what every path in this front calls. The four
-differences:
-
-| Node | the frozen `renderToString` | `renderNode` here |
-|---|---|---|
-| `#text` | `e.value` verbatim | `escapeHtml(e.value)` |
-| `#text` inside a raw-text tag | verbatim | verbatim, and `</script` / `</style` is **refused** |
-| attribute | `name="value"` verbatim | `name="` + `escapeAttribute(value)` + `"` |
-| a void tag | `<input></input>` | `<input …>`, no closing tag |
-| `#raw` | renders `<#raw>` | `e.value` verbatim — the single documented escape hatch |
-
-`escapeHtml` covers `&`, `<`, `>`; `escapeAttribute` adds `"` and `'`. The `&`
-is replaced FIRST or the ampersand of an entity is escaped a second time.
-
-**Front 01's `escape.html` / `escape.attribute` do not exist on this binary** —
-`libs/std` has no `escape` module — so the two functions are here, in pure
-botopink, spelled as front 01 specifies them. When front 01 lands they are two
-bodies to delete, not to reconcile.
-
-**A raw-text body is verbatim, and the one sequence that closes it early is
-refused rather than escaped.** `escapeHtml` applied to a CSS body turns `a > b`
-into `a &gt; b` and applied to a script body turns working code into text, so
-escaping a `script` or `style` body would silently change the program. Emitting
-it verbatim is only safe because a body containing `</script` or `</style` — in
-any case, matching the HTML parser's own rule — FAILS the render with the tag
-named. Refusing is the restrictive answer and there is no flag that turns it
-into escaping.
-
-**No path in `ssr.bp` calls `renderToString`**, and it could not: jhonstart is
-not importable from here. The frozen renderer still writes `</input>` and still
-escapes nothing, so any assertion about escaped output or a missing closing tag
-holds through `renderNode` ONLY. A test that renders a form with
-`renderToString` is testing the wrong function.
-
-### Why this front ships BOTH host files
-
-Front 05's three measurements hold and none is violated: every cell carries an
-`@External.Node` and an `@External.Erlang` form, so neither row has a call with
-no binding; `runtime.mjs` is frozen but `ssr.mjs` is this front's own file; and
-the atom `rakun_ssr` is named in emitted output — twenty-two call sites in
-`.botopinkbuild/test-out/ssr.erl` — so `shipErlSidecars` copies
-`src/sidecars/rakun_ssr.erl`, **verified by reading**
-`.botopinkbuild/test-out/rakun_ssr.erl` and diffing it against the source, not
-by trusting exit 0.
-
-What decides the shape is front 22's question, and it is the same answer fronts
-22, 62 and 06 gave: **is the thing being stored pure?** Front 05's config
-readers were, and a sidecar would have been a second copy of something botopink
-can do. These are not. The host holds a record of seven FUNCTIONS (the installed
-`RenderHooks`), a gather over unstarted THUNKS, and two per-render ordinals that
-must survive a call into user code. No string table holds a closure. The
-escaping, the walker, the composition order, the payload format, the document
-shell and the chunk protocol are botopink, compiled to both targets; neither
-host knows what HTML is.
-
-The module atom may not be `ssr`: rakun emits `rakun/ssr`, and `shipErlSidecars`
-skips a qualifier matching a module this build emitted — silently. Every rakun
-sidecar is `rakun_<name>.erl`.
+- **The dispatch** (`servePage`): `routing`'s `matchPath` over the `P` records;
+  no page → 404 with no renderer run. The renderer runs inside one front 62
+  request scope in phase `Render` (a cookie write raises), with the previous
+  phase restored after; it is handed a `Request` carrying the page pattern's
+  parameters whose `query` read calls front 62's `markDynamic("searchParams")`
+  (under `rakun.render.strict=true` that read RAISES — a static export's
+  failure). A raise out of the renderer — a navigation reason included; page
+  signals are the HTML library's (decision 117 rule 1) — answers 500 when
+  nothing was written yet. The response is closed exactly once.
+- **The writer** (`src/sidecars/rakun_ssr.erl`, per serving process): 200 with
+  `Content-Type: text/html; charset=utf-8` unless the renderer said otherwise;
+  `setStatus` / `setHeader` after the first `write`, and any call after `close`,
+  fail the request naming the call. Over front 04's listener the head goes out
+  with the first chunk (`Transfer-Encoding: chunked`) or with `close` when
+  nothing was written (`Content-Length: 0` — a 307 with `location`), each chunk
+  is an HTTP/1.1 chunk written as it is handed over, and the request is marked
+  streamed so the acceptor writes nothing more. Without a socket
+  (`rkDispatchHttp`) the chunks are buffered and answered as one `Response`.
+- **Installation**: `servePages()` makes the page path the core router's
+  fallback (`rakun_runtime:set_fallback/1`): a URL no decorator route matched
+  reaches `servePage`.
+- **Calling the writer from another module**: `writeTo`, `setStatusOn`,
+  `setHeaderOn`, `closeOut`. A module that IMPORTS `ChunkWriter` cannot call its
+  function-typed fields directly on the erlang backend (`out.write(x)` lowers to
+  a method call `write/2`), and an imported fn-type alias resolves the names it
+  mentions in the importer's scope, so a module writing a `PageRenderer` imports
+  `Request` from `rakun` even when it never spells it (`language-gaps.md`).
+- `splitQuery` / `encodeQuery` / `queryDict` (the query codec over std's
+  `encoding`, front 62's `decodeComponent`) and `buildId()` stay here.
 
 ## The auto-configuration pass
 

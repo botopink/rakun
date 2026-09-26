@@ -75,18 +75,17 @@ runStandaloneGate() {
         if grep -q 'renderToString' "$ssr"; then
             fail "ssr.bp calls renderToString — the frozen renderer escapes nothing; a single call is the whole hole"
         fi
-        # Decision 77: no module of onze is reachable from rakun's core. The
-        # allowed occurrences are all `contracts.md § 2` STRINGS — the
-        # `data-onze-*` markers, the `__onze` payload id, `__onzeFill`, and
-        # front 22's `onze.appDir` property key — plus prose in comments.
-        if grep -rn 'from "onze' modules/rakun/src/ modules/rakun-app/src/ 2>/dev/null | grep -q .; then
-            fail "modules/rakun/src/ or modules/rakun-app/src/ imports a module of onze (decision 77)"
+        # Decisions 113-115: rakun builds no HTML and names neither the HTML
+        # library nor the orchestrator — not an import, not a key, not a
+        # marker, not a word in a comment (front 23 step 5, front 22 step 2).
+        if grep -rn 'from "jhonstart\|from "onze' modules/rakun/src/ modules/rakun-app/src/ 2>/dev/null | grep -q .; then
+            fail "modules/rakun/src/ or modules/rakun-app/src/ imports jhonstart or onze (decision 113)"
         fi
-        if grep -rn 'onze' modules/rakun/src/ modules/rakun-app/src/ 2>/dev/null \
-            | grep -vE '\.bp:[0-9]+: *//' \
-            | grep -v 'data-onze-' | grep -v '__onze' \
-            | grep -v 'onze\.appDir' | grep -q .; then
-            fail "modules/rakun/src/ or modules/rakun-app/src/ names onze outside the contract-2 marker strings (decision 77)"
+        if grep -rni 'onze' modules/rakun/src/ modules/rakun-app/src/ 2>/dev/null | grep -q .; then
+            fail "modules/rakun/src/ or modules/rakun-app/src/ names onze (decisions 113, 115)"
+        fi
+        if grep -rn 'Element\|LayoutProps\|jhonstart' modules/rakun-app/src/ 2>/dev/null | grep -q .; then
+            fail "modules/rakun-app/src/ names a UI type or the HTML library (decision 114)"
         fi
         local voidtag
         for voidtag in area base col embed hr img input link meta source track wbr; do
@@ -94,7 +93,7 @@ runStandaloneGate() {
                 fail "ssr.bp spells the void tag \"$voidtag\" — the set is front 94's isVoidTag, passed in"
             fi
         done
-        pass "front 23 greps: no renderToString, no onze module, no tag list"
+        pass "front 22/23 greps: no renderToString, no onze or jhonstart, no UI type, no tag list"
     fi
 
     # 2. botopink test.

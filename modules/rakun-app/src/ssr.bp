@@ -1,917 +1,255 @@
-//// rakun/ssr — the server-side render pipeline (front 23).
+//// rakun — the page path (front 23): the chunk writer, the page renderer and
+//// the dispatch.
 ////
-//// This is where a URL becomes bytes: front 22's table finds the page, front
-//// 22's layout chain wraps it, this file renders the tree with ESCAPING, wraps
-//// the markup in a document, writes the payload the browser reconnects
-//// through, and hands front 04's transport an ordered list of chunks.
+//// rakun BUILDS NO HTML (decision 113). A page's markup is the HTML library's
+//// (its front 30): the walker, the escaping, the layout composition, the
+//// document and the payload. The two never import each other; the
+//// application's orchestrator hands this front one OPAQUE renderer per page
+//// pattern (decision 114), and the renderer writes its status, its headers and
+//// its chunks through the `ChunkWriter` rakun gives it. rakun writes them to
+//// the socket in the order it was handed them and reads none of them.
 ////
-//// THREE THINGS THIS FILE DELIBERATELY DOES NOT KNOW.
+//// THE PAGE PATH, END TO END, ON BEAM:
 ////
-//// 1. What an element IS. `Element` is jhonstart's type and rakun declares no
-////    dependency on jhonstart — the same rule that made every signature in
-////    `file_router.bp` generic in `El`. So the walker is generic too, and the
-////    six things it must be able to do to a tree (make a node, read its tag,
-////    its value, its attributes and its children, and ask whether a tag is
-////    void or raw-text) arrive as an `ElementView<El>` — a record of function
-////    values, the same seam shape `RenderHooks` is. `isVoid` and `isRawText`
-////    are front 94's `isVoidTag`/`isRawTextTag`, PASSED IN: one definition,
-////    never two lists that must agree. `grep` this file for a tag list and
-////    there is none.
+////     request
+////       -> 22  matchPath(table, pathname)       `routing`; no page -> 404, no renderer runs
+////       -> 22  the renderer registered for the matched pattern
+////       -> 62  request scope, setPhase(Render)  headers, cookies, memo cache
+////       -> 23  render(req, out)                 status, headers, chunks through `out`
+////       -> 23  out.close() when the renderer's task resolves, unless it closed
+////       -> 62  previous phase restored, scope closed
 ////
-//// 2. What a bundler, a stylesheet pipeline or a framework is. Those arrive as
-////    `RenderHooks` values (decision 77). `defaultHooks()` is a working
-////    document with none of them.
+//// STATUS. 200 with `Content-Type: text/html; charset=utf-8` unless the
+//// renderer said otherwise; `setStatus` / `setHeader` are legal before the
+//// first `write` only, and a call after it fails the request naming the call
+//// (decision 67). The head goes out with the first chunk, or with `close` when
+//// nothing was written — a 307 with `location` and no body. A raise out of the
+//// renderer — a navigation reason included, since page signals are the HTML
+//// library's (decision 117 rule 1) — is a failed render: 500 when nothing was
+//// written yet. The response is closed exactly once.
 ////
-//// 3. What is slow. A suspense boundary is front 30's; this front owns the
-////    hole IDS and the chunk PROTOCOL, and takes a boundary as an unstarted
-////    thunk.
-////
-//// TWO CALL-SITE RULES MEASURED WHILE WRITING THIS FILE, both erlang-only and
-//// both invisible on the commonJS row:
-////
-//// - **A function-valued record FIELD must be read into a local before it is
-////   called.** `v.tagOf(e)` lowers to a METHOD call — `tagOf(V, E)` — and the
-////   erlang row reds with `function tagOf/2 undefined`. `val tagOf = v.tagOf;
-////   tagOf(e)` is the same value and lowers on both. Every call through
-////   `ElementView` and `RenderHooks` in this file is written that way, and so
-////   is every consumer's.
-//// - **A named function used as a value does not lower on erlang.** Build a
-////   view or a hooks record with `{ t -> isVoidTag(t) }`, never `isVoidTag`.
-////   This is front 22's measurement, and it is what the four markers already
-////   emit.
+//// THE WRITER (`src/sidecars/rakun_ssr.erl`) streams to the connection's socket
+//// when the request came through front 04's listener (HTTP/1.1 chunked), and
+//// buffers when it did not (`rkDispatchHttp` from a test): the dispatch then
+//// answers the buffer as one `Response`.
 
 import {collections.Dict, encoding} from "std";
-import {Response} from "rakun";
-import {rkProp} from "rakun";
-// `toI32` is front 05's `parseInt(v, 10)` rule, reached through a `pub fn` in
-// `src/` rather than spelled a second time — the reason `lifecycle.bp` imports
-// it too.
-import {toI32} from "rakun";
+import {Request, Response, rkProp, sub} from "rakun";
 import {
     RequestPhase,
     decodeComponent,
     RequestScope,
     beginRequest,
     endRequest,
-    isDynamic,
-    markDynamic,
+    requestLive,
     requestPhase,
     setPhase,
 } from "rakun/request_context";
-import {
-    contextOf,
-    ctxParam,
-    appTable,
-    rkAppTable,
-    PageContext,
-    LayoutProps,
-    rkAppHasRender,
-    rkAppRegisterTemplate,
-    rkAppRender,
-} from "file_router";
-import {table: {RouteEntry, writeTable}, match.matchPath} from "routing";
-import {charOf, sub} from "rakun";
+import {rkAppRegisterPage, rkAppTable, rkAppRender} from "file_router";
+import {table: {RouteEntry, parseTable, writeTable}, match: {RouteMatch, matchPath}} from "routing";
 
-// ── the host cells, and why this front ships a host file ────────────────────
-//
-// Every cell below is one `@External.Erlang` form (the node twin `ssr.mjs` left
-// with front 04's Step 10, decision 113); the atom `rakun_ssr` is named in this
-// module's emitted output, so `shipErlSidecars` copies
-// `src/sidecars/rakun_ssr.erl` — verified by READING
-// `.botopinkbuild/test-out/rakun_ssr.erl`, not by trusting exit 0.
-//
-// What decides the shape is front 22's question — is the thing being stored
-// PURE? Front 05's config readers were, and a sidecar would have been a second
-// copy of something botopink can do. These are not: a record of seven
-// FUNCTIONS, a list of unstarted THUNKS and two ordinals that must survive a
-// call into user code. No string table holds a closure.
+// ── step 1: the seam ────────────────────────────────────────────────────────
 
-#[@External.Erlang("rakun_ssr", "set_hooks")]
-pub declare fn rkSsrSetHooks<H>(hooks: H) -> i32;
-
-#[@External.Erlang("rakun_ssr", "has_hooks")]
-pub declare fn rkSsrHasHooks() -> bool;
-
-#[@External.Erlang("rakun_ssr", "hooks_or")]
-pub declare fn rkSsrHooksOr<H>(fallback: H) -> H;
-
-#[@External.Erlang("rakun_ssr", "set_selected")]
-pub declare fn rkSsrSetSelected(depth: i32) -> i32;
-
-#[@External.Erlang("rakun_ssr", "selected_depth")]
-pub declare fn rkSsrSelected() -> i32;
-
-#[@External.Erlang("rakun_ssr", "next_nav")]
-pub declare fn rkSsrNextNav() -> i32;
-
-// One process per thunk on the BEAM, the results gathered BY INDEX. The
-// argument is an `Array<fn() -> T>` and never an already-started `@Task`:
-// `@Task<T>` lowers eagerly on erlang, so two tasks awaited together have
-// already run one after the other, at full latency, and no assertion over the
-// markup would ever say so.
-#[@External.Erlang("rakun_ssr", "all")]
-pub declare fn rkSsrAll<T>(thunks: Array<fn() -> @Task<T>>) -> @Task<Array<T>>;
-
-#[@External.Erlang("rakun_ssr", "settled_order")]
-pub declare fn rkSsrSettledOrder() -> string;
-
-// Does this row spawn? The BEAM does and node does not, which is the one place
-// the two rows are a different mechanism. It is stated here rather than papered
-// over, and the suite's single timing assertion reads it.
-#[@External.Erlang("rakun_ssr", "concurrent")]
-pub declare fn rkSsrConcurrent() -> bool;
-
-#[@External.Erlang("rakun_ssr", "next_island")]
-pub declare fn rkSsrNextIsland() -> i32;
-
-#[@External.Erlang("rakun_ssr", "next_hole")]
-pub declare fn rkSsrNextHole() -> i32;
-
-// The payload round trip, and the one place this front lets a host read what it
-// wrote. Both halves use a JSON parser this front did not write — `JSON.parse`
-// on node, OTP's own `json:decode/1` on the BEAM — so a document whose payload
-// is not valid JSON fails on BOTH rows, and the keys come back SORTED because
-// a map has no order and an object's insertion order is not the contract.
-// A parser of our own would have been a second implementation of the thing
-// under test, which is the failure mode the round trip exists to prevent.
-#[@External.Erlang("rakun_ssr", "payload_keys")]
-pub declare fn rkSsrPayloadKeys(json: string) -> string;
-
-#[@External.Erlang("rakun_ssr", "payload_text")]
-pub declare fn rkSsrPayloadText(json: string, key: string) -> string;
-
-#[@External.Erlang("rakun_ssr", "reset")]
-pub declare fn rkSsrReset() -> i32;
-
-// The layout depth the render that is running handed the current layout — `0`
-// for the root layout, `1` for the next one down. Front 26's router state calls
-// it `selected`; it is the one router value with no payload key, because it is
-// per-layout rather than per-document.
-pub fn selected() -> i32 {
-    return rkSsrSelected();
-}
-
-// ── step 1: the rendered page, and why it is not a `Response` ───────────────
-//
-// `http.bp` is frozen and `Response(status, body)` carries no header list and
-// no streaming body. So the pipeline's own answer is a record of its own, and
-// `toResponse` is the boundary conversion — used ONLY on the non-streaming
-// path, because joining the chunks is exactly what streaming refuses to do.
-// When `http.bp` unfreezes, `RenderedPage` collapses into `Response` and
-// `toResponse` disappears.
-
-pub type RenderedPage(
-    status: i32,
-    headers: Array<#(string, string)>,
-    chunks: string[],
+pub type ChunkWriter(
+    setStatus: fn(code: i32) -> void,
+    setHeader: fn(name: string, value: string) -> void,
+    write: fn(chunk: string) -> @Task<void>,
+    close: fn() -> @Task<void>,
 )
 
-// The one content type this front produces. A document is UTF-8 HTML or it is
-// not this front's answer, so the header is not a parameter.
-pub fn htmlHeaders() -> Array<#(string, string)> {
-    return [#("Content-Type", "text/html; charset=utf-8")];
+pub type PageRenderer = fn(req: Request, out: ChunkWriter) -> @Task<void>;
+
+// The orchestrator's one call per page pattern, at boot. A second renderer for
+// one pattern fails here, naming it (front 22's `rkAppRegisterPage`).
+pub fn page(pattern: string, render: PageRenderer) -> i32 {
+    return rkAppRegisterPage(pattern, render);
 }
 
-pub fn renderedPage(status: i32, chunks: string[]) -> RenderedPage {
-    return RenderedPage(status: status, headers: htmlHeaders(), chunks: chunks);
+// The four doors as functions of this module. A module that IMPORTS
+// `ChunkWriter` cannot call a function-typed field directly on the erlang
+// backend today — `out.write(x)` there lowers to a method call `write/2`
+// (`language-gaps.md`) — so a renderer written elsewhere goes through these.
+pub fn writeTo(out: ChunkWriter, chunk: string) -> @Task<void> {
+    await out.write(chunk);
 }
 
-pub fn headerOfPage(page: RenderedPage, name: string) -> string {
-    var found = "";
-    for (page.headers) { h ->
-        if (h._0 == name) {
-            found = h._1;
-        };
-    };
-    return found;
+pub fn setStatusOn(out: ChunkWriter, code: i32) -> i32 {
+    out.setStatus(code);
+    return code;
 }
 
-// THREE TYPED ACCESSORS, for the reason `paramOf`, `headerOf` and `ctxParam`
-// exist one module over: `page.chunks.at(0).unwrapOr("")` written at a call
-// site reads the element back UNWRAPPED on the erlang row and dies with a
-// `case_clause` on the chunk itself — the array came off a RECORD FIELD and the
-// type is lost there. Read through a typed PARAMETER and it is correct.
-pub fn chunkCount(page: RenderedPage) -> i32 {
-    return page.chunks.length;
-}
-
-pub fn chunkAt(page: RenderedPage, index: i32) -> string {
-    return page.chunks.at(index).unwrapOr("");
-}
-
-pub fn bodyOf(page: RenderedPage) -> string {
-    return page.chunks.join("");
-}
-
-pub fn toResponse(page: RenderedPage) -> Response {
-    return Response(status: page.status, body: page.chunks.join(""));
-}
-
-// ── the element surface, as a record of function values ─────────────────────
-//
-// `make` takes the four parts in ONE order — tag, value, attrs, children —
-// because jhonstart's `Element` spells them in another (`tag, value, children,
-// attrs`) and an adapter that maps them is one line, while two orders that must
-// agree are a bug waiting for a reviewer. The adapter lives in the library that
-// owns the element type; front 26 writes it, this front never sees it.
-
-pub type ElementView<El>(
-    make: fn(string, string, Array<#(string, string)>, El[]) -> El,
-    tagOf: fn(El) -> string,
-    valueOf: fn(El) -> string,
-    attrsOf: fn(El) -> Array<#(string, string)>,
-    childrenOf: fn(El) -> El[],
-    isVoid: fn(string) -> bool,
-    isRawText: fn(string) -> bool,
-)
-
-// rakun's own element, for a rakun application that ships no UI library and for
-// this front's own assertions. It is NOT a second `Element`: nothing in this
-// file mentions it, `nodeView` is the only bridge, and the two predicates are
-// still parameters — so rakun keeps no tag list of any kind.
-pub type Node(
-    tag: string,
-    value: string,
-    attrs: Array<#(string, string)>,
-    children: Node[],
-)
-
-pub fn nodeView(
-    isVoid: fn(string) -> bool,
-    isRawText: fn(string) -> bool,
-) -> ElementView<Node> {
-    return ElementView(
-        make: { t, v, a, c -> Node(tag: t, value: v, attrs: a, children: c) },
-        tagOf: { e -> nodeTag(e) },
-        valueOf: { e -> nodeValue(e) },
-        attrsOf: { e -> nodeAttrs(e) },
-        childrenOf: { e -> nodeChildren(e) },
-        isVoid: isVoid,
-        isRawText: isRawText,
-    );
-}
-
-// The four readers are named functions taking a TYPED parameter rather than
-// field reads inside the lambdas: a lambda parameter's type is lost on the
-// erlang row, and a field read off a value whose type was lost lowers to a
-// property read.
-pub fn nodeTag(e: Node) -> string {
-    return e.tag;
-}
-
-pub fn nodeValue(e: Node) -> string {
-    return e.value;
-}
-
-pub fn nodeAttrs(e: Node) -> Array<#(string, string)> {
-    return e.attrs;
-}
-
-pub fn nodeChildren(e: Node) -> Node[] {
-    return e.children;
-}
-
-// ── step 3: escaping is the render, not a step before it ────────────────────
-//
-// Front 01's `escape.html` / `escape.attribute` do not exist yet: `libs/std`
-// has no `escape` module on this binary. The two functions are HERE, in pure
-// botopink, spelled exactly as front 01 specifies them — `&`, `<`, `>` for
-// html, plus `"` and `'` for an attribute — and when front 01 lands they are
-// the two bodies to delete, not to reconcile. `&` is replaced FIRST or the
-// ampersand of an entity is escaped a second time.
-
-pub fn escapeHtml(plain: string) -> string {
-    return plain.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
-}
-
-pub fn escapeAttribute(plain: string) -> string {
-    return escapeHtml(plain).replaceAll("\"", "&quot;").replaceAll("'", "&#39;");
-}
-
-// A `script` or `style` body that closes its own element is REFUSED, never
-// escaped: escaping a raw-text body changes the program it holds — `a > b`
-// becomes `a &gt; b` in CSS and working code becomes text in a script — so the
-// one sequence that can end the element early fails the render with the tag
-// named. There is no flag that turns this into escaping.
-pub fn rawTextProblem(tag: string) -> string {
-    return "rakun ssr: a <" + tag + "> body contains `</" + tag
-        + "` - a raw-text body is emitted verbatim, so the one sequence that "
-        + "closes the element early is refused rather than rewritten into "
-        + "something that no longer runs";
-}
-
-pub fn attrMarkup(attrs: Array<#(string, string)>) -> string {
-    var out = "";
-    for (attrs) { a ->
-        out = out + " " + a._0 + "=\"" + escapeAttribute(a._1) + "\"";
-    };
-    return out;
-}
-
-// The escape hatch, and there are exactly two uses of it in the milestone: the
-// style block and the payload script. Built through the view's own `make`, so
-// this front adds it without touching a frozen element module.
-pub fn raw<El>(v: ElementView<El>, html: string) -> El {
-    val make = v.make;
-    return make("#raw", html, [], []);
-}
-
-pub fn renderNode<El>(v: ElementView<El>, e: El) -> string {
-    return renderIn(v, e, false);
-}
-
-// `rawParent` is what makes "a `#text` inside a raw-text tag is verbatim" a
-// property of the WALK rather than of the node: a text node does not know who
-// its parent is, and the tag that decides is one frame up.
-pub fn renderIn<El>(v: ElementView<El>, e: El, rawParent: bool) -> string {
-    val tagOf = v.tagOf;
-    val valueOf = v.valueOf;
-    val attrsOf = v.attrsOf;
-    val childrenOf = v.childrenOf;
-    val isVoid = v.isVoid;
-    val isRawText = v.isRawText;
-    val tag = tagOf(e);
-    if (tag == "#text") {
-        return if (rawParent) valueOf(e) else escapeHtml(valueOf(e));
-    } else if (tag == "#raw") {
-        return valueOf(e);
-    } else {
-        val rawBody = isRawText(tag);
-        var inner = "";
-        for (childrenOf(e)) { c ->
-            inner = inner + renderIn(v, c, rawBody);
-        };
-        if (rawBody) inner = inner + valueOf(e);
-        if (rawBody && inner.toLower().contains("</" + tag.toLower())) @panic(rawTextProblem(tag));
-        if (tag == "#fragment") {
-            return inner;
-        } else {
-            val open = "<" + tag + attrMarkup(attrsOf(e)) + ">";
-            return if (isVoid(tag)) open else open + inner + "</" + tag + ">";
-        };
-    };
-}
-
-// ── decision 77: `RenderHooks` — the one seam, and it points inwards ────────
-//
-// A full-stack framework built on this pipeline has three things to add to a
-// document: stylesheet `<link>`s and blocking scripts in the head, the deferred
-// bundle tags after the payload, and a style sink that decides WHEN the sheet
-// is serialised. None of that may be reached for from here — an edge from rakun
-// to a bundler would make the server depend on the toolchain that packages it,
-// and rakun would stop being usable without one.
-//
-// So this front declares a record of function values and READS it. It never
-// imports an implementation: `grep` this file for `onze` and the only hits are
-// the `data-onze-*` marker names and `__onzeFill`, which are `contracts.md § 2`
-// STRINGS and not module references. `Onze.run` installs its own record at
-// boot — one line in ITS code — and `islandAttr` is jhonstart front 29's,
-// because the marker belongs to whoever decides which components are islands
-// while the ordinals are assigned here. One definition, passed in.
-//
-// The four sink fields carry no state in their signatures: the sheet is already
-// process-local and rakun serves each request in its own BEAM process, so the
-// implementation holds whatever it needs and rakun holds nothing it would have
-// to name a type for.
-//
-// `void` is not a value in botopink, so `openSink` answers `i32` like every
-// other rakun cell that does something rather than computing something.
-
-pub type RenderHooks(
-    headExtra: fn(string) -> string,
-    bodyExtra: fn(string) -> string,
-    islandAttr: fn(i32) -> #(string, string),
-    openSink: fn() -> i32,
-    collectHead: fn() -> string,
-    collectChunk: fn(string) -> string,
-    closeSink: fn() -> string,
-    // `contracts.md § 6a` says `emittedClasses(sink)` is what the wrapper hands
-    // this front for the payload's `s` key — but the front's own field list
-    // stops at `closeSink`, so a sink filled with classes had no way to answer
-    // them. This is that field. It is read once, after `collectHead`, and it is
-    // never a re-scan of the CSS: the sink records as it fills.
-    emittedClasses: fn() -> string,
-)
-
-pub fn islandId(ordinal: i32) -> string {
-    return "i" + ordinal.toString();
-}
-
-pub fn holeId(ordinal: i32) -> string {
-    return "h" + ordinal.toString();
-}
-
-// `contracts.md § 2`: `data-onze-i="i0"`. The component name and the props live
-// in the payload's `i` array, never on the element.
-pub fn defaultIslandAttr(ordinal: i32) -> #(string, string) {
-    return #("data-onze-i", islandId(ordinal));
-}
-
-pub fn noHeadExtra(route: string) -> string {
-    return "";
-}
-
-pub fn noBodyExtra(route: string) -> string {
-    return "";
-}
-
-pub fn noOpenSink() -> i32 {
+pub fn setHeaderOn(out: ChunkWriter, name: string, value: string) -> i32 {
+    out.setHeader(name, value);
     return 0;
 }
 
-pub fn noCollectHead() -> string {
-    return "";
+pub fn closeOut(out: ChunkWriter) -> @Task<void> {
+    await out.close();
 }
 
-pub fn noCollectChunk(hole: string) -> string {
-    return "";
-}
+// ── the host cells ──────────────────────────────────────────────────────────
 
-pub fn noCloseSink() -> string {
-    return "";
-}
+#[@External.Erlang("rakun_ssr", "begin_page")]
+pub declare fn rkSsrBegin() -> i32;
 
-pub fn noEmittedClasses() -> string {
-    return "";
-}
+#[@External.Erlang("rakun_ssr", "set_status")]
+pub declare fn rkSsrSetStatus(code: i32) -> void;
 
-// A working document with no bundler and no stylesheet pipeline: no extra tags,
-// the marker pair of `contracts.md § 2`, and a sink that collects nothing. An
-// app with no toolchain renders correctly through it.
-pub fn defaultHooks() -> RenderHooks {
-    return RenderHooks(
-        headExtra: { r -> noHeadExtra(r) },
-        bodyExtra: { r -> noBodyExtra(r) },
-        islandAttr: { n -> defaultIslandAttr(n) },
-        openSink: { -> noOpenSink() },
-        collectHead: { -> noCollectHead() },
-        collectChunk: { h -> noCollectChunk(h) },
-        closeSink: { -> noCloseSink() },
-        emittedClasses: { -> noEmittedClasses() },
+#[@External.Erlang("rakun_ssr", "set_header")]
+pub declare fn rkSsrSetHeader(name: string, value: string) -> void;
+
+#[@External.Erlang("rakun_ssr", "write")]
+pub declare fn rkSsrWrite(chunk: string) -> @Task<void>;
+
+#[@External.Erlang("rakun_ssr", "close")]
+pub declare fn rkSsrClose() -> @Task<void>;
+
+#[@External.Erlang("rakun_ssr", "status")]
+pub declare fn rkSsrStatus() -> i32;
+
+#[@External.Erlang("rakun_ssr", "header")]
+pub declare fn rkSsrHeader(name: string) -> string;
+
+#[@External.Erlang("rakun_ssr", "closed")]
+pub declare fn rkSsrClosed() -> bool;
+
+#[@External.Erlang("rakun_ssr", "started")]
+pub declare fn rkSsrStarted() -> bool;
+
+#[@External.Erlang("rakun_ssr", "streamed")]
+pub declare fn rkSsrStreamed() -> bool;
+
+#[@External.Erlang("rakun_ssr", "body")]
+pub declare fn rkSsrBody() -> string;
+
+// Run `render`; `""`, or the reason it raised.
+#[@External.Erlang("rakun_ssr", "guard")]
+pub declare fn rkSsrGuard<T>(render: fn() -> T) -> string;
+
+// The request a renderer is handed: the page pattern's parameters
+// (`name\tvalue` lines), and a query read that marks the render dynamic.
+#[@External.Erlang("rakun_ssr", "page_request")]
+pub declare fn rkSsrPageRequest(req: Request, paramsWire: string) -> Request;
+
+#[@External.Erlang("rakun_ssr", "set_fallback")]
+pub declare fn rkSsrSetFallback(dispatch: fn(req: Request) -> @Task<Response>) -> i32;
+
+#[@External.Erlang("rakun_ssr", "clear_fallback")]
+pub declare fn rkSsrClearFallback() -> i32;
+
+// The writer a dispatch hands its renderer: four doors onto `rakun_ssr.erl`.
+pub fn chunkWriter() -> ChunkWriter {
+    return ChunkWriter(
+        setStatus: { code -> rkSsrSetStatus(code) },
+        setHeader: { name, value -> rkSsrSetHeader(name, value) },
+        write: { chunk -> rkSsrWrite(chunk) },
+        close: { -> rkSsrClose() },
     );
 }
 
-// The record is filled FIELD BY FIELD, not all or nothing: replacing one leaves
-// the other six at their defaults. botopink has no record-update expression, so
-// each field gets a function of its own rather than a caller spelling all seven.
+// ── step 2: the dispatch ────────────────────────────────────────────────────
 
-pub fn withHeadExtra(h: RenderHooks, f: fn(string) -> string) -> RenderHooks {
-    return RenderHooks(
-        headExtra: f,
-        bodyExtra: h.bodyExtra,
-        islandAttr: h.islandAttr,
-        openSink: h.openSink,
-        collectHead: h.collectHead,
-        collectChunk: h.collectChunk,
-        closeSink: h.closeSink,
-        emittedClasses: h.emittedClasses,
-    );
-}
-
-pub fn withBodyExtra(h: RenderHooks, f: fn(string) -> string) -> RenderHooks {
-    return RenderHooks(
-        headExtra: h.headExtra,
-        bodyExtra: f,
-        islandAttr: h.islandAttr,
-        openSink: h.openSink,
-        collectHead: h.collectHead,
-        collectChunk: h.collectChunk,
-        closeSink: h.closeSink,
-        emittedClasses: h.emittedClasses,
-    );
-}
-
-pub fn withIslandAttr(h: RenderHooks, f: fn(i32) -> #(string, string)) -> RenderHooks {
-    return RenderHooks(
-        headExtra: h.headExtra,
-        bodyExtra: h.bodyExtra,
-        islandAttr: f,
-        openSink: h.openSink,
-        collectHead: h.collectHead,
-        collectChunk: h.collectChunk,
-        closeSink: h.closeSink,
-        emittedClasses: h.emittedClasses,
-    );
-}
-
-pub fn withCollectHead(h: RenderHooks, f: fn() -> string) -> RenderHooks {
-    return RenderHooks(
-        headExtra: h.headExtra,
-        bodyExtra: h.bodyExtra,
-        islandAttr: h.islandAttr,
-        openSink: h.openSink,
-        collectHead: f,
-        collectChunk: h.collectChunk,
-        closeSink: h.closeSink,
-        emittedClasses: h.emittedClasses,
-    );
-}
-
-pub fn withEmittedClasses(h: RenderHooks, f: fn() -> string) -> RenderHooks {
-    return RenderHooks(
-        headExtra: h.headExtra,
-        bodyExtra: h.bodyExtra,
-        islandAttr: h.islandAttr,
-        openSink: h.openSink,
-        collectHead: h.collectHead,
-        collectChunk: h.collectChunk,
-        closeSink: h.closeSink,
-        emittedClasses: f,
-    );
-}
-
-pub fn withSink(
-    h: RenderHooks,
-    open: fn() -> i32,
-    head: fn() -> string,
-    chunk: fn(string) -> string,
-    close: fn() -> string,
-) -> RenderHooks {
-    return RenderHooks(
-        headExtra: h.headExtra,
-        bodyExtra: h.bodyExtra,
-        islandAttr: h.islandAttr,
-        openSink: open,
-        collectHead: head,
-        collectChunk: chunk,
-        closeSink: close,
-        emittedClasses: h.emittedClasses,
-    );
-}
-
-pub fn setHooks(h: RenderHooks) -> i32 {
-    return rkSsrSetHooks(h);
-}
-
-pub fn hooksInstalled() -> bool {
-    return rkSsrHasHooks();
-}
-
-pub fn hooks() -> RenderHooks {
-    return rkSsrHooksOr(defaultHooks());
-}
-
-// An island marker: the element the client bundle walks to find a component's
-// own server-rendered DOM. The ordinal is assigned HERE, in render order, and
-// the attribute pair is read through the hooks — so the marker and the payload
-// index cannot disagree.
-pub fn island<El>(v: ElementView<El>, h: RenderHooks, ordinal: i32, inner: El) -> El {
-    val make = v.make;
-    val attrOf = h.islandAttr;
-    return make("div", "", [attrOf(ordinal)], [inner]);
-}
-
-pub fn nextIslandOrdinal() -> i32 {
-    return rkSsrNextIsland();
-}
-
-// ── step 4: the document and the payload ────────────────────────────────────
-//
-// One `<script id="__onze" type="application/json">`, the last thing in
-// `<body>` before the client bundle. JSON is the right choice precisely because
-// only the BROWSER parses it: the server writes it by concatenation, and
-// `std/json`'s lack of a structured walker never comes up.
-//
-// `k` and `z` are allocated by this front and written by fronts 60 and 61. They
-// are SEPARATE BLOBS joined on `pattern` rather than extra columns in `t`, so
-// contract 1 — the route table — stays untouched and its round-trip test keeps
-// testing four fields. A front that wants a per-pattern fact gets a key here; it
-// does not widen the table.
-
-pub type Payload(
-    build: string,
-    pathname: string,
-    pattern: string,
+// The page a pathname reaches: its `P` record and its parameters, or an empty
+// record when no page claims it (a pattern carrying only a layout is not
+// public).
+pub type PageMatch(
+    record: string,
     params: string,
-    query: string,
-    table: string,
-    islands: Array<#(string, string, string)>,
-    actions: Array<#(string, string)>,
-    styles: string,
-    holes: string[],
-    dynamic: bool,
-    kinds: string,
-    slots: string,
 )
 
-pub fn payloadVersion() -> i32 {
-    return 1;
+pub fn matchPage(pathname: string) -> PageMatch {
+    val pages: RouteEntry[] = parseTable(rkAppTable()).filter({ e -> (e.kind == "P") && (e.slot == "") });
+    val found = matchPath(pages, pathname);
+    val m = found.unwrapOr(noMatch());
+    val record: string = if (m.entry.kind == "P") writeTable([m.entry]) else "";
+    var lines: string[] = [];
+    for (m.params.keys()) { k ->
+        lines.push(k + "\t" + m.params.at(k).unwrapOr(""));
+    };
+    return PageMatch(record: record, params: lines.join("\n"));
 }
 
-pub fn emptyPayload() -> Payload {
-    return Payload(
-        build: "",
-        pathname: "",
-        pattern: "",
-        params: "",
+fn noMatch() -> RouteMatch {
+    return RouteMatch(entry: RouteEntry(kind: "", pattern: "", slot: "", verb: ""), params: Dict.empty(), rest: [], chain: []);
+}
+
+fn missingRenderer() -> PageRenderer {
+    return { req, out -> async {
+        out.setStatus(404);
+    } };
+}
+
+pub fn notFoundProblem(pathname: string) -> string {
+    return "rakun ssr: no page claims `" + pathname + "` - a pattern carrying nothing but a layout is not public";
+}
+
+// The dispatch: one function, the status written. The renderer runs inside one
+// request scope in phase `Render`; a renderer that raised before writing is a
+// 500; the response is closed once.
+pub fn servePage(req: Request, out: ChunkWriter) -> @Task<i32> {
+    val found: PageMatch = matchPage(req.path);
+    if (found.record == "") {
+        out.setStatus(404);
+        await out.close();
+        return 404;
+    };
+    val render: PageRenderer = rkAppRender(found.record, missingRenderer());
+    val pageReq: Request = rkSsrPageRequest(req, found.params);
+    val opened: bool = requestLive() == false;
+    val _b = if (opened) beginRequest(RequestScope(
+        id: "page",
+        phase: RequestPhase.Render,
+        method: "GET",
+        path: req.path,
         query: "",
-        table: "",
-        islands: [],
-        actions: [],
-        styles: "",
-        holes: [],
-        dynamic: false,
-        kinds: "",
-        slots: "",
-    );
+        headersWire: "",
+        strict: rkProp("rakun.render.strict") == "true",
+    )) else 0;
+    val previous: RequestPhase = requestPhase();
+    val _p = setPhase(RequestPhase.Render);
+    val failure: string = rkSsrGuard({ -> render(pageReq, out) });
+    val _r = setPhase(previous);
+    val _e = if (opened) endRequest() else "";
+    val failedEarly: bool = (failure != "") && (rkSsrStarted() == false) && (rkSsrClosed() == false);
+    val _f = if (failedEarly) failRender(out) else 0;
+    val _c = await closeIfOpen(out);
+    return rkSsrStatus();
 }
 
-// A JSON string, escaped as JSON requires. The backslash goes FIRST or every
-// escape this function adds is escaped a second time.
-pub fn jsonString(text: string) -> string {
-    return "\"" + text
-        .replaceAll("\\", "\\\\")
-        .replaceAll("\"", "\\\"")
-        .replaceAll("\n", "\\n")
-        .replaceAll("\r", "\\r")
-        .replaceAll("\t", "\\t") + "\"";
+fn failRender(out: ChunkWriter) -> i32 {
+    out.setStatus(500);
+    return 0;
 }
 
-pub fn jsonBool(b: bool) -> string {
-    return if (b) "true" else "false";
+fn closeIfOpen(out: ChunkWriter) -> @Task<i32> {
+    if (rkSsrClosed()) return 0;
+    await out.close();
+    return 0;
 }
 
-pub fn jsonStrings(xs: string[]) -> string {
-    var parts: string[] = [];
-    for (xs) { x ->
-        parts.push(jsonString(x));
-    };
-    return "[" + parts.join(",") + "]";
+// The page path as the core router's fallback: a request no decorator route
+// matched reaches `servePage` with a fresh writer. Over the socket the writer
+// has already written everything; without one the buffer is the `Response`.
+pub fn servePages() -> i32 {
+    return rkSsrSetFallback({ req -> pageResponse(req) });
 }
 
-pub fn jsonPairs(xs: Array<#(string, string)>) -> string {
-    var parts: string[] = [];
-    for (xs) { x ->
-        parts.push("[" + jsonString(x._0) + "," + jsonString(x._1) + "]");
-    };
-    return "[" + parts.join(",") + "]";
+pub fn stopServingPages() -> i32 {
+    return rkSsrClearFallback();
 }
 
-pub fn jsonTriples(xs: Array<#(string, string, string)>) -> string {
-    var parts: string[] = [];
-    for (xs) { x ->
-        parts.push("[" + jsonString(x._0) + "," + jsonString(x._1) + "," + jsonString(x._2) + "]");
-    };
-    return "[" + parts.join(",") + "]";
+pub fn pageResponse(req: Request) -> @Task<Response> {
+    val _b = rkSsrBegin();
+    val status: i32 = await servePage(req, chunkWriter());
+    return Response(status: status, body: rkSsrBody());
 }
 
-// `v` FIRST and `1` as its value: a client that does not recognise the version
-// refuses to hydrate rather than guessing, and it should be able to decide that
-// from the first bytes it reads.
-pub fn writePayload(p: Payload) -> string {
-    return "{\"v\":" + payloadVersion().toString()
-        + ",\"b\":" + jsonString(p.build)
-        + ",\"p\":" + jsonString(p.pathname)
-        + ",\"r\":" + jsonString(p.pattern)
-        + ",\"m\":" + jsonString(p.params)
-        + ",\"q\":" + jsonString(p.query)
-        + ",\"t\":" + jsonString(p.table)
-        + ",\"i\":" + jsonTriples(p.islands)
-        + ",\"a\":" + jsonPairs(p.actions)
-        + ",\"s\":" + jsonString(p.styles)
-        + ",\"h\":" + jsonStrings(p.holes)
-        + ",\"d\":" + jsonBool(p.dynamic)
-        + ",\"k\":" + jsonString(p.kinds)
-        + ",\"z\":" + jsonString(p.slots)
-        + "}";
-}
-
-// `<`, `>` and `&` become `\u003c`, `\u003e`, `\u0026`, and U+2028 / U+2029
-// become `\u2028` / `\u2029`. `</script` is therefore UNREPRESENTABLE inside
-// the block rather than filtered out of it, which is the property that makes an
-// inert `type="application/json"` script safe to carry attacker-controlled
-// strings.
+// ── the query codec and the build id ────────────────────────────────────────
 //
-// The two line separators are found by CODE POINT and never by a literal: a
-// non-ASCII string literal raises `badarg` on the erlang row before any of this
-// front's code runs, so `"\u{2028}"` could not be written even as a needle.
-// `charCodeAt` answers a UTF-16 code unit on node against a codepoint on the
-// BEAM, and the two agree for every character in the BMP, which both of these
-// are.
-pub fn payloadEscape(json: string) -> string {
-    val flat = json
-        .replaceAll("&", "\\u0026")
-        .replaceAll("<", "\\u003c")
-        .replaceAll(">", "\\u003e");
-    var out = "";
-    var i = 0;
-    while (i < flat.length()) {
-        val code = flat.charCodeAt(i);
-        if (code == 8232) {
-            out = out + "\\u2028";
-        } else if (code == 8233) {
-            out = out + "\\u2029";
-        } else {
-            out = out + charOf(flat, i);
-        };
-        i = i + 1;
-    };
-    return out;
-}
-
-pub fn payloadScript(p: Payload) -> string {
-    return "<script id=\"__onze\" type=\"application/json\">"
-        + payloadEscape(writePayload(p))
-        + "</script>";
-}
-
-// The payload text back out of a rendered document, for a reader that has the
-// bytes and not the record. Written with `indexOf`/`sub` rather than a parser:
-// the opening tag is a fixed string this front emitted itself.
-pub fn payloadOf(document: string) -> string {
-    val open = "<script id=\"__onze\" type=\"application/json\">";
-    val at = document.indexOf(open);
-    if (at < 0) return "" else {
-        val rest = sub(document, at + open.length(), document.length());
-        val close = rest.indexOf("</script>");
-        return if (close < 0) rest else sub(rest, 0, close);
-    };
-}
-
-pub fn doctype() -> string {
-    return "<!DOCTYPE html><html lang=\"pt-BR\"><head><meta charset=\"utf-8\">";
-}
-
-pub fn rootOpen() -> string {
-    return "<div data-onze-root=\"\">";
-}
-
-// The shell, the body and the payload, in the one order the sheet allows.
-//
-// The head is written AFTER the body is rendered, because the style sink is
-// filled by the render and serialising it early would write an empty block —
-// which is why the non-streaming path builds the body string first and the
-// document string second. `collectHead` is that serialisation and it is called
-// EXACTLY ONCE per document: the hook's contract is that a second call answers
-// nothing, so a stray earlier call is a drained sheet, not a doubled one.
-//
-// `emilia.flush()` does not appear here and may not: decision 77 makes the four
-// sink calls FIELDS of `RenderHooks`, filled by front 69 and installed by
-// `Onze.run`, so `repository/rakun/` names no module of onze and none of
-// emilia. A document rendered through `defaultHooks()` therefore carries no
-// `<style>` at all, which is what "a working document with no toolchain" means.
-pub fn document(head: string, body: string, p: Payload) -> @Task<string> {
-    val h: RenderHooks = hooks();
-    val collectHead = h.collectHead;
-    val headExtra = h.headExtra;
-    val bodyExtra = h.bodyExtra;
-    val sheet = collectHead();
-    val extra = headExtra(p.pattern);
-    val tail = bodyExtra(p.pattern);
-    return doctype() + head + sheet + extra + "</head><body>"
-        + rootOpen() + body + "</div>"
-        + payloadScript(p)
-        + tail
-        + "</body></html>";
-}
-
-// ── step 2: composition order ───────────────────────────────────────────────
-//
-// For each segment, root-first, the page is wrapped from the INSIDE OUT: the
-// page is innermost, then `not-found`, then `loading`, then `error`, then
-// `template`, then `layout`. So the outermost element is the root layout and
-// the nesting reads `layout > template > error > loading > not-found > page`,
-// which is `NEXTJS-DOCS.md § 4` exactly.
-//
-// The chain this takes is front 22's — `matchPath(…)`'s `chain` field is ALREADY
-// the root-first `L` list, so a caller holding a match never calls
-// `layoutChain` a second time.
-
-pub fn recordLine(kind: string, pattern: string) -> string {
-    return writeTable([RouteEntry(kind: kind, pattern: pattern, slot: "", verb: "")]);
-}
-
-// The wrapper order, innermost first. A convention nobody registered
-// contributes NO wrapper — the nesting shrinks, it does not gain an empty div.
-pub fn wrapperKinds() -> string[] {
-    return ["N", "S", "E", "T", "L"];
-}
-
-pub fn propsChildren<El>(p: LayoutProps<El>) -> El {
-    return p.children;
-}
-
-pub fn emptySlots<El>() -> Dict<string, El> {
-    return Dict.empty();
-}
-
-// The fallback `rkAppRender` answers when a record holds no function. It is
-// never CALLED — every call site asks `rkAppHasRender` first — but the cell is
-// typed and total, so a value of the right shape has to exist.
-pub fn identityLayout<El>() -> fn(props: LayoutProps<El>) -> El {
-    return { p -> propsChildren(p) };
-}
-
-pub fn templateKey(pattern: string, nav: i32) -> string {
-    return pattern + "#" + nav.toString();
-}
-
-pub fn wrapOne<El>(
-    v: ElementView<El>,
-    kind: string,
-    pattern: string,
-    route: PageContext,
-    depth: i32,
-    nav: i32,
-    inner: El,
-) -> El {
-    val line = recordLine(kind, pattern);
-    if (rkAppHasRender(line) == false) {
-        return inner;
-    } else {
-        val f: fn(props: LayoutProps<El>) -> El = rkAppRender(line, identityLayout());
-        val _d = rkSsrSetSelected(depth);
-        val out = f(LayoutProps(route: route, children: inner, slots: emptySlots()));
-        if (kind == "T") {
-            val make = v.make;
-            return make("div", "", [#("data-onze-t", templateKey(pattern, nav))], [out]);
-        } else {
-            return out;
-        };
-    };
-}
-
-// `chain` is front 22's root-first `L` list — the `chain` field of the
-// `RouteMatch` a caller already holds, never a second `layoutChain` call.
-pub fn compose<El>(
-    v: ElementView<El>,
-    chain: RouteEntry[],
-    route: PageContext,
-    nav: i32,
-    page: El,
-) -> El {
-    var tree = page;
-    var depth = chain.length - 1;
-    // The chain is walked INNERMOST FIRST through `reverse()` rather than with
-    // an index: `xs.at(i).unwrapOr(…)` inside a function generic in `El` reads
-    // the element back UNWRAPPED on the erlang row and dies with a
-    // `case_clause` on the record itself. Measured on this binary; the same
-    // expression in `file_router.bp`, in a non-generic function, is correct.
-    val ordered: RouteEntry[] = chain.reverse();
-    for (ordered) { e ->
-        for (wrapperKinds()) { k ->
-            tree = wrapOne(v, k, e.pattern, route, depth, nav, tree);
-        };
-        depth = depth - 1;
-    };
-    return tree;
-}
-
-// Registering a boundary convention. Fronts 30 (`loading.bp`) and 31
-// (`error.bp` / `not-found.bp`) own the MARKERS; the records they write are
-// front 22's `S`, `E` and `N` lines, and this is the cell that puts one in the
-// table with its render beside it until those fronts land. It reaches front
-// 22's registry through front 22's own public cell — nothing here writes a
-// wire record by hand.
-pub fn registerBoundary<El>(kind: string, pattern: string, render: fn(props: LayoutProps<El>) -> El) -> i32 {
-    return rkAppRegisterTemplate(recordLine(kind, pattern), render);
-}
-
-
-// ── steps 5 and 6: the two entry points ─────────────────────────────────────
-//
-// THE PHASE WORD IS NOT BOOKKEEPING. `setPhase(RequestPhase.Render)` is the
-// same word front 12's `rkCachePhase()` reads to decide whether a revalidation
-// is legal, so a pipeline that skips it makes `revalidatePath` raise from
-// inside an action. The phase table of `contracts.md § 5` is ENFORCED, which
-// also means `cookies().set(...)` from a render raises — asserted here, not
-// described.
-//
-// AWAITING CHILDREN, AND WHY `@Task` IS NOT CONCURRENCY. `@Task<T>` lowers
-// EAGERLY on erlang — decision 120, and `libs/std/src/http.bp` says so
-// outright — so a task is a value that has already been computed, and calling
-// two loaders and awaiting both afterwards runs them one after the other at
-// full latency. No assertion over the markup would ever say so. And a `@Task`
-// fn cannot `await` inside a `loop` or a closure, because the await channel is
-// the function's return and a closure has a return of its own. So the pipeline
-// NEVER awaits in a loop and never hands anything an already-started task: it
-// builds an
-// `Array<fn() -> @Task<El>>` — unstarted THUNKS — and gathers them in ONE
-// await. The concurrency comes from spawned processes.
-
-// `std/querystring` COMPILES AND RUNS on both rows now — the compiler fixed the
-// three defects behind the old `{error, undef}` reading and `querystring.parse`
-// from a `test/` file is green on node and on the BEAM as of `4fe1747e`,
-// measured before this line was written. The two functions below survive
-// anyway, for a reason that has nothing to do with loading: std's
-// `querystring` does LESS than they do, and both differences are measured.
-//
-//   * `querystring.parse` DOES NOT percent-decode — `a=%20b` reads back as the
-//     literal `%20b` — and `querystring.stringify` does not percent-encode:
-//     `#("a b", "c;d")` serialises as `a b=c;d`. std says so itself
-//     (`libs/std/src/querystring.bp`: "the call site should pre-escape").
-//     `route.query` is a decoded dict, so the decoding has to happen here.
-//   * `querystring.parse` splits a chunk on EVERY `=` and keeps the second
-//     field, so `a=b=c` loses the `=c`. `splitQuery` cuts at the FIRST `=` and
-//     keeps the rest of the chunk, which is what the form grammar says.
-//
-// Swapping both bodies for the std calls leaves every OTHER cell in this
-// repository GREEN, which is why `ssr_test.bp`'s cell "splitQuery /
-// encodeQuery percent-code, which std's querystring does not" exists: the
-// difference is pinned by an assertion rather than by this comment alone. The percent codec
-// is NOT written a second time — it is std's `encoding` (RFC 3986), read through
-// front 62's `decodeComponent`, which keeps an escape that would decode to a
-// control character exactly as written.
+// `route.query` of the HTML library's page context is a decoded dict built
+// from these (std's `querystring` neither percent-decodes nor splits at the
+// FIRST `=`), and the build id is front 03's content hash the orchestrator
+// stamps.
 
 pub fn splitQuery(query: string) -> Array<#(string, string)> {
     var out: Array<#(string, string)> = [];
@@ -945,295 +283,6 @@ pub fn queryDict(query: string) -> Dict<string, string> {
     return d;
 }
 
-pub fn encodeParams(route: PageContext) -> string {
-    var pairs: Array<#(string, string)> = [];
-    val names: string[] = route.params.keys();
-    for (names) { k ->
-        pairs.push(#(k, ctxParam(route, k)));
-    };
-    return encodeQuery(pairs);
-}
-
-// The build id is front 03's content hash of the build. Front 03 has not
-// landed, so it is read from front 04's property table and is `""` in a project
-// that sets nothing — which is honest: an empty build id is a build nobody
-// stamped, not a build whose hash happens to be empty.
 pub fn buildId() -> string {
     return rkProp("rakun.build.id");
-}
-
-// READING THE SEARCH PARAMS MARKS THE RENDER DYNAMIC, and the marking is done
-// by the accessor rather than by a developer remembering to declare it: the one
-// that is remembered is not the one that leaks. Front 60's prerenderer with
-// `strict` set RAISES here instead of marking, which is how a static export
-// fails the build.
-pub fn searchParams(route: PageContext) -> Dict<string, string> {
-    val _m = markDynamic("searchParams");
-    return route.query;
-}
-
-pub fn searchParam(route: PageContext, name: string) -> string {
-    val _m = markDynamic("searchParams");
-    return route.query.at(name).unwrapOr("");
-}
-
-// One process per thunk, one await. This is the shape every sibling render in
-// this front goes through, and the type is what makes "no call site passes an
-// already-started task" checkable: the parameter is a FUNCTION, so a value
-// does not fit.
-pub fn renderAll<T>(thunks: Array<fn() -> @Task<T>>) -> @Task<Array<T>> {
-    return await rkSsrAll(thunks);
-}
-
-pub fn settledOrder() -> string {
-    return rkSsrSettledOrder();
-}
-
-pub fn concurrentRow() -> bool {
-    return rkSsrConcurrent();
-}
-
-// ── the request scope the pipeline runs inside ──────────────────────────────
-//
-// `beginRender` / `endRender` are the two halves a dispatcher brackets a render
-// with, and `endRender` MUST run on the failure path too — front 62's contract,
-// for front 62's reason: the next request on a keep-alive connection would
-// otherwise start inside this one's frame. botopink has no `finally` and a
-// raise is not catchable from a `.bp` body, so the bracket is the DISPATCHER's
-// and this front provides the two halves rather than pretending a single call
-// can hold it. On the BEAM the frame dies with the serving process, which is
-// why it is process-local; on node it would survive, which is why the rule is
-// written down here as well as in front 62.
-
-pub fn beginRender(id: string, pathname: string, query: string, strict: bool) -> i64 {
-    return beginRequest(RequestScope(
-        id: id,
-        phase: RequestPhase.Render,
-        method: "GET",
-        path: pathname,
-        query: query,
-        headersWire: "",
-        strict: strict,
-    ));
-}
-
-pub fn endRender() -> string {
-    return endRequest();
-}
-
-pub fn notFoundProblem(pathname: string) -> string {
-    return "rakun ssr: no page claims `" + pathname
-        + "` - a pattern carrying nothing but a layout is not public";
-}
-
-// ── step 6: the non-streaming entry point ───────────────────────────────────
-
-pub fn missingPage<El>(v: ElementView<El>, route: PageContext) -> @Task<El> {
-    val make = v.make;
-    return make("#fragment", "", [], []);
-}
-
-pub fn render<El>(v: ElementView<El>, pathname: string, query: string) -> @Task<RenderedPage> {
-    val previous: RequestPhase = requestPhase();
-    val _p = setPhase(RequestPhase.Render);
-    val h: RenderHooks = hooks();
-    val openSink = h.openSink;
-    val emitted = h.emittedClasses;
-    val _o = openSink();
-    val nav = rkSsrNextNav();
-    val table: RouteEntry[] = appTable();
-    var matched = false;
-    var pattern = "";
-    var chain: RouteEntry[] = [];
-    var route: PageContext = PageContext(
-        pathname: pathname,
-        pattern: "",
-        params: Dict.empty(),
-        query: queryDict(query),
-        rest: [],
-    );
-    // The optional binder is a CLOSURE, and a `@Task` body may not await
-    // inside one — so the match is unpacked here and every await happens below
-    // it, in the function's own body.
-    if (matchPath(table, pathname)) { hit ->
-        matched = true;
-        pattern = hit.entry.pattern;
-        chain = hit.chain;
-        route = contextOf(hit, pathname, queryDict(query));
-    };
-    // THE AWAIT IS UNCONDITIONAL, and that is not a simplification. `await`
-    // inside an `if`/`else` block of a `@Task` body is emitted on the
-    // commonJS row inside a NON-ASYNC arrow IIFE — botopink's `if` is an
-    // expression — and node refuses the file at LOAD with `SyntaxError: await
-    // is only valid in async functions`, which takes the whole test file down
-    // rather than one cell. Measured here. So the page function is looked up
-    // for both arms (a miss resolves to `missingPage`, an empty fragment) and
-    // awaited once, at the body's own level.
-    val pageFn: fn(route: PageContext) -> @Task<El> =
-        rkAppRender(recordLine("P", pattern), { r -> missingPage(v, r) });
-    val page = await pageFn(route);
-    var body = "";
-    var status = 404;
-    if (matched) {
-        body = renderNode(v, compose(v, chain, route, nav, page));
-        status = 200;
-    } else {
-        body = renderNode(v, compose(v, rootChain(table), route, nav, page));
-    };
-    val payload = Payload(
-        build: buildId(),
-        pathname: pathname,
-        pattern: pattern,
-        params: encodeParams(route),
-        query: query,
-        table: rkAppTable(),
-        islands: [],
-        actions: [],
-        styles: emitted(),
-        holes: [],
-        dynamic: isDynamic(),
-        kinds: "",
-        slots: "",
-    );
-    val doc = await document("", body, payload);
-    val _back = setPhase(previous);
-    return renderedPage(status, [doc]);
-}
-
-// The layout chain of the root, which is what a 404 is wrapped in: a URL that
-// matches no page still renders inside the layouts that would have wrapped it,
-// and the `not-found` boundary is one of the five wrappers `compose` applies.
-pub fn rootChain(table: RouteEntry[]) -> RouteEntry[] {
-    var out: RouteEntry[] = [];
-    for (table) { e ->
-        if (((e.kind == "L" && e.slot == "") && e.pattern == "/")) {
-            out.push(e);
-        };
-    };
-    return out;
-}
-
-// ── step 5: streaming ───────────────────────────────────────────────────────
-//
-// The response goes out as an ordered list of chunks and front 04's transport
-// writes them.
-//
-//   1. SHELL — doctype, head, open body, the composed tree with each boundary
-//      rendered as `<div data-onze-h="h1">…fallback…</div>`. The payload's `h`
-//      lists every hole still open.
-//   2. FILL — one per resolved boundary, in RESOLUTION order:
-//      `<template data-onze-f="h1">…</template><script>__onzeFill("h1")</script>`.
-//   3. TAIL — the payload script, the sink's closing block, the body extra.
-//
-// Front 30 owns the Suspense boundaries; this front owns the IDS and the chunk
-// PROTOCOL, and guarantees that a hole id in `h` is filled by exactly one fill
-// chunk. A boundary that resolved before the shell was flushed is simply not in
-// the `holes` list — it was rendered inline and never became a hole.
-
-// `Hole<El>` was a record here — `(fallback, body)` — and it is gone: a
-// parameter typed `Array<Hole<El>>` hits the same `generic-arg-skip-forbidden`
-// refusal as the bare thunk array, so a caller passes the fallbacks (already in
-// the shell) and the bodies (an `Array<fn() -> @Task<El>>`) as two lists. A
-// record nothing can take as a parameter is surface with no use.
-
-// The shell marker for a hole. The ordinal is assigned HERE, as an ordinal in
-// SHELL order, and is not derived from the route, the pattern or the boundary's
-// position in the tree.
-pub fn holeMarker<El>(v: ElementView<El>, ordinal: i32, fallback: El) -> El {
-    val make = v.make;
-    return make("div", "", [#("data-onze-h", holeId(ordinal))], [fallback]);
-}
-
-pub fn nextHoleOrdinal() -> i32 {
-    return rkSsrNextHole();
-}
-
-pub fn fillChunk(id: string, markup: string) -> string {
-    return "<template data-onze-f=\"" + id + "\">" + markup + "</template>"
-        + "<script>__onzeFill(\"" + id + "\")</script>";
-}
-
-pub fn shellChunk(head: string, body: string) -> string {
-    val h: RenderHooks = hooks();
-    val collectHead = h.collectHead;
-    val headExtra = h.headExtra;
-    return doctype() + head + collectHead() + headExtra("") + "</head><body>"
-        + rootOpen() + body + "</div>";
-}
-
-pub fn indicesOf(order: string) -> i32[] {
-    var out: i32[] = [];
-    if (order == "") return out else {
-        for (order.split(",")) { part ->
-            if (part != "") {
-                out.push(toI32(part));
-            };
-        };
-        return out;
-    };
-}
-
-// The bodies are gathered in ONE await over unstarted thunks. The fills then go
-// out in the order the gather SETTLED in — which a gather by index cannot also
-// answer, so the host records it on the side — while the ids stay in shell
-// order. Two boundaries that resolve out of order therefore produce two fill
-// chunks in resolution order, each carrying the markup of its own boundary.
-// **The streaming entry is three calls and not one, and the reason is a
-// compiler gap, not a design choice.** A parameter typed
-// `Array<fn() -> @Task<El>>` in a function that also takes an
-// `ElementView<El>` is refused with `generic-arg-skip-forbidden: cannot skip a
-// defaulted argument while providing a later one` — reported on the token AFTER
-// the parameter, at any position in the list. Each half compiles on its own;
-// the two together do not. So the gather keeps its own function, where the
-// thunk type is the thing that makes "no call site passes an already-started
-// task" checkable, and the chunk protocol keeps its own, where nothing is
-// generic at all:
-//
-// ```bp
-// val resolved = await renderAll(bodies);          // ONE await, over thunks
-// val markups = markupAll(v, resolved);            // the walker, per boundary
-// val page = streamChunks(head, shell, ids, markups, p);
-// ```
-
-pub fn markupAll<El>(v: ElementView<El>, resolved: Array<El>) -> string[] {
-    var out: string[] = [];
-    for (resolved) { e ->
-        out.push(renderNode(v, e));
-    };
-    return out;
-}
-
-// The chunk list. Nothing here is generic: by this point every boundary is a
-// finished string, which is also why a fill chunk can carry the markup of its
-// own boundary and nothing else.
-//
-// The fills go out in the order the gather SETTLED in — which a gather by index
-// cannot also answer, so the host records it on the side — while the IDS stay
-// in shell order. Two boundaries that resolve out of order therefore produce
-// two fill chunks in resolution order, each carrying its own markup, and every
-// id in the payload's `h` is filled by exactly one chunk.
-pub fn streamChunks(
-    head: string,
-    shell: string,
-    ids: string[],
-    markups: string[],
-    p: Payload,
-) -> RenderedPage {
-    val h: RenderHooks = hooks();
-    val collectChunk = h.collectChunk;
-    val closeSink = h.closeSink;
-    val bodyExtra = h.bodyExtra;
-    var chunks: string[] = [shellChunk(head, shell)];
-    for (indicesOf(settledOrder())) { i ->
-        val id = ids.at(i).unwrapOr("");
-        val markup = markups.at(i).unwrapOr("");
-        chunks.push(collectChunk(id) + fillChunk(id, markup));
-    };
-    chunks.push(payloadScript(p) + closeSink() + bodyExtra(p.pattern) + "</body></html>");
-    return renderedPage(200, chunks);
-}
-
-pub fn emptyOf<El>(v: ElementView<El>) -> El {
-    val make = v.make;
-    return make("#fragment", "", [], []);
 }

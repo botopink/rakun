@@ -1,127 +1,102 @@
-//// rakun — the file-convention route table.
+//// rakun — the file-convention registry (front 22 steps 2 and 6): table
+//// records and opaque page renderers.
 ////
-//// Every assertion here runs on BOTH rows (`botopink test` and
-//// `botopink test --target erlang`) from this one file, which is the point of a
-//// boundary front: a wire format or a precedence order only one target agrees
-//// with is the bug this front exists to prevent.
+//// A page is registered the way the orchestrator registers one — a renderer
+//// that writes plain text through a `ChunkWriter` (front 23) — and a UI record
+//// the way the orchestrator copies one in. Nothing here names an element: the
+//// registry holds a renderer it never calls.
 
+import {testing.asserts} from "std";
+import {Request} from "rakun";
 import {
-    PageContext,
-    LayoutProps,
-    emptyParams,
-    entryLine,
-    rkAppHandler,
+    rkAppRegisterEntry,
+    rkAppRegisterPage,
+    rkAppRegisterHandler,
     rkAppTable,
     rkAppCount,
     rkAppHasRender,
-    rkAppRender,
     rkAppReset,
+    entryLine,
     appTable,
-    contextOf,
-    rkAppPage,
-    rkAppLayout,
+    unknownKindProblem,
+    duplicatePageProblem,
 } from "file_router";
-import {table.RouteEntry, match: {matchPath, paramOf}} from "routing";
-import {Request} from "rakun";
-import {collections.Dict} from "std";
+import {ChunkWriter, PageRenderer, matchPage, writeTo} from "ssr";
+import {match.matchPath} from "routing";
 
-// The grammar, wire and matcher tests (steps 1, 3 and 4) moved with the code to
-// the bundled library `routing` (`libs/routing/test/{segment,table,match}_test.bp`,
-// `01-std/04-routing-lib` Step 3). What stays is rakun's: the registry, the
-// host table and the context a page is handed.
-
-// ── step 2: the registry ────────────────────────────────────────────────────
-//
-// `El` is `string` here: `Element` is jhonstart's type and rakun declares no
-// dependency on it, which is exactly why every registry cell is generic.
-
-fn probePage(route: PageContext) -> @Task<string> {
-    return "page:" + route.pattern;
+fn textPage(label: string) -> PageRenderer {
+    return { req, out -> writeText(out, label) };
 }
 
-fn probeLayout(props: LayoutProps<string>) -> string {
-    return "layout:" + props.children;
+// The body as a named fn writing through `writeTo`: a module that imports
+// `ChunkWriter` cannot call its function-typed fields directly on the erlang
+// backend (a compiler gap, recorded).
+fn writeText(out: ChunkWriter, label: string) -> @Task<void> {
+    await writeTo(out, label);
 }
 
-fn noLayout(props: LayoutProps<string>) -> string {
-    return "none:" + props.children;
+fn noop(req: Request) -> string {
+    return "";
 }
 
-fn probeHandler(req: Request) -> string {
-    return "handled";
+test "rakun routing: an entry becomes one line of the host table" {
+    val _r = rkAppReset();
+    val _a = rkAppRegisterEntry("L", "blog", "");
+    assert rkAppTable() == "L|/blog";
+    val _b = rkAppRegisterEntry("L", "", "");
+    assert rkAppTable() == "L|/blog\nL|/";
+    val _c = rkAppRegisterEntry("S", "dashboard/@team", "");
+    assert rkAppTable().endsWith("\nS|/dashboard|team");
+    val _z = rkAppReset();
 }
 
-fn rootContext() -> PageContext {
-    val none: string[] = [];
-    return PageContext(
-        pathname: "/",
-        pattern: "/",
-        params: emptyParams(),
-        query: emptyParams(),
-        rest: none,
-    );
+test "rakun routing: a kind outside the eight letters is refused naming the letter" {
+    val _r = rkAppReset();
+    try asserts.throwsWith({ ->
+        val _x = rkAppRegisterEntry("Q", "blog", "");
+        0;
+    }, unknownKindProblem("Q"));
+    assert rkAppCount() == 0;
 }
 
-test "rakun routing: a record becomes one line of the host table" {
-    assert entryLine("P", "blog/[slug]", "") == "P|/blog/[slug]";
-    assert entryLine("L", "", "") == "L|/";
-    assert entryLine("D", "dashboard/@team", "") == "D|/dashboard|team";
-    assert entryLine("R", "api/posts", "GET") == "R|/api/posts||GET";
-    assert entryLine("P", "(marketing)/about", "") == "P|/about";
-}
-
-test "rakun routing: the registry appends in order and keeps each renderer" {
-    val _reset = rkAppReset();
-    val _l = rkAppLayout("", { props -> probeLayout(props) });
-    val _p = rkAppPage("blog/[slug]", { route -> probePage(route) });
-    val _h = rkAppHandler("GET", "api/posts", { req -> probeHandler(req) });
-    assert rkAppCount() == 3;
-    assert rkAppTable() == "L|/\nP|/blog/[slug]\nR|/api/posts||GET";
-    val back = appTable();
-    assert back.length == 3;
-    assert back.at(1).unwrapOr(RouteEntry(kind: "", pattern: "", slot: "", verb: "")).kind == "P";
-    assert rkAppHasRender("L|/");
+test "rakun routing: a page is a P record whose renderer the dispatch finds" {
+    val _r = rkAppReset();
+    val _p = rkAppRegisterPage("blog/[slug]", textPage("post"));
+    assert rkAppTable() == "P|/blog/[slug]";
     assert rkAppHasRender("P|/blog/[slug]");
-    assert rkAppHasRender("P|/nothing-registered").negate();
+    val m = matchPage("/blog/hello");
+    assert m.record == "P|/blog/[slug]";
+    assert m.params == "slug\thello";
+    val _z = rkAppReset();
 }
 
-test "rakun routing: a registered renderer comes back callable, with a fallback" {
-    val _reset = rkAppReset();
-    val _l = rkAppLayout("", { props -> probeLayout(props) });
-    val found = rkAppRender("L|/", { props -> noLayout(props) });
-    val lp = LayoutProps(route: rootContext(), children: "x", slots: Dict.empty());
-    assert found(lp) == "layout:x";
-    val missing = rkAppRender("L|/nothing", { props -> noLayout(props) });
-    assert missing(lp) == "none:x";
+test "rakun routing: a second renderer for one pattern is refused naming the pattern" {
+    val _r = rkAppReset();
+    val _p = rkAppRegisterPage("blog/[slug]", textPage("one"));
+    try asserts.throwsWith({ ->
+        val _q = rkAppRegisterPage("blog/[slug]", textPage("two"));
+        0;
+    }, duplicatePageProblem("/blog/[slug]"));
+    assert rkAppCount() == 1;
+    val _z = rkAppReset();
 }
 
-test "rakun routing: the host table and the botopink matcher agree" {
-    val _reset = rkAppReset();
-    val _l = rkAppLayout("", { props -> probeLayout(props) });
-    val _b = rkAppLayout("blog", { props -> probeLayout(props) });
-    val _p = rkAppPage("blog/[slug]", { route -> probePage(route) });
-    val table = appTable();
-    var slug = "";
-    var depth = 0;
-    if (matchPath(table, "/blog/hello")) { hit ->
-        slug = paramOf(hit, "slug");
-        depth = hit.chain.length;
-    };
-    assert slug == "hello";
-    assert depth == 2;
+test "rakun routing: a handler is an R record in the same table" {
+    val _r = rkAppReset();
+    val _h = rkAppRegisterHandler("GET", "api/posts", { req -> noop(req) });
+    assert rkAppTable() == "R|/api/posts||GET";
+    assert rkAppHasRender("R|/api/posts||GET");
+    val _z = rkAppReset();
 }
 
-test "rakun routing: a context carries the match through to a page" {
-    val _reset = rkAppReset();
-    val _p = rkAppPage("blog/[slug]", { route -> probePage(route) });
-    val table = appTable();
-    var pattern = "";
-    var pathname = "";
-    if (matchPath(table, "/blog/hello")) { hit ->
-        val ctx = contextOf(hit, "/blog/hello", emptyParams());
-        pattern = ctx.pattern;
-        pathname = ctx.pathname;
-    };
-    assert pattern == "/blog/[slug]";
-    assert pathname == "/blog/hello";
+test "rakun routing: the host table and the bundled matcher agree" {
+    val _r = rkAppReset();
+    val _a = rkAppRegisterEntry("L", "", "");
+    val _b = rkAppRegisterPage("", textPage("home"));
+    val _c = rkAppRegisterPage("(marketing)/about", textPage("about"));
+    val found = matchPath(appTable(), "/about");
+    assert found.map({ m -> m.entry.pattern }).unwrapOr("") == "/about";
+    assert matchPage("/nowhere").record == "";
+    assert entryLine("P", "(marketing)/about", "", "") == "P|/about";
+    val _z = rkAppReset();
 }

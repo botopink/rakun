@@ -1,744 +1,300 @@
-// rakun — the SSR pipeline (front 23): the rendered page, the composition
-// order, the escaping walker, the document and its payload, the chunk protocol
-// and the two entry points.
-//
-// EVERY CELL IN THIS FILE RUNS ON BOTH ROWS. The render, the escaping and the
-// chunk writer are the erlang half of the front; the payload reader and the
-// streaming-hole swapper are the js half; the payload format is the contract
-// between them, so a suite that only wrote or only read would prove nothing
-// about the boundary this front exists to hold.
-//
-// THE ELEMENT THE CELLS RENDER is rakun's own `Node`, reached through
-// `nodeView`. jhonstart's `Element` is not importable here and must not become
-// importable: rakun declares no dependency on it. The two tag predicates are
-// PARAMETERS of the view — front 94's `isVoidTag` / `isRawTextTag` in a real
-// application — and the two written here are this file's fixture, deliberately
-// two tags wide so that nobody mistakes them for a second void list.
+//// rakun — the page path (front 23): `ChunkWriter`, `PageRenderer`, `page`
+//// and `servePage`.
+////
+//// Every renderer here writes fixed plain-text chunks: the assertions are about
+//// dispatch, scope, phase, status and the bytes written — never about markup,
+//// which rakun does not build (decision 113). The first half drives the
+//// dispatch without a socket (the writer buffers, and the dispatch answers the
+//// buffer); the second half over front 04's listener, where the writer streams
+//// HTTP/1.1 chunks and a raw client reads them as bytes.
 
-import {testing.asserts} from "std";
-import {collections.Dict} from "std";
-import {io.clock} from "std";
+import {testing.asserts, async} from "std";
+import {Request, Response, rkSetProp, rkDispatchHttp, rkServe} from "rakun";
+import {rkAppReset} from "file_router";
 import {
-    LayoutProps,
-    PageContext,
-    contextOf,
-    emptyParams,
-    appTable,
-    rkAppLayout,
-    rkAppPage,
-    rkAppReset,
-} from "file_router";
-import {table.RouteEntry, match.matchPath} from "routing";
-import {
-    Cookies,
-    RequestPhase,
-    RequestScope,
-    beginRequest,
-    CookieAttrs,
-    cookieDefaults,
-    cookies,
-    endRequest,
-    phaseName,
-    requestPhase,
-    rkReqShareBump,
-    rkReqShareCount,
-    rkReqShareReset,
-    rkReqSleep,
-} from "rakun";
-import {
-    ElementView,
-    Node,
-    RenderedPage,
-    compose,
-    escapeAttribute,
-    escapeHtml,
-    headerOfPage,
-    htmlHeaders,
-    Payload,
-    RenderHooks,
-    defaultHooks,
-    document,
-    emptyPayload,
-    hooks,
-    island,
-    islandId,
-    jsonString,
-    nextIslandOrdinal,
-    nodeView,
-    payloadEscape,
-    payloadOf,
-    payloadScript,
-    raw,
-    beginRender,
-    concurrentRow,
-    endRender,
-    holeId,
-    holeMarker,
-    markupAll,
-    nextHoleOrdinal,
-    render,
-    renderAll,
-    bodyOf,
-    chunkAt,
-    chunkCount,
-    registerBoundary,
-    renderNode,
-    searchParam,
+    ChunkWriter,
+    PageRenderer,
+    page,
+    servePage,
+    servePages,
+    stopServingPages,
+    chunkWriter,
+    writeTo,
+    setStatusOn,
+    setHeaderOn,
+    closeOut,
+    rkSsrBegin,
+    rkSsrHeader,
     splitQuery,
     encodeQuery,
-    settledOrder,
-    streamChunks,
-    withSink,
-    renderedPage,
-    rkSsrPayloadKeys,
-    rkSsrPayloadText,
-    rkSsrReset,
-    setHooks,
-    withCollectHead,
-    withHeadExtra,
-    writePayload,
-    selected,
-    toResponse,
 } from "ssr";
+import {RequestPhase, requestPhase, isDynamic, cookies} from "rakun/request_context";
 
-// ── the fixture view ────────────────────────────────────────────────────────
+// ── renderers ───────────────────────────────────────────────────────────────
 
-pub fn fixtureVoid(tag: string) -> bool {
-    return tag == "input" || tag == "br";
+// Every renderer body is a named fn over a typed `ChunkWriter` and writes
+// through `writeTo` / `setStatusOn` / `setHeaderOn` / `closeOut`: a module that
+// imports `ChunkWriter` cannot call its function-typed fields directly on the
+// erlang backend (a compiler gap, recorded).
+fn chunks(parts: string[]) -> PageRenderer {
+    return { req, out -> writeAll(out, parts) };
 }
 
-pub fn fixtureRawText(tag: string) -> bool {
-    return tag == "script" || tag == "style";
+fn writeAll(out: ChunkWriter, parts: string[]) -> @Task<void> {
+    for (parts) { p ->
+        val _w = writeTo(out, p);
+    };
 }
 
-pub fn view() -> ElementView<Node> {
-    return nodeView({ t -> fixtureVoid(t) }, { t -> fixtureRawText(t) });
+fn redirecting() -> PageRenderer {
+    return { req, out -> redirectBody(out) };
 }
 
-pub fn el(tag: string, attrs: Array<#(string, string)>, children: Node[]) -> Node {
-    return Node(tag: tag, value: "", attrs: attrs, children: children);
+fn redirectBody(out: ChunkWriter) -> @Task<void> {
+    val _st = setStatusOn(out, 307);
+    val _sh = setHeaderOn(out, "location", "/login");
+    await closeOut(out);
 }
 
-pub fn txt(value: string) -> Node {
-    return Node(tag: "#text", value: value, attrs: [], children: []);
+fn ownNotFound() -> PageRenderer {
+    return { req, out -> notFoundBody(out) };
 }
 
-pub fn ssrContext(pathname: string, pattern: string) -> PageContext {
-    return PageContext(
-        pathname: pathname,
-        pattern: pattern,
-        params: emptyParams(),
-        query: Dict.empty(),
-        rest: [],
-    );
+fn notFoundBody(out: ChunkWriter) -> @Task<void> {
+    val _st = setStatusOn(out, 404);
+    await writeTo(out, "nothing here");
 }
 
-// A layout that names itself and keeps its children, which is what makes the
-// nesting readable as a string rather than asserted in prose.
-pub fn wrapLayout(name: string, props: LayoutProps<Node>) -> Node {
-    return el(name, [], [props.children]);
+fn lateStatus() -> PageRenderer {
+    return { req, out -> lateBody(out) };
 }
 
-pub fn depthLayout(props: LayoutProps<Node>) -> Node {
-    return el("d" + selected().toString(), [], [props.children]);
+fn lateBody(out: ChunkWriter) -> @Task<void> {
+    await writeTo(out, "first");
+    val _st = setStatusOn(out, 500);
 }
 
-// ── step 1: the rendered page ───────────────────────────────────────────────
-
-test "rakun ssr: a rendered page carries headers and an ordered chunk list" {
-    val page: RenderedPage = renderedPage(200, ["<html>", "<body>", "</html>"]);
-    assert page.status == 200;
-    assert chunkCount(page) == 3;
-    assert headerOfPage(page, "Content-Type") == "text/html; charset=utf-8";
-    assert htmlHeaders().length == 1;
+fn afterClose() -> PageRenderer {
+    return { req, out -> afterCloseBody(out) };
 }
 
-test "rakun ssr: toResponse joins the chunks and is the only place that does" {
-    val page: RenderedPage = renderedPage(404, ["a", "b", "c"]);
-    val res = toResponse(page);
+fn afterCloseBody(out: ChunkWriter) -> @Task<void> {
+    await closeOut(out);
+    await writeTo(out, "too late");
+}
+
+fn phaseProbe() -> PageRenderer {
+    return { req, out -> phaseBody(out) };
+}
+
+fn phaseBody(out: ChunkWriter) -> @Task<void> {
+    val inRender: bool = requestPhase() == RequestPhase.Render;
+    await writeTo(out, if (inRender) "render" else "other");
+}
+
+fn cookieWriter() -> PageRenderer {
+    return { req, out -> cookieBody(out) };
+}
+
+fn cookieBody(out: ChunkWriter) -> @Task<void> {
+    val _c = setCookieNow();
+    await writeTo(out, "unreachable");
+}
+
+fn setCookieNow() -> i32 {
+    return cookies().set("s", "1");
+}
+
+fn navRaiser() -> PageRenderer {
+    return { req, out -> navBody(out) };
+}
+
+fn navBody(out: ChunkWriter) -> @Task<void> {
+    val _n = raiseNav();
+    await writeTo(out, "unreachable");
+}
+
+#[@External.Erlang("""erlang:error({nav, <<"nav:not-found">>})""")]
+declare fn raiseNav() -> i32;
+
+fn paramsEcho() -> PageRenderer {
+    return { req, out -> paramsBody(req, out) };
+}
+
+fn paramsBody(req: Request, out: ChunkWriter) -> @Task<void> {
+    await writeTo(out, req.param("slug") + "|" + req.query("tab"));
+}
+
+fn slowSecond() -> PageRenderer {
+    return { req, out -> slowBody(out) };
+}
+
+fn slowBody(out: ChunkWriter) -> @Task<void> {
+    await writeTo(out, "shell;");
+    val _s = sleepMs(400);
+    await writeTo(out, "tail");
+}
+
+fn plainText() -> PageRenderer {
+    return { req, out -> plainBody(out) };
+}
+
+fn plainBody(out: ChunkWriter) -> @Task<void> {
+    val _sh = setHeaderOn(out, "content-type", "text/plain");
+    await writeTo(out, "x");
+}
+
+#[@External.Erlang("rakun_request_context", "sleep")]
+declare fn sleepMs(ms: i32) -> i32;
+
+fn fresh() -> i32 {
+    val _r = rkAppReset();
+    return servePages();
+}
+
+fn get(path: string) -> Response {
+    return rkDispatchHttp("GET", path, "{}", "{}", "");
+}
+
+// ── step 1 and step 2, without a socket ─────────────────────────────────────
+
+test "rakun ssr: a URL with no page answers 404 and no renderer runs" {
+    val _f = fresh();
+    val _p = page("", chunks(["home"]));
+    val res: Response = get("/missing");
     assert res.status == 404;
+    assert res.body == "";
+}
+
+test "rakun ssr: a page's chunks are the body, in the order written" {
+    val _f = fresh();
+    val _p = page("docs", chunks(["a", "b", "c"]));
+    val res: Response = get("/docs");
+    assert res.status == 200;
     assert res.body == "abc";
 }
 
-// ── step 3: the escaping walker ─────────────────────────────────────────────
-
-test "rakun ssr: a text node carrying a script tag renders with no `<` at all" {
-    val v: ElementView<Node> = view();
-    val out = renderNode(v, txt("<script>alert(1)</script>"));
-    assert out.contains("<") == false;
-    assert out == "&lt;script&gt;alert(1)&lt;/script&gt;";
-}
-
-test "rakun ssr: the ampersand is escaped first, so an entity is not doubled" {
-    assert escapeHtml("a & b") == "a &amp; b";
-    assert escapeHtml("&lt;") == "&amp;lt;";
-    assert escapeAttribute("say \"hi\" & 'bye'") == "say &quot;hi&quot; &amp; &#39;bye&#39;";
-}
-
-test "rakun ssr: an attribute value containing a quote renders as an entity" {
-    val v: ElementView<Node> = view();
-    val out = renderNode(v, el("div", [#("title", "a \"quoted\" <b>")], []));
-    assert out == "<div title=\"a &quot;quoted&quot; &lt;b&gt;\"></div>";
-    assert out.contains("\"a \"") == false;
-}
-
-test "rakun ssr: a void tag emits no closing tag" {
-    val v: ElementView<Node> = view();
-    val out = renderNode(v, el("input", [#("name", "q")], []));
-    assert out == "<input name=\"q\">";
-    assert out.contains("</input>") == false;
-}
-
-test "rakun ssr: a raw-text body is verbatim, in both directions" {
-    val v: ElementView<Node> = view();
-    val style = renderNode(v, el("style", [], [txt("a > b { color: red }")]));
-    assert style == "<style>a > b { color: red }</style>";
-    val script = renderNode(v, el("script", [], [txt("if (a && b) go();")]));
-    assert script == "<script>if (a && b) go();</script>";
-}
-
-test "rakun ssr: a raw-text body that closes its own element is refused, in any case" {
-    val v: ElementView<Node> = view();
+test "rakun ssr: a second page for one pattern is refused naming it" {
+    val _f = fresh();
+    val _p = page("docs", chunks(["a"]));
     try asserts.throwsWith({ ->
-        renderNode(v, el("script", [], [txt("var a = \"</script>\";")]));
+        val _q = page("docs", chunks(["b"]));
         0;
-    }, "a <script> body contains");
-    try asserts.throwsWith({ ->
-        renderNode(v, el("style", [], [txt("/* </STYLE> */")]));
-        0;
-    }, "a <style> body contains");
+    }, "a page is already registered for `/docs`");
 }
 
-test "rakun ssr: `#raw` is the one escape hatch and renders verbatim" {
-    val v: ElementView<Node> = view();
-    assert renderNode(v, raw(v, "<b>x</b>")) == "<b>x</b>";
+test "rakun ssr: a renderer's own 307 with location and no body" {
+    val _f = fresh();
+    val _p = page("private", redirecting());
+    val res: Response = get("/private");
+    assert res.status == 307;
+    assert res.body == "";
+    assert rkSsrHeader("location") == "/login";
 }
 
-test "rakun ssr: the walker is a superset of the frozen renderer, not a divergence" {
-    val v: ElementView<Node> = view();
-    val tree = el("div", [#("class", "post")], [el("p", [], [txt("hi")])]);
-    assert renderNode(v, tree) == "<div class=\"post\"><p>hi</p></div>";
-    assert renderNode(v, Node(tag: "#fragment", value: "", attrs: [], children: [txt("a"), txt("b")])) == "ab";
+test "rakun ssr: a renderer's own 404 with a body" {
+    val _f = fresh();
+    val _p = page("gone", ownNotFound());
+    val res: Response = get("/gone");
+    assert res.status == 404;
+    assert res.body == "nothing here";
 }
 
-// ── step 2: composition order ───────────────────────────────────────────────
-
-test "rakun ssr: one segment holding all six conventions nests layout > template > error > loading > not-found > page" {
-    val _r = rkAppReset();
-    val _s = rkSsrReset();
-    val v: ElementView<Node> = view();
-    val _l = rkAppLayout("", { props -> wrapLayout("layout", props) });
-    val _t = registerBoundary("T", "/", { props -> wrapLayout("template", props) });
-    val _e = registerBoundary("E", "/", { props -> wrapLayout("error", props) });
-    val _o = registerBoundary("S", "/", { props -> wrapLayout("loading", props) });
-    val _n = registerBoundary("N", "/", { props -> wrapLayout("not-found", props) });
-    val tree = compose(v, [RouteEntry(kind: "L", pattern: "/", slot: "", verb: "")], ssrContext("/", "/"), 1, el("page", [], []));
-    val out = renderNode(v, tree);
-    assert out.startsWith("<layout><div data-onze-t=\"/#1\"><template><error><loading><not-found><page>");
-    assert out.endsWith("</page></not-found></loading></error></template></div></layout>");
+test "rakun ssr: setStatus after the first write fails the request and the status stays" {
+    val _f = fresh();
+    val _p = page("late", lateStatus());
+    val res: Response = get("/late");
+    assert res.status == 200;
+    assert res.body == "first";
 }
 
-test "rakun ssr: a segment with no template contributes no wrapper" {
-    val _r = rkAppReset();
-    val _s = rkSsrReset();
-    val v: ElementView<Node> = view();
-    val _l = rkAppLayout("", { props -> wrapLayout("layout", props) });
-    val tree = compose(v, [RouteEntry(kind: "L", pattern: "/", slot: "", verb: "")], ssrContext("/", "/"), 1, el("page", [], []));
-    assert renderNode(v, tree) == "<layout><page></page></layout>";
-    assert renderNode(v, tree).contains("div") == false;
+test "rakun ssr: a call on the writer after close fails the request, and it is closed once" {
+    val _f = fresh();
+    val _p = page("closed", afterClose());
+    val res: Response = get("/closed");
+    assert res.status == 200;
+    assert res.body == "";
 }
 
-test "rakun ssr: the root layout is outermost and the page innermost for a real chain" {
-    val _r = rkAppReset();
-    val _s = rkSsrReset();
-    val v: ElementView<Node> = view();
-    val _root = rkAppLayout("", { props -> wrapLayout("root", props) });
-    val _blog = rkAppLayout("blog", { props -> wrapLayout("blog", props) });
-    val _page = rkAppPage("blog/[slug]", { route -> pageOf(route) });
-    val table = appTable();
-    var out = "";
-    if (matchPath(table, "/blog/hello")) { hit ->
-        val ctx = contextOf(hit, "/blog/hello", emptyParams());
-        out = renderNode(v, compose(v, hit.chain, ctx, 1, el("page", [], [])));
-    };
-    assert out == "<root><blog><page></page></blog></root>";
-}
-
-test "rakun ssr: a template key changes between two renders of the same route" {
-    val _r = rkAppReset();
-    val _s = rkSsrReset();
-    val v: ElementView<Node> = view();
-    val _t = registerBoundary("T", "/", { props -> wrapLayout("template", props) });
-    val chain = [RouteEntry(kind: "L", pattern: "/", slot: "", verb: "")];
-    val first = renderNode(v, compose(v, chain, ssrContext("/", "/"), 1, el("page", [], [])));
-    val second = renderNode(v, compose(v, chain, ssrContext("/", "/"), 2, el("page", [], [])));
-    assert first.contains("data-onze-t=\"/#1\"");
-    assert second.contains("data-onze-t=\"/#2\"");
-    assert first == second == false;
-}
-
-test "rakun ssr: each layout render receives its own selected depth, root first" {
-    val _r = rkAppReset();
-    val _s = rkSsrReset();
-    val v: ElementView<Node> = view();
-    val _root = rkAppLayout("", { props -> depthLayout(props) });
-    val _blog = rkAppLayout("blog", { props -> depthLayout(props) });
-    val _year = rkAppLayout("blog/[year]", { props -> depthLayout(props) });
-    val _page = rkAppPage("blog/[year]/[slug]", { route -> pageOf(route) });
-    val table = appTable();
-    var out = "";
-    if (matchPath(table, "/blog/2026/hello")) { hit ->
-        val ctx = contextOf(hit, "/blog/2026/hello", emptyParams());
-        out = renderNode(v, compose(v, hit.chain, ctx, 1, el("page", [], [])));
-    };
-    assert out == "<d0><d1><d2><page></page></d2></d1></d0>";
-}
-
-pub fn pageOf(route: PageContext) -> @Task<Node> {
-    return el("page", [], []);
-}
-
-// ── step 4: the document and the payload ────────────────────────────────────
-
-pub fn samplePayload() -> Payload {
-    return Payload(
-        build: "b0",
-        pathname: "/blog/hello",
-        pattern: "/blog/[slug]",
-        params: "slug=hello",
-        query: "page=2",
-        table: "L|/\nP|/blog/[slug]",
-        islands: [#("i0", "Counter", "n=1"), #("i1", "Toggle", "on=")],
-        actions: [#("like", "a1")],
-        styles: "a1b2 c3d4",
-        holes: ["h1"],
-        dynamic: true,
-        kinds: "/blog/[slug]|dynamic",
-        slots: "/dashboard|team",
-    );
-}
-
-test "rakun ssr: the payload emits `v` first and `1` as its value" {
-    val json = writePayload(samplePayload());
-    assert json.startsWith("{\"v\":1,");
-    assert rkSsrPayloadText(json, "v") == "1";
-}
-
-test "rakun ssr: the payload's `t` is the route-table blob verbatim, newline-escaped by the JSON writer" {
-    val json = writePayload(samplePayload());
-    assert json.contains("\"t\":\"L|/\\nP|/blog/[slug]\"");
-    assert rkSsrPayloadText(json, "t") == "L|/\nP|/blog/[slug]";
-}
-
-test "rakun ssr: a JSON string escapes the backslash before anything it adds" {
-    assert jsonString("a\\b") == "\"a\\\\b\"";
-    assert jsonString("say \"hi\"") == "\"say \\\"hi\\\"\"";
-    assert jsonString("one\ntwo") == "\"one\\ntwo\"";
-}
-
-test "rakun ssr: payloadEscape leaves no literal `<`, `>` or `&` in its output" {
-    val out = payloadEscape("{\"m\":\"a=<b>&c\"}");
-    assert out.contains("<") == false;
-    assert out.contains(">") == false;
-    assert out.contains("&") == false;
-    assert out.contains("\\u003c");
-    assert out.contains("\\u003e");
-    assert out.contains("\\u0026");
-}
-
-test "rakun ssr: a param carrying `</script>` yields a document with exactly two script closers" {
-    val _s = rkSsrReset();
-    val p = Payload(
-        build: "b0",
-        pathname: "/p",
-        pattern: "/p",
-        params: "q=</script><img src=x onerror=alert(1)>",
-        query: "",
-        table: "",
-        islands: [],
-        actions: [],
-        styles: "",
-        holes: [],
-        dynamic: false,
-        kinds: "",
-        slots: "",
-    );
-    val doc = await document("<title>t</title>", "<p>body</p>", p);
-    // ONE closer, this front's own: the spec says two because the second is the
-    // client bundle's, and `defaultHooks()` installs no bundle.
-    assert countOf(doc, "</script>") == 1;
-    // The dangerous half of the injection cannot form at all: no `<` survives
-    // the payload escape, so `<img` is not in the document even though the
-    // inert text `onerror=alert(1)` is — which is the point of an
-    // `application/json` block a parser never executes.
-    assert doc.contains("<img") == false;
-    assert doc.contains("img src=x onerror=alert(1)");
-    assert payloadOf(doc).contains("</script") == false;
-}
-
-test "rakun ssr: the payload round trip — a real parser on each row reads the same field set" {
-    val _s = rkSsrReset();
-    val p: Payload = samplePayload();
-    val doc = await document("", "<main></main>", p);
-    val json = payloadOf(doc);
-    assert rkSsrPayloadKeys(json) == "a,b,d,h,i,k,m,p,q,r,s,t,v,z";
-    assert rkSsrPayloadText(json, "p") == "/blog/hello";
-    assert rkSsrPayloadText(json, "r") == "/blog/[slug]";
-    assert rkSsrPayloadText(json, "m") == "slug=hello";
-    assert rkSsrPayloadText(json, "q") == "page=2";
-    assert rkSsrPayloadText(json, "s") == "a1b2 c3d4";
-    assert rkSsrPayloadText(json, "d") == "true";
-    assert rkSsrPayloadText(json, "h") == "[\"h1\"]";
-    assert rkSsrPayloadText(json, "i") == "[[\"i0\",\"Counter\",\"n=1\"],[\"i1\",\"Toggle\",\"on=\"]]";
-    assert rkSsrPayloadText(json, "a") == "[[\"like\",\"a1\"]]";
-    assert rkSsrPayloadText(json, "k") == "/blog/[slug]|dynamic";
-    assert rkSsrPayloadText(json, "z") == "/dashboard|team";
-}
-
-test "rakun ssr: a document rendered with the default hooks names no bundler and opens no sheet" {
-    val _s = rkSsrReset();
-    val doc = await document("<title>t</title>", "<p>hi</p>", emptyPayload());
-    assert doc.startsWith("<!DOCTYPE html><html lang=\"pt-BR\"><head><meta charset=\"utf-8\">");
-    assert doc.contains("<div data-onze-root=\"\"><p>hi</p></div>");
-    assert doc.endsWith("</body></html>");
-    assert doc.contains("<script src") == false;
-    // Decision 77: the sheet is a `RenderHooks` field, so a default document
-    // carries NO `<style>` at all. The front's own text says "exactly one",
-    // which was written when this front still called `emilia.flush()` itself.
-    assert doc.contains("<style") == false;
-}
-
-test "rakun ssr: the hooks record is filled field by field, not all or nothing" {
-    val _s = rkSsrReset();
-    val base: RenderHooks = defaultHooks();
-    val one: RenderHooks = withHeadExtra(base, { r -> "<link rel=\"stylesheet\" href=\"/a.css\">" });
-    val _i = setHooks(one);
-    val doc = await document("", "<p>hi</p>", emptyPayload());
-    assert doc.contains("<link rel=\"stylesheet\" href=\"/a.css\">");
-    // the other six are still the defaults
-    assert doc.contains("<style") == false;
-    assert doc.endsWith("</script></body></html>");
-    val _r = rkSsrReset();
-}
-
-test "rakun ssr: the head is serialised once per document, after the body rendered" {
-    val _s = rkSsrReset();
-    val _z = rkReqShareReset();
-    val base: RenderHooks = defaultHooks();
-    val sunk: RenderHooks = withCollectHead(base, { -> countedSheet() });
-    val _i = setHooks(sunk);
-    val doc = await document("", "<p>hi</p>", emptyPayload());
-    assert countOf(doc, "<style") == 1;
-    assert rkReqShareCount("ssr.collectHead") == 1;
-    // a second document in the same process gets its own call, not a drained sheet
-    val again = await document("", "<p>two</p>", emptyPayload());
-    assert countOf(again, "<style") == 1;
-    assert rkReqShareCount("ssr.collectHead") == 2;
-    val _r = rkSsrReset();
-}
-
-test "rakun ssr: island ordinals are assigned here, in render order, and the marker agrees with the index" {
-    val _s = rkSsrReset();
-    val v: ElementView<Node> = view();
-    val h: RenderHooks = hooks();
-    val first = nextIslandOrdinal();
-    val second = nextIslandOrdinal();
-    assert islandId(first) == "i0";
-    assert islandId(second) == "i1";
-    val markup = renderNode(v, el("main", [], [
-        island(v, h, first, txt("one")),
-        island(v, h, second, txt("two")),
-    ]));
-    assert markup == "<main><div data-onze-i=\"i0\">one</div><div data-onze-i=\"i1\">two</div></main>";
-}
-
-pub fn countedSheet() -> string {
-    val _b = rkReqShareBump("ssr.collectHead");
-    return "<style>.a{color:red}</style>";
-}
-
-pub fn countOf(haystack: string, needle: string) -> i32 {
-    return haystack.split(needle).length - 1;
-}
-
-// ── steps 5 and 6: streaming and the two entry points ───────────────────────
-
-pub fn slowLeaf(name: string, ms: i32) -> @Task<Node> {
-    val _s = rkReqSleep(ms);
-    return el(name, [], []);
-}
-
-pub fn blogPage(route: PageContext) -> @Task<Node> {
-    return el("article", [], [txt("post " + route.pathname)]);
-}
-
-pub fn queryPage(route: PageContext) -> @Task<Node> {
-    val q = searchParam(route, "page");
-    return el("article", [], [txt("page " + q)]);
-}
-
-pub fn scopeFor(path: string) -> i64 {
-    return beginRender("ssr-" + path, path, "", false);
-}
-
-test "rakun ssr: a URL no page claims answers 404 with the not-found boundary's markup" {
-    val _r = rkAppReset();
-    val _s = rkSsrReset();
-    val v: ElementView<Node> = view();
-    val _l = rkAppLayout("", { props -> wrapLayout("layout", props) });
-    val _n = registerBoundary("N", "/", { props -> wrapLayout("not-found", props) });
-    val _p = rkAppPage("blog/[slug]", { route -> blogPage(route) });
-    val _e = scopeFor("/nowhere");
-    val page: RenderedPage = await render(v, "/nowhere", "");
-    val _x = endRender();
-    assert page.status == 404;
-    val doc = bodyOf(page);
-    assert doc.contains("<layout><not-found></not-found></layout>");
-    assert doc.contains("<div data-onze-root=\"\"><layout>");
-}
-
-test "rakun ssr: a matched URL renders the page inside its layouts and answers 200" {
-    val _r = rkAppReset();
-    val _s = rkSsrReset();
-    val v: ElementView<Node> = view();
-    val _l = rkAppLayout("", { props -> wrapLayout("layout", props) });
-    val _b = rkAppLayout("blog", { props -> wrapLayout("blog", props) });
-    val _p = rkAppPage("blog/[slug]", { route -> blogPage(route) });
-    val _e = scopeFor("/blog/hello");
-    val page: RenderedPage = await render(v, "/blog/hello", "");
-    val _x = endRender();
-    assert page.status == 200;
-    val doc = bodyOf(page);
-    assert doc.contains("<layout><blog><article>post /blog/hello</article></blog></layout>");
-    assert headerOfPage(page, "Content-Type") == "text/html; charset=utf-8";
-    val json = payloadOf(doc);
-    assert rkSsrPayloadText(json, "r") == "/blog/[slug]";
-    assert rkSsrPayloadText(json, "m") == "slug=hello";
-    assert rkSsrPayloadText(json, "d") == "false";
+test "rakun ssr: a raised navigation reason is a failed render, 500 - not 404" {
+    val _f = fresh();
+    val _p = page("nav", navRaiser());
+    val res: Response = get("/nav");
+    assert res.status == 500;
 }
 
 test "rakun ssr: the render runs in phase Render, where a cookie write raises" {
-    val _r = rkAppReset();
-    val _s = rkSsrReset();
-    val _e = scopeFor("/phase");
-    assert phaseName(requestPhase()) == "render";
-    val c: Cookies = cookies();
-    try asserts.throwsWith({ ->
-        c.set("a", "b", cookieDefaults());
-        0;
-    }, "in phase `render`");
-    val _x = endRender();
+    val _f = fresh();
+    val _p = page("phase", phaseProbe());
+    val _c = page("cookie", cookieWriter());
+    assert get("/phase").body == "render";
+    assert get("/cookie").status == 500;
 }
 
-test "rakun ssr: reading the search params marks the render dynamic; not reading leaves `d` false" {
-    val _r = rkAppReset();
-    val _s = rkSsrReset();
-    val v: ElementView<Node> = view();
-    val _p = rkAppPage("plain", { route -> blogPage(route) });
-    val _q = rkAppPage("filtered", { route -> queryPage(route) });
-    val _e1 = scopeFor("/plain");
-    val quiet: RenderedPage = await render(v, "/plain", "page=2");
-    val _x1 = endRender();
-    assert rkSsrPayloadText(payloadOf(bodyOf(quiet)), "d") == "false";
-    val _e2 = scopeFor("/filtered");
-    val loud: RenderedPage = await render(v, "/filtered", "page=2");
-    val _x2 = endRender();
-    val doc = bodyOf(loud);
-    assert doc.contains("<article>page 2</article>");
-    assert rkSsrPayloadText(payloadOf(doc), "d") == "true";
+test "rakun ssr: the renderer reads the pattern's params and the query, and the query read marks the render dynamic" {
+    val _f = fresh();
+    val _p = page("blog/[slug]", paramsEcho());
+    val res: Response = rkDispatchHttp("GET", "/blog/hello", "{}", "{\"tab\":\"comments\"}", "");
+    assert res.body == "hello|comments";
 }
 
-test "rakun ssr: the previous phase is restored after a render" {
-    val _r = rkAppReset();
-    val _s = rkSsrReset();
-    val v: ElementView<Node> = view();
-    val _e = beginRequest(RequestScope(
-        id: "h-1",
-        phase: RequestPhase.Handler,
-        method: "GET",
-        path: "/x",
-        query: "",
-        headersWire: "",
-        strict: false,
-    ));
-    val _page = await render(v, "/x", "");
-    assert phaseName(requestPhase()) == "handler";
-    val _x = endRequest();
+test "rakun ssr: a strict render raises on a query read instead of marking it" {
+    val _f = fresh();
+    val _p = page("blog/[slug]", paramsEcho());
+    val _s = rkSetProp("rakun.render.strict", "true");
+    val res: Response = rkDispatchHttp("GET", "/blog/hello", "{}", "{\"tab\":\"x\"}", "");
+    val _u = rkSetProp("rakun.render.strict", "");
+    assert res.status == 500;
 }
 
-test "rakun ssr: sibling loaders are unstarted thunks gathered in ONE await" {
-    val _s = rkSsrReset();
-    var thunks: Array<fn() -> @Task<Node>> = [];
-    thunks.push({ -> slowLeaf("one", 50) });
-    thunks.push({ -> slowLeaf("two", 50) });
-    // The clock is `std/io/clock` reached DIRECTLY from this test file — measured
-    // green on both rows on `4fe1747e`, which is why `ssr.bp`'s `nowMs` /
-    // `sinceUnder` wrappers are gone. It is two calls rather than one
-    // `clock.measureMillis(body)` because the body being measured is an AWAIT,
-    // and a `@Task` body may not await inside a closure.
-    val start = clock.monotonicMillis();
-    val resolved = await renderAll(thunks);
-    val fast = (clock.monotonicMillis() - start) < 100;
-    assert resolved.length == 2;
-    val v: ElementView<Node> = view();
-    assert markupAll(v, resolved).join("") == "<one></one><two></two>";
-    // The BEAM spawns one process per thunk, so two 50 ms loaders finish in
-    // well under 100 ms. Node has no process and `rkReqSleep` blocks the event
-    // loop, so the same two take 100 ms there — which is exactly what the same
-    // test written over already-started `@Task` values would look like on BOTH
-    // rows, and why the thunk type is the thing that is asserted, not the clock.
-    assert fast == concurrentRow();
+// ── step 3, over the socket ─────────────────────────────────────────────────
+
+// One raw exchange: the head and the chunked body, as bytes, plus how long the
+// first body chunk took to arrive and how long the whole response took.
+#[@External.Erlang("""(fun(__Port, __Path) -> {ok, __S} = gen_tcp:connect("127.0.0.1", __Port, [binary, {active, false}]), __T0 = erlang:monotonic_time(millisecond), ok = gen_tcp:send(__S, [<<"GET ">>, __Path, <<" HTTP/1.1", 13, 10, "Host: x", 13, 10, 13, 10>>]), __Loop = fun __Loop(__Acc, __First) -> case binary:match(__Acc, <<"0", 13, 10, 13, 10>>) of nomatch -> case gen_tcp:recv(__S, 0, 3000) of {ok, __M} -> __F2 = case {__First, binary:match(<<__Acc/binary, __M/binary>>, <<"shell;">>)} of {undefined, {_, _}} -> erlang:monotonic_time(millisecond) - __T0; _ -> __First end, __Loop(<<__Acc/binary, __M/binary>>, __F2); _ -> {__Acc, __First} end; _ -> {__Acc, __First} end end, {__All, __FirstAt} = __Loop(<<>>, undefined), __Total = erlang:monotonic_time(millisecond) - __T0, gen_tcp:close(__S), iolist_to_binary([__All, <<"|first=">>, integer_to_binary(case __FirstAt of undefined -> -1; __X -> __X end), <<"|total=">>, integer_to_binary(__Total)]) end)($0, $1)""")]
+declare fn rawGet(port: i32, path: string) -> string;
+
+fn start() -> i32 {
+    val _k = rkSetProp("rakun.main.keep-alive", "false");
+    return rkServe(0, { m, p, h, q, b -> rkDispatchHttp(m, p, h, q, b) });
 }
 
-test "rakun ssr: a shell and one boundary produce three chunks, the first ending inside <body>" {
-    val _s = rkSsrReset();
-    val v: ElementView<Node> = view();
-    val first = nextHoleOrdinal();
-    assert holeId(first) == "h1";
-    val shell = renderNode(v, el("main", [], [holeMarker(v, first, txt("loading"))]));
-    var thunks: Array<fn() -> @Task<Node>> = [];
-    thunks.push({ -> slowLeaf("late", 1) });
-    val resolved = await renderAll(thunks);
-    val page: RenderedPage = streamChunks(
-        "<title>t</title>",
-        shell,
-        [holeId(first)],
-        markupAll(v, resolved),
-        holePayload(["h1"]),
-    );
-    assert chunkCount(page) == 3;
-    assert chunkAt(page, 0).endsWith("</div>");
-    assert chunkAt(page, 0).contains("<body>");
-    assert chunkAt(page, 0).contains("<div data-onze-h=\"h1\">loading</div>");
-    assert chunkAt(page, 1)
-        == "<template data-onze-f=\"h1\"><late></late></template><script>__onzeFill(\"h1\")</script>";
-    assert chunkAt(page, 2).endsWith("</body></html>");
-    val doc = bodyOf(page);
-    assert rkSsrPayloadText(payloadOf(doc), "h") == "[\"h1\"]";
-    assert countOf(doc, "data-onze-f=\"h1\"") == 1;
+test "rakun ssr: over the socket the chunks arrive in order, byte for byte, with the default head" {
+    val _f = fresh();
+    val _p = page("docs", chunks(["<p>a</p>", "<p>b</p>"]));
+    val raw: string = rawGet(start(), "/docs");
+    assert raw.startsWith("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nTransfer-Encoding: chunked\r\n");
+    assert raw.contains("\r\n\r\n8\r\n<p>a</p>\r\n8\r\n<p>b</p>\r\n0\r\n\r\n");
 }
 
-test "rakun ssr: hole ids are ordinals in shell order even when the boundaries resolve in reverse" {
-    val _s = rkSsrReset();
-    val v: ElementView<Node> = view();
-    val a = nextHoleOrdinal();
-    val b = nextHoleOrdinal();
-    assert holeId(a) == "h1";
-    assert holeId(b) == "h2";
-    val shell = renderNode(v, el("main", [], [
-        holeMarker(v, a, txt("A")),
-        holeMarker(v, b, txt("B")),
-    ]));
-    var thunks: Array<fn() -> @Task<Node>> = [];
-    thunks.push({ -> slowLeaf("slow", 60) });
-    thunks.push({ -> slowLeaf("quick", 1) });
-    val resolved = await renderAll(thunks);
-    val page: RenderedPage = streamChunks(
-        "",
-        shell,
-        [holeId(a), holeId(b)],
-        markupAll(v, resolved),
-        holePayload(["h1", "h2"]),
-    );
-    assert chunkCount(page) == 4;
-    // shell order, in the shell and in the payload, whatever the clock did
-    assert shell == "<main><div data-onze-h=\"h1\">A</div><div data-onze-h=\"h2\">B</div></main>";
-    // resolution order, in the chunks — and each fill carries its OWN markup
-    val expected = if (concurrentRow()) "1,0" else "0,1";
-    assert settledOrder() == expected;
-    val firstFill = chunkAt(page, 1);
-    val secondFill = chunkAt(page, 2);
-    if (concurrentRow()) {
-        assert firstFill.contains("data-onze-f=\"h2\"");
-        assert firstFill.contains("<quick></quick>");
-        assert secondFill.contains("data-onze-f=\"h1\"");
-        assert secondFill.contains("<slow></slow>");
-    } else {
-        assert firstFill.contains("data-onze-f=\"h1\"");
-        assert firstFill.contains("<slow></slow>");
-        assert secondFill.contains("data-onze-f=\"h2\"");
-        assert secondFill.contains("<quick></quick>");
-    };
+test "rakun ssr: a header the renderer set replaces the default by name" {
+    val _f = fresh();
+    val _p = page("plain", plainText());
+    val raw: string = rawGet(start(), "/plain");
+    assert raw.contains("content-type: text/plain\r\n");
+    assert raw.contains("text/html") == false;
 }
 
-test "rakun ssr: a boundary that resolved before the shell flush is no hole and gets no fill chunk" {
-    val _s = rkSsrReset();
-    val v: ElementView<Node> = view();
-    val shell = renderNode(v, el("main", [], [el("inline", [], [txt("already here")])]));
-    val page: RenderedPage = streamChunks("", shell, [], [], holePayload([]));
-    assert chunkCount(page) == 2;
-    val doc = bodyOf(page);
-    assert doc.contains("data-onze-h") == false;
-    assert doc.contains("data-onze-f") == false;
-    assert doc.contains("__onzeFill") == false;
-    assert rkSsrPayloadText(payloadOf(doc), "h") == "[]";
+test "rakun ssr: the first chunk reaches the socket before the second is written" {
+    val _f = fresh();
+    val _p = page("stream", slowSecond());
+    val raw: string = rawGet(start(), "/stream");
+    val afterFirst: string = raw.split("|first=").at(1) ?? "-1";
+    val first: i32 = toInt(afterFirst.split("|").at(0) ?? "-1");
+    val total: i32 = toInt(raw.split("|total=").at(1) ?? "-1");
+    val _s = stopServingPages();
+    assert first >= 0;
+    assert total - first >= 300;
 }
 
-test "rakun ssr: a streamed chunk carries the sink's block before its markup" {
-    val _s = rkSsrReset();
-    val v: ElementView<Node> = view();
-    val base: RenderHooks = defaultHooks();
-    val sunk: RenderHooks = withSink(
-        base,
-        { -> 0 },
-        { -> "<style>.shell{}</style>" },
-        { hole -> "<style data-onze-s=\"" + hole + "\">.chunk{}</style>" },
-        { -> "" },
-    );
-    val _i = setHooks(sunk);
-    val hole = nextHoleOrdinal();
-    val shell = renderNode(v, el("main", [], [holeMarker(v, hole, txt("..."))]));
-    var thunks: Array<fn() -> @Task<Node>> = [];
-    thunks.push({ -> slowLeaf("late", 1) });
-    val resolved = await renderAll(thunks);
-    val page: RenderedPage = streamChunks("", shell, [holeId(hole)], markupAll(v, resolved), holePayload(["h1"]));
-    assert chunkAt(page, 0).contains("<style>.shell{}</style>");
-    assert chunkAt(page, 1).startsWith("<style data-onze-s=\"h1\">.chunk{}</style><template");
-    val _r = rkSsrReset();
-}
+#[@External.Erlang("""binary_to_integer($0)""")]
+declare fn toInt(s: string) -> i32;
 
-pub fn holePayload(ids: string[]) -> Payload {
-    return Payload(
-        build: "b0",
-        pathname: "/stream",
-        pattern: "/stream",
-        params: "",
-        query: "",
-        table: "",
-        islands: [],
-        actions: [],
-        styles: "",
-        holes: ids,
-        dynamic: false,
-        kinds: "",
-        slots: "",
-    );
-}
+// ── the query codec ─────────────────────────────────────────────────────────
 
-// A query string rendered pair-by-pair, so the assertion below reads the values
-// without `.at(i).unwrapOr(...)` — that shape reads the element back UNWRAPPED
-// here and reds with `{case_clause, ...}` on the erlang row.
-pub fn pairText(pairs: Array<#(string, string)>) -> string {
-    var out: string[] = [];
-    for (pairs) { p ->
-        out.push(p._0 + "|" + p._1);
-    };
-    return out.join(",");
-}
-
-// WHY `ssr.bp` KEEPS ITS OWN QUERY CODEC. `std/querystring` loads and runs on
-// both rows now, so the reason front 62 wrote `splitQuery` / `encodeQuery` is
-// gone — but std's pair does LESS, and this cell is the difference. Swapping
-// both bodies for `querystring.parse` / `querystring.stringify` leaves every
-// OTHER cell in this repository green; this one reds on all three lines.
 test "rakun ssr: splitQuery / encodeQuery percent-code, which std's querystring does not" {
-    // std's `parse` hands back the literal `%20b`; `route.query` is a decoded
-    // dict, so the decoding happens in `splitQuery`.
-    assert pairText(splitQuery("a=%20b")) == "a| b";
-    // std's `parse` splits on EVERY `=` and keeps the second field, losing the
-    // `=c`. `splitQuery` cuts at the FIRST `=`.
-    assert pairText(splitQuery("a=b=c")) == "a|b=c";
-    // std's `stringify` would write `a b=c;d` — a space and a `;` straight into
-    // a URL.
+    val pairs = splitQuery("?a=%20b&c=d=e&flag");
+    assert pairs.length == 3;
+    assert pairs.map({ p -> p._0 + "=" + p._1 }).join("&") == "a= b&c=d=e&flag=";
     assert encodeQuery([#("a b", "c;d")]) == "a%20b=c%3Bd";
 }

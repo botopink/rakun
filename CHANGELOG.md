@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+### rakun-app: the page seam, and the render leaves (botopink fronts 22 steps 2, 5, 6 and 23; decisions 113-115, 117)
+
+- `ssr.bp` is the page path only: `ChunkWriter`, `PageRenderer`, `page`,
+  `servePage`, `servePages` (the core router's fallback), `writeTo` /
+  `setStatusOn` / `setHeaderOn` / `closeOut`, the query codec and `buildId`.
+  The walker, the escaping, the composition, the document, the payload,
+  `RenderHooks`, the ordinals and `RenderedPage` / `toResponse` are gone —
+  they are the HTML library's (its front 30).
+- `rakun_ssr.erl` is the chunk writer: per serving process; chunked HTTP/1.1 on
+  the socket (the head with the first chunk, or `Content-Length: 0` on a bare
+  close), a buffer without one; `setStatus` / `setHeader` after the first write
+  and any call after `close` fail the request naming the call.
+- `file_router.bp`: `rkAppRegisterEntry` (kind validated), `rkAppRegisterPage`
+  (a second page for one pattern refused), `rkAppRegisterHandler`; the UI
+  markers, `PageContext`, `LayoutProps` and the accessors left; `rakun.appDir`
+  replaces `onze.appDir`.
+- `rakun_runtime.erl`: `set_fallback/1` / `clear_fallback/0` (a request no route
+  matched reaches the page path); the connection process records its socket and
+  skips its own response when the handler streamed; `t_send/2` exported.
+- The pre-commit gate's front 22/23 greps: no `onze` anywhere in the core or
+  `rakun-app` sources, no `jhonstart` import, no UI type in `rakun-app`.
+- `examples/rakun-ssr` shows the page path with plain-text renderers.
+- `modules/rakun-app` 59 / 0 → **33 / 0**: the render's cells left with the
+  render; the page path has 17 cells of its own (six over a real socket).
+
 ### SQL data access: DataSource, pool, SqlTemplate, #[query], #[transactional] (botopink front 08)
 
 - `modules/rakun-data` gets its first code (front 08 owns the manifest and
