@@ -1533,7 +1533,7 @@ pub fn servePage(req: Request, out: ChunkWriter) -> @Task<i32> // the status wri
 - **A renderer body ends in `return;`.** A `-> @Task<@Result<void, string>>`
   body that falls off its end is not an `Ok` on erlang (it answers its last
   value, and the dispatch reads that as a failed render) — a compiler defect,
-  recorded in `status.md`; every renderer here and in the tests returns
+  a `language-gaps.md` row; every renderer here and in the tests returns
   explicitly.
 - **The writer** (`src/sidecars/rakun_ssr.erl`, per serving process): 200 with
   `Content-Type: text/html; charset=utf-8` unless the renderer said otherwise;
@@ -1562,8 +1562,8 @@ pub fn servePage(req: Request, out: ChunkWriter) -> @Task<i32> // the status wri
   `matchPage` binds the narrowed value to `val m: RouteMatch = found;` before
   reading `m.params.at(k).unwrapOr("")`: on a narrowed optional whose type is
   another package's, that chain lowers to a bare `unwrapOr/2` on erlang and
-  fails on commonJS (measured with `routing`'s `matchPath`; a compiler row in
-  `status.md`).
+  fails on commonJS (measured with `routing`'s `matchPath`; a `language-gaps.md`
+  row).
 
 ## `route.bp` handlers — `modules/rakun-app/src/route_handler.bp` (front 25)
 
