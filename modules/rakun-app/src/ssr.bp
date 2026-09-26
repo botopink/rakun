@@ -25,19 +25,20 @@
 //// (decision 67). The head goes out with the first chunk, or with `close` when
 //// nothing was written — a 307 with `location` and no body. A raise out of the
 //// renderer — a navigation reason included, since page signals are the HTML
-//// library's (decision 117 rule 1) — is a failed render: 500 when nothing was
-//// written yet. The response is closed exactly once.
+//// library's (decision 117 rule 1) — and an `Error(msg)` it answers are one
+//// failed render (decision 130): 500 when nothing was written yet, the
+//// response closed otherwise, the reason logged under a correlation digest and
+//// never written. The response is closed exactly once.
 ////
 //// THE WRITER (`src/sidecars/rakun_ssr.erl`) streams to the connection's socket
 //// when the request came through front 04's listener (HTTP/1.1 chunked), and
 //// buffers when it did not (`rkDispatchHttp` from a test): the dispatch then
 //// answers the buffer as one `Response`.
 
-import {collections.Dict, encoding} from "std";
-import {Request, Response, rkProp, sub} from "rakun";
+import {collections.Dict, querystring} from "std";
+import {Request, Response, rkProp} from "rakun";
 import {
     RequestPhase,
-    decodeComponent,
     RequestScope,
     beginRequest,
     endRequest,
@@ -57,7 +58,10 @@ pub type ChunkWriter(
     close: fn() -> @Task<void>,
 )
 
-pub type PageRenderer = fn(req: Request, out: ChunkWriter) -> @Task<void>;
+// A renderer's `Error(msg)` is answered like a raise (decision 130): 500 when
+// nothing was written, otherwise the response is closed; the message goes to
+// the log under a correlation digest, never on the wire.
+pub type PageRenderer = fn(req: Request, out: ChunkWriter) -> @Task<@Result<void, string>>;
 
 // The orchestrator's one call per page pattern, at boot. A second renderer for
 // one pattern fails here, naming it (front 22's `rkAppRegisterPage`).
@@ -122,9 +126,14 @@ pub declare fn rkSsrStreamed() -> bool;
 #[@External.Erlang("rakun_ssr", "body")]
 pub declare fn rkSsrBody() -> string;
 
-// Run `render`; `""`, or the reason it raised.
+// Run `render`; the text it answers, or the reason it raised.
 #[@External.Erlang("rakun_ssr", "guard")]
-pub declare fn rkSsrGuard<T>(render: fn() -> T) -> string;
+pub declare fn rkSsrGuard(render: fn() -> @Task<string>) -> string;
+
+// A failed render's reason, to the log under a correlation digest; answers the
+// digest.
+#[@External.Erlang("rakun_ssr", "log_failure")]
+pub declare fn rkSsrLogFailure(reason: string) -> string;
 
 // The request a renderer is handed: the page pattern's parameters
 // (`name\tvalue` lines), and a query read that marks the render dynamic.
@@ -160,23 +169,35 @@ pub type PageMatch(
 pub fn matchPage(pathname: string) -> PageMatch {
     val pages: RouteEntry[] = parseTable(rkAppTable()).filter({ e -> (e.kind == "P") && (e.slot == "") });
     val found = matchPath(pages, pathname);
-    val m = found.unwrapOr(noMatch());
-    val record: string = if (m.entry.kind == "P") writeTable([m.entry]) else "";
+    if (found == null) return PageMatch(record: "", params: "");
+    val m: RouteMatch = found;
     var lines: string[] = [];
     for (m.params.keys()) { k ->
         lines.push(k + "\t" + m.params.at(k).unwrapOr(""));
     };
-    return PageMatch(record: record, params: lines.join("\n"));
-}
-
-fn noMatch() -> RouteMatch {
-    return RouteMatch(entry: RouteEntry(kind: "", pattern: "", slot: "", verb: ""), params: Dict.empty(), rest: [], chain: []);
+    return PageMatch(record: writeTable([m.entry]), params: lines.join("\n"));
 }
 
 fn missingRenderer() -> PageRenderer {
-    return { req, out -> async {
-        out.setStatus(404);
-    } };
+    return { req, out -> notFoundStatus(out) };
+}
+
+fn notFoundStatus(out: ChunkWriter) -> @Task<@Result<void, string>> {
+    out.setStatus(404);
+    return;
+}
+
+pub fn renderErrorProblem(message: string) -> string {
+    return "rakun ssr: the page renderer answered Error: " + message;
+}
+
+// The renderer's outcome as text: `""` for `Ok`, the problem for `Error(msg)`.
+fn renderOutcome(render: PageRenderer, req: Request, out: ChunkWriter) -> @Task<string> {
+    val r: @Result<void, string> = await render(req, out);
+    return case r {
+        Ok(_) -> "";
+        Error(msg) -> renderErrorProblem(msg);
+    };
 }
 
 pub fn notFoundProblem(pathname: string) -> string {
@@ -207,7 +228,8 @@ pub fn servePage(req: Request, out: ChunkWriter) -> @Task<i32> {
     )) else 0;
     val previous: RequestPhase = requestPhase();
     val _p = setPhase(RequestPhase.Render);
-    val failure: string = rkSsrGuard({ -> render(pageReq, out) });
+    val failure: string = rkSsrGuard({ -> renderOutcome(render, pageReq, out) });
+    val _l = if (failure != "") rkSsrLogFailure(failure) else "";
     val _r = setPhase(previous);
     val _e = if (opened) endRequest() else "";
     val failedEarly: bool = (failure != "") && (rkSsrStarted() == false) && (rkSsrClosed() == false);
@@ -244,40 +266,19 @@ pub fn pageResponse(req: Request) -> @Task<Response> {
     return Response(status: status, body: rkSsrBody());
 }
 
-// ── the query codec and the build id ────────────────────────────────────────
+// ── the query dict and the build id ─────────────────────────────────────────
 //
-// `route.query` of the HTML library's page context is a decoded dict built
-// from these (std's `querystring` neither percent-decodes nor splits at the
-// FIRST `=`), and the build id is front 03's content hash the orchestrator
-// stamps.
+// The query codec is std's `querystring` (RFC 3986: split on `&`, each field
+// on its FIRST `=`, both sides percent-decoded). A malformed component — a `%`
+// not followed by two hex digits, an escape that is not UTF-8, a control
+// character raw or escaped — is refused, never kept as written (03r-e,
+// std-a). A later duplicate name wins. The build id is front 03's content hash
+// the orchestrator stamps.
 
-pub fn splitQuery(query: string) -> Array<#(string, string)> {
-    var out: Array<#(string, string)> = [];
-    val body = if (query.startsWith("?")) sub(query, 1, query.length()) else query;
-    if (body == "") return out else {
-        for (body.split("&")) { chunk ->
-            if (chunk != "") {
-                val eq = chunk.indexOf("=");
-                val name = if (eq < 0) chunk else sub(chunk, 0, eq);
-                val value = if (eq < 0) "" else sub(chunk, eq + 1, chunk.length());
-                out.push(#(decodeComponent(name), decodeComponent(value)));
-            };
-        };
-        return out;
-    };
-}
-
-pub fn encodeQuery(pairs: Array<#(string, string)>) -> string {
-    var parts: string[] = [];
-    for (pairs) { pair ->
-        parts.push(encoding.percentEncode(pair._0) + "=" + encoding.percentEncode(pair._1));
-    };
-    return parts.join("&");
-}
-
-pub fn queryDict(query: string) -> Dict<string, string> {
+pub fn queryDict(query: string) -> @Result<Dict<string, string>, string> {
+    val pairs = try querystring.parse(query);
     var d = Dict.empty();
-    for (splitQuery(query)) { pair ->
+    for (pairs) { pair ->
         d = d.insert(pair._0, pair._1);
     };
     return d;

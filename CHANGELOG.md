@@ -9,6 +9,12 @@
   instead of scanning it; the actuator's details check is `isJsonObject` over
   `json.decode` (the `json_object_ok` cell is gone); the `db` indicator writes
   its details with `json.object` / `json.quote`.
+- `rakun-app`: `PageRenderer` answers `@Task<@Result<void, string>>`
+  (decision 130); an `Error(msg)` is a failed render like a raise — 500 before
+  the first chunk, closed after, the message logged under a correlation digest
+  and never written. `splitQuery` / `encodeQuery` are gone: `queryDict` is std's
+  `querystring.parse` and refuses a malformed component. `matchPage` /
+  `appResponse` narrow the optional match instead of a dummy fallback.
 
 ### Static files (botopink front 82)
 

@@ -1513,7 +1513,7 @@ renderers. What stays is the seam, and it points inwards (decision 114):
 ```bp
 pub type ChunkWriter(setStatus: fn(code: i32) -> void, setHeader: fn(name: string, value: string) -> void,
                      write: fn(chunk: string) -> @Task<void>, close: fn() -> @Task<void>)
-pub type PageRenderer = fn(req: Request, out: ChunkWriter) -> @Task<void>;
+pub type PageRenderer = fn(req: Request, out: ChunkWriter) -> @Task<@Result<void, string>>;
 pub fn page(pattern: string, render: PageRenderer) -> i32      // front 22's rkAppRegisterPage
 pub fn servePage(req: Request, out: ChunkWriter) -> @Task<i32> // the status written
 ```
@@ -1525,8 +1525,16 @@ pub fn servePage(req: Request, out: ChunkWriter) -> @Task<i32> // the status wri
   parameters whose `query` read calls front 62's `markDynamic("searchParams")`
   (under `rakun.render.strict=true` that read RAISES — a static export's
   failure). A raise out of the renderer — a navigation reason included; page
-  signals are the HTML library's (decision 117 rule 1) — answers 500 when
-  nothing was written yet. The response is closed exactly once.
+  signals are the HTML library's (decision 117 rule 1) — and an `Error(msg)` it
+  answers are one failed render (decision 130): 500 when nothing was written
+  yet, the response closed otherwise, the reason (`renderErrorProblem(msg)` for
+  an `Error`) logged by `rakun_ssr:log_failure/1` under a correlation digest and
+  never written. The response is closed exactly once.
+- **A renderer body ends in `return;`.** A `-> @Task<@Result<void, string>>`
+  body that falls off its end is not an `Ok` on erlang (it answers its last
+  value, and the dispatch reads that as a failed render) — a compiler defect,
+  recorded in `status.md`; every renderer here and in the tests returns
+  explicitly.
 - **The writer** (`src/sidecars/rakun_ssr.erl`, per serving process): 200 with
   `Content-Type: text/html; charset=utf-8` unless the renderer said otherwise;
   `setStatus` / `setHeader` after the first `write`, and any call after `close`,
@@ -1545,8 +1553,17 @@ pub fn servePage(req: Request, out: ChunkWriter) -> @Task<i32> // the status wri
   a method call `write/2`), and an imported fn-type alias resolves the names it
   mentions in the importer's scope, so a module writing a `PageRenderer` imports
   `Request` from `rakun` even when it never spells it (`language-gaps.md`).
-- `splitQuery` / `encodeQuery` / `queryDict` (the query codec over std's
-  `encoding`, front 62's `decodeComponent`) and `buildId()` stay here.
+- `queryDict(query) -> @Result<Dict<string, string>, string>` is std's
+  `querystring.parse` folded into a dict (a later duplicate wins); a malformed
+  component is refused, never kept as written (03r-e, std-a). rakun keeps no
+  query codec of its own. `buildId()` stays here.
+- **An optional is read by narrowing**: `matchPage` and `appResponse` test
+  `found != null` and read the match; no dummy `RouteMatch` fallback.
+  `matchPage` binds the narrowed value to `val m: RouteMatch = found;` before
+  reading `m.params.at(k).unwrapOr("")`: on a narrowed optional whose type is
+  another package's, that chain lowers to a bare `unwrapOr/2` on erlang and
+  fails on commonJS (measured with `routing`'s `matchPath`; a compiler row in
+  `status.md`).
 
 ## `route.bp` handlers — `modules/rakun-app/src/route_handler.bp` (front 25)
 
