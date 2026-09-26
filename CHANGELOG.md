@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### rakun-web: std's JSON writer, static error pages, compression (botopink front 07 steps 4, 5 and 9)
+
+- `problemJson` writes through `json.object` / `json.quote`; `jsonEscape` is
+  gone.
+- Static error pages: a browser's bare 4xx/5xx (or an unmatched raise) gets
+  `<rakun.web.error-path>/<status>.html`, then `4xx.html` / `5xx.html`; JSON
+  clients keep the problem detail. `negotiation.bp` reads `Accept` with
+  q-values.
+- `compression.bp`: gzip / deflate negotiated from `Accept-Encoding`, off by
+  default, `br` refused at boot; `Vary: Accept-Encoding` on every compressible
+  response; no `Server` header unless configured. `installBuiltins` registers
+  five entries.
+- `rakun-web` 107 / 0 → **126 / 0** (`compression_test.bp` 13,
+  `error_pages_test.bp` 6, `error_test.bp` +1 −0).
+
 ### Two concurrent requests, two request-scoped instances (botopink front 06 step 6)
 
 - `test/context_test.bp` spawns two requests with `async.runAll` (one process

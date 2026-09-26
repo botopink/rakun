@@ -10,7 +10,7 @@
 //// A refusal text carries NO double quote: on the erlang row `throwsWith` reads
 //// the `~p` rendering, in which a `"` is escaped. Measured during this front.
 
-import {testing.asserts} from "std";
+import {testing.asserts, json, json.Json} from "std";
 import {Response} from "rakun";
 import {rkSetProp} from "rakun";
 import {
@@ -34,7 +34,6 @@ import {
     problemMediaType,
     blankType,
     statusReason,
-    jsonEscape,
     raiseProblem,
     registerAdvice,
     adviceTags,
@@ -104,13 +103,28 @@ test "rakun-web problem: the JSON member is type even though the field is typeUr
 }
 
 test "rakun-web problem: a value carrying a quote or a newline cannot break the document" {
-    assert jsonEscape("a\"b") == "a\\\"b";
-    assert jsonEscape("a\nb") == "a\\nb";
-    assert jsonEscape("a\\b") == "a\\\\b";
     val p: ProblemDetail = problemFor(400, "he said \"no\"\nthen left", "/x");
     val wire: string = problemJson(p);
     assert wire.contains("he said \\\"no\\\"\\nthen left");
     assert wire.endsWith("\"}");
+}
+
+test "rakun-web problem: a detail with a control character and a quote decodes back through std" {
+    val detail: string = "bell" + controlOne() + " and \"quoted\"";
+    val wire: string = problemJson(problemFor(400, detail, "/x"));
+    val back = json.decode(wire);
+    assert back.isOk();
+    val members = case back.unwrapOr(Json.Null) {
+        Obj(members: ms) -> ms;
+        _ -> [];
+    };
+    val found = members.filter({ m -> m._0 == "detail" });
+    val pair = found.at(0).unwrapOr(#("", Json.Null));
+    val text = case pair._1 {
+        Str(value: s) -> s;
+        _ -> "";
+    };
+    assert text == detail;
 }
 
 test "rakun-web problem: the reason phrase table covers the families it does not name" {
@@ -275,3 +289,7 @@ test "rakun-web error: the entry short-circuits nothing a filter above it did" {
     assert res.status == 200;
     assert res.body == "[handled /x]";
 }
+
+// U+0001, built by the host: a string literal cannot spell it portably.
+#[@External.Erlang("""<<1>>""")]
+declare fn controlOne() -> string;

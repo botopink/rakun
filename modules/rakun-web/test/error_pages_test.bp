@@ -1,0 +1,105 @@
+//// rakun-web — static error pages (front 07 step 5).
+////
+//// The pages are real files under `test/fixtures/`, found through
+//// `rakun.web.error-path`: `errors-full/` holds a `404.html`, `errors-family/`
+//// only `4xx.html` and `5xx.html`. The request goes through the error entry
+//// with a terminal that answers what the step names — the router's empty 404,
+//// or a raise no advice matched.
+
+import {Response, rkSetProp} from "rakun";
+import {runChain, registerFilter, resetChain, orderProblem, headerValue, rkChainSetTerminal} from "filter";
+import {errorEntry, raiseProblem, resetAdvice} from "error";
+import {mediaQuality, negotiate, prefersHtml} from "negotiation";
+
+fn notFoundTerminal() -> i32 {
+    return rkChainSetTerminal({ method, path, headersWire, queryWire, body ->
+        Response.notFound();
+    });
+}
+
+fn raisingTerminal() -> i32 {
+    return rkChainSetTerminal({ method, path, headersWire, queryWire, body ->
+        val _r = raiseProblem("order.unhandled", "no advice for this");
+        Response.ok("never");
+    });
+}
+
+fn pages(dir: string) -> i32 {
+    val _r = resetChain();
+    val _a = resetAdvice();
+    val _d = rkSetProp("rakun.web.error-path", dir);
+    val _p = rkSetProp("rakun.web.problemdetails.enabled", "true");
+    return registerFilter("problem", orderProblem(), { req, chain -> errorEntry(req, chain) });
+}
+
+fn getAccepting(accept: string) -> Response {
+    return runChain("GET", "/missing", "accept\t" + accept, "", "");
+}
+
+fn done() -> i32 {
+    val _d = rkSetProp("rakun.web.error-path", "");
+    val _p = rkSetProp("rakun.web.problemdetails.enabled", "");
+    return resetChain();
+}
+
+fn browser() -> string {
+    return "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
+}
+
+test "rakun-web negotiation: the most specific range decides, and q=0 refuses" {
+    assert mediaQuality("text/html", "text/html") == 1000;
+    assert mediaQuality("text/*;q=0.4, */*;q=0.1", "text/html") == 400;
+    assert mediaQuality("*/*;q=0.1", "application/json") == 100;
+    assert mediaQuality("", "application/json") == 1000;
+    assert mediaQuality("text/html;q=0, */*", "text/html") == 0;
+    assert negotiate("application/json;q=0.5, text/plain;q=0.9", ["application/json", "text/plain"]) == "text/plain";
+    assert prefersHtml(browser());
+    assert prefersHtml("application/json") == false;
+}
+
+test "rakun-web error pages: a browser's 404 gets error/404.html" {
+    val _p = pages("test/fixtures/errors-full");
+    val _t = notFoundTerminal();
+    val res: Response = getAccepting(browser());
+    val _d = done();
+    assert res.status == 404;
+    assert res.body == "<h1>not here</h1>";
+}
+
+test "rakun-web error pages: with only 4xx.html present, a 404 serves it" {
+    val _p = pages("test/fixtures/errors-family");
+    val _t = notFoundTerminal();
+    val res: Response = getAccepting(browser());
+    val _d = done();
+    assert res.status == 404;
+    assert res.body == "<h1>client error</h1>";
+}
+
+test "rakun-web error pages: a raise no advice matched serves 5xx.html to a browser" {
+    val _p = pages("test/fixtures/errors-family");
+    val _t = raisingTerminal();
+    val res: Response = getAccepting(browser());
+    val _d = done();
+    assert res.status == 500;
+    assert res.body == "<h1>server error</h1>";
+}
+
+test "rakun-web error pages: Accept application/json gets the problem detail even when the page exists" {
+    val _p = pages("test/fixtures/errors-full");
+    val _t = notFoundTerminal();
+    val res: Response = getAccepting("application/json");
+    val ct: string = headerValue("Content-Type");
+    val _d = done();
+    assert res.status == 404;
+    assert ct == "application/problem+json";
+    assert res.body.contains("\"status\":404");
+}
+
+test "rakun-web error pages: a missing page directory is not an error; the problem detail is served" {
+    val _p = pages("test/fixtures/no-such-directory");
+    val _t = notFoundTerminal();
+    val res: Response = getAccepting(browser());
+    val _d = done();
+    assert res.status == 404;
+    assert res.body.contains("\"title\":\"Not Found\"");
+}

@@ -19,6 +19,8 @@
 //// environment asked for it.
 
 import {Response} from "rakun";
+import {json, io.fs} from "std";
+import {prefersHtml} from "negotiation";
 import {rkProp} from "rakun";
 import {WebRequest, Chain, withHeader} from "filter";
 
@@ -117,22 +119,17 @@ pub fn problemFor(status: i32, detail: string, instance: string) -> ProblemDetai
 
 // ── serialization ───────────────────────────────────────────────────────────
 
-pub fn jsonEscape(raw: string) -> string {
-    var out = "";
-    for (raw.split("")) { ch ->
-        val piece: string = if (ch == "\"") "\\\"" else if (ch == "\\") "\\\\" else if (ch == "\n") "\\n" else if (ch == "\r") "\\r" else if (ch == "\t") "\\t" else ch;
-        out = out + piece;
-    };
-    return out;
-}
-
+// std's writer (decision 116): `json.quote` escapes every control character,
+// not only `\n` `\r` `\t`, so a `detail` carrying U+0001 still reads back as
+// the same text through `json.decode`.
 pub fn problemJson(p: ProblemDetail) -> string {
-    return "{\"type\":\"" + jsonEscape(p.typeUri)
-        + "\",\"title\":\"" + jsonEscape(p.title)
-        + "\",\"status\":" + p.status.toString()
-        + ",\"detail\":\"" + jsonEscape(p.detail)
-        + "\",\"instance\":\"" + jsonEscape(p.instance)
-        + "\"}";
+    return json.object([
+        #("type", json.quote(p.typeUri)),
+        #("title", json.quote(p.title)),
+        #("status", p.status.toString()),
+        #("detail", json.quote(p.detail)),
+        #("instance", json.quote(p.instance)),
+    ]);
 }
 
 // The one place a `ProblemDetail` becomes a `Response`: the content type is set
@@ -198,20 +195,62 @@ pub fn problemDetailsEnabled() -> bool {
 // A tagged raise nothing registered for is still unmatched, and an unmatched
 // raise answers the same way an untagged one does. The tag and its detail go to
 // the log under the digest; the body carries the digest alone.
-fn unmatched(tag: string, detail: string, instance: string) -> Response {
+fn unmatched(tag: string, detail: string, instance: string, accept: string) -> Response {
     val digest: string = if (tag == "") detail else rkProblemDigest(tag + " " + detail);
     if (tag != "") {
         val _n = rkProblemNote(digest + " unmatched problem tag `" + tag + "`: " + detail);
     };
+    val page: string = staticPage(500, accept);
+    if (page != "") return pageResponse(500, page);
     return problemResponse(problemFor(500, "correlation " + digest, instance));
 }
 
 pub fn renderProblem(tag: string, detail: string, instance: string) -> Response {
-    if (tag == "") return unmatched(tag, detail, instance);
+    return renderProblemFor(tag, detail, instance, "application/json");
+}
+
+pub fn renderProblemFor(tag: string, detail: string, instance: string, accept: string) -> Response {
+    if (tag == "") return unmatched(tag, detail, instance, accept);
     val hit: ?ProblemDetail = rkAdviceInvoke(tag, detail);
     val found: ProblemDetail = hit.unwrapOr(problemFor(0, "", ""));
-    if (found.status == 0) return unmatched(tag, detail, instance);
+    if (found.status == 0) return unmatched(tag, detail, instance, accept);
     return problemResponse(found);
+}
+
+// ── static error pages (step 5) ─────────────────────────────────────────────
+//
+// When NOTHING produced a response body — the router's empty 404, a bare
+// empty-bodied 4xx/5xx, or a raise no advice matched — a browser gets
+// `<rakun.web.error-path>/<status>.html`, then `<…>/4xx.html` or `<…>/5xx.html`
+// (the resolution order of Spring's error pages). A client that prefers JSON
+// gets the problem detail whatever pages exist, and a missing page or page
+// directory is not an error: the problem detail is served instead. A handler's
+// own body is never replaced, and neither is a matched advice's detail.
+
+pub fn errorPagePath() -> string {
+    val configured: string = rkProp("rakun.web.error-path");
+    if (configured != "") return configured else return "error";
+}
+
+pub fn errorPageFiles(status: i32) -> string[] {
+    val base: string = errorPagePath();
+    val family: string = if (status >= 500) "5xx" else "4xx";
+    return [base + "/" + status.toString() + ".html", base + "/" + family + ".html"];
+}
+
+// The page for `status`, or `""` when the client does not prefer HTML or no
+// candidate file exists.
+pub fn staticPage(status: i32, accept: string) -> string {
+    if (prefersHtml(accept) == false) return "";
+    var found = "";
+    for (errorPageFiles(status)) { f ->
+        if ((found == "") && fs.exists(f)) found = fs.readText(f).unwrapOr("");
+    };
+    return found;
+}
+
+fn pageResponse(status: i32, page: string) -> Response {
+    return withHeader(Response.withStatus(status, page), "Content-Type", "text/html; charset=utf-8");
 }
 
 // The pass-through half. A handler's own `Response` WITH A BODY is never
@@ -225,10 +264,14 @@ pub fn fillProblem(res: Response, instance: string) -> Response {
 }
 
 pub fn errorEntry(req: WebRequest, chain: Chain) -> Response {
+    val accept: string = req.header("accept");
     val res: Response = rkRunGuarded(
         { -> chain.next(req) },
-        { tag, detail -> renderProblem(tag, detail, req.path) },
+        { tag, detail -> renderProblemFor(tag, detail, req.path, accept) },
     );
+    val bare: bool = (res.status >= 400) && (res.body == "");
+    val page: string = if (bare) staticPage(res.status, accept) else "";
+    if (page != "") return pageResponse(res.status, page);
     return fillProblem(res, req.path);
 }
 

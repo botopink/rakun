@@ -2698,19 +2698,47 @@ handler reads, HSTS, and the outbound bundle resolution fronts 08/09/13/15 call.
 It opens no socket: the acceptor is front 04's file. See § TLS and the SSL
 bundle registry.
 
-### What front 07 did NOT reach
+### Steps 4 (the writer), 5 and 9 — landed with the track's second pass
 
-Steps 1, 2, 3, 3b and 4 of the spec are in. Five steps are not, and none is
-stubbed:
+- **The problem body is std's writer** (decision 116): `problemJson` is
+  `json.object` over `json.quote`, which escapes every control character; the
+  private `jsonEscape` (it escaped only `\n` `\r` `\t`) is gone, and a
+  `detail` holding U+0001 and a `"` reads back through `json.decode` unchanged.
+- **Static error pages** (`error.bp`: `errorPagePath`, `errorPageFiles`,
+  `staticPage`). When nothing produced a body — the router's empty 404, a bare
+  empty-bodied 4xx/5xx, or a raise no advice matched — a client that PREFERS
+  HTML (`negotiation.prefersHtml`: `text/html` acceptable and above
+  `application/json`) gets `<rakun.web.error-path>/<status>.html`, then
+  `4xx.html` / `5xx.html`, as `text/html; charset=utf-8`; everyone else gets
+  the problem detail, and a missing page or directory is not an error. A
+  handler's own body and a matched advice's detail are never replaced.
+- **`negotiation.bp`** is the one `Accept` reader: media ranges with q-values
+  in thousandths, the most specific range deciding (`text/html` over `text/*`
+  over `*/*`), an absent header meaning `*/*`.
+- **Compression and server identification** (`compression.bp`, entries at 200
+  and 300, installed by `installBuiltins`, which now registers five). gzip and
+  deflate from erts `zlib`; `br` (or any other name) in
+  `rakun.server.compression.algorithms` fails `bootWeb()` saying a NIF would be
+  needed. OFF unless `rakun.server.compression.enabled=true` (Spring's default;
+  a compressed secret beside attacker-chosen text is BREACH); only the media
+  types of `rakun.server.compression.mime-types`, at or above
+  `min-response-size` (2048). `Vary: Accept-Encoding` on every response of a
+  compressible type, compressed or not. The `Content-Length` on the wire is the
+  compressed body's — the acceptor measures `byte_size/1` — asserted over a real
+  socket. No `Server` header unless `rakun.server.server-header` names one.
+- **A compiler defect met here**: on erlang, a `return` inside an `if` that is
+  itself inside an `if` block is dropped (the inner `case` falls through to
+  `ok` and execution continues) — `language-gaps.md`. `errorEntry` binds the
+  condition and the page first instead.
+
+### What front 07 did NOT reach
 
 | Step | What it needs |
 |---|---|
-| 5 — static error pages | File IO from `src/` (`std/io/fs`), and a decision about `Accept: text/html` that belongs with step 6. The resolution ORDER is already fixed in `convention.bp` (`errorPageCandidates`): `<error-path>/404.html`, then `<…>/4xx.html`, then `<…>/5xx.html` |
-| 6 — content negotiation | The `MessageConverter` behavior, an `Accept` q-value parser and a media-type registry. No blocker; it is work |
+| 6 — content negotiation | The converter registry on top of `negotiation.bp`. No blocker; it is work |
 | 7 — `WebCustomizer` | `WebRegistry` with `addConverter`/`addCorsMapping`/`addFilter`/`addFormatter`, which needs step 6's converter registry first |
 | 8 — API versioning | The resolution is string work with no blocker; the `Deprecation`/`Sunset` pair needs front 05 keys that exist |
-| 9 — compression | `zlib` cells on both hosts, plus the `br` boot refusal. No blocker; it is work |
-| 10 — graceful shutdown | **Blocked, and not on front 76.** Step 2 of the sequence is "close the listening socket, keep every connection process alive" — and the listening socket is `rakun_runtime.erl`'s, in `modules/rakun/`, which front 07 does not own. The drain cannot be written from this member. Front 76's `readinessDrained()` is the SOFT half and the spec says how to land without it; the socket is the hard half |
+| 10 — graceful shutdown | The listening socket is `rakun_runtime.erl`'s (front 04's), and front 76's `readinessDrained()` is the soft half the spec says how to land without |
 
 ## Validation — the bundled `validation` library (front 14, moved by decision 116 rule 5)
 

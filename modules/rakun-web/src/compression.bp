@@ -1,0 +1,175 @@
+//// rakun-web — response compression and server identification (front 07
+//// step 9): two chain entries at the late end of the order band.
+////
+//// COMPRESSION is negotiated from `Accept-Encoding` with q-values and runs at
+//// order 200, after the application's entries, so it sees the body they
+//// produced. Two algorithms, both `zlib` in erts and therefore always present:
+//// `gzip` and `deflate` (the zlib-wrapped form RFC 9110 § 8.4.1.2 names).
+//// Brotli is REFUSED, not faked: OTP has no `br`, so naming it in
+//// `rakun.server.compression.algorithms` fails the boot saying a NIF would be
+//// required. A body is compressed only when compression is enabled
+//// (`rakun.server.compression.enabled=true` — Spring's default is off, and a
+//// compressed secret beside attacker-chosen text is BREACH), its media type is
+//// in `rakun.server.compression.mime-types` and it is at least
+//// `rakun.server.compression.min-response-size` bytes (default 2048).
+//// `Vary: Accept-Encoding` goes on every response whose media type could have
+//// been compressed, whether it was or not — a cache must not serve a gzipped
+//// body to a client that did not ask for one.
+////
+//// SERVER IDENTIFICATION inverts Next's default: no `Server` header unless
+//// `rakun.server.server-header` names one, and then exactly that value. The
+//// knob only makes the response louder, never quieter.
+
+import {Response} from "rakun";
+import {rkProp, toI32} from "rakun";
+import {WebRequest, Chain, withHeader, headerValue, sentinelStatus} from "filter";
+
+// ── the host cells: bytes, not graphemes ────────────────────────────────────
+
+#[@External.Erlang("""zlib:gzip($0)""")]
+declare fn gzipBytes(body: string) -> string;
+
+#[@External.Erlang("""zlib:compress($0)""")]
+declare fn deflateBytes(body: string) -> string;
+
+#[@External.Erlang("""byte_size($0)""")]
+pub declare fn byteSize(body: string) -> i32;
+
+// ── configuration ───────────────────────────────────────────────────────────
+
+pub fn compressionEnabled() -> bool {
+    return rkProp("rakun.server.compression.enabled") == "true";
+}
+
+pub fn minResponseSize() -> i32 {
+    val raw: string = rkProp("rakun.server.compression.min-response-size");
+    if (raw == "") return 2048 else return toI32(raw);
+}
+
+pub fn compressibleTypes() -> string[] {
+    val raw: string = rkProp("rakun.server.compression.mime-types");
+    val list: string = if (raw == "") "text/html,text/xml,text/plain,text/css,text/javascript,application/javascript,application/json,application/xml,application/problem+json" else raw;
+    return list.split(",").map({ t -> t.trim().toLower() }).filter({ t -> t != "" });
+}
+
+pub fn algorithms() -> string[] {
+    val raw: string = rkProp("rakun.server.compression.algorithms");
+    val list: string = if (raw == "") "gzip,deflate" else raw;
+    return list.split(",").map({ t -> t.trim().toLower() }).filter({ t -> t != "" });
+}
+
+pub fn brotliProblem() -> string {
+    return "rakun-web: rakun.server.compression.algorithms names br - OTP has no "
+        + "brotli, and compressing with it would need a NIF this build does not "
+        + "carry; use gzip or deflate";
+}
+
+pub fn unknownAlgorithmProblem(name: string) -> string {
+    return "rakun-web: rakun.server.compression.algorithms names `" + name
+        + "` - the algorithms are gzip and deflate";
+}
+
+// Boot-time: every configured algorithm is one rakun can run. Called from
+// `bootWeb()`, so a `br` in the configuration fails the boot, never a request.
+pub fn validateCompression() -> i32 {
+    for (algorithms()) { a ->
+        if (a == "br") @panic(brotliProblem());
+        if ((a != "gzip") && (a != "deflate")) @panic(unknownAlgorithmProblem(a));
+    };
+    return algorithms().length;
+}
+
+// ── `Accept-Encoding` ───────────────────────────────────────────────────────
+//
+// A q-value is read as THOUSANDTHS (RFC 9110 § 12.4.2 allows at most three
+// decimals), so `q=0.5` is 500 and comparisons stay integral. An absent q is
+// 1000; a malformed one is 0 — an encoding the client did not clearly accept is
+// not chosen.
+
+pub fn qMillis(raw: string) -> i32 {
+    val t: string = raw.trim();
+    if (t == "") return 1000;
+    val parts: string[] = t.split(".");
+    val whole: string = parts.at(0) ?? "";
+    val frac: string = (parts.at(1) ?? "") + "000";
+    if ((whole != "0") && (whole != "1")) return 0;
+    val thousandths: i32 = toI32(frac.slice(0, 3));
+    val q: i32 = toI32(whole) * 1000 + thousandths;
+    if (q > 1000) return 0 else return q;
+}
+
+fn tokenName(token: string) -> string {
+    return (token.split(";").at(0) ?? "").trim().toLower();
+}
+
+fn tokenQ(token: string) -> i32 {
+    var q = 1000;
+    for (token.split(";")) { p ->
+        val kv: string = p.trim().toLower();
+        if (kv.startsWith("q=")) q = qMillis(kv.slice(2, kv.length));
+    };
+    return q;
+}
+
+// The q-value `header` gives `name`: its own token, else `*`, else 0 (absent —
+// only `identity` is acceptable by default, and rakun never picks it).
+pub fn qualityOf(header: string, name: string) -> i32 {
+    var own = -1;
+    var star = -1;
+    for (header.split(",")) { token ->
+        val n: string = tokenName(token);
+        if (n == name) own = tokenQ(token);
+        if (n == "*") star = tokenQ(token);
+    };
+    if (own >= 0) return own;
+    if (star >= 0) return star;
+    return 0;
+}
+
+// The encoding to use, or `""` for none: the highest q above zero among the
+// configured algorithms, ties going to the configuration's order.
+pub fn chooseEncoding(header: string, allowed: string[]) -> string {
+    var best = "";
+    var bestQ = 0;
+    for (allowed) { a ->
+        val q: i32 = qualityOf(header, a);
+        if (q > bestQ) {
+            best = a;
+            bestQ = q;
+        };
+    };
+    return best;
+}
+
+pub fn isCompressibleType(contentType: string) -> bool {
+    val base: string = (contentType.split(";").at(0) ?? "").trim().toLower();
+    if (base == "") return false;
+    return compressibleTypes().filter({ t -> t == base }).length > 0;
+}
+
+pub fn compress(encoding: string, body: string) -> string {
+    if (encoding == "gzip") return gzipBytes(body) else return deflateBytes(body);
+}
+
+// ── the two entries ─────────────────────────────────────────────────────────
+
+pub fn compressionEntry(req: WebRequest, chain: Chain) -> Response {
+    val res: Response = chain.next(req);
+    if (res.status == sentinelStatus()) return res;
+    if (compressionEnabled() == false) return res;
+    if (isCompressibleType(headerValue("Content-Type")) == false) return res;
+    val varied: Response = withHeader(res, "Vary", "Accept-Encoding");
+    if (headerValue("Content-Encoding") != "") return varied;
+    if (byteSize(res.body) < minResponseSize()) return varied;
+    val encoding: string = chooseEncoding(req.header("accept-encoding"), algorithms());
+    if (encoding == "") return varied;
+    val _e = withHeader(res, "Content-Encoding", encoding);
+    return Response(status: res.status, body: compress(encoding, res.body));
+}
+
+pub fn serverIdEntry(req: WebRequest, chain: Chain) -> Response {
+    val res: Response = chain.next(req);
+    if (res.status == sentinelStatus()) return res;
+    val name: string = rkProp("rakun.server.server-header");
+    if (name == "") return res else return withHeader(res, "Server", name);
+}

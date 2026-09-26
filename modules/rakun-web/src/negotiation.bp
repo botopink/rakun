@@ -1,0 +1,82 @@
+//// rakun-web — `Accept` negotiation (front 07 steps 5 and 6).
+////
+//// One reader of a media-range list with q-values (RFC 9110 § 12.5.1), shared
+//// by the static error pages (step 5: does this client want HTML?) and the
+//// message converters (step 6: which media type does the response take?).
+//// A q-value is read in THOUSANDTHS, as `compression.bp` reads
+//// `Accept-Encoding`: at most three decimals, so every comparison is integral.
+//// The most specific matching range wins for a media type: `text/html` over
+//// `text/*` over `*/*`. An absent `Accept` means `*/*`.
+
+import {toI32} from "rakun";
+
+pub fn rangeQ(raw: string) -> i32 {
+    val t: string = raw.trim();
+    if (t == "") return 1000;
+    val parts: string[] = t.split(".");
+    val whole: string = parts.at(0) ?? "";
+    val frac: string = (parts.at(1) ?? "") + "000";
+    if ((whole != "0") && (whole != "1")) return 0;
+    val q: i32 = toI32(whole) * 1000 + toI32(frac.slice(0, 3));
+    if (q > 1000) return 0 else return q;
+}
+
+fn baseOf(range: string) -> string {
+    return (range.split(";").at(0) ?? "").trim().toLower();
+}
+
+fn qOf(range: string) -> i32 {
+    var q = 1000;
+    for (range.split(";")) { p ->
+        val kv: string = p.trim().toLower();
+        if (kv.startsWith("q=")) q = rangeQ(kv.slice(2, kv.length));
+    };
+    return q;
+}
+
+// 3 for an exact match, 2 for `type/*`, 1 for `*/*`, 0 for none.
+fn specificity(range: string, mediaType: string) -> i32 {
+    val want: string = mediaType.toLower();
+    if (range == want) return 3;
+    val slash: i32 = want.indexOf("/");
+    val family: string = if (slash < 0) want else want.slice(0, slash);
+    if (range == family + "/*") return 2;
+    if (range == "*/*") return 1;
+    return 0;
+}
+
+// The q-value `accept` gives `mediaType`, through its most specific range.
+pub fn mediaQuality(accept: string, mediaType: string) -> i32 {
+    val header: string = if (accept.trim() == "") "*/*" else accept;
+    var bestSpec = 0;
+    var q = 0;
+    for (header.split(",")) { range ->
+        val base: string = baseOf(range);
+        val spec: i32 = specificity(base, mediaType);
+        if (spec > bestSpec) {
+            bestSpec = spec;
+            q = qOf(range);
+        };
+    };
+    return q;
+}
+
+// The media type `accept` prefers among `offered`, or `""` when it accepts none
+// of them. Ties go to the order of `offered`.
+pub fn negotiate(accept: string, offered: string[]) -> string {
+    var best = "";
+    var bestQ = 0;
+    for (offered) { m ->
+        val q: i32 = mediaQuality(accept, m);
+        if (q > bestQ) {
+            best = m;
+            bestQ = q;
+        };
+    };
+    return best;
+}
+
+// A browser asking for a page: HTML acceptable, and preferred to JSON.
+pub fn prefersHtml(accept: string) -> bool {
+    return negotiate(accept, ["text/html", "application/json"]) == "text/html";
+}

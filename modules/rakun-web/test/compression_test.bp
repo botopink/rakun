@@ -1,0 +1,226 @@
+//// rakun-web — compression and server identification (front 07 step 9).
+////
+//// The negotiation is asserted as pure functions; the entry through `runChain`
+//// with a terminal of this file's own; and the wire — the `Content-Length` of a
+//// compressed body — over a real socket, through the core's listener with the
+//// chain installed as the runner, read back by a host cell that speaks HTTP/1.1
+//// in bytes (a gzipped body is not text, so the `.bp` string surface is not the
+//// right reader for it).
+
+import {testing.asserts} from "std";
+import {Request, Response, rkSetProp, rkRegisterRoute, rkServe, rkDispatchHttp} from "rakun";
+import {
+    WebRequest,
+    Chain,
+    runChain,
+    registerFilter,
+    resetChain,
+    withHeader,
+    headerValue,
+    rkChainSetTerminal,
+    rkChainSetRunner,
+    orderCompression,
+    orderServerId,
+} from "filter";
+import {
+    qMillis,
+    qualityOf,
+    chooseEncoding,
+    isCompressibleType,
+    byteSize,
+    validateCompression,
+    compressionEntry,
+    serverIdEntry,
+} from "compression";
+
+// ── helpers ─────────────────────────────────────────────────────────────────
+
+// `{"k":"v"}` — nine bytes — `times` times, spelled as bytes (a `"` inside a
+// host template does not survive to the emitted Erlang).
+#[@External.Erlang("""binary:copy(<<123, 34, 107, 34, 58, 34, 118, 34, 125>>, $0)""")]
+declare fn repeatJson(times: i32) -> string;
+
+#[@External.Erlang("""zlib:gunzip($0)""")]
+declare fn gunzip(body: string) -> string;
+
+#[@External.Erlang("""zlib:uncompress($0)""")]
+declare fn inflate(body: string) -> string;
+
+// One HTTP/1.1 exchange in bytes: `status|content-length|body-bytes|content-encoding|vary|decoded-bytes|server`.
+#[@External.Erlang("""(fun(__Port, __Req) -> {ok, __S} = gen_tcp:connect("127.0.0.1", __Port, [binary, {active, false}]), ok = gen_tcp:send(__S, __Req), __Get = fun(__Hd, __N) -> __Hits = [string:trim(__V) || __L <- binary:split(__Hd, <<"\r\n">>, [global]), [__K, __V] <- [binary:split(__L, <<":">>)], string:lowercase(__K) =:= __N], case __Hits of [__X | _] -> __X; [] -> <<>> end end, __Loop = fun __Loop(__Acc) -> case binary:split(__Acc, <<"\r\n\r\n">>) of [__H, __B] -> __Len = binary_to_integer(case __Get(__H, <<"content-length">>) of <<>> -> <<"0">>; __CL -> __CL end), case byte_size(__B) >= __Len of true -> {__H, __B}; false -> {ok, __M} = gen_tcp:recv(__S, 0, 2000), __Loop(<<__Acc/binary, __M/binary>>) end; _ -> {ok, __M} = gen_tcp:recv(__S, 0, 2000), __Loop(<<__Acc/binary, __M/binary>>) end end, {__Head, __Body} = __Loop(<<>>), gen_tcp:close(__S), [_, __St | _] = binary:split(hd(binary:split(__Head, <<"\r\n">>)), <<" ">>, [global]), __Enc = __Get(__Head, <<"content-encoding">>), __Plain = case __Enc of <<"gzip">> -> zlib:gunzip(__Body); <<"deflate">> -> zlib:uncompress(__Body); _ -> __Body end, iolist_to_binary([__St, "|", __Get(__Head, <<"content-length">>), "|", integer_to_binary(byte_size(__Body)), "|", __Enc, "|", __Get(__Head, <<"vary">>), "|", integer_to_binary(byte_size(__Plain)), "|", __Get(__Head, <<"server">>)]) end)($0, $1)""")]
+declare fn exchangeBytes(port: i32, request: string) -> string;
+
+fn jsonTerminal(times: i32) -> i32 {
+    return rkChainSetTerminal({ method, path, headersWire, queryWire, body ->
+        val _t = withHeader(Response.ok(""), "Content-Type", "application/json");
+        Response.ok(repeatJson(times));
+    });
+}
+
+fn typedTerminal(contentType: string, times: i32) -> i32 {
+    return rkChainSetTerminal({ method, path, headersWire, queryWire, body ->
+        val _t = withHeader(Response.ok(""), "Content-Type", contentType);
+        Response.ok(repeatJson(times));
+    });
+}
+
+fn compressing() -> i32 {
+    val _r = resetChain();
+    val _e = rkSetProp("rakun.server.compression.enabled", "true");
+    val _a = rkSetProp("rakun.server.compression.algorithms", "");
+    return registerFilter("compression", orderCompression(), { req, chain -> compressionEntry(req, chain) });
+}
+
+fn getWith(acceptEncoding: string) -> Response {
+    return runChain("GET", "/data", "accept-encoding\t" + acceptEncoding, "", "");
+}
+
+fn done() -> i32 {
+    val _r = resetChain();
+    return rkSetProp("rakun.server.compression.enabled", "");
+}
+
+// ── negotiation, as functions ───────────────────────────────────────────────
+
+test "rakun-web compression: a q-value is read in thousandths, and a malformed one is zero" {
+    assert qMillis("") == 1000;
+    assert qMillis("1") == 1000;
+    assert qMillis("0.5") == 500;
+    assert qMillis("0.125") == 125;
+    assert qMillis("0") == 0;
+    assert qMillis("2") == 0;
+    assert qMillis("x") == 0;
+}
+
+test "rakun-web compression: q=0 refuses an encoding and the next accepted one is chosen" {
+    assert chooseEncoding("gzip", ["gzip", "deflate"]) == "gzip";
+    assert chooseEncoding("deflate", ["gzip", "deflate"]) == "deflate";
+    assert chooseEncoding("gzip;q=0, deflate", ["gzip", "deflate"]) == "deflate";
+    assert chooseEncoding("gzip;q=0.4, deflate;q=0.9", ["gzip", "deflate"]) == "deflate";
+    assert chooseEncoding("*", ["gzip", "deflate"]) == "gzip";
+    assert chooseEncoding("br", ["gzip", "deflate"]) == "";
+    assert chooseEncoding("", ["gzip", "deflate"]) == "";
+    assert qualityOf("gzip;q=0.3, *;q=0.1", "deflate") == 100;
+}
+
+test "rakun-web compression: only the configured media types are compressible" {
+    assert isCompressibleType("application/json");
+    assert isCompressibleType("text/html; charset=utf-8");
+    assert isCompressibleType("image/png") == false;
+    assert isCompressibleType("") == false;
+}
+
+test "rakun-web compression: naming br fails the boot saying a NIF would be required" {
+    val _a = rkSetProp("rakun.server.compression.algorithms", "gzip,br");
+    try asserts.throwsWith({ ->
+        val _v = validateCompression();
+        0;
+    }, "OTP has no brotli");
+    val _b = rkSetProp("rakun.server.compression.algorithms", "");
+    assert validateCompression() == 2;
+}
+
+// ── the entry ───────────────────────────────────────────────────────────────
+
+test "rakun-web compression: gzip on a 4 KB JSON response yields a gzipped body" {
+    val _c = compressing();
+    val _t = jsonTerminal(512);
+    val res: Response = getWith("gzip");
+    assert headerValue("Content-Encoding") == "gzip";
+    assert byteSize(res.body) < 4096;
+    assert gunzip(res.body) == repeatJson(512);
+    val _d = done();
+}
+
+test "rakun-web compression: deflate is chosen when asked, and gzip;q=0 falls back to it" {
+    val _c = compressing();
+    val _t = jsonTerminal(512);
+    val one: Response = getWith("deflate");
+    assert headerValue("Content-Encoding") == "deflate";
+    assert inflate(one.body) == repeatJson(512);
+    val two: Response = getWith("gzip;q=0, deflate");
+    assert headerValue("Content-Encoding") == "deflate";
+    assert inflate(two.body) == repeatJson(512);
+    val _d = done();
+}
+
+test "rakun-web compression: a 100-byte response is not compressed, and still varies" {
+    val _c = compressing();
+    val _t = jsonTerminal(10);
+    val res: Response = getWith("gzip");
+    assert byteSize(res.body) == 90;
+    assert headerValue("Content-Encoding") == "";
+    assert headerValue("Vary") == "Accept-Encoding";
+    val _d = done();
+}
+
+test "rakun-web compression: an image/png response is not compressed and does not vary" {
+    val _c = compressing();
+    val _t = typedTerminal("image/png", 512);
+    val res: Response = getWith("gzip");
+    assert byteSize(res.body) == 4608;
+    assert headerValue("Content-Encoding") == "";
+    assert headerValue("Vary") == "";
+    val _d = done();
+}
+
+test "rakun-web compression: Vary is set on a compressible response whether it was compressed or not" {
+    val _c = compressing();
+    val _t = jsonTerminal(512);
+    val _a = getWith("gzip");
+    assert headerValue("Vary") == "Accept-Encoding";
+    val _b = getWith("identity");
+    assert headerValue("Content-Encoding") == "";
+    assert headerValue("Vary") == "Accept-Encoding";
+    val _d = done();
+}
+
+test "rakun-web compression: off by default" {
+    val _r = resetChain();
+    val _f = registerFilter("compression", orderCompression(), { req, chain -> compressionEntry(req, chain) });
+    val _t = jsonTerminal(512);
+    val res: Response = getWith("gzip");
+    assert byteSize(res.body) == 4608;
+    assert headerValue("Content-Encoding") == "";
+    val _d = done();
+}
+
+// ── server identification ───────────────────────────────────────────────────
+
+test "rakun-web server-id: no Server header by default, exactly the configured one otherwise" {
+    val _r = resetChain();
+    val _f = registerFilter("server-id", orderServerId(), { req, chain -> serverIdEntry(req, chain) });
+    val _t = jsonTerminal(1);
+    val _a = getWith("");
+    assert headerValue("Server") == "";
+    val _p = rkSetProp("rakun.server.server-header", "edge");
+    val _b = getWith("");
+    assert headerValue("Server") == "edge";
+    val _u = rkSetProp("rakun.server.server-header", "");
+    val _d = done();
+}
+
+// ── the wire ────────────────────────────────────────────────────────────────
+
+fn bigJson(req: Request) -> Response {
+    return withHeader(Response.ok(repeatJson(512)), "Content-Type", "application/json");
+}
+
+test "rakun-web compression: over the socket the Content-Length is the compressed body's" {
+    val _c = compressing();
+    val _r = rkChainSetRunner({ method, path, headersWire, queryWire, body ->
+        runChain(method, path, headersWire, queryWire, body);
+    });
+    val _k = rkSetProp("rakun.main.keep-alive", "false");
+    val port: i32 = rkServe(0, { m, p, h, q, b -> rkDispatchHttp(m, p, h, q, b) });
+    val _route = rkRegisterRoute("GET", "/zip/big", { r -> bigJson(r) });
+    val summary: string = exchangeBytes(port, "GET /zip/big HTTP/1.1\r\nHost: x\r\nAccept-Encoding: gzip\r\n\r\n");
+    val parts: string[] = summary.split("|");
+    val _d = done();
+    assert parts.at(0) == "200";
+    assert parts.at(3) == "gzip";
+    assert parts.at(1) == parts.at(2);
+    assert parts.at(5) == "4608";
+    assert parts.at(4) == "Accept-Encoding";
+    assert parts.at(6) == "";
+}
