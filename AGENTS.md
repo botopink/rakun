@@ -1749,6 +1749,32 @@ dynamic segment).
 - **Alternates** — `alternatesFor(set, pathname)`: one `Alternate(hreflang, href)`
   per locale plus `x-default`, absolute under `rakun.i18n.origin`.
 
+## Metadata file routes — `modules/rakun-app/src/metadata_routes.bp` (front 66)
+
+Eight Next conventions as routes: `sitemap.xml`, `robots.txt`,
+`manifest.webmanifest`, `favicon.ico`, `icon.*`, `apple-icon.*`,
+`opengraph-image` and `twitter-image`. Each `register*` adds ONE `R` entry with
+verb `GET` to front 22's table through front 25's `registerRoute` — the table
+format is unchanged. Host cells are `rakun_metadata_routes.erl` (file read,
+SHA-256 hash); the renderers are pure botopink.
+
+- **Renderers** — `renderSitemap` (every value through `escape.html`, an empty
+  field omitted), `renderSitemapIndex`, `shardEntries` (50 000 URLs / 50 MB per
+  document — no key raises it), `renderRobots`, `renderManifest` (std's JSON
+  writers). A vocabulary value outside the protocol's set, a line break in a
+  robots value, or a second sitemap / robots / manifest refuses the
+  registration; a family is claimed only after its value validated.
+- **Icons and images** — `registerIconFile`, `registerImageFile` (a file under
+  `rakun.appDir`, `path.isInside`-checked, must exist), `registerImageRoute` +
+  `setImageRenderer` (an opaque `PageRenderer`; none set answers 501 naming
+  front 70). Resolution is nearest-ancestor; `iconsFor` / `imagesFor` /
+  `imageUrlFor` / `manifestHref` answer DATA with a `?<16 hex>` content hash, and
+  front 32 writes the tags — no HTML here. Served files carry a one-year
+  immutable cache header.
+- **Scan** — `scanMetadataFiles(appDir)` over std's `io.fs.glob`, skipping `_`
+  folders. A module fn here must not be named like an auto-imported erlang BIF
+  (`element/2` hijacks record field reads — `language-gaps.md`).
+
 ## Navigation signals — `modules/rakun-app/src/navigation.bp` (front 63)
 
 `notFound()`, `redirect(loc)` (307), `permanentRedirect(loc)` (308) and

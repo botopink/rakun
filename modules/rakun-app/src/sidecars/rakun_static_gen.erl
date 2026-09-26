@@ -73,9 +73,16 @@ kinds() ->
     ensure(),
     lists:sort([iolist_to_binary([P, "|", K, "|", R]) || {{kind, P}, K, R} <- ets:tab2list(?T)]).
 
+%% Forgets the registries, the decided kinds and the gauge's high-water mark.
+%% A regeneration's claim, the counters, the live gauge and the log survive:
+%% another test file running in the same node must not be able to free a
+%% claim a worker still holds.
 reset() ->
     ensure(),
-    true = ets:delete_all_objects(?T),
+    _ = ets:select_delete(?T, [{{{config, '_'}, '_'}, [], [true]},
+                               {{{params, '_'}, '_'}, [], [true]},
+                               {{{kind, '_'}, '_', '_'}, [], [true]},
+                               {{{gauge_max, '_'}, '_'}, [], [true]}]),
     0.
 
 %% ═══ the bounded fan-out ═════════════════════════════════════════════════════
@@ -187,7 +194,7 @@ ensure() ->
         undefined ->
             Caller = self(),
             Pid = spawn(fun() ->
-                                case catch erlang:register(rakun_static_gen_owner, self()) of
+                                case (try erlang:register(rakun_static_gen_owner, self()) catch error:badarg -> false end) of
                                     true ->
                                         _ = ets:new(?T, [named_table, public, set]),
                                         Caller ! {rakun_static_gen_owner, ready},

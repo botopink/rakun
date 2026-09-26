@@ -1075,8 +1075,10 @@ refuse_before_body(Sock, Status, Text) ->
     _ = t_send(Sock, [<<"HTTP/1.1 ">>, integer_to_binary(Status), <<" ">>, reason_phrase(Status),
                       <<"\r\nContent-Length: ">>, integer_to_binary(byte_size(Text)),
                       <<"\r\nConnection: close\r\n\r\n">>, Text]),
-    %% Half-close, then read and drop at most 8 KiB for 200 ms, so the refusal
-    %% reaches a client still sending before the close resets the connection.
+    %% Half-close, then read and drop at most 8 KiB and hold the socket open
+    %% for the rest of 200 ms, so a client still sending reads the refusal
+    %% before the close resets the connection (a reset discards what the
+    %% client had not read yet).
     Received = case get(rakun_transport) of
                    ssl -> 0;
                    _ ->
@@ -1091,7 +1093,12 @@ refuse_before_body(Sock, Status, Text) ->
     _ = set_prop(<<"rakun.server.last-refused-bytes">>, integer_to_binary(Received)),
     close_connection(Sock).
 
-drain_upto(_Sock, Left, _Deadline) when Left =< 0 -> ok;
+drain_upto(_Sock, Left, Deadline) when Left =< 0 ->
+    Wait = Deadline - erlang:monotonic_time(millisecond),
+    case Wait > 0 of
+        true -> timer:sleep(Wait);
+        false -> ok
+    end;
 drain_upto(Sock, Left, Deadline) ->
     Wait = Deadline - erlang:monotonic_time(millisecond),
     case Wait > 0 of

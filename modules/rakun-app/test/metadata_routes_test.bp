@@ -1,0 +1,332 @@
+//// rakun-app — metadata file routes (front 66). The routes are exercised
+//// through the app fallback (`serveApp`) with `rkDispatchHttp`; the response
+//// headers are read back from front 23's writer (`rkSsrHeader`).
+
+import {testing.asserts} from "std";
+import {io: {fs, env}} from "std";
+import {Request, Response, rkSetProp, rkDispatchHttp} from "rakun";
+import {table: {RouteEntry, parseTable, writeTable}} from "routing";
+import {rkAppReset, rkAppTable, rkAppRegisterPage} from "file_router";
+import {PageRenderer, ChunkWriter, writeTo, rkSsrHeader} from "ssr";
+import {serveApp, HandlerResponse, registerRoute} from "route_handler";
+import {
+    SitemapEntry, renderSitemap, shardEntries, renderSitemapIndex, registerSitemap, sitemapEntryProblem,
+    RobotRule, Robots, renderRobots, registerRobots, WebManifest, ManifestIcon, renderManifest, registerManifest, manifestHref,
+    IconKind, IconRef, registerIconFile, iconsFor, iconKindName,
+    ImageKind, ImageRoute, ImageMeta, registerImageFile, registerImageRoute, setImageRenderer, resolveImage, imageUrlFor, imagesFor,
+    metadataRoutePatterns, scanMetadataFiles, resetMetadataRoutes, maxSitemapUrls,
+} from "metadata_routes";
+
+fn tmp() -> string {
+    val dir: string = env.read("BOTOPINK_TEST_TMPDIR") ?? "";
+    if (dir == "") @panic("BOTOPINK_TEST_TMPDIR is not set - botopink test sets it");
+    return dir + "/rakun-app-metadata";
+}
+
+#[@External.Erlang("""(fun(__P) -> ok = filelib:ensure_dir(__P), 0 end)($0)""")]
+declare fn ensureDir(file: string) -> i32;
+
+fn put(rel: string, bytes: string) -> i32 {
+    val file = tmp() + "/app/" + rel;
+    val _d = ensureDir(file);
+    val _w = fs.writeText(file, bytes);
+    return 0;
+}
+
+fn fresh() -> i32 {
+    val _r = rkAppReset();
+    val _m = resetMetadataRoutes();
+    val _a = rkSetProp("rakun.appDir", tmp() + "/app");
+    val _o = rkSetProp("rakun.metadata.origin", "https://site.test");
+    return serveApp();
+}
+
+fn get(path: string) -> Response {
+    return rkDispatchHttp("GET", path, "{}", "{}", "");
+}
+
+fn entry(loc: string) -> SitemapEntry {
+    return SitemapEntry(loc: loc, lastModified: "", changeFrequency: "", priority: "");
+}
+
+fn twoEntries() -> @Task<SitemapEntry[]> {
+    val es: SitemapEntry[] = [
+        SitemapEntry(loc: "https://site.test/", lastModified: "2026-09-01", changeFrequency: "daily", priority: "1.0"),
+        SitemapEntry(loc: "https://site.test/a?b=1&c=2", lastModified: "", changeFrequency: "", priority: "0.5"),
+    ];
+    return es;
+}
+
+// ── step 1 ──────────────────────────────────────────────────────────────────
+
+test "metadata: the sitemap renders the exact document, & escaped, empty lastmod omitted" {
+    val xml = renderSitemap([
+        SitemapEntry(loc: "https://site.test/", lastModified: "2026-09-01", changeFrequency: "daily", priority: "1.0"),
+        SitemapEntry(loc: "https://site.test/a?b=1&c=2", lastModified: "", changeFrequency: "", priority: "0.5"),
+    ]);
+    assert xml == "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n<url>\n<loc>https://site.test/</loc>\n<lastmod>2026-09-01</lastmod>\n<changefreq>daily</changefreq>\n<priority>1.0</priority>\n</url>\n<url>\n<loc>https://site.test/a?b=1&amp;c=2</loc>\n<priority>0.5</priority>\n</url>\n</urlset>\n", xml;
+}
+
+test "metadata: an unknown changeFrequency and a priority above 1 fail at registration" {
+    assert sitemapEntryProblem(SitemapEntry(loc: "x", lastModified: "", changeFrequency: "sometimes", priority: "")).contains("changeFrequency `sometimes` is not one of always, hourly, daily, weekly, monthly, yearly, never");
+    assert sitemapEntryProblem(SitemapEntry(loc: "x", lastModified: "", changeFrequency: "", priority: "1.5")).contains("priority `1.5`");
+    val _f = fresh();
+    try asserts.throwsWith({ -> registerSitemap({ -> badEntries() }) }, "changeFrequency `sometimes`");
+}
+
+fn badEntries() -> @Task<SitemapEntry[]> {
+    val es: SitemapEntry[] = [SitemapEntry(loc: "x", lastModified: "", changeFrequency: "sometimes", priority: "")];
+    return es;
+}
+
+test "metadata: 50 001 entries shard in two, 50 000 in one, and the bound has no key" {
+    val many: SitemapEntry[] = Array.range(0, 50001).map({ i -> entry("https://s/" + i.toString()) });
+    assert shardEntries(many).length == 2;
+    assert shardEntries(many.slice(0, 50000)).length == 1;
+    assert maxSitemapUrls() == 50000;
+    val src: string = fs.readText("src/metadata_routes.bp").unwrapOr("");
+    assert src.contains("rkProp(\"rakun.metadata.sitemap") == false;
+}
+
+fn manyEntries() -> @Task<SitemapEntry[]> {
+    val es: SitemapEntry[] = Array.range(0, 50001).map({ i -> entry("https://s/" + i.toString()) });
+    return es;
+}
+
+test "metadata: above the bound /sitemap.xml is the index and /sitemap/0.xml the first shard" {
+    val _f = fresh();
+    val _s = registerSitemap({ -> manyEntries() });
+    val index = get("/sitemap.xml");
+    assert index.status == 200;
+    assert index.body.startsWith("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<sitemapindex");
+    assert index.body.contains("<loc>https://site.test/sitemap/1.xml</loc>");
+    assert rkSsrHeader("content-type") == "application/xml";
+    val shard = get("/sitemap/0.xml");
+    assert shard.status == 200 && shard.body.contains("<loc>https://s/0</loc>");
+}
+
+test "metadata: with one shard /sitemap.xml is the shard itself and no index exists" {
+    val _f = fresh();
+    val _s = registerSitemap({ -> twoEntries() });
+    val res = get("/sitemap.xml");
+    assert res.body.contains("<urlset") && res.body.contains("sitemapindex") == false;
+    assert get("/sitemap/0.xml").status == 404;
+}
+
+// ── step 2 ──────────────────────────────────────────────────────────────────
+
+fn robots() -> Robots {
+    return Robots(rules: [RobotRule(userAgent: "*", allow: ["/"], disallow: ["/admin"]), RobotRule(userAgent: "bad", allow: [], disallow: ["/"])], sitemap: "https://site.test/sitemap.xml", host: "");
+}
+
+fn robotsTask() -> @Task<Robots> {
+    return robots();
+}
+
+test "metadata: robots.txt renders the exact text" {
+    assert renderRobots(robots()) == "User-Agent: *\nAllow: /\nDisallow: /admin\n\nUser-Agent: bad\nDisallow: /\n\nSitemap: https://site.test/sitemap.xml\n";
+    val noMap = Robots(rules: [RobotRule(userAgent: "*", allow: [], disallow: ["/x"])], sitemap: "", host: "");
+    assert renderRobots(noMap) == "User-Agent: *\nDisallow: /x\n\n";
+}
+
+fn injected() -> @Task<Robots> {
+    return Robots(rules: [RobotRule(userAgent: "*\nDisallow: /", allow: [], disallow: [])], sitemap: "", host: "");
+}
+
+test "metadata: a line break in a robots value fails at registration" {
+    val _f = fresh();
+    try asserts.throwsWith({ -> registerRobots({ -> injected() }) }, "an injected line is an injected rule");
+}
+
+test "metadata: robots.txt is text/plain, and 404 when nothing registered it" {
+    val _f = fresh();
+    assert get("/robots.txt").status == 404;
+    val _r = registerRobots({ -> robotsTask() });
+    val res = get("/robots.txt");
+    assert res.status == 200 && res.body.startsWith("User-Agent: *");
+    assert rkSsrHeader("content-type") == "text/plain";
+}
+
+// ── step 3 ──────────────────────────────────────────────────────────────────
+
+fn manifest(name: string, display: string, icons: Array<ManifestIcon>) -> WebManifest {
+    return WebManifest(name: name, shortName: "S", startUrl: "/", display: display, backgroundColor: "#fff", themeColor: "#000", icons: icons);
+}
+
+test "metadata: the manifest is the exact JSON, a quote escaped, empty icons kept" {
+    assert renderManifest(manifest("A \"B\"", "standalone", [])) == "{\"name\":\"A \\\"B\\\"\",\"short_name\":\"S\",\"start_url\":\"/\",\"display\":\"standalone\",\"background_color\":\"#fff\",\"theme_color\":\"#000\",\"icons\":[]}";
+    val one = renderManifest(manifest("A", "browser", [ManifestIcon(src: "/i.png", sizes: "512x512", contentType: "image/png")]));
+    assert one.contains("\"icons\":[{\"src\":\"/i.png\",\"sizes\":\"512x512\",\"type\":\"image/png\"}]");
+}
+
+fn badManifest() -> @Task<WebManifest> {
+    return manifest("A", "fullscreen-ish", []);
+}
+
+fn goodManifest() -> @Task<WebManifest> {
+    return manifest("A", "standalone", []);
+}
+
+test "metadata: an unknown display fails at registration; the route is /manifest.webmanifest" {
+    val _f = fresh();
+    try asserts.throwsWith({ -> registerManifest({ -> badManifest() }) }, "display `fullscreen-ish` is not one of fullscreen, standalone, minimal-ui, browser");
+    assert manifestHref() == "";
+    val _m = registerManifest({ -> goodManifest() });
+    val res = get("/manifest.webmanifest");
+    assert res.status == 200 && res.body.contains("\"display\":\"standalone\"");
+    assert rkSsrHeader("content-type") == "application/manifest+json";
+    assert manifestHref() == "/manifest.webmanifest";
+}
+
+// ── step 4 ──────────────────────────────────────────────────────────────────
+
+test "metadata: favicon, icon and apple-icon are served and resolved as data" {
+    val _f = fresh();
+    val _a = put("favicon.ico", "ICO");
+    val _b = put("icon.png", "PNG-ICON");
+    val _c = put("apple-icon.png", "PNG-APPLE");
+    val _r1 = registerIconFile(IconKind.Favicon, "", "favicon.ico", "image/x-icon", "");
+    val _r2 = registerIconFile(IconKind.Icon, "", "icon.png", "image/png", "512x512");
+    val _r3 = registerIconFile(IconKind.AppleIcon, "", "apple-icon.png", "image/png", "180x180");
+    val fav = get("/favicon.ico");
+    assert fav.status == 200 && fav.body == "ICO" && rkSsrHeader("content-type") == "image/x-icon";
+    val icon = get("/icon.png");
+    assert icon.body == "PNG-ICON" && rkSsrHeader("cache-control") == "public, max-age=31536000, immutable";
+    val refs = iconsFor("/blog/[slug]");
+    assert refs.length == 3;
+    val apple = refs.filter({ r -> iconKindName(r.kind) == "apple-icon" });
+    val a: IconRef = apple.at(0) ?? IconRef(kind: IconKind.Icon, href: "", contentType: "", sizes: "");
+    assert a.href.startsWith("/apple-icon.png?") && a.href.length() == "/apple-icon.png?".length() + 16;
+    assert a.contentType == "image/png" && a.sizes == "180x180";
+    val src: string = fs.readText("src/metadata_routes.bp").unwrapOr("");
+    assert src.contains("<link") == false && src.contains("<meta") == false;
+}
+
+test "metadata: a missing file and a file outside the app directory fail" {
+    val _f = fresh();
+    try asserts.throwsWith({ -> registerIconFile(IconKind.Icon, "", "nope.png", "image/png", "1x1") }, "`nope.png` does not exist");
+    try asserts.throwsWith({ -> registerIconFile(IconKind.Icon, "", "../outside.png", "image/png", "1x1") }, "escapes the app directory");
+}
+
+// ── step 5 ──────────────────────────────────────────────────────────────────
+
+fn card() -> PageRenderer {
+    return { req, out -> cardBody(out, req) };
+}
+
+fn cardBody(out: ChunkWriter, req: Request) -> @Task<void> {
+    await writeTo(out, "SVG for " + req.path + " " + rkPropS("card.version"));
+}
+
+#[@External.Erlang("rakun_runtime", "prop")]
+declare fn rkPropS(key: string) -> string;
+
+test "metadata: an image at blog/[slug] overrides the root's for /blog/hello and not for /about" {
+    val _f = fresh();
+    val _a = put("opengraph-image.png", "ROOT");
+    val _b = put("blog/[slug]/opengraph-image.png", "BLOG");
+    val _r = registerImageFile(ImageKind.OpenGraph, "", "opengraph-image.png", "image/png", 1200, 630);
+    val _s = registerImageFile(ImageKind.OpenGraph, "blog/[slug]", "blog/[slug]/opengraph-image.png", "image/png", 1200, 630);
+    val blog: ?ImageRoute = resolveImage(ImageKind.OpenGraph, "/blog/[slug]");
+    val about: ?ImageRoute = resolveImage(ImageKind.OpenGraph, "/about");
+    assert (blog ?? ImageRoute(kind: ImageKind.Twitter, pattern: "none", width: 0, height: 0, contentType: "")).pattern == "/blog/[slug]";
+    assert (about ?? ImageRoute(kind: ImageKind.Twitter, pattern: "none", width: 0, height: 0, contentType: "")).pattern == "/";
+    val served = get("/blog/hello/opengraph-image");
+    assert served.body == "BLOG" && rkSsrHeader("cache-control") == "public, max-age=31536000, immutable";
+}
+
+test "metadata: with no registration there is no card" {
+    val _f = fresh();
+    assert resolveImage(ImageKind.OpenGraph, "/x") == null;
+    assert imagesFor("/x", "x").length == 0;
+}
+
+test "metadata: the image URL carries a hash that moves with one byte of the file or the body" {
+    val _f = fresh();
+    val _a = put("blog/[slug]/opengraph-image.png", "BYTES-1");
+    val _r = registerImageFile(ImageKind.OpenGraph, "blog/[slug]", "blog/[slug]/opengraph-image.png", "image/png", 1200, 630);
+    val first = imageUrlFor(ImageKind.OpenGraph, "/blog/hello") ?? "";
+    assert first.startsWith("/blog/hello/opengraph-image?"), first;
+    val _b = put("blog/[slug]/opengraph-image.png", "BYTES-2");
+    val second = imageUrlFor(ImageKind.OpenGraph, "/blog/hello") ?? "";
+    assert first != second;
+    val _d = registerImageRoute(ImageKind.Twitter, "blog/[slug]", 1200, 630, "image/png");
+    val _s = setImageRenderer(ImageKind.Twitter, "blog/[slug]", card());
+    val _v = rkSetProp("card.version", "1");
+    val t1 = imageUrlFor(ImageKind.Twitter, "/blog/hello") ?? "";
+    val _w = rkSetProp("card.version", "2");
+    val t2 = imageUrlFor(ImageKind.Twitter, "/blog/hello") ?? "";
+    assert t1.startsWith("/blog/hello/twitter-image?") && t1 != t2;
+}
+
+test "metadata: imagesFor answers every field front 32 needs" {
+    val _f = fresh();
+    val _a = put("blog/[slug]/opengraph-image.png", "OG");
+    val _r = registerImageFile(ImageKind.OpenGraph, "blog/[slug]", "blog/[slug]/opengraph-image.png", "image/png", 1200, 630);
+    val metas = imagesFor("/blog/hello", "blog/[slug]");
+    assert metas.length == 1;
+    val m: ImageMeta = metas.at(0) ?? ImageMeta(kind: ImageKind.Twitter, url: "", width: 0, height: 0, contentType: "");
+    assert m.url.startsWith("/blog/hello/opengraph-image?") && m.width == 1200 && m.height == 630 && m.contentType == "image/png";
+}
+
+test "metadata: a dynamic image with no renderer answers 501 naming front 70, and its meta still exists" {
+    val _f = fresh();
+    val _d = registerImageRoute(ImageKind.OpenGraph, "blog/[slug]", 1200, 630, "image/png");
+    val res = get("/blog/hello/opengraph-image");
+    assert res.status == 501 && res.body.contains("front 70");
+    assert imagesFor("/blog/hello", "blog/[slug]").length == 1;
+}
+
+test "metadata: a dynamic image with a renderer answers its bytes; setting one for an unregistered route fails" {
+    val _f = fresh();
+    val _d = registerImageRoute(ImageKind.OpenGraph, "blog/[slug]", 1200, 630, "image/svg+xml");
+    val _s = setImageRenderer(ImageKind.OpenGraph, "blog/[slug]", card());
+    val _v = rkSetProp("card.version", "7");
+    val res = get("/blog/hello/opengraph-image");
+    assert res.status == 200 && res.body == "SVG for /blog/hello 7", res.body;
+    assert rkSsrHeader("content-type") == "image/svg+xml";
+    try asserts.throwsWith({ -> setImageRenderer(ImageKind.Twitter, "nowhere", card()) }, "no dynamic twitter-image is registered at `/nowhere`");
+}
+
+// ── step 6 ──────────────────────────────────────────────────────────────────
+
+test "metadata: every registration is one GET R entry and the table round-trips" {
+    val _f = fresh();
+    val _s = registerSitemap({ -> twoEntries() });
+    val _r = registerRobots({ -> robotsTask() });
+    val entries: RouteEntry[] = parseTable(rkAppTable());
+    val metaEntries = entries.filter({ e -> e.kind == "R" && e.verb == "GET" });
+    assert metaEntries.length == 3, rkAppTable();
+    assert writeTable(parseTable(rkAppTable())) == rkAppTable();
+    assert metadataRoutePatterns().join(",") == "/sitemap.xml,/robots.txt";
+}
+
+fn appRobots(req: Request) -> @Task<HandlerResponse> {
+    return HandlerResponse.text("mine");
+}
+
+test "metadata: a metadata route and an application route.bp at one URL fail, naming both" {
+    val _f = fresh();
+    val _a = registerRoute("GET", "robots.txt", "appRobots", { req -> appRobots(req) });
+    try asserts.throwsWith({ -> registerRobots({ -> robotsTask() }) }, "registered by `appRobots` and again by `robots`");
+}
+
+test "metadata: the scan finds a nested icon and skips a private folder" {
+    val _a = put("a/b/c/icon.png", "x");
+    val _b = put("_private/icon.png", "x");
+    val _c = put("twitter-image.jpg", "x");
+    val found = scanMetadataFiles(tmp() + "/app");
+    assert found.filter({ f -> f == "a/b/c/icon.png" }).length == 1, found.join(",");
+    assert found.filter({ f -> f.contains("_private") }).length == 0;
+    assert found.filter({ f -> f == "twitter-image.jpg" }).length == 1;
+}
+
+test "metadata: a second sitemap, robots or manifest is refused" {
+    val _f = fresh();
+    val _s = registerSitemap({ -> twoEntries() });
+    val _r = registerRobots({ -> robotsTask() });
+    val _m = registerManifest({ -> goodManifest() });
+    try asserts.throwsWith({ -> registerSitemap({ -> twoEntries() }) }, "a sitemap is already registered");
+    try asserts.throwsWith({ -> registerRobots({ -> robotsTask() }) }, "a robots is already registered");
+    try asserts.throwsWith({ -> registerManifest({ -> goodManifest() }) }, "a manifest is already registered");
+}
