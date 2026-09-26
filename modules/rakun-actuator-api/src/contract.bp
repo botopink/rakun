@@ -1,0 +1,59 @@
+//// rakun-actuator-api — the contract eight fronts register against.
+////
+//// Types and behaviors only. Nothing here decides a status, a timeout, a route
+//// or an exposure: those are the host's (`modules/rakun-actuator`). A module
+//// shipping an indicator, a contributor or an endpoint depends on this module
+//// and on nothing else of the actuator.
+////
+//// `details`, an info contribution and an endpoint body are JSON STRINGS built
+//// by whoever answers, not structured values: there is no std JSON walker that
+//// could serialize an arbitrary record (`language-gaps.md`).
+
+import {Request} from "rakun";
+
+// `status` is one of `UP`, `DOWN`, `OUT_OF_SERVICE`, `UNKNOWN`; the host reads
+// any other spelling as `UNKNOWN`. `details` is a JSON object string, `{}` when
+// there is nothing to say, and never carries a credential, a URL with a
+// password or a stack trace.
+pub type Health(
+    status: string,
+    details: string,
+)
+
+pub fn healthUp() -> Health {
+    return Health(status: "UP", details: "{}");
+}
+
+pub fn healthDown(details: string) -> Health {
+    return Health(status: "DOWN", details: details);
+}
+
+// An indicator must not raise and must answer within its timeout; the host
+// turns a raise into `DOWN` and an overrun into `UNKNOWN`, so a broken
+// indicator degrades one component and never the endpoint.
+pub behavior HealthIndicator {
+    fn check(self: Self) -> Health;
+}
+
+// A JSON object string; its top-level keys are what the host merges by.
+pub behavior InfoContributor {
+    fn contribute(self: Self) -> string;
+}
+
+pub type EndpointResponse(
+    status: i32,
+    contentType: string,
+    body: string,
+)
+
+pub fn endpointJson(body: string) -> EndpointResponse {
+    return EndpointResponse(status: 200, contentType: "application/json", body: body);
+}
+
+// `id` names the endpoint; the host routes `<base-path>/<segment>` to it, the
+// segment being the id unless `management.endpoints.web.path-mapping.<id>`
+// renames it.
+pub behavior Endpoint {
+    fn id(self: Self) -> string;
+    fn read(self: Self, req: Request) -> EndpointResponse;
+}

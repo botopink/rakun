@@ -1,0 +1,231 @@
+//// rakun-actuator-api — the registration cells and the four decorators.
+////
+//// A registration is API, a decision is host. Every function here WRITES a
+//// row into a table `rakun_actuator_api.erl` owns, or answers who wrote it;
+//// none of them runs an indicator, orders a status, picks a route or decides
+//// what is exposed. An application with this module and no host registers
+//// indicators nothing reads, which is exactly right: nothing is exposing them.
+////
+//// THE ONE RULE ENFORCED AT REGISTRATION is the duplicate id, because it is a
+//// property of the registry and not of the decision: two registrations under
+//// one id cannot both be found, so the second raises at module load — at boot —
+//// naming both owners. The same owner registering again replaces its own row
+//// (a reloaded module is not a second indicator).
+////
+//// A health check is stored WRAPPED: `{ -> healthLine(check()) }`, so the host
+//// is handed `status\tdetails` and never has to know how a `Health` record is
+//// laid out on the BEAM.
+
+import {Health, EndpointResponse} from "contract";
+
+// ── the host cells ──────────────────────────────────────────────────────────
+
+#[@External.Erlang("rakun_actuator_api", "register_health")]
+pub declare fn rkApiHealthStore(id: string, owner: string, check: fn() -> string) -> i32;
+
+#[@External.Erlang("rakun_actuator_api", "health_owner")]
+pub declare fn rkApiHealthOwner(id: string) -> string;
+
+#[@External.Erlang("rakun_actuator_api", "health_ids")]
+pub declare fn rkApiHealthIds() -> string;
+
+#[@External.Erlang("rakun_actuator_api", "health_remove")]
+pub declare fn rkApiHealthRemove(id: string) -> i32;
+
+#[@External.Erlang("rakun_actuator_api", "register_info")]
+pub declare fn rkApiInfoStore(id: string, owner: string, contribute: fn() -> string) -> i32;
+
+#[@External.Erlang("rakun_actuator_api", "info_owner")]
+pub declare fn rkApiInfoOwner(id: string) -> string;
+
+#[@External.Erlang("rakun_actuator_api", "info_ids")]
+pub declare fn rkApiInfoIds() -> string;
+
+#[@External.Erlang("rakun_actuator_api", "info_remove")]
+pub declare fn rkApiInfoRemove(id: string) -> i32;
+
+#[@External.Erlang("rakun_actuator_api", "register_endpoint")]
+pub declare fn rkApiEndpointStore<Q>(id: string, owner: string, ops: string, read: fn(req: Q) -> EndpointResponse) -> i32;
+
+#[@External.Erlang("rakun_actuator_api", "endpoint_owner")]
+pub declare fn rkApiEndpointOwner(id: string) -> string;
+
+#[@External.Erlang("rakun_actuator_api", "endpoint_ids")]
+pub declare fn rkApiEndpointIds() -> string;
+
+#[@External.Erlang("rakun_actuator_api", "endpoint_ops")]
+pub declare fn rkApiEndpointOps(id: string) -> string;
+
+#[@External.Erlang("rakun_actuator_api", "endpoint_remove")]
+pub declare fn rkApiEndpointRemove(id: string) -> i32;
+
+#[@External.Erlang("rakun_actuator_api", "register_instrumentation")]
+pub declare fn rkApiInstrumentationStore<R>(owner: string, hook: fn() -> R) -> i32;
+
+#[@External.Erlang("rakun_actuator_api", "instrumentation_owner")]
+pub declare fn rkApiInstrumentationOwner() -> string;
+
+#[@External.Erlang("rakun_actuator_api", "instrumentation_reset")]
+pub declare fn rkApiInstrumentationReset() -> i32;
+
+#[@External.Erlang("rakun_actuator_api", "table_facts")]
+pub declare fn rkApiTableFacts() -> string;
+
+// ── the refusals ────────────────────────────────────────────────────────────
+//
+// No double quote in any text: on the erlang row `throwsWith` reads the `~p`
+// rendering, in which a `"` is escaped.
+
+pub fn duplicateIdProblem(kind: string, id: string, first: string, second: string) -> string {
+    return "rakun-actuator: two " + kind + "s are registered as `" + id + "` (`" + first + "` and `" + second + "`) - one id is one row, and only one of them could ever be read; give one a distinct id";
+}
+
+pub fn idProblem(kind: string, id: string) -> string {
+    return "rakun-actuator: a " + kind + " id must be non-empty and hold no whitespace, `/`, `|` or tab, and `" + id + "` does not";
+}
+
+pub fn duplicateInstrumentationProblem(first: string, second: string) -> string {
+    return "rakun-actuator: two #[instrumentation] functions are registered (`" + first + "` and `" + second + "`) - one application runs one startup hook first, and two cannot both be first";
+}
+
+fn badId(id: string) -> bool {
+    val dirty = id.contains(" ") || id.contains("/") || id.contains("|") || id.contains("\t") || id.contains("\n");
+    return id == "" || dirty;
+}
+
+fn claim(kind: string, id: string, owner: string, first: string) -> i32 {
+    if (badId(id)) @panic(idProblem(kind, id));
+    if ((first != "") && (first != owner)) @panic(duplicateIdProblem(kind, id, first, owner));
+    return 0;
+}
+
+// ── registration ────────────────────────────────────────────────────────────
+
+pub fn healthLine(h: Health) -> string {
+    return h.status + "\t" + h.details;
+}
+
+pub fn rkRegisterHealthIndicator(id: string, owner: string, check: fn() -> Health) -> i32 {
+    val _c = claim("health indicator", id, owner, rkApiHealthOwner(id));
+    return rkApiHealthStore(id, owner, { -> healthLine(check()) });
+}
+
+pub fn rkRegisterInfoContributor(id: string, owner: string, contribute: fn() -> string) -> i32 {
+    val _c = claim("info contributor", id, owner, rkApiInfoOwner(id));
+    return rkApiInfoStore(id, owner, contribute);
+}
+
+// `ops` is the comma-joined operation list (`read`, and `write`/`delete` when
+// the type declares them); the handler registered is the read operation's.
+pub fn rkRegisterEndpoint<Q>(id: string, owner: string, ops: string, read: fn(req: Q) -> EndpointResponse) -> i32 {
+    val _c = claim("endpoint", id, owner, rkApiEndpointOwner(id));
+    return rkApiEndpointStore(id, owner, ops, read);
+}
+
+pub fn rkRegisterInstrumentation<R>(owner: string, hook: fn() -> R) -> i32 {
+    val first: string = rkApiInstrumentationOwner();
+    if ((first != "") && (first != owner)) @panic(duplicateInstrumentationProblem(first, owner));
+    return rkApiInstrumentationStore(owner, hook);
+}
+
+// ── reading the registries (ids only — what they MEAN is the host's) ─────────
+
+fn lines(wire: string) -> string[] {
+    if (wire == "") {
+        val none: string[] = [];
+        return none;
+    } else return wire.split("\n");
+}
+
+pub fn healthIndicatorIds() -> string[] {
+    return lines(rkApiHealthIds());
+}
+
+pub fn infoContributorIds() -> string[] {
+    return lines(rkApiInfoIds());
+}
+
+pub fn endpointIds() -> string[] {
+    return lines(rkApiEndpointIds());
+}
+
+// `health <id>` · `info <id>` · `endpoint <id> [<ops>]`, each group sorted by id.
+pub fn registryListing() -> string {
+    var out: string[] = [];
+    for (healthIndicatorIds()) { id -> out.push("health " + id) };
+    for (infoContributorIds()) { id -> out.push("info " + id) };
+    for (endpointIds()) { id -> out.push("endpoint " + id + " [" + rkApiEndpointOps(id).split(",").join(", ") + "]") };
+    return out.join("\n");
+}
+
+// ── the decorators ──────────────────────────────────────────────────────────
+//
+// Each is a type-level decorator that stacks under a STEREOTYPE
+// (`#[component]`, `#[service]`, …): the stereotype emits the singleton
+// `__rkMake_<Type>()` the registration calls, and a decorator body cannot emit
+// a second factory without duplicating the injection rule. A type without one
+// is refused at comptime, naming the fix, rather than failing the build later
+// with `unbound variable '__rkMake_<Type>'`.
+//
+// The emitted line runs at the APPLICATION site, so the consumer imports the
+// registration cell by name (`rkRegisterHealthIndicator`, …) beside the marker.
+// Decorator bodies are comment-free and call no sibling (the comptime rules
+// `context.bp`'s `#[managed]` docblock records).
+
+pub fn healthIndicator(comptime decl: @Decl, id: string) {
+    var stereotype = "";
+    var hasCheck = false;
+    decl.annotations.forEach({ a ->
+        val isStereo = a.name == "component" || a.name == "service" || a.name == "repository" || a.name == "controller" || a.name == "restController" || a.name == "configuration";
+        val st = if (isStereo) a.name else stereotype;
+        stereotype = st;
+    });
+    decl.methods.forEach({ m ->
+        val c = if (m.name == "check") true else hasCheck;
+        hasCheck = c;
+    });
+    @emit("val __rkHi_" + decl.name + " = rkRegisterHealthIndicator(\"" + id + "\", \"" + decl.name + "\", { -> __rkMake_" + decl.name + "().check() });");
+    if (decl.kind != DeclKind.Type) decl.fail("#[healthIndicator] must annotate a type");
+    if (stereotype == "") decl.fail("#[healthIndicator] needs a stereotype on the same type (#[component] or #[service]) - the stereotype emits the singleton factory the registration calls");
+    if (hasCheck == false) decl.fail("#[healthIndicator] must annotate a type with a check(self) -> Health method");
+}
+
+pub fn infoContributor(comptime decl: @Decl, id: string) {
+    var stereotype = "";
+    var hasContribute = false;
+    decl.annotations.forEach({ a ->
+        val isStereo = a.name == "component" || a.name == "service" || a.name == "repository" || a.name == "controller" || a.name == "restController" || a.name == "configuration";
+        val st = if (isStereo) a.name else stereotype;
+        stereotype = st;
+    });
+    decl.methods.forEach({ m ->
+        val c = if (m.name == "contribute") true else hasContribute;
+        hasContribute = c;
+    });
+    @emit("val __rkIc_" + decl.name + " = rkRegisterInfoContributor(\"" + id + "\", \"" + decl.name + "\", { -> __rkMake_" + decl.name + "().contribute() });");
+    if (decl.kind != DeclKind.Type) decl.fail("#[infoContributor] must annotate a type");
+    if (stereotype == "") decl.fail("#[infoContributor] needs a stereotype on the same type (#[component] or #[service]) - the stereotype emits the singleton factory the registration calls");
+    if (hasContribute == false) decl.fail("#[infoContributor] must annotate a type with a contribute(self) -> string method");
+}
+
+pub fn endpoint(comptime decl: @Decl, id: string) {
+    var stereotype = "";
+    var ops: Array<string> = [];
+    decl.annotations.forEach({ a ->
+        val isStereo = a.name == "component" || a.name == "service" || a.name == "repository" || a.name == "controller" || a.name == "restController" || a.name == "configuration";
+        val st = if (isStereo) a.name else stereotype;
+        stereotype = st;
+    });
+    decl.methods.forEach({ m ->
+        if (m.name == "read" || m.name == "write" || m.name == "delete") ops.push(m.name);
+    });
+    @emit("val __rkEp_" + decl.name + " = rkRegisterEndpoint(\"" + id + "\", \"" + decl.name + "\", \"" + ops.join(",") + "\", { req -> __rkMake_" + decl.name + "().read(req) });");
+    if (decl.kind != DeclKind.Type) decl.fail("#[endpoint] must annotate a type");
+    if (stereotype == "") decl.fail("#[endpoint] needs a stereotype on the same type (#[component] or #[service]) - the stereotype emits the singleton factory the registration calls");
+    if (ops.indexOf("read") < 0) decl.fail("#[endpoint] must annotate a type with a read(self, req: Request) -> EndpointResponse method");
+}
+
+pub fn instrumentation(comptime decl: @Decl) {
+    @emit("val __rkInstr_" + decl.name + " = rkRegisterInstrumentation(\"" + decl.name + "\", { -> " + decl.name + "() });");
+    if (decl.kind != DeclKind.Fn) decl.fail("#[instrumentation] must annotate a function");
+}

@@ -1,0 +1,163 @@
+//// rakun-actuator-api — the span seam.
+////
+//// `startSpan`/`endSpan` are here and not in the host so fronts 23, 24 and 25
+//// (render, action, handler) and front 13 (the outbound `traceparent`) emit
+//// without depending on the host. The `http.server.request` chain entry — a
+//// decision about the request path — is the host's.
+////
+//// Each span emits two `:telemetry`-shaped events, `[rakun, <name…>, start]`
+//// and `[rakun, <name…>, stop]`, with measurements (`system_time`, and
+//// `duration` in microseconds on stop) and metadata (`name`, `trace_id`,
+//// `span_id`, `parent_id`, `attributes`, `outcome`). When the `telemetry`
+//// module is loaded they go to `telemetry:execute/3`; a botopink subscriber
+//// (`subscribeSpans`) gets the same event as `rakun.<name…>.<phase>` with the
+//// two maps JSON-encoded. With no subscriber the emission is a no-op. Front 11
+//// emits; front 75 subscribes and exports.
+////
+//// PARENTING IS PER PROCESS. The current span is a stack in the caller's
+//// process dictionary: a request is a process, so a span started inside another
+//// span is its child and two requests never share a parent.
+////
+//// W3C TRACE CONTEXT. `traceparent: 00-<32 hex trace id>-<16 hex parent id>-01`.
+//// `continueTrace(header)` makes an inbound, well-formed header the parent of the
+//// next span; a malformed or absent one is ignored, so the next span starts a
+//// fresh trace. `currentTraceparent()` is what front 13's client sends.
+
+#[@External.Erlang("rakun_actuator_api", "fresh_trace_id")]
+pub declare fn rkSpanFreshTraceId() -> string;
+
+#[@External.Erlang("rakun_actuator_api", "fresh_span_id")]
+pub declare fn rkSpanFreshSpanId() -> string;
+
+#[@External.Erlang("rakun_actuator_api", "now_micros")]
+pub declare fn rkSpanNowMicros() -> i64;
+
+#[@External.Erlang("rakun_actuator_api", "span_current")]
+pub declare fn rkSpanCurrent() -> string;
+
+#[@External.Erlang("rakun_actuator_api", "span_push")]
+pub declare fn rkSpanPush(traceId: string, spanId: string) -> i32;
+
+#[@External.Erlang("rakun_actuator_api", "span_pop")]
+pub declare fn rkSpanPop(spanId: string) -> i32;
+
+#[@External.Erlang("rakun_actuator_api", "span_clear")]
+pub declare fn rkSpanClear() -> i32;
+
+#[@External.Erlang("rakun_actuator_api", "emit_start")]
+pub declare fn rkSpanEmitStart(name: string, traceId: string, spanId: string, parentId: string, attributes: string) -> i32;
+
+#[@External.Erlang("rakun_actuator_api", "emit_stop")]
+pub declare fn rkSpanEmitStop(
+    name: string,
+    traceId: string,
+    spanId: string,
+    parentId: string,
+    attributes: string,
+    durationMicros: i64,
+    outcome: string,
+) -> i32;
+
+#[@External.Erlang("rakun_actuator_api", "subscribe")]
+pub declare fn rkSpanSubscribe(onEvent: fn(event: string, measurementsJson: string, metadataJson: string) -> i32) -> i32;
+
+#[@External.Erlang("rakun_actuator_api", "subscriber_count")]
+pub declare fn rkSpanSubscriberCount() -> i32;
+
+#[@External.Erlang("rakun_actuator_api", "unsubscribe_all")]
+pub declare fn rkSpanUnsubscribeAll() -> i32;
+
+#[@External.Erlang("rakun_actuator_api", "span_log_enable")]
+pub declare fn rkSpanLogEnable() -> i32;
+
+#[@External.Erlang("rakun_actuator_api", "span_log")]
+pub declare fn rkSpanLog() -> string;
+
+#[@External.Erlang("rakun_actuator_api", "span_log_reset")]
+pub declare fn rkSpanLogReset() -> i32;
+
+// `parentId` is `""` for a root span. `startedAt` is wall-clock microseconds.
+pub type Span(
+    name: string,
+    traceId: string,
+    spanId: string,
+    parentId: string,
+    startedAt: i64,
+    attributes: string,
+)
+
+// `attributes` is a JSON object string (`{}` when there are none).
+pub fn startSpan(name: string, attributes: string) -> Span {
+    val current: string = rkSpanCurrent();
+    val parts: string[] = current.split("\t");
+    val inTrace = current != "";
+    val traceId: string = if (inTrace) parts.at(0) ?? "" else rkSpanFreshTraceId();
+    val parentId: string = if (inTrace) parts.at(1) ?? "" else "";
+    val spanId: string = rkSpanFreshSpanId();
+    val _p = rkSpanPush(traceId, spanId);
+    val span = Span(
+        name: name,
+        traceId: traceId,
+        spanId: spanId,
+        parentId: parentId,
+        startedAt: rkSpanNowMicros(),
+        attributes: attributes,
+    );
+    val _e = rkSpanEmitStart(name, traceId, spanId, parentId, attributes);
+    return span;
+}
+
+// `outcome` is free text (`ok`, `error`, a status code); the answer is 0.
+pub fn endSpan(span: Span, outcome: string) -> i32 {
+    val _p = rkSpanPop(span.spanId);
+    val elapsed: i64 = rkSpanNowMicros() - span.startedAt;
+    return rkSpanEmitStop(span.name, span.traceId, span.spanId, span.parentId, span.attributes, elapsed, outcome);
+}
+
+pub fn subscribeSpans(onEvent: fn(event: string, measurementsJson: string, metadataJson: string) -> i32) -> i32 {
+    return rkSpanSubscribe(onEvent);
+}
+
+// ── W3C trace context ───────────────────────────────────────────────────────
+
+pub fn traceparentOf(span: Span) -> string {
+    return "00-" + span.traceId + "-" + span.spanId + "-01";
+}
+
+// The header for the caller's current span, `""` outside any span.
+pub fn currentTraceparent() -> string {
+    val current: string = rkSpanCurrent();
+    if (current == "") return "";
+    val parts: string[] = current.split("\t");
+    return "00-" + (parts.at(0) ?? "") + "-" + (parts.at(1) ?? "") + "-01";
+}
+
+fn isHex(s: string, size: i32) -> bool {
+    val chars: string[] = s.split("");
+    if (chars.length != size) return false;
+    var ok = true;
+    var zero = true;
+    for (chars) { c ->
+        val digit = "0123456789abcdef".contains(c);
+        if (digit == false) ok = false;
+        if (c != "0") zero = false;
+    };
+    return ok && (zero == false || size == 2);
+}
+
+pub fn validTraceparent(header: string) -> bool {
+    val parts: string[] = header.trim().split("-");
+    if (parts.length != 4) return false;
+    if ((parts.at(0) ?? "") != "00") return false;
+    return isHex(parts.at(1) ?? "", 32) && isHex(parts.at(2) ?? "", 16) && isHex(parts.at(3) ?? "", 2);
+}
+
+// Makes a well-formed inbound header the parent of the next span in this
+// process; answers whether it did. A malformed header is not an error — the
+// next span simply starts a fresh trace, which is what the W3C spec asks for.
+pub fn continueTrace(header: string) -> bool {
+    if (validTraceparent(header) == false) return false;
+    val parts: string[] = header.trim().split("-");
+    val _p = rkSpanPush(parts.at(1) ?? "", parts.at(2) ?? "");
+    return true;
+}

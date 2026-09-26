@@ -2,6 +2,44 @@
 
 ## Unreleased
 
+### Actuator: health, info and the endpoint host (botopink front 11)
+
+- New member `modules/rakun-actuator-api` (depends on `rakun` only): `Health`,
+  `HealthIndicator`, `InfoContributor`, `Endpoint`, `EndpointResponse`, `Span`; the
+  decorators `#[healthIndicator("id")]`, `#[infoContributor("id")]`, `#[endpoint("id")]`
+  (each stacked under a stereotype) and `#[instrumentation]`; the registration cells
+  `rkRegisterHealthIndicator`/`rkRegisterInfoContributor`/`rkRegisterEndpoint`/
+  `rkRegisterInstrumentation` (a second registration under a taken id fails at boot
+  naming both owners); `startSpan`/`endSpan` with per-process parenting,
+  `:telemetry`-shaped events (to `telemetry:execute/3` when loaded, and to
+  `subscribeSpans` subscribers), W3C `traceparent` continue/emit, and a no-op cost with
+  no subscriber. Sidecar `rakun_actuator_api.erl` owns the three `named_table, public`
+  registries.
+- `modules/rakun-actuator` (depends on `rakun`, `rakun-actuator-api`, `rakun-web`):
+  `mountActuator()` registers ONE route, `GET <base-path>/:endpoint`, and dispatches by
+  id; `rakun.management.endpoints.web.base-path` (default `/actuator`),
+  `…path-mapping.<id>`, `rakun.management.endpoint.<id>.cache.time-to-live` (per endpoint),
+  endpoint CORS through rakun-web's CORS mapping
+  (`rakun.management.endpoints.web.cors.allowed-origins`/`-methods`). Unknown and unexposed
+  ids answer the same RFC 9457 404. Only `health` is reachable until front 76 installs
+  an exposure decision (`installExposure`).
+- Health: indicators run concurrently (one process each) under
+  `rakun.management.health.<id>.timeout` (default 2 s; overrun → `UNKNOWN`, process killed);
+  a raise → `DOWN` with the reason; unknown status → `UNKNOWN`; non-object details
+  replaced; worst status by `rakun.management.endpoint.health.status.order`, code by
+  `…status.http-mapping.<status>` (DOWN/OUT_OF_SERVICE → 503). Ships `ping` and
+  `diskSpace`.
+- Info: contributors merged by top-level key (a shared key fails `mountActuator`
+  naming both); ships `build`, `otp`, `os`, `process` and `env` (`rakun.info.*` keys).
+- `beans`, `configprops`, `mappings` (decorator and file-router routes, labelled) and
+  `startup` (boot steps marked on the boot events, `timeStep` for the rest);
+  `#[instrumentation]` runs once on `ApplicationStarting`; an `http.server.request`
+  chain entry at +100.
+- Not in this entry: `shutdown` (Step 7), `configprops` sources, the
+  `config.load`/`listener.bind`/per-`#[postConstruct]` steps, and the render/action/
+  handler/outbound-client spans owed by fronts 23/24/25/13.
+- Tests: `rakun-actuator-api` 10 passed, `rakun-actuator` 38 passed, 0 compile failures.
+
 ### The listener over TLS (botopink front 74 steps 2, 3, 5 and 6)
 
 - `rakun_runtime.erl`: `rakun.server.ssl.bundle` makes the acceptor `ssl`

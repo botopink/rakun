@@ -1,0 +1,132 @@
+//// rakun-actuator — `instrumentation.bp`: the startup hook, boot-step timing,
+//// the `startup` endpoint and the `http.server.request` span entry.
+////
+//// BOOT STEPS. `installBootTiming()` listens for front 06's boot events and
+//// places a MARK at each: the step between two marks is recorded under the
+//// later mark's name — `context.prepare` (ApplicationStarting →
+//// ApplicationPrepared), `eager.init` (→ ApplicationStarted: the eager pass and
+//// every `#[postConstruct]`), `application.ready` (→ ApplicationReady). The
+//// steps are contiguous, so they sum to the boot's total. A step the event
+//// sequence does not bracket (`config.load`, `listener.bind`) is recorded by
+//// wrapping it in `timeStep(name, { -> … })`. `startupSteps()` is the record
+//// front 17's summary line reads; `startup` is the endpoint over it.
+////
+//// THE HOOK. The one `#[instrumentation]` function (rakun-actuator-api's
+//// registry refuses a second, naming both) runs on `ApplicationStarting` — the
+//// first boot event, before the eager pass constructs any bean — at most once.
+////
+//// THE SPAN ENTRY. A rakun-web chain entry at order +100 (`orderMetrics()`),
+//// so it wraps every entry above +100 and the route handler: it continues an
+//// inbound `traceparent` or starts a trace, opens `http.server.request`, runs
+//// the rest of the chain and closes the span with the status code as its
+//// outcome. A raise propagates to the error entry at −100 without closing the
+//// span; the per-process span stack is cleared at the start of every request,
+//// so it never leaks into the next one.
+
+import {Request, Response, rkRegisterListener, listenersFor} from "rakun";
+import {WebRequest, Chain, registerFilter, orderMetrics, chainNames} from "rakun-web";
+import {json} from "std";
+import {
+    EndpointResponse,
+    Span,
+    startSpan,
+    endSpan,
+    continueTrace,
+    rkSpanClear,
+    rkRegisterEndpoint,
+} from "rakun-actuator-api";
+
+#[@External.Erlang("rakun_actuator", "run_instrumentation")]
+pub declare fn rkActuatorRunInstrumentation() -> string;
+
+#[@External.Erlang("rakun_actuator", "boot_mark")]
+pub declare fn rkActuatorBootMark(step: string) -> i32;
+
+#[@External.Erlang("rakun_actuator", "time_step")]
+pub declare fn rkActuatorTimeStep<T>(step: string, work: fn() -> T) -> T;
+
+#[@External.Erlang("rakun_actuator", "steps")]
+pub declare fn rkActuatorSteps() -> string;
+
+#[@External.Erlang("rakun_actuator", "steps_json")]
+pub declare fn rkActuatorStepsJson() -> string;
+
+#[@External.Erlang("rakun_actuator", "steps_total")]
+pub declare fn rkActuatorStepsTotal() -> i32;
+
+#[@External.Erlang("rakun_actuator", "steps_reset")]
+pub declare fn rkActuatorStepsReset() -> i32;
+
+// ── boot steps ──────────────────────────────────────────────────────────────
+
+pub type StartupStep(
+    step: string,
+    startedAtMillis: string,
+    durationMillis: string,
+)
+
+// The record, in recording order.
+pub fn startupSteps() -> StartupStep[] {
+    var out: StartupStep[] = [];
+    val wire: string = rkActuatorSteps();
+    if (wire != "") {
+        for (wire.split("\n")) { line ->
+            val f: string[] = line.split("\t");
+            out.push(StartupStep(step: f.at(0) ?? "", startedAtMillis: f.at(1) ?? "", durationMillis: f.at(2) ?? ""));
+        };
+    };
+    return out;
+}
+
+pub fn timeStep<T>(step: string, work: fn() -> T) -> T {
+    return rkActuatorTimeStep(step, work);
+}
+
+fn onStarting() -> i32 {
+    val _m = rkActuatorBootMark("");
+    val _h = rkActuatorRunInstrumentation();
+    return 0;
+}
+
+pub fn installBootTiming() -> i32 {
+    var mine = false;
+    for (listenersFor("ApplicationStarting")) { l ->
+        if (l.owner == "rakun-actuator") mine = true;
+    };
+    if (mine) return 0;
+    val _a = rkRegisterListener("ApplicationStarting", "rakun-actuator", { ev -> onStarting() });
+    val _b = rkRegisterListener("ApplicationPrepared", "rakun-actuator", { ev -> rkActuatorBootMark("context.prepare") });
+    val _c = rkRegisterListener("ApplicationStarted", "rakun-actuator", { ev -> rkActuatorBootMark("eager.init") });
+    val _d = rkRegisterListener("ApplicationReady", "rakun-actuator", { ev -> rkActuatorBootMark("application.ready") });
+    return 1;
+}
+
+pub fn startupRead(req: Request) -> EndpointResponse {
+    return EndpointResponse(status: 200, contentType: "application/json", body: rkActuatorStepsJson());
+}
+
+pub fn registerStartupEndpoint() -> i32 {
+    return rkRegisterEndpoint("startup", "rakun-actuator", "read", { req -> startupRead(req) });
+}
+
+// ── the http.server.request span ────────────────────────────────────────────
+
+pub fn spanEntry(req: WebRequest, chain: Chain) -> Response {
+    val _c = rkSpanClear();
+    val _t = continueTrace(req.header("traceparent"));
+    val attributes = json.object([#("method", json.quote(req.method)), #("path", json.quote(req.path))]);
+    val span: Span = startSpan("http.server.request", attributes);
+    val res: Response = chain.next(req);
+    val _e = endSpan(span, res.status.toString());
+    val _d = rkSpanClear();
+    return res;
+}
+
+pub fn spanEntryName() -> string {
+    return "actuator-http-server-request";
+}
+
+pub fn installSpanEntry() -> i32 {
+    if (chainNames().indexOf(spanEntryName()) >= 0) return 0;
+    return registerFilter(spanEntryName(), orderMetrics(), { req, chain -> spanEntry(req, chain) });
+}

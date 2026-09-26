@@ -1,0 +1,139 @@
+//// rakun-actuator — the `#[instrumentation]` hook, boot-step timing, and the
+//// `http.server.request` span entry.
+////
+//// `startupHook` is this application's one `#[instrumentation]` function; it
+//// records how many times `Ledger` had been constructed when it ran. The span
+//// tests install a rakun-web chain runner and reset the chain to empty at the
+//// end, which makes the runner the identity for whatever runs after them.
+
+import {testing.asserts} from "std";
+import {service, managed, rkScan, rkSingleton, rkEnter, rkDone, rkRegisterBean} from "rakun";
+import {Request, Response, rkDispatchHttp, rkSetProp, rkProp, rkRegisterRoute, rkBuildCount, rkCtxBump, rkCtxCount, bootSequence, toI32} from "rakun";
+import {
+    instrumentation,
+    rkRegisterInstrumentation,
+    currentTraceparent,
+    rkSpanLogEnable,
+    rkSpanLog,
+    rkSpanLogReset,
+    rkSpanUnsubscribeAll,
+} from "rakun-actuator-api";
+import {WebRequest, Chain, registerFilter, resetChain, runChain, rkChainSetRunner, orderCompression, chainNames, chainOrders} from "rakun-web";
+import {mountActuator} from "actuator";
+import {installExposure, clearExposure} from "endpoint_host";
+import {startupSteps, StartupStep, rkActuatorStepsTotal, rkActuatorStepsReset, timeStep, spanEntryName} from "instrumentation";
+
+#[service]
+#[managed]
+pub type Ledger {
+    pub fn size(self: Self) -> i32 {
+        return 0;
+    }
+}
+
+#[instrumentation]
+pub fn startupHook() -> i32 {
+    val _b = rkCtxBump("instrumentation ran");
+    return rkSetProp("test.hook.ledger-builds", rkBuildCount("Ledger").toString());
+}
+
+test "instrumentation: the hook runs once, first, before any bean is constructed" {
+    val _m = mountActuator();
+    val _r = rkActuatorStepsReset();
+    assert rkBuildCount("Ledger") == 0;
+    val published = bootSequence();
+    assert published == 8;
+    assert rkCtxCount("instrumentation ran") == 1;
+    assert rkProp("test.hook.ledger-builds") == "0";
+    assert rkBuildCount("Ledger") == 1;
+    val _again = bootSequence();
+    assert rkCtxCount("instrumentation ran") == 1;
+}
+
+test "instrumentation: two #[instrumentation] functions fail at boot naming both" {
+    try asserts.throwsWith({ ->
+        val _x = rkRegisterInstrumentation("otherHook", { -> 0 });
+        0;
+    }, "(`startupHook` and `otherHook`)");
+}
+
+test "startup: every boot step is recorded with a start and a duration, and the steps sum to the total" {
+    val _m = mountActuator();
+    val _r = rkActuatorStepsReset();
+    val _b = bootSequence();
+    val bootTotal: i32 = rkActuatorStepsTotal();
+    var summed = 0;
+    for (startupSteps()) { s -> summed = summed + toI32(s.durationMillis) };
+    val _t = timeStep("listener.bind", { -> 0 });
+    val steps: StartupStep[] = startupSteps();
+    var names: string[] = [];
+    var bad = 0;
+    for (steps) { s ->
+        names.push(s.step);
+        if ((s.startedAtMillis == "") || (s.durationMillis == "")) bad = bad + 1;
+    };
+    assert summed == bootTotal, summed.toString() + " vs " + bootTotal.toString();
+    assert names == ["context.prepare", "eager.init", "application.ready", "listener.bind"], names.join(",");
+    assert bad == 0;
+    val _e = installExposure({ id -> id == "startup" });
+    val res = rkDispatchHttp("GET", "/actuator/startup", "{}", "{}", "");
+    val _c = clearExposure();
+    assert res.status == 200;
+    assert res.body.contains("{\"durationMillis\":"), res.body;
+    assert res.body.contains("\"step\":\"eager.init\"");
+    assert res.body.contains("\"totalMillis\":");
+}
+
+fn probe(req: Request) -> Response {
+    return Response.ok(currentTraceparent());
+}
+
+fn inner(req: WebRequest, chain: Chain) -> Response {
+    if (req.path == "/spanprobe/filter") return Response.ok(currentTraceparent());
+    return chain.next(req);
+}
+
+fn installSpanChain() -> i32 {
+    val _r = resetChain();
+    val _m = mountActuator();
+    val _f = registerFilter("inner-probe", orderCompression(), { req, chain -> inner(req, chain) });
+    return rkChainSetRunner({ method, path, headersWire, queryWire, body ->
+        runChain(method, path, headersWire, queryWire, body);
+    });
+}
+
+test "spans: the http.server.request entry sits at +100 and wraps the filters below it and the handler" {
+    val _i = installSpanChain();
+    val names = chainNames();
+    val orders = chainOrders();
+    val _p = rkRegisterRoute("GET", "/spanprobe/:x", { req -> probe(req) });
+    val inbound = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+    val headers = "{\"traceparent\":\"" + inbound + "\"}";
+    val handled = rkDispatchHttp("GET", "/spanprobe/handler", headers, "{}", "");
+    val filtered = rkDispatchHttp("GET", "/spanprobe/filter", headers, "{}", "");
+    val _r = resetChain();
+    assert names == [spanEntryName(), "inner-probe"];
+    assert orders == ["100", "200"];
+    assert handled.body.startsWith("00-4bf92f3577b34da6a3ce929d0e0e4736-"), handled.body;
+    assert handled.body.contains("-00f067aa0ba902b7-") == false;
+    assert filtered.body.startsWith("00-4bf92f3577b34da6a3ce929d0e0e4736-"), filtered.body;
+    assert currentTraceparent() == "";
+}
+
+test "spans: an absent traceparent starts a fresh trace, and the span parents on the inbound one when present" {
+    val _i = installSpanChain();
+    val _p = rkRegisterRoute("GET", "/spanlog/:x", { req -> probe(req) });
+    val _l = rkSpanLogReset();
+    val _s = rkSpanLogEnable();
+    val fresh = rkDispatchHttp("GET", "/spanlog/a", "{}", "{}", "");
+    val continued = rkDispatchHttp("GET", "/spanlog/b", "{\"traceparent\":\"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01\"}", "{}", "");
+    val log = rkSpanLog();
+    val _u = rkSpanUnsubscribeAll();
+    val _l2 = rkSpanLogReset();
+    val _r = resetChain();
+    assert fresh.body.startsWith("00-4bf92f3577b34da6a3ce929d0e0e4736-") == false;
+    assert fresh.body.length() == 55;
+    assert log.contains("rakun.http.server.stop http.server.request trace=4bf92f3577b34da6a3ce929d0e0e4736 span="), log;
+    assert log.contains("parent=00f067aa0ba902b7 outcome=200");
+    assert log.contains("parent= outcome=200");
+}

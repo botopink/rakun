@@ -1,0 +1,81 @@
+//// rakun-actuator — `info`: contributors merged by top-level key.
+////
+//// `DeploymentInfo` is decorated in this module and registers at load, with
+//// no change to the host. Exposure is front 76's, so every request here runs
+//// with a stand-in decision installed and cleared again.
+
+import {testing.asserts} from "std";
+import {component, rkScan, rkSingleton, rkEnter, rkDone} from "rakun";
+import {Response, rkDispatchHttp, rkSetProp} from "rakun";
+import {infoContributor, rkRegisterInfoContributor, rkApiInfoRemove, infoContributorIds} from "rakun-actuator-api";
+import {mountActuator} from "actuator";
+import {installExposure, clearExposure} from "endpoint_host";
+import {infoJson, infoConflict} from "info";
+
+#[infoContributor("deployment")]
+#[component]
+pub type DeploymentInfo {
+    pub fn contribute(self: Self) -> string {
+        return "{\"deployment\": {\"region\": \"eu-west-1\"}}";
+    }
+}
+
+fn readInfo() -> Response {
+    val _e = installExposure({ id -> id == "info" });
+    val res = rkDispatchHttp("GET", "/actuator/info", "{}", "{}", "");
+    val _c = clearExposure();
+    return res;
+}
+
+test "info: every contributor is merged by top-level key" {
+    val _m = mountActuator();
+    val res = readInfo();
+    assert res.status == 200;
+    assert res.body.startsWith("{\"build\":{");
+    assert res.body.contains("\"deployment\":{\"region\":\"eu-west-1\"}");
+    assert res.body.contains("\"otp\":{");
+    assert res.body.contains("\"os\":{");
+    assert res.body.contains("\"process\":{");
+}
+
+test "info: build, otp, os and process report real values" {
+    val _m = mountActuator();
+    val body = infoJson();
+    assert body.contains("\"build\":{\"name\":\"rakun-actuator\",\"version\":\"0.0.1\"}"), body;
+    assert body.contains("\"release\":\"2");
+    assert body.contains("\"erts\":\"");
+    assert body.contains("\"schedulers\":");
+    assert body.contains("\"family\":\"unix\"");
+    assert body.contains("\"pid\":\"");
+    assert body.contains("\"uptimeMillis\":");
+}
+
+test "info: keys under info.* in configuration appear, nested by their dots" {
+    val _m = mountActuator();
+    val _a = rkSetProp("rakun.info.app.name", "orders");
+    val _b = rkSetProp("rakun.info.app.team", "payments");
+    val body = infoJson();
+    val _u1 = rkSetProp("rakun.info.app.name", "");
+    val _u2 = rkSetProp("rakun.info.app.team", "");
+    assert body.contains("\"app\":{\"name\":\"orders\",\"team\":\"payments\"}"), body;
+    assert infoJson().contains("\"app\"") == false;
+}
+
+test "info: two contributors claiming one key fail at boot naming both" {
+    val _m = mountActuator();
+    val _x = rkRegisterInfoContributor("vm", "VmInfo", { -> "{\"otp\": {\"release\": \"99\"}}" });
+    val conflict = infoConflict();
+    try asserts.throwsWith({ ->
+        val _again = mountActuator();
+        0;
+    }, "the info key `otp` is contributed by both `otp` and `vm`");
+    val _r = rkApiInfoRemove("vm");
+    assert conflict.contains("`otp` and `vm`");
+    assert infoConflict() == "";
+}
+
+test "info: an #[infoContributor] declared in another module registers here" {
+    val _m = mountActuator();
+    assert infoContributorIds().contains("deployment");
+    assert infoJson().contains("\"deployment\":{\"region\":\"eu-west-1\"}");
+}

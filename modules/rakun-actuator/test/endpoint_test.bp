@@ -1,0 +1,265 @@
+//// rakun-actuator — the endpoint host, driven through front 04's real
+//// dispatcher (`rkDispatchHttp`), so every request here is matched by the core
+//// router against the ONE route the host registered.
+////
+//// Exposure is front 76's. With nothing installed only `health` answers; a
+//// test that needs another endpoint installs a stand-in decision
+//// (`installExposure({ id -> true })`) and clears it before it returns, and a
+//// test that sets a property sets it back to "". The CORS test installs a
+//// rakun-web chain runner and resets the chain to empty at the end, which makes
+//// the runner the identity for whatever runs after it.
+
+import {testing.asserts} from "std";
+import {component, rkScan, rkSingleton, rkEnter, rkDone} from "rakun";
+import {Request, Response, rkDispatchHttp, rkSetProp, rkReplyHeaders, rkRouteCount, rkCtxBump, rkCtxCount} from "rakun";
+import {
+    Endpoint,
+    EndpointResponse,
+    Health,
+    endpoint,
+    rkRegisterEndpoint,
+    rkRegisterHealthIndicator,
+    rkApiEndpointRemove,
+    rkApiHealthRemove,
+    endpointIds,
+} from "rakun-actuator-api";
+import {
+    registerFilter,
+    resetChain,
+    orderCors,
+    corsEntry,
+    runChain,
+    rkChainSetRunner,
+    headerValue,
+    resetCorsMappings,
+    problemJson,
+    problemFor,
+} from "rakun-web";
+import {mountActuator} from "actuator";
+import {installExposure, clearExposure, rkActuatorCacheReset, cacheTtlMillis} from "endpoint_host";
+
+#[endpoint("queue")]
+#[component]
+pub type QueueEndpoint implement Endpoint {
+    pub fn id(self: Self) -> string {
+        return "queue";
+    }
+
+    pub fn read(self: Self, req: Request) -> EndpointResponse {
+        return EndpointResponse(status: 200, contentType: "application/json", body: "{\"depth\":7,\"oldestAgeSeconds\":12}");
+    }
+}
+
+fn get(path: string) -> Response {
+    return rkDispatchHttp("GET", path, "{}", "{}", "");
+}
+
+fn openAll() -> i32 {
+    return installExposure({ id -> true });
+}
+
+fn counted(key: string) -> EndpointResponse {
+    val n = rkCtxBump(key);
+    return EndpointResponse(status: 200, contentType: "text/plain", body: n.toString());
+}
+
+fn tally() -> Health {
+    val _n = rkCtxBump("tally");
+    return Health(status: "UP", details: "{}");
+}
+
+test "endpoint: an application endpoint is reachable by id under the base path" {
+    val _m = mountActuator();
+    val _e = openAll();
+    val res = get("/actuator/queue");
+    val headers = rkReplyHeaders();
+    val _c = clearExposure();
+    assert res.status == 200;
+    assert res.body == "{\"depth\":7,\"oldestAgeSeconds\":12}";
+    assert headers.contains("\"Content-Type\":\"application/json\"");
+}
+
+test "endpoint: an unknown id answers 404 through the problem-detail shape" {
+    val _m = mountActuator();
+    val _e = openAll();
+    val res = get("/actuator/nope");
+    val headers = rkReplyHeaders();
+    val _c = clearExposure();
+    assert res.status == 404;
+    assert res.body == problemJson(problemFor(404, "no endpoint registered as nope", "/actuator/nope"));
+    assert res.body == "{\"type\":\"about:blank\",\"title\":\"Not Found\",\"status\":404,\"detail\":\"no endpoint registered as nope\",\"instance\":\"/actuator/nope\"}";
+    assert headers.contains("\"Content-Type\":\"application/problem+json\"");
+}
+
+test "endpoint: with front 76 absent only health is reachable, and a hidden endpoint answers exactly like an unknown one" {
+    val _m = mountActuator();
+    val _c = clearExposure();
+    val health = get("/actuator/health");
+    val queue = get("/actuator/queue");
+    val info = get("/actuator/info");
+    val beans = get("/actuator/beans");
+    assert health.status == 200;
+    assert queue.status == 404;
+    assert queue.body == problemJson(problemFor(404, "no endpoint registered as queue", "/actuator/queue"));
+    assert info.status == 404;
+    assert beans.status == 404;
+}
+
+test "endpoint: base-path moves every endpoint" {
+    val _b = rkSetProp("rakun.management.endpoints.web.base-path", "/manage");
+    val _m = mountActuator();
+    val _e = openAll();
+    val moved = get("/manage/queue");
+    val health = get("/manage/health");
+    val old = get("/actuator/queue");
+    val _c = clearExposure();
+    val _u = rkSetProp("rakun.management.endpoints.web.base-path", "");
+    assert moved.status == 200;
+    assert moved.body == "{\"depth\":7,\"oldestAgeSeconds\":12}";
+    assert health.status == 200;
+    assert old.status == 404;
+}
+
+test "endpoint: a base path that is the root, or has no leading slash, is refused" {
+    val _b = rkSetProp("rakun.management.endpoints.web.base-path", "/");
+    try asserts.throwsWith({ ->
+        val _m = mountActuator();
+        0;
+    }, "must not be the root");
+    val _u = rkSetProp("rakun.management.endpoints.web.base-path", "");
+}
+
+test "endpoint: path-mapping renames one segment and the id stays health" {
+    val _m = mountActuator();
+    val _p = rkSetProp("rakun.management.endpoints.web.path-mapping.health", "healthcheck");
+    val renamed = get("/actuator/healthcheck");
+    val old = get("/actuator/health");
+    val _u = rkSetProp("rakun.management.endpoints.web.path-mapping.health", "");
+    assert renamed.status == 200;
+    assert renamed.body.contains("\"status\"");
+    assert old.status == 404;
+    assert endpointIds().contains("health");
+}
+
+test "endpoint: exactly one route is registered regardless of the number of endpoints" {
+    val _b = rkSetProp("rakun.management.endpoints.web.base-path", "/ops");
+    val before: i32 = rkRouteCount();
+    val _m = mountActuator();
+    val afterMount: i32 = rkRouteCount();
+    val _x = rkRegisterEndpoint("extraOne", "Extra", "read", { req -> counted("extra") });
+    val _y = rkRegisterEndpoint("extraTwo", "Extra", "read", { req -> counted("extra") });
+    val _z = rkRegisterEndpoint("extraThree", "Extra", "read", { req -> counted("extra") });
+    val _again = mountActuator();
+    val afterMore: i32 = rkRouteCount();
+    val _e = openAll();
+    val one = get("/ops/extraOne");
+    val three = get("/ops/extraThree");
+    val _c = clearExposure();
+    for (["extraOne", "extraTwo", "extraThree"]) { id ->
+        val _r = rkApiEndpointRemove(id);
+    };
+    val _u = rkSetProp("rakun.management.endpoints.web.base-path", "");
+    assert afterMount == before + 1;
+    assert afterMore == afterMount;
+    assert endpointIds().length >= 7;
+    assert one.status == 200;
+    assert three.status == 200;
+}
+
+test "endpoint: two endpoints with the same id fail at boot naming both" {
+    try asserts.throwsWith({ ->
+        val _x = rkRegisterEndpoint("queue", "SecondQueueEndpoint", "read", { req -> counted("dup") });
+        0;
+    }, "(`QueueEndpoint` and `SecondQueueEndpoint`)");
+}
+
+test "endpoint: a cache time-to-live serves the cached response and the indicators run once" {
+    val _m = mountActuator();
+    val _k = rkActuatorCacheReset();
+    val _t = rkRegisterHealthIndicator("tally", "TallyHealth", { -> tally() });
+    val _l = rkSetProp("rakun.management.endpoint.health.cache.time-to-live", "5s");
+    val before: i32 = rkCtxCount("tally");
+    val first = get("/actuator/health");
+    val second = get("/actuator/health");
+    val cachedRuns: i32 = rkCtxCount("tally") - before;
+    val _u = rkSetProp("rakun.management.endpoint.health.cache.time-to-live", "");
+    val _k2 = rkActuatorCacheReset();
+    val _x = rkApiHealthRemove("tally");
+    assert first.status == 200;
+    assert second.body == first.body;
+    assert cachedRuns == 1, "runs " + cachedRuns.toString() + " ttl " + cacheTtlMillis("health").toString();
+}
+
+test "endpoint: a TTL of 0, the default, runs the indicators on every request" {
+    val _m = mountActuator();
+    val _k = rkActuatorCacheReset();
+    val _t = rkRegisterHealthIndicator("tally", "TallyHealth", { -> tally() });
+    val before: i32 = rkCtxCount("tally");
+    val _a = get("/actuator/health");
+    val _b = get("/actuator/health");
+    val runs: i32 = rkCtxCount("tally") - before;
+    val _x = rkApiHealthRemove("tally");
+    assert runs == 2;
+}
+
+test "endpoint: the cache is per endpoint, not global" {
+    val _m = mountActuator();
+    val _k = rkActuatorCacheReset();
+    val _r = rkRegisterEndpoint("counter", "Counter", "read", { req -> counted("counter") });
+    val _l = rkSetProp("rakun.management.endpoint.health.cache.time-to-live", "5s");
+    val _e = openAll();
+    val _h1 = get("/actuator/health");
+    val c1 = get("/actuator/counter");
+    val c2 = get("/actuator/counter");
+    val _c = clearExposure();
+    val _u = rkSetProp("rakun.management.endpoint.health.cache.time-to-live", "");
+    val _k2 = rkActuatorCacheReset();
+    val _x = rkApiEndpointRemove("counter");
+    assert c1.body != c2.body;
+}
+
+fn installCorsChain() -> i32 {
+    val _r = resetChain();
+    val _f = registerFilter("cors", orderCors(), { req, chain -> corsEntry(req, chain) });
+    return rkChainSetRunner({ method, path, headersWire, queryWire, body ->
+        runChain(method, path, headersWire, queryWire, body);
+    });
+}
+
+test "endpoint: endpoint CORS uses front 07's policy with its own origins, and a preflight never runs the endpoint" {
+    val _o = rkSetProp("rakun.management.endpoints.web.cors.allowed-origins", "https://ops.example.com");
+    val _m = mountActuator();
+    val _i = installCorsChain();
+    val _t = rkRegisterHealthIndicator("tally", "TallyHealth", { -> tally() });
+    val before: i32 = rkCtxCount("tally");
+    val preflight = rkDispatchHttp(
+        "OPTIONS",
+        "/actuator/health",
+        "{\"Origin\":\"https://ops.example.com\",\"Access-Control-Request-Method\":\"GET\"}",
+        "{}",
+        "",
+    );
+    val allowOrigin: string = headerValue("Access-Control-Allow-Origin");
+    val allowMethods: string = headerValue("Access-Control-Allow-Methods");
+    val runs: i32 = rkCtxCount("tally") - before;
+    val stranger = rkDispatchHttp(
+        "OPTIONS",
+        "/actuator/health",
+        "{\"Origin\":\"https://evil.example.com\",\"Access-Control-Request-Method\":\"GET\"}",
+        "{}",
+        "",
+    );
+    val simple = rkDispatchHttp("GET", "/actuator/health", "{\"Origin\":\"https://ops.example.com\"}", "{}", "");
+    val simpleOrigin: string = headerValue("Access-Control-Allow-Origin");
+    val _x = rkApiHealthRemove("tally");
+    val _r = resetChain();
+    val _c = resetCorsMappings();
+    val _u = rkSetProp("rakun.management.endpoints.web.cors.allowed-origins", "");
+    assert preflight.status == 204;
+    assert allowOrigin == "https://ops.example.com";
+    assert allowMethods == "GET";
+    assert runs == 0;
+    assert stranger.status == 403;
+    assert simple.status == 200;
+    assert simpleOrigin == "https://ops.example.com";
+}

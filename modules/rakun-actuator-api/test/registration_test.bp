@@ -1,0 +1,104 @@
+//// rakun-actuator-api — registration with the host absent.
+////
+//// This member's tests run without `modules/rakun-actuator` in the build, so
+//// every assertion here is "registration succeeds and nothing reads it". The
+//// decorated types sit at module level, so their registrations run at LOAD,
+//// before the first test block.
+
+import {testing.asserts} from "std";
+import {service, component, rkScan, rkSingleton, rkEnter, rkDone, Request} from "rakun";
+import {Health, EndpointResponse, Endpoint, healthUp} from "contract";
+import {
+    healthIndicator,
+    infoContributor,
+    endpoint,
+    rkRegisterHealthIndicator,
+    rkRegisterInfoContributor,
+    rkRegisterEndpoint,
+    registryListing,
+    healthIndicatorIds,
+    rkApiHealthRemove,
+    rkApiTableFacts,
+} from "registration";
+
+#[healthIndicator("workQueue")]
+#[component]
+pub type WorkQueueHealth {
+    pub fn check(self: Self) -> Health {
+        return Health(status: "UP", details: "{}");
+    }
+}
+
+#[healthIndicator("db")]
+#[service]
+pub type DataSourceHealth {
+    pub fn check(self: Self) -> Health {
+        return Health(status: "UP", details: "{}");
+    }
+}
+
+#[infoContributor("deployment")]
+#[component]
+pub type DeploymentInfo {
+    pub fn contribute(self: Self) -> string {
+        return "{\"deployment\": {\"region\": \"eu-west-1\"}}";
+    }
+}
+
+#[endpoint("queue")]
+#[component]
+pub type QueueEndpoint implement Endpoint {
+    pub fn id(self: Self) -> string {
+        return "queue";
+    }
+
+    pub fn read(self: Self, req: Request) -> EndpointResponse {
+        return EndpointResponse(status: 200, contentType: "application/json", body: "{\"depth\":7}");
+    }
+}
+
+#[endpoint("caches")]
+#[component]
+pub type CachesEndpoint implement Endpoint {
+    pub fn id(self: Self) -> string {
+        return "caches";
+    }
+
+    pub fn read(self: Self, req: Request) -> EndpointResponse {
+        return EndpointResponse(status: 200, contentType: "application/json", body: "[]");
+    }
+}
+
+test "registry: indicators, a contributor and endpoints register under their ids with the host absent, sorted by name" {
+    assert registryListing() == "health db\nhealth workQueue\ninfo deployment\nendpoint caches [read]\nendpoint queue [read]";
+}
+
+test "registry: a second indicator under a taken id fails naming both" {
+    try asserts.throwsWith({ ->
+        val _x = rkRegisterHealthIndicator("db", "OtherDataSourceHealth", { -> healthUp() });
+        0;
+    }, "(`DataSourceHealth` and `OtherDataSourceHealth`)");
+}
+
+test "registry: the same owner registering again replaces its own row" {
+    val _x = rkRegisterHealthIndicator("db", "DataSourceHealth", { -> healthUp() });
+    assert healthIndicatorIds() == ["db", "workQueue"];
+}
+
+test "registry: a second endpoint or contributor under a taken id fails naming both" {
+    try asserts.throwsWith({ ->
+        val _x = rkRegisterInfoContributor("deployment", "Other", { -> "{}" });
+        0;
+    }, "(`DeploymentInfo` and `Other`)");
+}
+
+test "registry: an id with a slash is refused" {
+    try asserts.throwsWith({ ->
+        val _x = rkRegisterHealthIndicator("a/b", "X", { -> healthUp() });
+        0;
+    }, "id must be non-empty");
+}
+
+test "registry: the three registries are named, public and owned by the API process" {
+    assert rkApiTableFacts() == "rakun_actuator_health named=true protection=public owner=api\nrakun_actuator_info named=true protection=public owner=api\nrakun_actuator_endpoints named=true protection=public owner=api";
+}

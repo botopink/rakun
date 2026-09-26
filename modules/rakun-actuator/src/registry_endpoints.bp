@@ -1,0 +1,121 @@
+//// rakun-actuator — `beans`, `configprops`, `mappings`: doors onto registries
+//// other fronts own.
+////
+//// None of these holds state. Each reads a registry at request time and
+//// renders it; an absent registry is an empty list, never a failure:
+////
+////   · `beans`       — front 06's bean table (`rkBeanTable`): type, qualifier,
+////                     scope, lazy, primary, owner, context path; registration order;
+////   · `configprops` — front 05's key catalogue (`configCatalogue`): key, type,
+////                     default, and the bound value (`rkValue`); sanitization is
+////                     front 76's, and none of these is exposed by default;
+////   · `mappings`    — front 04's route table (`rkRoutePaths`, source
+////                     `decorator`) and front 22's file-router table when
+////                     rakun-app is in the build (source `file-router`).
+
+import {Request, rkRoutePaths, rkBeanTable, parseBeans, Bean, rkValue, sub} from "rakun";
+import {configCatalogue, Entry} from "rakun/config";
+import {json} from "std";
+import {EndpointResponse, rkRegisterEndpoint} from "rakun-actuator-api";
+
+#[@External.Erlang("rakun_actuator", "file_routes")]
+pub declare fn rkActuatorFileRoutes() -> string;
+
+fn flag(v: bool) -> string {
+    return if (v) "true" else "false";
+}
+
+fn ok(body: string) -> EndpointResponse {
+    return EndpointResponse(status: 200, contentType: "application/json", body: body);
+}
+
+// ── beans ───────────────────────────────────────────────────────────────────
+
+pub fn beanJson(b: Bean) -> string {
+    return json.object([
+        #("type", json.quote(b.typeName)),
+        #("qualifier", json.quote(b.qualifier)),
+        #("scope", json.quote(b.scope)),
+        #("lazy", flag(b.lazy)),
+        #("primary", flag(b.primary)),
+        #("owner", json.quote(b.owner)),
+        #("context", json.quote(b.path)),
+    ]);
+}
+
+pub fn beansJson() -> string {
+    var rows: string[] = [];
+    for (parseBeans(rkBeanTable())) { b -> rows.push(beanJson(b)) };
+    return json.object([#("beans", "[" + rows.join(",") + "]")]);
+}
+
+pub fn beansRead(req: Request) -> EndpointResponse {
+    return ok(beansJson());
+}
+
+// ── configprops ─────────────────────────────────────────────────────────────
+
+// A catalogue entry's value is `<type>:<default>`.
+pub fn propertyJson(e: Entry) -> string {
+    val colon = e.value.indexOf(":");
+    val kind: string = if (colon < 0) e.value else sub(e.value, 0, colon);
+    val dflt: string = if (colon < 0) "" else sub(e.value, colon + 1, e.value.length());
+    return json.object([
+        #("key", json.quote(e.key)),
+        #("type", json.quote(kind)),
+        #("default", json.quote(dflt)),
+        #("value", json.quote(rkValue(e.key))),
+    ]);
+}
+
+pub fn configpropsJson() -> string {
+    var rows: string[] = [];
+    for (configCatalogue()) { e -> rows.push(propertyJson(e)) };
+    return json.object([#("properties", "[" + rows.join(",") + "]")]);
+}
+
+pub fn configpropsRead(req: Request) -> EndpointResponse {
+    return ok(configpropsJson());
+}
+
+// ── mappings ────────────────────────────────────────────────────────────────
+
+fn mappingJson(verb: string, path: string, source: string) -> string {
+    return json.object([#("verb", json.quote(verb)), #("path", json.quote(path)), #("source", json.quote(source))]);
+}
+
+// Front 04's rows (`GET /a, POST /b`) then front 22's (`kind|pattern|slot|verb`,
+// pages `P` answer GET and route handlers `R` their verb); layouts, templates
+// and defaults are not routes and are left out.
+pub fn mappingsJson() -> string {
+    var rows: string[] = [];
+    val wire: string = rkRoutePaths();
+    if (wire != "") {
+        for (wire.split(", ")) { row ->
+            val space = row.indexOf(" ");
+            if (space > 0) rows.push(mappingJson(sub(row, 0, space), sub(row, space + 1, row.length()), "decorator"));
+        };
+    };
+    val files: string = rkActuatorFileRoutes();
+    if (files != "") {
+        for (files.split("\n")) { line ->
+            val f: string[] = line.split("|");
+            val kind: string = f.at(0) ?? "";
+            val pattern: string = f.at(1) ?? "";
+            val verb0: string = f.at(3) ?? "";
+            if (kind == "P") rows.push(mappingJson("GET", pattern, "file-router"));
+            if (kind == "R") rows.push(mappingJson(if (verb0 == "") "*" else verb0, pattern, "file-router"));
+        };
+    };
+    return json.object([#("mappings", "[" + rows.join(",") + "]")]);
+}
+
+pub fn mappingsRead(req: Request) -> EndpointResponse {
+    return ok(mappingsJson());
+}
+
+pub fn registerRegistryEndpoints() -> i32 {
+    val _b = rkRegisterEndpoint("beans", "rakun-actuator", "read", { req -> beansRead(req) });
+    val _c = rkRegisterEndpoint("configprops", "rakun-actuator", "read", { req -> configpropsRead(req) });
+    return rkRegisterEndpoint("mappings", "rakun-actuator", "read", { req -> mappingsRead(req) });
+}

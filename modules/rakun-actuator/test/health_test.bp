@@ -1,0 +1,228 @@
+//// rakun-actuator — health aggregation and the indicator contract.
+////
+//// The badly-behaved suite is the part eight fronts depend on: an indicator
+//// that raises, one that sleeps past its timeout, one that answers an unknown
+//// status and one whose details are not JSON — and the endpoint still answers,
+//// within the timeout, with a sensible aggregate.
+////
+//// The registries are node-global, so every test that registers an indicator
+//// removes it before it returns, and every test that sets a property sets it
+//// back to "" (front 04's "unset"). `OrdersHealth` is the one decorated
+//// indicator: it registers at load, from this module, with no change to the
+//// host — which is the point of it.
+
+import {testing.asserts} from "std";
+import {component, rkScan, rkSingleton, rkEnter, rkDone} from "rakun";
+import {rkDispatchHttp, rkSetProp, rkReplyHeaders, rkReqSleep, rkCtxBump, rkCtxCount, Response} from "rakun";
+import {Health, healthIndicator, rkRegisterHealthIndicator, rkApiHealthRemove, healthIndicatorIds} from "rakun-actuator-api";
+import {rkSpanNowMicros} from "rakun-actuator-api";
+import {mountActuator} from "actuator";
+import {rkActuatorRestart} from "endpoint_host";
+import {healthReport, renderHealth, HealthReport, registerHealthBuiltins} from "health";
+
+#[healthIndicator("orders")]
+#[component]
+pub type OrdersHealth {
+    pub fn check(self: Self) -> Health {
+        return Health(status: "UP", details: "{\"pending\":3}");
+    }
+}
+
+fn get(path: string) -> Response {
+    return rkDispatchHttp("GET", path, "{}", "{}", "");
+}
+
+fn fixture(status: string, details: string) -> Health {
+    return Health(status: status, details: details);
+}
+
+fn raising() -> Health {
+    @panic("broker unreachable");
+}
+
+fn sleeping(ms: i32, marker: string) -> Health {
+    val _s = rkReqSleep(ms);
+    val _b = rkCtxBump(marker);
+    return Health(status: "UP", details: "{}");
+}
+
+// Leaves `ping` alone: the decorated and built-in extras are taken out for the
+// duration of one assertion and put back by `restore()`.
+fn onlyPing() -> i32 {
+    val _d = rkApiHealthRemove("diskSpace");
+    return rkApiHealthRemove("orders");
+}
+
+fn restore() -> i32 {
+    val _o = rkRegisterHealthIndicator("orders", "OrdersHealth", { -> __rkMake_OrdersHealth().check() });
+    return registerHealthBuiltins();
+}
+
+// Microseconds since `since`; the bounds below are written in microseconds
+// because an i32 literal does not widen to i64 in an arithmetic expression.
+fn elapsedMicros(since: i64) -> i64 {
+    val now: i64 = rkSpanNowMicros();
+    return now - since;
+}
+
+test "health: with only ping the aggregate is UP and the endpoint answers 200" {
+    val _m = mountActuator();
+    val _o = onlyPing();
+    val rendered = renderHealth(healthReport());
+    val res = get("/actuator/health");
+    val _r = restore();
+    assert rendered == "status UP\ncomponents:\n  ping UP {}";
+    assert res.status == 200;
+    assert res.body == "{\"status\":\"UP\"}";
+    assert rkReplyHeaders().contains("\"Content-Type\":\"application/json\"");
+}
+
+test "health: one DOWN indicator makes the aggregate DOWN and the code 503" {
+    val _m = mountActuator();
+    val _o = onlyPing();
+    val _w = rkRegisterHealthIndicator("workQueue", "WorkQueueHealth", { -> fixture("DOWN", "{\"depth\":1200}") });
+    val rendered = renderHealth(healthReport());
+    val res = get("/actuator/health");
+    val _x = rkApiHealthRemove("workQueue");
+    val _r = restore();
+    assert rendered == "status DOWN\ncomponents:\n  ping UP {}\n  workQueue DOWN {\"depth\":1200}";
+    assert res.status == 503;
+    assert res.body == "{\"status\":\"DOWN\"}";
+}
+
+test "health: status.order changes which status wins, and http-mapping changes the code" {
+    val _m = mountActuator();
+    val _a = rkRegisterHealthIndicator("workQueue", "WorkQueueHealth", { -> fixture("DOWN", "{}") });
+    val _b = rkRegisterHealthIndicator("maintenance", "MaintenanceHealth", { -> fixture("OUT_OF_SERVICE", "{}") });
+    val byDefault: HealthReport = healthReport();
+    val _o = rkSetProp("rakun.management.endpoint.health.status.order", "out-of-service, down, unknown, up");
+    val reordered: HealthReport = healthReport();
+    val _h = rkSetProp("rakun.management.endpoint.health.status.http-mapping.out-of-service", "299");
+    val res = get("/actuator/health");
+    val _u1 = rkSetProp("rakun.management.endpoint.health.status.order", "");
+    val _u2 = rkSetProp("rakun.management.endpoint.health.status.http-mapping.out-of-service", "");
+    val _x = rkApiHealthRemove("workQueue");
+    val _y = rkApiHealthRemove("maintenance");
+    assert byDefault.status == "DOWN";
+    assert reordered.status == "OUT_OF_SERVICE";
+    assert res.status == 299;
+    assert res.body == "{\"status\":\"OUT_OF_SERVICE\"}";
+}
+
+test "health: an indicator that raises becomes DOWN with the reason and the endpoint still answers" {
+    val _m = mountActuator();
+    val _o = onlyPing();
+    val _f = rkRegisterHealthIndicator("flaky", "FlakyHealth", { -> raising() });
+    val rendered = renderHealth(healthReport());
+    val res = get("/actuator/health");
+    val _x = rkApiHealthRemove("flaky");
+    val _r = restore();
+    assert rendered == "status DOWN\ncomponents:\n  flaky DOWN {\"error\":\"broker unreachable\"}\n  ping UP {}";
+    assert res.status == 503;
+}
+
+test "health: an indicator past its timeout becomes UNKNOWN, is abandoned, and the endpoint answers within the timeout" {
+    val _m = mountActuator();
+    val _o = onlyPing();
+    val _t = rkSetProp("rakun.management.health.slow.timeout", "100ms");
+    val before: i32 = rkCtxCount("slow finished");
+    val _s = rkRegisterHealthIndicator("slow", "SlowHealth", { -> sleeping(400, "slow finished") });
+    val started: i64 = rkSpanNowMicros();
+    val res = get("/actuator/health");
+    val took: i64 = elapsedMicros(started);
+    val rendered = renderHealth(healthReport());
+    val _w = rkReqSleep(600);
+    val after: i32 = rkCtxCount("slow finished");
+    val _x = rkApiHealthRemove("slow");
+    val _u = rkSetProp("rakun.management.health.slow.timeout", "");
+    val _r = restore();
+    assert rendered == "status UNKNOWN\ncomponents:\n  ping UP {}\n  slow UNKNOWN {\"error\":\"timeout after 100ms\"}";
+    assert res.status == 200;
+    assert took < 350000, "the probe took " + took.toString() + " us";
+    assert after == before, "the abandoned check ran to completion";
+}
+
+test "health: ten indicators at 300 ms each complete in about 300 ms, not 3 s" {
+    val _m = mountActuator();
+    val ids = ["c0", "c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8", "c9"];
+    for (ids) { id ->
+        val _r = rkRegisterHealthIndicator(id, "Concurrent" + id, { -> sleeping(300, "concurrent") });
+    };
+    val started: i64 = rkSpanNowMicros();
+    val report: HealthReport = healthReport();
+    val took: i64 = elapsedMicros(started);
+    for (ids) { id ->
+        val _x = rkApiHealthRemove(id);
+    };
+    assert report.components.length >= 10;
+    assert report.status == "UP";
+    assert took < 1000000, "ten concurrent indicators took " + took.toString() + " us";
+}
+
+test "health: four badly behaved indicators cannot break the endpoint" {
+    val _m = mountActuator();
+    val _o = onlyPing();
+    val _t = rkSetProp("rakun.management.health.hung.timeout", "150ms");
+    val _a = rkRegisterHealthIndicator("raises", "RaisesHealth", { -> raising() });
+    val _b = rkRegisterHealthIndicator("hung", "HungHealth", { -> sleeping(2000, "hung finished") });
+    val _c = rkRegisterHealthIndicator("weird", "WeirdHealth", { -> fixture("MOSTLY_FINE", "{}") });
+    val _d = rkRegisterHealthIndicator("garbled", "GarbledHealth", { -> fixture("UP", "{not json") });
+    val started: i64 = rkSpanNowMicros();
+    val res = get("/actuator/health");
+    val took: i64 = elapsedMicros(started);
+    val rendered = renderHealth(healthReport());
+    for (["raises", "hung", "weird", "garbled"]) { id ->
+        val _x = rkApiHealthRemove(id);
+    };
+    val _u = rkSetProp("rakun.management.health.hung.timeout", "");
+    val _r = restore();
+    assert res.status == 503;
+    assert res.body == "{\"status\":\"DOWN\"}";
+    assert took < 500000, "the probe took " + took.toString() + " us";
+    assert rendered == "status DOWN\ncomponents:\n  garbled UP {\"error\":\"details are not a JSON object\"}\n  hung UNKNOWN {\"error\":\"timeout after 150ms\"}\n  ping UP {}\n  raises DOWN {\"error\":\"broker unreachable\"}\n  weird UNKNOWN {\"error\":\"unknown status MOSTLY_FINE\"}";
+}
+
+test "health: a #[healthIndicator] declared in another module registers here with no change to the host" {
+    val _m = mountActuator();
+    assert healthIndicatorIds().contains("orders");
+    val report: HealthReport = healthReport();
+    var line = "";
+    for (report.components) { c ->
+        if (c.id == "orders") line = c.id + " " + c.status + " " + c.details;
+    };
+    assert line == "orders UP {\"pending\":3}";
+}
+
+test "health: two indicators with one id fail at boot naming both" {
+    try asserts.throwsWith({ ->
+        val _x = rkRegisterHealthIndicator("orders", "SecondOrdersHealth", { -> fixture("UP", "{}") });
+        0;
+    }, "(`OrdersHealth` and `SecondOrdersHealth`)");
+}
+
+test "health: ping and diskSpace ship, and diskSpace reports the filesystem" {
+    val _m = mountActuator();
+    val report: HealthReport = healthReport();
+    var ping = "";
+    var disk = "";
+    for (report.components) { c ->
+        if (c.id == "ping") ping = c.status;
+        if (c.id == "diskSpace") disk = c.status + " " + c.details;
+    };
+    assert ping == "UP";
+    assert disk.startsWith("UP {\"total\":"), disk;
+    assert disk.contains("\"free\":");
+    assert disk.contains("\"threshold\":10485760");
+}
+
+test "health: the registries are the API's, so a host restart loses no registration" {
+    val _m = mountActuator();
+    val before = healthIndicatorIds();
+    val _r = rkActuatorRestart();
+    val after = healthIndicatorIds();
+    val res = rkDispatchHttp("GET", "/actuator/health", "{}", "{}", "");
+    assert after == before;
+    assert after.contains("orders");
+    assert after.contains("ping");
+    assert res.status == 200;
+}

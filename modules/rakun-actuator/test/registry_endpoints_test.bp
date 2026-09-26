@@ -1,0 +1,77 @@
+//// rakun-actuator — `beans`, `configprops`, `mappings`: views onto registries
+//// other fronts own. Each read is a fresh read of the registry: nothing is
+//// held between two requests. Exposure is front 76's, so each request runs
+//// with a stand-in decision installed and cleared again.
+
+import {testing.asserts} from "std";
+import {service, managed, qualifier, lazy, rkScan, rkSingleton, rkEnter, rkDone, rkRegisterBean} from "rakun";
+import {Request, Response, rkDispatchHttp, rkSetProp, rkRegisterRoute, rkRegisterConfigKeys} from "rakun";
+import {mountActuator} from "actuator";
+import {installExposure, clearExposure} from "endpoint_host";
+import {rkActuatorFileRoutes} from "registry_endpoints";
+
+#[service]
+#[managed]
+#[qualifier("primaryLedger")]
+#[lazy]
+pub type LedgerStore {
+    pub fn size(self: Self) -> i32 {
+        return 0;
+    }
+}
+
+fn read(id: string) -> Response {
+    val _e = installExposure({ x -> x == id });
+    val res = rkDispatchHttp("GET", "/actuator/" + id, "{}", "{}", "");
+    val _c = clearExposure();
+    return res;
+}
+
+fn order(req: Request) -> Response {
+    return Response.ok(req.param("id"));
+}
+
+test "beans: every registered bean is listed with its qualifier, scope and lazy flag" {
+    val _m = mountActuator();
+    val res = read("beans");
+    assert res.status == 200;
+    assert res.body.startsWith("{\"beans\":[");
+    assert res.body.contains("{\"type\":\"LedgerStore\",\"qualifier\":\"primaryLedger\",\"scope\":\"singleton\",\"lazy\":true,\"primary\":false,\"owner\":\"LedgerStore\",\"context\":\"\"}"), res.body;
+}
+
+test "configprops: every catalogued key is listed with its type, default and bound value" {
+    val _m = mountActuator();
+    val _k = rkRegisterConfigKeys("shop", "name:string:demo|port:i32:8080");
+    val _v = rkSetProp("shop.name", "acme");
+    val res = read("configprops");
+    val _u = rkSetProp("shop.name", "");
+    assert res.status == 200;
+    assert res.body.contains("{\"key\":\"shop.name\",\"type\":\"string\",\"default\":\"demo\",\"value\":\"acme\"}"), res.body;
+    assert res.body.contains("{\"key\":\"shop.port\",\"type\":\"i32\",\"default\":\"8080\",\"value\":\"\"}");
+}
+
+test "mappings: decorator routes are listed with their source, and the host's own route among them" {
+    val _m = mountActuator();
+    val _r = rkRegisterRoute("GET", "/orders/:id", { req -> order(req) });
+    val res = read("mappings");
+    assert res.status == 200;
+    assert res.body.contains("{\"verb\":\"GET\",\"path\":\"/orders/:id\",\"source\":\"decorator\"}"), res.body;
+    assert res.body.contains("{\"verb\":\"GET\",\"path\":\"/actuator/:endpoint\",\"source\":\"decorator\"}");
+}
+
+test "mappings: with front 22 absent the file-router half is an empty list, not a failure" {
+    val _m = mountActuator();
+    assert rkActuatorFileRoutes() == "";
+    val res = read("mappings");
+    assert res.status == 200;
+    assert res.body.contains("file-router") == false;
+}
+
+test "registry endpoints hold no state: a route registered after a read appears in the next read" {
+    val _m = mountActuator();
+    val first = read("mappings");
+    val _r = rkRegisterRoute("DELETE", "/orders/:id", { req -> order(req) });
+    val second = read("mappings");
+    assert first.body.contains("\"verb\":\"DELETE\"") == false;
+    assert second.body.contains("{\"verb\":\"DELETE\",\"path\":\"/orders/:id\",\"source\":\"decorator\"}");
+}

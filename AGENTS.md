@@ -2803,6 +2803,112 @@ Every step of the front's spec is now in. What is still open is recorded in the
 front README (the Definition of done's q-value box names `br` refusal and both
 headers, which hold; the shutdown box waits on front 76 for the readiness half).
 
+## The actuator — `modules/rakun-actuator-api/` and `modules/rakun-actuator/` (front 11)
+
+Two members, one rule: **a registration is API, a decision is host.**
+
+### `rakun-actuator-api` — the contract (Step 0, wave 1)
+
+Depends on `rakun` only; every front that ships an indicator, a contributor or an
+endpoint (08, 09, 12, 15–18, 77, 85) depends on this member and never on the host.
+
+| File | Holds |
+|---|---|
+| `src/contract.bp` | `Health(status, details)`, `healthUp()`/`healthDown()`, `HealthIndicator`, `InfoContributor`, `EndpointResponse(status, contentType, body)`, `endpointJson()`, `Endpoint` |
+| `src/registration.bp` | the host cells over `rakun_actuator_api`; `rkRegisterHealthIndicator(id, owner, check)`, `rkRegisterInfoContributor(id, owner, contribute)`, `rkRegisterEndpoint(id, owner, ops, read)`, `rkRegisterInstrumentation(owner, hook)`; `healthIndicatorIds()`/`infoContributorIds()`/`endpointIds()`/`registryListing()`; the decorators `#[healthIndicator("id")]`, `#[infoContributor("id")]`, `#[endpoint("id")]`, `#[instrumentation]` |
+| `src/span.bp` | `Span`, `startSpan(name, attributesJson)`, `endSpan(span, outcome)`, `subscribeSpans`, W3C `traceparentOf`/`currentTraceparent`/`validTraceparent`/`continueTrace`, the span-log subscriber (`rkSpanLogEnable`/`rkSpanLog`) |
+| `src/sidecars/rakun_actuator_api.erl` | the three registries (`rakun_actuator_health`, `_info`, `_endpoints`, all `named_table, public`) plus the instrumentation row, owned by a dedicated process `rakun_actuator_api_owner` (never the host, so a host restart loses no registration); the span stack (process dictionary) and the emitter |
+
+Decisions:
+
+- **The one rule the API enforces is the duplicate id**: a second registration under
+  a taken id raises at module load (boot) naming both owners; the same owner
+  registering again replaces its row. That is why every registration cell takes an
+  `owner` argument (the README's two-argument form could not name both).
+- **The decorators stack under a stereotype** (`#[component]`/`#[service]`/…): the
+  emitted line calls `__rkMake_<Type>()`, which only a stereotype emits (`#[managed]`
+  on a singleton registers `{ -> __rkMake_<Type>() }` but does not define it). A type
+  without one is refused at comptime naming the fix. The consumer imports the
+  registration cell beside the marker (`rkRegisterHealthIndicator`, …).
+- **A check is stored wrapped** as `{ -> healthLine(check()) }` (`status\tdetails`), so
+  the host never depends on how a record is laid out on the BEAM.
+- **Spans**: parenting is a per-process stack, so a request is a trace scope for
+  free. Every span emits `[rakun, <name segments, trailing "request" dropped>, start|stop]`
+  with measurements `system_time` (+ `duration` µs on stop) and metadata `name`,
+  `trace_id`, `span_id`, `parent_id`, `attributes`, `outcome` — to
+  `telemetry:execute/3` when that module is loaded, and to botopink subscribers as
+  `rakun.<…>.<phase>` + two JSON strings. The subscriber list is a `persistent_term`,
+  so with no subscriber an emission is two lookups (a million emissions plus the bare loop measured at 38 ms).
+  Ids are `rand:bytes`, not `crypto` (a correlation handle, not a secret).
+
+### `rakun-actuator` — the host (Steps 1–6, 8)
+
+Depends on `rakun`, `rakun-actuator-api`, `rakun-web` (problem details, CORS mapping,
+the chain). `rakun-security`/`rakun-data` in `modules.md`'s row are fronts 76/87's.
+
+| File | Holds |
+|---|---|
+| `src/endpoint_host.bp` | `basePath()` (`rakun.management.endpoints.web.base-path`, default `/actuator`; root, no leading slash or trailing slash refused), `segmentFor`/`idForSegment` (`path-mapping.<id>`), `cacheTtlMillis` (`rakun.management.endpoint.<id>.cache.time-to-live`), the exposure seam `installExposure`/`clearExposure`/`exposed`, `serveActuator`, `mountRoute`, `mountCors` |
+| `src/health.bp` | `healthReport()`/`renderHealth()`, status order (`rakun.management.endpoint.health.status.order`, default `down, out-of-service, unknown, up`), `httpStatusFor` (`…status.http-mapping.<status>`, DOWN/OUT_OF_SERVICE → 503), per-indicator timeout (`rakun.management.health.<id>.timeout`, default 2 s), the `ping` and `diskSpace` (`rakun.management.health.diskspace.path`/`.threshold`) indicators, `registerHealthBuiltins()` |
+| `src/info.bp` | merge by top-level key, `infoConflict()`, the `build`/`otp`/`os`/`process`/`env` (`rakun.info.*` keys) contributors, `registerInfoBuiltins()` |
+| `src/registry_endpoints.bp` | `beans` (front 06's bean table), `configprops` (front 05's catalogue + bound value), `mappings` (front 04's routes as `decorator`, front 22's table as `file-router` when `rakun_file_router` is loaded) |
+| `src/instrumentation.bp` | boot-step marks on front 06's boot events (`context.prepare`, `eager.init`, `application.ready`), `timeStep(name, work)`, `startupSteps()`, the `startup` endpoint, the `#[instrumentation]` run on `ApplicationStarting`, the `http.server.request` chain entry at +100 |
+| `src/actuator.bp` | `mountActuator()` — the one call that turns the host on |
+| `src/sidecars/rakun_actuator.erl` | `run_health/2` (one process per indicator, per-indicator deadline, overrun killed), the response cache, the mount table, the exposure hook (`persistent_term`), the info merge (JSON parse), the facts (OTP/OS/process/build/`df -Pk`), boot steps, `restart/0` |
+
+Decisions:
+
+- **One route, `GET <base>/:endpoint`.** Front 04's router binds `:name` one segment
+  for one and has no catch-all, so the README's `:path*` is not expressible; an
+  endpoint answers at exactly one segment. A moved base path mounts a second route
+  (a route cannot be unregistered) and the old one answers 404 because
+  `serveActuator` reads the live base path.
+- **`mountActuator()` is explicit.** A library module's top-level `val` does not run
+  at load on the erlang row, so the host's own rows (ping, diskSpace, the six built-in
+  endpoints, the five contributors, the boot listeners, the span entry, the route)
+  are registered there, idempotently. Call it after configuration is loaded and
+  before `bootSequence()`. It refuses to mount over an info key two contributors
+  claim.
+- **Exposure is front 76's.** With nothing installed only `health` answers; any
+  other id — registered or not — gets the same 404 problem detail
+  (`no endpoint registered as <segment>`), so an unexposed endpoint is not disclosed.
+  Front 76 installs its decision with `installExposure(fn(id) -> bool)`, which
+  replaces the default. No property opens an endpoint here.
+- **The contract** (for the eight indicator fronts): a raise → `DOWN` with
+  `{"error":"<reason>"}`; a timeout → `UNKNOWN` with `{"error":"timeout after <n>ms"}`
+  and the process killed; an unknown status → `UNKNOWN`; details that are not a JSON
+  object → replaced by an error object; all indicators concurrent. The health body is
+  `{"status":"<aggregate>"}` — detail visibility and groups are front 76's, which
+  renders them from `healthReport()`.
+- **Endpoint CORS** is a rakun-web CORS mapping keyed by the base path, from
+  `rakun.management.endpoints.web.cors.allowed-origins`/`allowed-methods` (default `GET`), so
+  front 07's `corsEntry` answers the preflight before the route and the endpoint never
+  runs for one.
+- **Not ported:** `rakun.management.endpoints.jmx.*` — `:telemetry` is the instrumentation
+  bus and `erl -remsh` / `observer` the management console.
+- **Not built (owed or blocked):** `shutdown` (Step 7 — a POST cannot reach the one
+  GET route; needs front 04 verb-agnostic matching or a second route, plus front 76's
+  grant; front 07's `gracefulShutdown()` is the drain it would call); `configprops`'s
+  per-key source (front 05 does not record one); `config.load`/`listener.bind`/
+  per-`#[postConstruct]` steps (they are outside `bootSequence()`; `timeStep` is the
+  wrapper their owners call); `render`/`action`/`handler` spans (fronts 23/24/25 call
+  `startSpan`/`endSpan`); the outbound `traceparent` (front 13 sends
+  `currentTraceparent()`).
+
+Measured: `rakun-actuator-api` 10 passed / 0 failed / 0 compile failures
+(`registration_test.bp`, `span_test.bp`); `rakun-actuator` 38 / 0 / 0
+(`endpoint_test.bp`, `health_test.bp`, `info_test.bp`, `registry_endpoints_test.bp`,
+`instrumentation_test.bp`). Compiler findings met here: `Array.sort()` type-checks but
+is not lowered on erlang (`function sort/1 undefined`); a `return` inside an `if`
+block nested in a statement-form `if` block does not return (the function falls
+through) — write the guard as `val x = if (…) … else null; if (x != null) return x;`.
+
+**Keys.** Every key this member reads is `rakun.*` (decision 115 rule 4): the
+front's README spells Spring's `management.endpoints.web.base-path` and `info.*`;
+here they are `rakun.management.endpoints.web.base-path`, `rakun.management.endpoint.<id>.…`,
+`rakun.management.health.<id>.timeout` and `rakun.info.*`.
+
+
 ## Validation — the bundled `validation` library (front 14, moved by decision 116 rule 5)
 
 Front 14's member `modules/rakun-validation` is gone: its seven modules are the

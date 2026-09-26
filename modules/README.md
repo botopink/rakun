@@ -24,9 +24,10 @@ refusal is the core's `config_check.bp`.
 
 | Member | `files` | `targets` | Spring Boot 4 | Front(s) | State |
 |---|---|---|---|---|---|
-| [rakun](./rakun/) (core) | root · http · runtime · decorators · bootstrap · rakun.d | erlang | `spring-boot-starter` | 04 · 05 · 06 · 62 · 72 · 74 | real code, 310 tests |
+| [rakun](./rakun/) (core) | root · http · runtime · decorators · bootstrap · rakun.d · … | erlang | `spring-boot-starter` | 04 · 05 · 06 · 62 · 72 · 74 | real code, 347 tests |
 | [rakun-app](./rakun-app/) | root · file_router · ssr | erlang | (Next.js `app/` router, server half) | 22 · 23 · 24 · 25 · 60 · 61 · 63 · 64 · 66 | real code, 59 tests |
-| [rakun-actuator](./rakun-actuator/) | root | erlang | `-actuator` (host) | 11 · 76 · 87 | scaffold |
+| [rakun-actuator-api](./rakun-actuator-api/) | root · contract · registration · span | erlang | `spring-boot-actuator` (the API half) | 11 (Step 0) | real code, 10 tests |
+| [rakun-actuator](./rakun-actuator/) | root · endpoint_host · health · info · registry_endpoints · instrumentation · actuator | erlang | `-actuator` (host) | 11 · 76 · 87 | real code, 38 tests |
 | [rakun-cache](./rakun-cache/) | root | erlang | `-cache` | 12 | scaffold |
 | [rakun-client](./rakun-client/) | root | erlang | `RestClient` / `WebClient` | 13 | scaffold |
 | [rakun-data](./rakun-data/) | root | erlang | `-data-jpa` / `-data-jdbc` / `-data-mongodb` / `-data-redis` | 08 · 09 · 77 · 78 | scaffold |
@@ -37,11 +38,10 @@ refusal is the core's `config_check.bp`.
 | [rakun-security](./rakun-security/) | root | erlang | `-security`, `-oauth2-client`, `-saml2` | 10 · 79 | scaffold |
 | [rakun-session](./rakun-session/) | root | erlang | `spring-session-jdbc` / `-data-redis` | 18 | scaffold |
 | [rakun-test](./rakun-test/) | root | erlang | `-test` | 19 | empty `pub` surface, 1 inline test |
-| [rakun-web](./rakun-web/) | root · filter · error · middleware · cors · convention | erlang | `-webmvc` (websocket is `rakun-websocket`) | 07 · 65 · 82 | real code, 83 tests |
+| [rakun-web](./rakun-web/) | root · filter · negotiation · error · middleware · cors · compression · customizer · apiversion · shutdown · convention · tls | erlang | `-webmvc` (websocket is `rakun-websocket`) | 07 · 65 · 82 | real code, 154 tests |
 
 `modules/rakun-web/` stopped being a scaffold with front 07: it carries the filter chain, CORS and
-RFC 9457 problem details, two host files (`src/chain.mjs`, `src/sidecars/rakun_chain.erl`) and four
-test files — see `repository/rakun/AGENTS.md` § The filter chain. Front 14's `modules/rakun-validation/` is now the bundled `validation` library — see
+RFC 9457 problem details, its host file (`src/sidecars/rakun_chain.erl`) and its test files — see `repository/rakun/AGENTS.md` § The filter chain. Front 14's `modules/rakun-validation/` is now the bundled `validation` library — see
 `repository/rakun/AGENTS.md` § Validation, and the section below.
 
 ### `validation` — front 14's member, now a bundled library (decision 116 rule 5)

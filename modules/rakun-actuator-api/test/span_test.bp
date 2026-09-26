@@ -1,0 +1,112 @@
+//// rakun-actuator-api — spans with no host and (mostly) no subscriber.
+////
+//// The parenting assertions compare ids; the cost assertion runs a million
+//// no-subscriber emissions and bounds the elapsed time, which is the one
+//// honest timing test here because the claim is an order of magnitude
+//// (under a microsecond each), not a millisecond. Every test that subscribes
+//// unsubscribes before it returns — the subscriber list is node-global.
+
+import {testing.asserts} from "std";
+import {
+    Span,
+    startSpan,
+    endSpan,
+    traceparentOf,
+    currentTraceparent,
+    validTraceparent,
+    continueTrace,
+    rkSpanEmitStart,
+    rkSpanNowMicros,
+    rkSpanClear,
+    rkSpanSubscriberCount,
+    rkSpanUnsubscribeAll,
+    rkSpanLogEnable,
+    rkSpanLog,
+    rkSpanLogReset,
+} from "span";
+
+test "span: a root span starts a trace, and a span started inside it is its child" {
+    val _c = rkSpanClear();
+    val outer: Span = startSpan("http.server.request", "{}");
+    val inner: Span = startSpan("render", "{\"page\":\"/\"}");
+    assert outer.parentId == "";
+    assert outer.traceId.length() == 32;
+    assert outer.spanId.length() == 16;
+    assert inner.traceId == outer.traceId;
+    assert inner.parentId == outer.spanId;
+    assert inner.spanId != outer.spanId;
+    val _i = endSpan(inner, "ok");
+    val sibling: Span = startSpan("action", "{}");
+    assert sibling.parentId == outer.spanId;
+    val _s = endSpan(sibling, "ok");
+    val _o = endSpan(outer, "200");
+    val next: Span = startSpan("http.server.request", "{}");
+    assert next.traceId != outer.traceId;
+    val _n = endSpan(next, "200");
+}
+
+test "span: an inbound traceparent continues the trace, a malformed one is ignored" {
+    val _c = rkSpanClear();
+    val header = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+    assert validTraceparent(header);
+    assert continueTrace(header);
+    val s: Span = startSpan("http.server.request", "{}");
+    assert s.traceId == "4bf92f3577b34da6a3ce929d0e0e4736";
+    assert s.parentId == "00f067aa0ba902b7";
+    assert currentTraceparent() == "00-4bf92f3577b34da6a3ce929d0e0e4736-" + s.spanId + "-01";
+    assert traceparentOf(s) == currentTraceparent();
+    val _e = endSpan(s, "200");
+    val _d = rkSpanClear();
+    assert continueTrace("00-00000000000000000000000000000000-00f067aa0ba902b7-01") == false;
+    assert continueTrace("01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01") == false;
+    assert continueTrace("garbage") == false;
+    val fresh: Span = startSpan("http.server.request", "{}");
+    assert fresh.parentId == "";
+    assert fresh.traceId != "4bf92f3577b34da6a3ce929d0e0e4736";
+    val _f = endSpan(fresh, "200");
+    assert currentTraceparent() == "";
+}
+
+test "span: events are telemetry-shaped and reach a subscriber" {
+    val _c = rkSpanClear();
+    val _r = rkSpanLogReset();
+    val _l = rkSpanLogEnable();
+    val s: Span = startSpan("http.server.request", "{}");
+    val _e = endSpan(s, "200");
+    val _u = rkSpanUnsubscribeAll();
+    val expected = "rakun.http.server.start http.server.request trace=" + s.traceId + " span=" + s.spanId + " parent= outcome=\nrakun.http.server.stop http.server.request trace=" + s.traceId + " span=" + s.spanId + " parent= outcome=200";
+    assert rkSpanLog() == expected;
+    val _r2 = rkSpanLogReset();
+}
+
+fn emitMany(n: i32) -> i32 {
+    var i = 0;
+    while (i < n) {
+        val _e = rkSpanEmitStart("http.server.request", "t", "s", "", "{}");
+        i = i + 1;
+    };
+    return i;
+}
+
+fn loopOnly(n: i32) -> i32 {
+    var i = 0;
+    while (i < n) {
+        val _e = 0;
+        i = i + 1;
+    };
+    return i;
+}
+
+test "span: with no subscriber an emission costs under a microsecond" {
+    val _u = rkSpanUnsubscribeAll();
+    assert rkSpanSubscriberCount() == 0;
+    val a: i64 = rkSpanNowMicros();
+    val _n = emitMany(1000000);
+    val b: i64 = rkSpanNowMicros();
+    val _m = loopOnly(1000000);
+    val c: i64 = rkSpanNowMicros();
+    val emitting: i64 = b - a;
+    val looping: i64 = c - b;
+    val cost: i64 = emitting - looping;
+    assert cost < 1000000, "a million no-subscriber emissions took " + cost.toString() + " us over the bare loop";
+}

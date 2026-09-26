@@ -1,0 +1,183 @@
+//// rakun-actuator — the endpoint host: one route, N endpoints.
+////
+//// An endpoint is a REGISTRATION (`#[endpoint("id")]` from rakun-actuator-api),
+//// not a controller: the base path and the per-endpoint segment are
+//// configuration, and a `#[getMapping]` is a compile-time constant. So the host
+//// registers exactly ONE route with front 04's router — `GET <base-path>/:endpoint`
+//// — and dispatches by id.
+////
+//// THE ROUTE IS `<base>/:endpoint`, NOT `<base>/:endpoint/:path*`. Front 04's
+//// router binds `:name` segments one for one and has no catch-all segment, so
+//// an endpoint answers at exactly one path segment under the base path. A
+//// sub-path (`/actuator/health/db`) is a router feature, not a host one.
+////
+//// EXPOSURE IS FRONT 76'S. With nothing installed, only `health` is reachable;
+//// every other id — registered or not — answers the SAME 404 problem detail an
+//// unknown id does, so an unexposed endpoint's existence is not disclosed. Front
+//// 76 installs its decision with `installExposure`, which replaces the default
+//// entirely. There is no property here that opens an endpoint (decision 67):
+//// the include/exclude keys are front 76's.
+////
+//// Keys read (all through front 04's property table, so front 05's sources set
+//// them): `rakun.management.endpoints.web.base-path` (default `/actuator`),
+//// `rakun.management.endpoints.web.path-mapping.<id>`,
+//// `rakun.management.endpoint.<id>.cache.time-to-live` (default 0, no cache),
+//// `rakun.management.endpoints.web.cors.allowed-origins` / `allowed-methods`.
+
+import {Request, Response, rkProp, rkRegisterRoute} from "rakun";
+import {rkPropDuration, Duration} from "rakun/config";
+import {withHeader, problemFor, problemResponse, registerCorsMapping} from "rakun-web";
+import {EndpointResponse, endpointIds} from "rakun-actuator-api";
+
+// ── the host cells ──────────────────────────────────────────────────────────
+
+#[@External.Erlang("rakun_actuator", "invoke_endpoint")]
+pub declare fn rkActuatorInvoke<Q>(id: string, req: Q) -> ?EndpointResponse;
+
+#[@External.Erlang("rakun_actuator", "cache_get")]
+pub declare fn rkActuatorCacheGet(id: string) -> ?EndpointResponse;
+
+#[@External.Erlang("rakun_actuator", "cache_put")]
+pub declare fn rkActuatorCachePut(id: string, ttlMillis: i32, res: EndpointResponse) -> i32;
+
+#[@External.Erlang("rakun_actuator", "cache_reset")]
+pub declare fn rkActuatorCacheReset() -> i32;
+
+#[@External.Erlang("rakun_actuator", "meta_put")]
+pub declare fn rkActuatorMetaPut(key: string, value: string) -> i32;
+
+#[@External.Erlang("rakun_actuator", "meta_get")]
+pub declare fn rkActuatorMetaGet(key: string) -> string;
+
+#[@External.Erlang("rakun_actuator", "exposure_install")]
+pub declare fn rkActuatorExposureInstall(decide: fn(id: string) -> bool) -> i32;
+
+#[@External.Erlang("rakun_actuator", "exposure_installed")]
+pub declare fn rkActuatorExposureInstalled() -> bool;
+
+#[@External.Erlang("rakun_actuator", "exposure_ask")]
+pub declare fn rkActuatorExposureAsk(id: string) -> bool;
+
+#[@External.Erlang("rakun_actuator", "exposure_clear")]
+pub declare fn rkActuatorExposureClear() -> i32;
+
+#[@External.Erlang("rakun_actuator", "restart")]
+pub declare fn rkActuatorRestart() -> i32;
+
+// ── configuration ───────────────────────────────────────────────────────────
+
+pub fn basePathProblem(raw: string) -> string {
+    return "rakun-actuator: rakun.management.endpoints.web.base-path is `" + raw + "` - it must start with a slash, must not end with one, and must not be the root (the root would put every endpoint id beside the application's own routes)";
+}
+
+pub fn basePath() -> string {
+    val raw: string = rkProp("rakun.management.endpoints.web.base-path").trim();
+    val base: string = if (raw == "") "/actuator" else raw;
+    if ((base.startsWith("/") == false) || base.endsWith("/") || base.contains(" ")) @panic(basePathProblem(raw));
+    return base;
+}
+
+// The path segment an id answers at: its `path-mapping` when one is set.
+pub fn segmentFor(id: string) -> string {
+    val mapped: string = rkProp("rakun.management.endpoints.web.path-mapping." + id).trim();
+    return if (mapped == "") id else mapped;
+}
+
+// The id a request segment names, `""` when none does. A renamed endpoint no
+// longer answers at its id.
+pub fn idForSegment(segment: string) -> string {
+    var found = "";
+    for (endpointIds()) { id ->
+        if (segmentFor(id) == segment) found = id;
+    };
+    return found;
+}
+
+pub fn cacheTtlMillis(id: string) -> i32 {
+    val d: Duration = rkPropDuration("rakun.management.endpoint." + id + ".cache.time-to-live", "millis");
+    return d.millis;
+}
+
+// ── exposure (front 76 decides; the default reaches only `health`) ──────────
+
+pub fn installExposure(decide: fn(id: string) -> bool) -> i32 {
+    return rkActuatorExposureInstall(decide);
+}
+
+pub fn clearExposure() -> i32 {
+    return rkActuatorExposureClear();
+}
+
+pub fn exposed(id: string) -> bool {
+    if (rkActuatorExposureInstalled()) return rkActuatorExposureAsk(id);
+    return id == "health";
+}
+
+// ── the route ───────────────────────────────────────────────────────────────
+
+pub fn notFoundProblem(segment: string, path: string) -> Response {
+    return problemResponse(problemFor(404, "no endpoint registered as " + segment, path));
+}
+
+pub fn render(res: EndpointResponse) -> Response {
+    val out: Response = Response.withStatus(res.status, res.body);
+    if (res.contentType == "") return out;
+    return withHeader(out, "Content-Type", res.contentType);
+}
+
+// Runs one endpoint by id, through its cache. The cache holds the last
+// `EndpointResponse` for `cache.time-to-live`, per endpoint.
+pub fn readEndpoint(id: string, req: Request) -> ?EndpointResponse {
+    val ttl: i32 = cacheTtlMillis(id);
+    val hit: ?EndpointResponse = if (ttl > 0) rkActuatorCacheGet(id) else null;
+    if (hit != null) return hit;
+    val fresh: ?EndpointResponse = rkActuatorInvoke(id, req);
+    if (fresh != null) {
+        val _p = rkActuatorCachePut(id, ttl, fresh ?? EndpointResponse(status: 0, contentType: "", body: ""));
+    };
+    return fresh;
+}
+
+// The route handler. A request under a base path that has since moved answers
+// 404 like any unknown id: a mounted route cannot be unregistered, so the check
+// is here.
+pub fn serveActuator(req: Request) -> Response {
+    val base: string = basePath();
+    val segment: string = req.param("endpoint");
+    if (req.path != base + "/" + segment) return notFoundProblem(segment, req.path);
+    val id: string = idForSegment(segment);
+    if ((id == "") || (exposed(id) == false)) return notFoundProblem(segment, req.path);
+    val res: ?EndpointResponse = readEndpoint(id, req);
+    if (res == null) return notFoundProblem(segment, req.path);
+    return render(res ?? EndpointResponse(status: 404, contentType: "", body: ""));
+}
+
+// Registers the ONE route for the current base path. Idempotent per base path:
+// mounting twice under one base registers one route; a base path moved by
+// configuration mounts a second route, and the first then answers 404 because
+// `serveActuator` reads the live base path.
+pub fn mountRoute() -> i32 {
+    val base: string = basePath();
+    val _c = mountCors(base);
+    if (rkActuatorMetaGet("mounted " + base) == "1") return 0;
+    val _r = rkRegisterRoute("GET", base + "/:endpoint", { req -> serveActuator(req) });
+    return rkActuatorMetaPut("mounted " + base, "1");
+}
+
+// ── endpoint CORS: front 07's policy, the actuator's own origins ────────────
+//
+// A per-prefix mapping in rakun-web's CORS table, keyed by the base path, so
+// the chain's CORS entry answers a preflight to an endpoint from these origins
+// — before the route, so the endpoint never runs for one. No origins, no
+// mapping: the global policy (deny-all by default) applies.
+
+pub fn mountCors(base: string) -> i32 {
+    val origins: string = rkProp("rakun.management.endpoints.web.cors.allowed-origins").trim();
+    if (origins == "") return 0;
+    val methods0: string = rkProp("rakun.management.endpoints.web.cors.allowed-methods").trim();
+    val methods: string = if (methods0 == "") "GET" else methods0;
+    val key: string = "cors " + base + " " + origins + " " + methods;
+    if (rkActuatorMetaGet(key) == "1") return 0;
+    val _m = registerCorsMapping(base, origins, methods);
+    return rkActuatorMetaPut(key, "1");
+}

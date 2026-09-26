@@ -1,0 +1,91 @@
+//// rakun-actuator — `info`: every contributor, merged by top-level key.
+////
+//// A contributor answers a JSON object string; the host parses it (in
+//// `rakun_actuator:info_merge/1` — there is no std JSON walker) and merges the
+//// objects by TOP-LEVEL key. Two contributors claiming one key is a boot failure
+//// naming both, never a silent last-wins: `mountActuator` checks it before the
+//// route exists. A contributor that raises, or answers something that is not a
+//// JSON object, contributes nothing.
+////
+//// Front 11 ships five contributors, registered by `registerInfoBuiltins()`
+//// under the owner `rakun-actuator`:
+////
+////   · `build`   — `name` and `version` from the working directory's `botopink.json`;
+////   · `otp`     — OTP release, ERTS version, online schedulers (Spring's `java` row);
+////   · `os`      — family, name, version, architecture;
+////   · `process` — OS PID, uptime in milliseconds, BEAM process count;
+////   · `env`     — every property under `rakun.info.*`, nested by its dots.
+
+import {Request, sub} from "rakun";
+import {json} from "std";
+import {
+    EndpointResponse,
+    rkRegisterInfoContributor,
+    rkRegisterEndpoint,
+    infoContributorIds,
+} from "rakun-actuator-api";
+
+#[@External.Erlang("rakun_actuator", "info_merge")]
+pub declare fn rkActuatorInfoMerge(ids: string) -> string;
+
+#[@External.Erlang("rakun_actuator", "env_info")]
+pub declare fn rkActuatorEnvInfo() -> string;
+
+#[@External.Erlang("rakun_actuator", "otp_facts")]
+pub declare fn rkActuatorOtpFacts() -> string;
+
+#[@External.Erlang("rakun_actuator", "os_facts")]
+pub declare fn rkActuatorOsFacts() -> string;
+
+#[@External.Erlang("rakun_actuator", "process_facts")]
+pub declare fn rkActuatorProcessFacts() -> string;
+
+#[@External.Erlang("rakun_actuator", "build_facts")]
+pub declare fn rkActuatorBuildFacts() -> string;
+
+pub fn infoConflictProblem(key: string, first: string, second: string) -> string {
+    return "rakun-actuator: the info key `" + key + "` is contributed by both `" + first + "` and `" + second + "` - contributions merge by top-level key, and one of them would silently replace the other";
+}
+
+// `ok\t<json>` or `conflict\t<key>\t<a>\t<b>` from the host.
+fn mergeWire() -> string {
+    return rkActuatorInfoMerge(infoContributorIds().join("\n"));
+}
+
+// `""` when the contributions merge cleanly, the refusal text otherwise.
+pub fn infoConflict() -> string {
+    val wire: string = mergeWire();
+    if (wire.startsWith("ok\t")) return "";
+    val f: string[] = wire.split("\t");
+    return infoConflictProblem(f.at(1) ?? "", f.at(2) ?? "", f.at(3) ?? "");
+}
+
+pub fn infoJson() -> string {
+    val wire: string = mergeWire();
+    if (wire.startsWith("ok\t")) return sub(wire, 3, wire.length());
+    return "";
+}
+
+pub fn infoRead(req: Request) -> EndpointResponse {
+    val body: string = infoJson();
+    if (body == "") return EndpointResponse(
+        status: 500,
+        contentType: "application/json",
+        body: json.object([#("error", json.quote(infoConflict()))]),
+    );
+    return EndpointResponse(status: 200, contentType: "application/json", body: body);
+}
+
+pub fn buildInfo() -> string {
+    val f: string[] = rkActuatorBuildFacts().split("\t");
+    return json.object([#("build", json.object([#("name", json.quote(f.at(0) ?? "")), #("version", json.quote(f.at(1) ?? ""))]))]);
+}
+
+pub fn registerInfoBuiltins() -> i32 {
+    val _b = rkRegisterInfoContributor("build", "rakun-actuator", { -> buildInfo() });
+    val _o = rkRegisterInfoContributor("otp", "rakun-actuator", { -> rkActuatorOtpFacts() });
+    val _s = rkRegisterInfoContributor("os", "rakun-actuator", { -> rkActuatorOsFacts() });
+    val _p = rkRegisterInfoContributor("process", "rakun-actuator", { -> rkActuatorProcessFacts() });
+    val _e = rkRegisterInfoContributor("env", "rakun-actuator", { -> rkActuatorEnvInfo() });
+    return rkRegisterEndpoint("info", "rakun-actuator", "read", { req -> infoRead(req) });
+}

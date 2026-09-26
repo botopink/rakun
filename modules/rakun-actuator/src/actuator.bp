@@ -1,0 +1,34 @@
+//// rakun-actuator — `mountActuator()`: the one call that turns the host on.
+////
+//// A library module's top-level `val` does not run at load on the erlang row,
+//// so the host's own rows are registered here, at boot, rather than at module
+//// load: the `ping`/`diskSpace` indicators and the `health` endpoint, the five
+//// info contributors and `info`, `beans`/`configprops`/`mappings`, `startup`,
+//// the boot-timing listeners, the `http.server.request` chain entry, and last
+//// the ONE route. Every step is idempotent, so a second call registers nothing.
+////
+//// It refuses to mount over contributions that do not merge: two info
+//// contributors claiming one top-level key is a boot failure naming both.
+//// Registered-id duplicates were already refused when the second registration
+//// ran (rakun-actuator-api).
+////
+//// Call it after configuration is loaded (the base path is read here) and
+//// before `bootSequence()` (so the boot is timed and `#[instrumentation]` runs).
+
+import {registerHealthBuiltins} from "health";
+import {registerInfoBuiltins, infoConflict} from "info";
+import {registerRegistryEndpoints} from "registry_endpoints";
+import {registerStartupEndpoint, installBootTiming, installSpanEntry} from "instrumentation";
+import {mountRoute} from "endpoint_host";
+
+pub fn mountActuator() -> i32 {
+    val _h = registerHealthBuiltins();
+    val _i = registerInfoBuiltins();
+    val _r = registerRegistryEndpoints();
+    val _s = registerStartupEndpoint();
+    val conflict: string = infoConflict();
+    if (conflict != "") @panic(conflict);
+    val _b = installBootTiming();
+    val _e = installSpanEntry();
+    return mountRoute();
+}
