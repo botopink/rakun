@@ -1,0 +1,34 @@
+//// rakun-messaging — outcome × attempt position (front 86 step 2) and the
+//// dead-letter envelope (step 4, pure half).
+
+import {retryPolicy, Outcome, nextAction, DeadLetter, deadLetterName, deadLetterJson, parseCount} from "reliability/policy";
+
+test "decision: the nine cells of outcome x attempt position" {
+    val p = retryPolicy(10, 200, 100, 3);
+    var cells: string[] = [];
+    for ([1, 2, 3]) { attempt ->
+        cells.push(nextAction(Outcome.Done, p, attempt));
+        cells.push(nextAction(Outcome.Retry(reason: "busy"), p, attempt));
+        cells.push(nextAction(Outcome.Reject(reason: "malformed"), p, attempt));
+    };
+    assert cells.join(",") == "ack,retry,dead-letter,ack,retry,dead-letter,ack,dead-letter,dead-letter", cells.join(",");
+}
+
+test "decision: Reject dead-letters at attempt 1 whatever maxAttempts is" {
+    assert nextAction(Outcome.Reject(reason: "bad"), retryPolicy(10, 200, 100, 50), 1) == "dead-letter";
+}
+
+test "decision: Retry at maxAttempts - 1 retries, at maxAttempts dead-letters" {
+    val p = retryPolicy(10, 200, 100, 5);
+    assert nextAction(Outcome.Retry(reason: "x"), p, 4) == "retry" && nextAction(Outcome.Retry(reason: "x"), p, 5) == "dead-letter";
+}
+
+test "decision: the dead letter carries the original destination, not the dlq" {
+    val json = deadLetterJson(DeadLetter(destination: "orders", body: "{\"id\":1}", reason: "malformed", attempt: 1, firstSeenMs: 42));
+    assert deadLetterName("orders") == "orders.dlq";
+    assert json == "{\"destination\":\"orders\",\"body\":\"{\\\"id\\\":1}\",\"reason\":\"malformed\",\"attempt\":1,\"firstSeenMs\":42}", json;
+}
+
+test "decision: parseCount walks decimals and falls back on anything else" {
+    assert parseCount("3", 1) == 3 && parseCount(" 12 ", 1) == 12 && parseCount("", 1) == 1 && parseCount("x2", 1) == 1 && parseCount("-2", 7) == 7;
+}

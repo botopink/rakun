@@ -1,0 +1,49 @@
+//// rakun-messaging — producer transactions (front 86 step 7).
+////
+//// `withProducerTransaction(prefix, body)` runs `body` with a producer
+//// transaction open (`transactional.id` = `<prefix><n>`, Spring's
+//// `transaction-id-prefix`): every `transactionalSend` inside it is held, and
+//// is appended to the Kafka log only when `body` returns — all of them, in
+//// order — and dropped when it raises, so a `read_committed` reader never sees
+//// an aborted send (on front 15's in-process Kafka arm, a reader sees only the
+//// log). An AMQP send inside a transaction refuses: channel transactions are
+//// weaker and slower than their reputation, and front 83's transactional
+//// outbox is the mechanism for "publish if and only if this commits".
+
+import {rkMsgPublish} from "messaging_host";
+
+#[@External.Erlang("""(fun(__P) -> case get(rakun_rel_tx) of undefined -> ok; _ -> erlang:error({panic, <<"rakun-messaging: withProducerTransaction is already open in this process - producer transactions do not nest">>}) end, __N = erlang:unique_integer([positive, monotonic]), __Id = <<__P/binary, (integer_to_binary(__N))/binary>>, put(rakun_rel_tx, {__Id, []}), persistent_term:put(rakun_rel_last_txid, __Id), __Id end)($0)""")]
+declare fn txBegin(prefix: string) -> string;
+#[@External.Erlang("""(fun() -> case get(rakun_rel_tx) of undefined -> []; {_, __L} -> erase(rakun_rel_tx), lists:reverse(__L) end end)()""")]
+declare fn txTake() -> Array<#(string, string, string, string)>;
+#[@External.Erlang("""(fun() -> erase(rakun_rel_tx), 0 end)()""")]
+declare fn txDrop() -> i32;
+#[@External.Erlang("""(fun(__A, __D, __K, __V) -> case get(rakun_rel_tx) of undefined -> false; {__Id, __L} -> put(rakun_rel_tx, {__Id, [{__A, __D, __K, __V} | __L]}), true end end)($0, $1, $2, $3)""")]
+declare fn txHold(arm: string, destination: string, key: string, payload: string) -> bool;
+#[@External.Erlang("""(fun(__F) -> try {ok, __F()} catch _:{panic, __R} when is_binary(__R) -> {error, __R}; _:__R -> {error, iolist_to_binary(io_lib:format("~p", [__R]))} end end)($0)""")]
+declare fn guardedBody(body: fn() -> i32) -> @Result<i32, string>;
+#[@External.Erlang("""persistent_term:get(rakun_rel_last_txid, <<>>)""")]
+pub declare fn lastTransactionalId() -> string;
+
+pub fn amqpTransactionProblem() -> string {
+    return "rakun-messaging: an AMQP send cannot join a producer transaction - AMQP channel transactions are not offered; enrol the send in front 83's transactional outbox (rakun-tx publishAfterCommit) so it is published if and only if the database transaction commits";
+}
+
+// Inside a transaction: held until commit. Outside: an ordinary publish.
+pub fn transactionalSend(arm: string, destination: string, key: string, payload: string) -> i32 {
+    if (arm == "amqp") @panic(amqpTransactionProblem());
+    if (txHold(arm, destination, key, payload)) return 0;
+    return rkMsgPublish(arm, destination, key, payload);
+}
+
+pub fn withProducerTransaction(prefix: string, body: fn() -> i32) -> i32 {
+    val _b = txBegin(prefix);
+    val r = guardedBody(body);
+    if (r.isError()) {
+        val _d = txDrop();
+        val reason = case r { Ok(v) -> ""; Error(e) -> e; };
+        @panic(reason);
+    };
+    for (txTake()) { s -> val _p = rkMsgPublish(s._0, s._1, s._2, s._3); };
+    return r.unwrapOr(0);
+}

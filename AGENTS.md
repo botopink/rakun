@@ -3967,9 +3967,49 @@ containers, the arms' state, the published log and the startup log.
   not connected, DOWN naming the container when an enabled container has no live
   worker; UP otherwise.
 - **Out of scope** (each its own front): JMS 90 · Pulsar 91 · RSocket 92 ·
-  Spring Integration and Kafka Streams 89 · retry, dead letters, idempotency 86 ·
+  Spring Integration and Kafka Streams 89 · retry and dead letters 86 (below) ·
   exchange topology and audit 87 · transactional publish 83. Non-text payloads
   wait on a byte type.
+
+### Reliability — `src/reliability/` (front 86)
+
+`reliableListener(name, broker, destination, group, handler)` registers a
+front 15 listener whose container is `name` and whose handler answers an
+`Outcome` (`Done`, `Retry(reason)`, `Reject(reason)`; a raise is
+`Retry("crashed: …")`). `policy.bp` is pure: `RetryPolicy` (integer
+`multiplierPercent`, 0 refused), `nextDelay`, `nextAction`, `DeadLetter`,
+`parseCount` (a copy of url.bp's private decimal walk). `dispatch.bp`:
+
+- **The attempt travels with the message** as `x-rakun-attempt` (and
+  `x-rakun-first-seen`). Front 15's in-process broker publishes no headers,
+  so a redelivery's headers ride in a payload prefix `\u{1e}rakun\u{1e}…\u{1e}`
+  that `deliveryOf` strips. A retry waits `nextDelay` with the original still
+  unsettled, publishes the redelivery, then settles the original — a crash in
+  between redelivers the original with its own count.
+- **Dead letters** go to `rakun.messaging.listener.<name>.dead-letter`
+  (default `<destination>.dlq`) as JSON with the ORIGINAL destination; the
+  original settles only when that publish answered 0, else it is requeued.
+  One warn line per dead letter (`reliabilityLog()`).
+- **Settings**: `retry.{initial-interval, multiplier-percent, max-interval,
+  max-attempts}` per listener, then `rakun.messaging.retry.*`;
+  `reliability.ack-mode` auto | manual (`ackDelivery(d)`; a `Done` without it
+  warns) | batch (`reliability.batch-size`; the container runs `ack-mode=manual`
+  with `prefetch` at least the size; the batch is settled through front 15's
+  owner every `size` messages — a stopped worker's held batch is redelivered,
+  not flushed). `startReliability()` refuses a bad setting at boot and
+  registers the `messaging` indicator (each reliable listener's arm).
+- **Concurrency sizes processes, not threads**: `concurrency` is the number of
+  consumer processes under the container's supervisor, `prefetch` the
+  per-process credit, so a large value is not the JVM's mistake.
+- Counters `rakun.messaging.deliveries`, `.retries`, `.dead_letters` and the
+  timer `rakun.messaging.handler.duration`, tagged `listener` (front 75; a
+  meter name takes no `-`).
+
+`transaction.bp`: `withProducerTransaction(prefix, body)` holds every
+`transactionalSend` until `body` returns (then appends them all) and drops
+them when it raises; `lastTransactionalId()` is `<prefix><n>`. An AMQP send in
+a transaction refuses: AMQP channel transactions are not offered, and front
+83's outbox is the mechanism for "publish if and only if this commits".
 
 ## WebSocket — `modules/rakun-websocket/` (front 20)
 

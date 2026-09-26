@@ -1,0 +1,117 @@
+//// rakun-messaging — the reliability policy as values (front 86 steps 1, 2
+//// and 4): pure functions over integers and variants, testable with no
+//// broker and no node.
+////
+//// `nextDelay(policy, attempt)`: `initialMs`, then times `multiplierPercent`
+//// / 100 per further attempt, never above `maxMs` (an integer percentage keeps
+//// the arithmetic in i32: Spring's `multiplier=1.5` is `150`).
+//// `nextAction(outcome, policy, attempt)`: `ack` for `Done`, `dead-letter`
+//// for `Reject` at any attempt (a rejection consumes none), and for `Retry`
+//// `retry` below `maxAttempts`, `dead-letter` at it.
+
+pub type RetryPolicy(
+    initialMs: i32,
+    multiplierPercent: i32,
+    maxMs: i32,
+    maxAttempts: i32,
+)
+
+pub fn retryPolicyProblem(initialMs: i32, multiplierPercent: i32, maxMs: i32, maxAttempts: i32) -> string {
+    if (multiplierPercent <= 0) return "rakun-messaging: a retry policy's multiplierPercent is " + multiplierPercent.toString() + " - it must be at least 1 (100 keeps the delay constant); 0 would retry in a zero-delay hot loop";
+    if (initialMs < 0 || maxMs < 0) return "rakun-messaging: a retry policy's delays must not be negative";
+    if (maxAttempts < 1) return "rakun-messaging: a retry policy's maxAttempts is " + maxAttempts.toString() + " - at least 1 (the first delivery)";
+    return "";
+}
+
+pub fn retryPolicy(initialMs: i32, multiplierPercent: i32, maxMs: i32, maxAttempts: i32) -> RetryPolicy {
+    val problem = retryPolicyProblem(initialMs, multiplierPercent, maxMs, maxAttempts);
+    if (problem != "") @panic(problem);
+    return RetryPolicy(initialMs: initialMs, multiplierPercent: multiplierPercent, maxMs: maxMs, maxAttempts: maxAttempts);
+}
+
+// The delay before attempt `attempt + 1`, for a delivery that was attempt
+// `attempt`. Stops multiplying once the ceiling is reached (no overflow).
+pub fn nextDelay(policy: RetryPolicy, attempt: i32) -> i32 {
+    var delay = if (policy.initialMs > policy.maxMs) policy.maxMs else policy.initialMs;
+    var n = 1;
+    while (n < attempt && delay < policy.maxMs) {
+        delay = delay * policy.multiplierPercent / 100;
+        n = n + 1;
+    };
+    return if (delay > policy.maxMs) policy.maxMs else delay;
+}
+
+pub type Outcome {
+    Done,
+    Retry(reason: string),
+    Reject(reason: string),
+}
+
+fn retryOrDeadLetter(policy: RetryPolicy, attempt: i32) -> string {
+    return if (attempt >= policy.maxAttempts) "dead-letter" else "retry";
+}
+
+pub fn nextAction(outcome: Outcome, policy: RetryPolicy, attempt: i32) -> string {
+    return case outcome {
+        Done -> "ack";
+        Reject(reason) -> "dead-letter";
+        Retry(reason) -> retryOrDeadLetter(policy, attempt);
+    };
+}
+
+pub fn reasonOf(outcome: Outcome) -> string {
+    return case outcome {
+        Done -> "";
+        Reject(reason) -> reason;
+        Retry(reason) -> reason;
+    };
+}
+
+pub type AckMode {
+    Auto,
+    Manual,
+    Batch(size: i32),
+}
+
+// ── the dead letter ─────────────────────────────────────────────────────────
+
+pub type DeadLetter(
+    destination: string,
+    body: string,
+    reason: string,
+    attempt: i32,
+    firstSeenMs: i32,
+)
+
+pub fn deadLetterName(destination: string) -> string {
+    return destination + ".dlq";
+}
+
+fn jsonText(s: string) -> string {
+    return "\"" + s.replaceAll("\\", "\\\\").replaceAll("\"", "\\\"").replaceAll("\n", "\\n").replaceAll("\r", "\\r").replaceAll("\t", "\\t") + "\"";
+}
+
+// The envelope published to the dead-letter destination.
+pub fn deadLetterJson(d: DeadLetter) -> string {
+    return "{\"destination\":" + jsonText(d.destination) + ",\"body\":" + jsonText(d.body) + ",\"reason\":" + jsonText(d.reason) + ",\"attempt\":" + d.attempt.toString() + ",\"firstSeenMs\":" + d.firstSeenMs.toString() + "}";
+}
+
+// ── the decimal walk ────────────────────────────────────────────────────────
+
+// `raw` as a non-negative decimal, or `fallback` when it is empty or holds
+// anything but digits. std has no string-to-integer with a fallback
+// (`libs/std/src/url.bp`'s `parsePortWalk` is private), so this is a copy.
+pub fn parseCount(raw: string, fallback: i32) -> i32 {
+    val digits = "0123456789";
+    val t = raw.trim();
+    if (t == "" || t.length() > 9) return fallback;
+    var n = 0;
+    var ok = true;
+    for (t.split("")) { c ->
+        val d = digits.indexOf(c);
+        if (c != "") {
+            if (d < 0) ok = false else n = n * 10 + d;
+        };
+    };
+    return if (ok) n else fallback;
+}

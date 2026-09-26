@@ -1,0 +1,51 @@
+//// rakun-messaging — producer transactions on the in-process Kafka arm and
+//// the AMQP refusal (front 86 step 7).
+
+import {testing.asserts} from "std";
+import {rkSetProp} from "rakun";
+import {resetMessaging, stopMessaging, startMessaging, published, startBroker} from "container";
+import {withProducerTransaction, transactionalSend, lastTransactionalId} from "reliability/transaction";
+
+fn clean() -> i32 {
+    val _s = stopMessaging();
+    for (["amqp", "kafka", "redis", "stream"]) { a -> val _t = rkSetProp("rakun.messaging." + a + ".transport", "memory"); };
+    val _r = resetMessaging();
+    return startBroker("kafka") + startBroker("amqp");
+}
+
+fn sends(topic: string) -> i32 {
+    return published("kafka").filter({ l -> l.startsWith(topic + "|") }).length;
+}
+
+fn sendBoth(topic: string) -> i32 {
+    val _a = transactionalSend("kafka", topic, "k", "one");
+    val mid = sends(topic);
+    val _b = transactionalSend("kafka", topic, "k", "two");
+    return mid;
+}
+
+test "transaction: a body that returns commits all its sends at once" {
+    val _c = clean();
+    val insideCount = withProducerTransaction("orders-tx-", { -> sendBoth("tx-ok") });
+    val after = sends("tx-ok");
+    assert insideCount == 0 && after == 2, after.toString();
+    assert lastTransactionalId().startsWith("orders-tx-");
+}
+
+test "transaction: a body that raises leaves nothing for a read_committed reader" {
+    val _c = clean();
+    try asserts.throwsWith({ -> withProducerTransaction("orders-tx-", { ->
+        val _m = sendBoth("tx-abort");
+        if (true) @panic("inventory check failed");
+        0
+    }) }, "inventory check failed");
+    assert sends("tx-abort") == 0;
+    val _p = transactionalSend("kafka", "tx-abort", "k", "outside");
+    assert sends("tx-abort") == 1;
+}
+
+test "transaction: an AMQP send in a producer transaction refuses, naming front 83's outbox" {
+    val _c = clean();
+    try asserts.throwsWith({ -> withProducerTransaction("p-", { -> transactionalSend("amqp", "orders", "", "x") }) }, "enrol the send in front 83's transactional outbox (rakun-tx publishAfterCommit)");
+    assert published("amqp").length == 0;
+}
