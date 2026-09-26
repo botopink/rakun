@@ -3489,6 +3489,16 @@ front 04's `server_test.bp:74,80`. `modules/rakun-web`: **104/104** on BOTH rows
 stays `0`, core rakun's `2` stays `2`.
 
 
+### The path a refusal names
+
+`absolutePath(given)` is what "the absolute path searched" names in
+`missingFileProblem`. std's `path` is posix-shaped (`isAbsolute` is a leading
+`/`), so `isWindowsAbsolute` recognises a drive letter (`C:\certs\server.pem`,
+`c:/certs`) and a UNC share (`\\host\share`) as absolute as written; only a
+relative path is joined onto `process.cwd()`. `test/ssl_bundle_test.bp` asserts
+both spellings, and idempotence (`absolutePath(resolved) == resolved`) without
+importing `io.process` into the test file.
+
 ### The listener over TLS (landed with the track's second pass)
 
 Front 04's acceptor takes the transport from front 74's seam: with

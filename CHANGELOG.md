@@ -15,6 +15,9 @@
   and never written. `splitQuery` / `encodeQuery` are gone: `queryDict` is std's
   `querystring.parse` and refuses a malformed component. `matchPage` /
   `appResponse` narrow the optional match instead of a dummy fallback.
+- `absolutePath` knows a Windows absolute path (`C:\certs\server.pem`,
+  `c:/certs`, `\\host\share`) and never joins it onto the working directory
+  (`isWindowsAbsolute`).
 
 ### Static files (botopink front 82)
 
