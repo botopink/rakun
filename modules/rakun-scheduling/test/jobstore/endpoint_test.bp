@@ -1,0 +1,100 @@
+//// rakun-scheduling — the `quartz` endpoint (front 84 step 6), through front
+//// 04's real dispatcher. Exposure is front 76's: a test that reads the
+//// endpoint installs a stand-in decision and clears it before it returns.
+
+import {testing.asserts} from "std";
+import {rkSetProp, rkDispatchHttp, Response} from "rakun";
+import {endpointIds} from "rakun-actuator-api";
+import {mountActuator, installExposure, clearExposure} from "rakun-actuator";
+import {startDataSource} from "rakun-data";
+import {Trigger, MisfirePolicy, installJobStore, registerTrigger, registerJobHandler, jobData, setJobClock, clearJobClock, instantOf} from "jobstore/store";
+import {tickOn} from "jobstore/scheduler";
+import {mountJobStore} from "jobstore/endpoint";
+
+fn get(path: string) -> Response {
+    return rkDispatchHttp("GET", path, "{}", "{}", "");
+}
+
+fn fresh(name: string) -> string {
+    val _s = startDataSource(name, "ets:memory", 2, 5000, "eager");
+    val _p = rkSetProp("rakun.scheduling.jobstore.datasource", name);
+    val _i = installJobStore(name);
+    val _c = setJobClock(instantOf("2026-09-20T00:00:00Z"));
+    val _a = mountActuator();
+    val _m = mountJobStore();
+    val _e = installExposure({ id -> true });
+    return name;
+}
+
+fn done() -> i32 {
+    val _a = rkSetProp("rakun.scheduling.jobstore.datasource", "");
+    val _b = rkSetProp("rakun.management.endpoint.quartz.max-executions", "");
+    val _e = clearExposure();
+    return clearJobClock();
+}
+
+fn nightly(name: string) -> Trigger {
+    return Trigger(name: name, job: name, cron: "0 0 3 * * *", startAt: 0, endAt: 0, misfire: MisfirePolicy.FireAll, retries: 0, backoffMs: 0);
+}
+
+// Runs first: nothing has mounted the job store yet.
+test "quartz: absent, not empty, when the job store is not mounted" {
+    assert endpointIds().indexOf("quartz") < 0;
+}
+
+test "quartz: lists every job with its group, triggers and next fire time" {
+    val ds = fresh("qe1");
+    val _t = registerTrigger(nightly("invoices"), jobData([#("period", "2026-09")]));
+    val res = get("/actuator/quartz");
+    val _z = done();
+    assert res.status == 200 && endpointIds().indexOf("quartz") >= 0, res.body;
+    assert res.body.contains("\"group\":\"DEFAULT\",\"name\":\"invoices\",\"state\":\"active\""), res.body;
+    assert res.body.contains("\"triggers\":[{\"cron\":\"0 0 3 * * *\",\"misfire\":\"FireAll\",\"name\":\"invoices\",\"nextFireTime\":\"2026-09-20T03:00:00Z\",\"previousFireTime\":null,\"state\":\"waiting\"}]"), res.body;
+}
+
+test "quartz: a job's executions are readable newest first, bounded" {
+    val ds = fresh("qe2");
+    val _r = rkSetProp("rakun.management.endpoint.quartz.max-executions", "2");
+    val _h = registerJobHandler("reports", "", { data -> "done" });
+    val _t = registerTrigger(nightly("reports"), "");
+    val _c = setJobClock(instantOf("2026-09-22T03:00:01Z"));
+    val _k = tickOn(ds, "node-q");
+    val res = get("/actuator/quartz/reports");
+    val missing = get("/actuator/quartz/nope");
+    val _z = done();
+    assert res.status == 200 && missing.status == 404, res.body;
+    val first = res.body.indexOf("2026-09-22T03:00:00");
+    val second = res.body.indexOf("2026-09-21T03:00:00");
+    assert first > 0 && second > first && res.body.indexOf("2026-09-20T03:00:00") < 0, res.body;
+}
+
+test "quartz: job data is sanitized by front 76's rules - masked by default, a secret-named key masked even when values are shown" {
+    val ds = fresh("qe3");
+    val _t0 = registerTrigger(nightly("plain"), jobData([#("period", "2026-09")]));
+    val hidden = get("/actuator/quartz");
+    val _v = rkSetProp("rakun.management.endpoint.quartz.show-values", "always");
+    val _t = registerTrigger(nightly("sync"), jobData([#("apiToken", "s3cr3t"), #("period", "2026-09")]));
+    val res = get("/actuator/quartz");
+    val _w = rkSetProp("rakun.management.endpoint.quartz.show-values", "");
+    val _z = done();
+    assert hidden.body.contains("\"value\":\"2026-09\"") == false && hidden.body.contains("\"value\":\"******\"") && res.body.contains("s3cr3t") == false && res.body.contains("{\"key\":\"period\",\"value\":\"2026-09\"}"), res.body;
+    assert res.body.contains("{\"key\":\"apiToken\",\"value\":\"******\"}"), res.body;
+}
+
+test "quartz: read-only - no route fires or deletes a job" {
+    val ds = fresh("qe4");
+    val _t = registerTrigger(nightly("ro"), "");
+    val fire = rkDispatchHttp("POST", "/actuator/quartz/ro", "{}", "{}", "");
+    val del = rkDispatchHttp("DELETE", "/actuator/quartz/ro", "{}", "{}", "");
+    val _z = done();
+    assert fire.status >= 400 && del.status >= 400, fire.status.toString() + "/" + del.status.toString();
+}
+
+test "quartz: the per-job route answers 404 when quartz is not exposed" {
+    val ds = fresh("qe5");
+    val _t = registerTrigger(nightly("hidden"), "");
+    val _e = installExposure({ id -> id == "health" });
+    val res = get("/actuator/quartz/hidden");
+    val _z = done();
+    assert res.status == 404;
+}

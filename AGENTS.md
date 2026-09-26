@@ -2659,7 +2659,8 @@ sanitizer. Keys are all `rakun.management.*` (03r-t).
   boot), the value or `******`; a key matching `password, secret, key, token,
   credentials, vcap_services, sun.java.command` or
   `…endpoint.sanitize.additional-keys` is always `******`. Applied by front
-  11's host after the cache (`filtered`).
+  11's host after the cache (`filtered`). `sanitizeEntries(id, body)` is the
+  same rule for another endpoint's entries (front 84's `quartz`).
 - **Groups** — `…endpoint.health.group.<name>.include` / `.show-details` /
   `.roles` / `.additional-path=server:/path` at `<base>/health/<name>`; a
   group runs only its own indicators. Empty or unknown-indicator groups refuse
@@ -3347,10 +3348,16 @@ In-VM scheduling: three trigger markers, one registry, a supervised executor, th
 `scheduledtasks` endpoint and the `scheduling` health indicator. Depends on `rakun`,
 `rakun-web` (listed directly: `shutdownTimeout()` here, and a transitive of the host),
 `rakun-actuator-api` and `rakun-actuator` (the host: the POST route is gated by its
-`exposed()` decision and answers its `notFoundProblem`). `rakun-data` in `modules.md`'s
-row is front 84's (the durable job store, `src/jobstore/**`, behind this registry).
+`exposed()` decision and answers its `notFoundProblem`). `rakun-data` is front 84's
+dependency (the durable job store, `src/jobstore/**`).
 A task here lives in ONE node's memory; every node of a cluster runs its own copy —
 an application that cannot tolerate that takes front 84.
+
+**Two guarantees, two fronts.** Front 16 is AT MOST ONCE per node: a missed window
+is gone. Front 84's job store is AT LEAST ONCE across the cluster: a node that
+completes a job and dies before recording it has another node run it again after
+the lease, so a handler with side effects that must happen once enrols them in
+front 83's outbox.
 
 | File | Holds |
 |---|---|
@@ -3447,6 +3454,37 @@ Measured: `modules/rakun-scheduling` 0 → **67 / 0** (0 compile failures) —
 `build_test` 12, `cron_test` 15, `endpoint_test` 9, `executor_test` 16,
 `registry_test` 8, `schedule_test` 7 (the seven test-snap.md scenarios, rendered
 exactly as the snapshots). Suite ~35 s, most of it `build_test`'s fixture builds.
+
+### The durable job store — `src/jobstore/` (front 84)
+
+Keys `rakun.scheduling.jobstore.{datasource, lease-ms (60000), interval-ms
+(1000), misfire-threshold-ms (60000), fire-all-ceiling (10)}`,
+`rakun.scheduling.overwrite-existing-jobs`,
+`rakun.management.endpoint.quartz.max-executions` (20). Time is `jobClock()`
+(`setJobClock` pins it in tests). No sidecar: every host cell is an inline
+template (a sidecar called only from a folder is not shipped).
+
+- `store.bp`: the three tables (`installJobStore`), `JobDetail` / `Trigger` /
+  `MisfirePolicy`, `registerJob` / `registerTriggerOn` / `registerTrigger(t,
+  data)` (one row per name; a changed definition refuses unless
+  overwrite-existing-jobs), trigger checks (cron via `cron.bp`, end before
+  start, a cron that disagrees with the handler's `#[persistentJob]`),
+  per-node handlers (`registerJobHandler`), `orphanJobs`, querystring job data
+  (`jobData`, `jobField`, `jobFields`).
+- `scheduler.bp`: `tickOn(ds, node)` — takeover of an expired lease
+  (conditional UPDATE on the old owner, a `takeover` history row), the claim of
+  each due trigger (conditional UPDATE, 03r-x), the misfire policy, each window
+  through the handler with retries (stopped when the next window is due) and
+  lease renewal every `lease-ms / 3`, then back to `waiting` only if still the
+  owner. An unreachable store logs once per interval. `startJobScheduler` /
+  `stopJobScheduler`: the loop with a per-node jitter (`jitterMs`).
+  `executionsOf`, `historyOf`, `pruneHistory`.
+- `markers.bp`: `#[persistentJob(name, cron)]` (method; return `string`) and
+  `#[jobs]` (the type: checks `(self, data: string) -> string` and emits
+  `rkPersistentJob(name, cron, { data -> __rkMake_<T>().<fn>(data) })`).
+- `endpoint.bp`: `mountJobStore()` registers `quartz` (read-only) and `GET
+  <base>/quartz/:job`; data entries go through front 76's
+  `sanitizeEntries("quartz", …)`.
 
 ## Security — `modules/rakun-security/` (front 10)
 

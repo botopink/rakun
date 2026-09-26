@@ -1,0 +1,86 @@
+//// rakun-scheduling — the `quartz` endpoint (front 84 step 6).
+////
+////   GET <base>/quartz          every job: group, state, data, triggers
+////                              (cron, misfire, state, next and previous fire)
+////   GET <base>/quartz/{job}    that job's executions, newest first, at most
+////                              `rakun.management.endpoint.quartz.max-executions` (20)
+////
+//// READ-ONLY: there is no trigger-now and no delete — an endpoint that fires
+//// a job is an endpoint that fires it twice. Exposure is front 76's
+//// (`exposed("quartz")`); job data is served as `{"key", "value"}` entries
+//// through front 76's sanitizer (`sanitizeEntries("quartz", …)`), so a data
+//// field named like a secret is masked. `mountJobStore()` registers the
+//// endpoint and the per-job route; an application without this module has
+//// no `quartz` id at all.
+
+import {Request, Response, rkRegisterRoute, rkProp, toI32} from "rakun";
+import {json} from "std";
+import {EndpointResponse, rkRegisterEndpoint} from "rakun-actuator-api";
+import {basePath, exposed, notFoundProblem, render} from "rakun-actuator/endpoint_host";
+import {sanitizeEntries} from "rakun-actuator/management";
+import {Rows, sqlTemplate, param} from "rakun-data";
+import {rkSchedMountOnce} from "endpoint";
+import {jobStoreDataSource, jobFields, formatInstant} from "jobstore/store";
+import {Execution, executionsOf} from "jobstore/scheduler";
+
+fn instant(ms: i32) -> string {
+    return if (ms > 0) json.quote(formatInstant(ms)) else "null";
+}
+
+fn dataJson(data: string) -> string {
+    return json.array(jobFields(data).map({ f -> json.object([#("key", json.quote(f._0)), #("value", json.quote(f._1))]) }));
+}
+
+pub fn quartzJson(ds: string) -> string {
+    val sql = sqlTemplate(ds);
+    val jobs: Rows = sql.query("SELECT name, grp, state, data FROM rakun_job ORDER BY name", []);
+    val items = jobs.toList().map({ j ->
+        val trs: Rows = sql.query("SELECT name, cron, misfire, state, next_fire, prev_fire FROM rakun_job_trigger WHERE job = :j ORDER BY name", [param("j", j.get("name"))]);
+        val triggers = trs.toList().map({ t -> json.object([
+            #("name", json.quote(t.get("name"))), #("cron", json.quote(t.get("cron"))), #("misfire", json.quote(t.get("misfire"))),
+            #("state", json.quote(t.get("state"))), #("nextFireTime", instant(t.int("next_fire"))), #("previousFireTime", instant(t.int("prev_fire"))),
+        ]) });
+        json.object([#("name", json.quote(j.get("name"))), #("group", json.quote(j.get("grp"))), #("state", json.quote(j.get("state"))), #("data", dataJson(j.get("data"))), #("triggers", json.array(triggers))])
+    });
+    return sanitizeEntries("quartz", json.object([#("jobs", json.array(items))]));
+}
+
+fn maxExecutions() -> i32 {
+    val raw = rkProp("rakun.management.endpoint.quartz.max-executions").trim();
+    return if (raw == "") 20 else toI32(raw);
+}
+
+pub fn executionsJson(ds: string, job: string) -> string {
+    val all = executionsOf(ds, job);
+    var newest: Execution[] = [];
+    var i = all.length - 1;
+    while (i >= 0 && newest.length < maxExecutions()) {
+        newest.push(all.at(i) ?? Execution(job: "", trigger: "", node: "", window: 0, started: 0, ended: 0, outcome: "", detail: ""));
+        i = i - 1;
+    };
+    val items = newest.map({ e -> json.object([
+        #("trigger", json.quote(e.trigger)), #("node", json.quote(e.node)), #("window", instant(e.window)),
+        #("started", instant(e.started)), #("ended", instant(e.ended)), #("outcome", json.quote(e.outcome)), #("detail", json.quote(e.detail)),
+    ]) });
+    return json.object([#("job", json.quote(job)), #("executions", json.array(items))]);
+}
+
+pub fn quartzRead(req: Request) -> EndpointResponse {
+    return EndpointResponse(status: 200, contentType: "application/json", body: quartzJson(jobStoreDataSource()));
+}
+
+pub fn quartzJobEndpoint(req: Request) -> Response {
+    val job: string = req.param("job");
+    if (exposed("quartz") == false) return notFoundProblem("quartz", req.path);
+    val ds = jobStoreDataSource();
+    val known: Rows = sqlTemplate(ds).query("SELECT name FROM rakun_job WHERE name = :n", [param("n", job)]);
+    if (known.rowCount() == 0) return notFoundProblem("quartz/" + job, req.path);
+    return render(EndpointResponse(status: 200, contentType: "application/json", body: executionsJson(ds, job)));
+}
+
+pub fn mountJobStore() -> i32 {
+    val _e = rkRegisterEndpoint("quartz", "rakun-scheduling", "read", { req -> quartzRead(req) });
+    val path = basePath() + "/quartz/:job";
+    if (rkSchedMountOnce("route " + path) == false) return 0;
+    return rkRegisterRoute("GET", path, { req -> quartzJobEndpoint(req) });
+}

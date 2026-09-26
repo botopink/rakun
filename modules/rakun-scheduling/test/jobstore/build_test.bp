@@ -1,0 +1,67 @@
+//// rakun-scheduling — what `#[persistentJob]` and `#[jobs]` refuse at build
+//// time (front 84 step 2). Each cell writes a one-file project depending on
+//// this member by path and asserts the compiler's located refusal — the
+//// `build_test.bp` shape, with rakun-data added to the dependencies.
+
+import {testing.asserts} from "std";
+import {io: {fs, process, env}} from "std";
+
+fn fixtureRoot() -> string {
+    val tmp = env.read("BOTOPINK_TEST_TMPDIR").unwrapOr("");
+    return if (tmp == "") "" else tmp + "/rakun-jobstore-fixtures";
+}
+
+fn compilerCommand() -> string {
+    return "B=\"$BOTOPINK_BIN\"; [ -n \"$B\" ] || B=\"$(command -v botopink)\"; [ -n \"$B\" ] || B=../../../botopink-lang/zig-out/bin/botopink; [ -x \"$B\" ] || { echo \"no botopink compiler: set BOTOPINK_BIN\"; exit 0; }; B=\"$(cd \"$(dirname \"$B\")\" && pwd)/$(basename \"$B\")\"; ";
+}
+
+fn dep(name: string, dir: string) -> string {
+    return "    \"" + name + "\": { \"path\": \"" + dir + "\" }";
+}
+
+// Writes `source` as the root of a project named `name`, builds it for erlang,
+// and answers the compiler's output followed by `exit=<status>`.
+fn buildFixture(name: string, source: string) -> string {
+    val root = fixtureRoot();
+    return if (root == "") "BOTOPINK_TEST_TMPDIR is not set: run this suite under `botopink test`" else buildFixtureIn(root + "/" + name, name, source);
+}
+
+fn buildFixtureIn(dir: string, name: string, source: string) -> string {
+    val here = process.cwd();
+    val _m = process.runShell("rm -rf '" + dir + "' && mkdir -p '" + dir + "/src'");
+    val deps = [
+        dep("rakun", here + "/../rakun"),
+        dep("rakun-web", here + "/../rakun-web"),
+        dep("rakun-actuator-api", here + "/../rakun-actuator-api"),
+        dep("rakun-actuator", here + "/../rakun-actuator"),
+        dep("rakun-data", here + "/../rakun-data"),
+        dep("rakun-scheduling", here),
+    ];
+    val manifest = "{\n  \"name\": \"" + name + "\",\n  \"version\": \"0.0.1\",\n  \"src\": \"src/\",\n  \"entry\": \"root.bp\",\n  \"target\": \"erlang\",\n  \"targets\": [\"erlang\"],\n  \"dependencies\": {\n" + deps.join(",\n") + "\n  }\n}\n";
+    val _j = fs.writeText(dir + "/botopink.json", manifest);
+    val _s = fs.writeText(dir + "/src/root.bp", source);
+    return process.runShell(compilerCommand() + "cd '" + dir + "' && \"$B\" build --target erlang --out out 2>&1 < /dev/null; echo \"exit=$?\"");
+}
+
+fn header() -> string {
+    return "import {service, rkScan, rkSingleton, rkEnter, rkDone} from \"rakun\";\nimport {jobs, persistentJob, rkPersistentJob} from \"rakun-scheduling\";\n\n";
+}
+
+test "jobs build: a #[jobs] service with a well-formed #[persistentJob] builds" {
+    val out = buildFixture("jobs-ok", header() + "#[service]\n#[jobs]\npub type Billing() {\n    #[persistentJob(\"invoices\", \"0 0 3 * * *\")]\n    pub fn runInvoices(self: Self, data: string) -> string {\n        return data;\n    }\n}\n");
+    assert out.contains("exit=0"), out;
+}
+
+test "jobs build: #[persistentJob] on something that is not a method is a located error" {
+    val onFn = buildFixture("jobs-fn", header() + "#[persistentJob(\"x\", \"0 0 3 * * *\")]\npub fn loose(data: string) -> string {\n    return data;\n}\n");
+    assert onFn.contains("#[persistentJob] must annotate a method of a #[jobs] type") && onFn.contains("src/root.bp:") && onFn.contains("exit=0") == false, onFn;
+    val onType = buildFixture("jobs-type", header() + "#[persistentJob(\"x\", \"0 0 3 * * *\")]\npub type Wrong(n: i32)\n");
+    assert onType.contains("#[persistentJob] must annotate a method of a #[jobs] type") && onType.contains("src/root.bp:"), onType;
+}
+
+test "jobs build: a handler not (self, data: string) -> string is a located error" {
+    val ret = buildFixture("jobs-ret", header() + "#[service]\n#[jobs]\npub type Billing() {\n    #[persistentJob(\"invoices\", \"0 0 3 * * *\")]\n    pub fn runInvoices(self: Self, data: string) -> i32 {\n        return 0;\n    }\n}\n");
+    assert (ret.contains("returns `i32` - a persistent job returns string") || ret.contains("#[jobs] Billing.runInvoices carries #[persistentJob] and is not (self: Self, data: string) -> string")) && ret.contains("src/root.bp:") && ret.contains("exit=0") == false, ret;
+    val params = buildFixture("jobs-params", header() + "#[service]\n#[jobs]\npub type Billing() {\n    #[persistentJob(\"invoices\", \"0 0 3 * * *\")]\n    pub fn runInvoices(self: Self, n: i32) -> string {\n        return \"\";\n    }\n}\n");
+    assert params.contains("#[jobs] Billing.runInvoices carries #[persistentJob] and is not (self: Self, data: string) -> string") && params.contains("src/root.bp:") && params.contains("exit=0") == false, params;
+}
