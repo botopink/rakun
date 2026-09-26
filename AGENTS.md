@@ -4081,6 +4081,22 @@ Selectors are the broker's — no client-side fallback. Durable subscriptions
 need `client-id`. `jms` health indicator. Tests run against
 `rakun_jms_fixture.erl`, an in-process STOMP broker.
 
+### Pulsar — `src/pulsar/` and `pulsar_host.bp` (front 91)
+
+The byte half is `src/sidecars/rakun_pulsar.erl` (botopink has no byte type
+or bit operators): CRC32C (Castagnoli, table-driven), protobuf varints, the
+`BaseCommand` subset, the simple and payload frame envelopes, reassembly of a
+split frame and a size limit. `pulsar.bp`: `parseTopic` / `renderTopic`
+(`persistent://public/default/<t>` defaults; `non-persistent` kept), the
+subscription types, start positions (`earliest`, `latest`, `ledger:entry[:p]`)
+and auth settings (`none`, `token`, `oauth2` with issuer-url, private-key,
+audience) checked at boot, and the admin arm over front 13's client
+(`rakun.pulsar.admin-url`, `.admin.connect-timeout` / `.read-timeout`):
+`createTopic`, `subscriptionsOf`, `backlogOf`, each with its own reader that
+answers an error for another shape. The data plane (connection, LOOKUP,
+producers, consumers, readers, transactions) is not written — no Pulsar
+broker to capture frames from.
+
 ### Reliability — `src/reliability/` (front 86)
 
 `reliableListener(name, broker, destination, group, handler)` registers a

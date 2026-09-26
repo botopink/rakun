@@ -1,0 +1,45 @@
+//// rakun-messaging — Pulsar topic names, settings and the codec's byte half
+//// (front 91 steps 1, 2 and 6).
+
+import {testing.asserts} from "std";
+import {io: {process}} from "std";
+import {rkSetProp} from "rakun";
+import {TopicName, parseTopic, renderTopic, subscriptionTypeProblem, startPositionProblem, authProblem} from "pulsar/pulsar";
+import {pulsarCrc32cHex, pulsarSimpleFrameHex, pulsarPayloadFrameHex, pulsarDecodeSplit} from "pulsar_host";
+
+test "topics: a full name fills four fields; a bare name takes the defaults and round-trips" {
+    val full = parseTopic("persistent://public/default/orders");
+    val bare = parseTopic("orders");
+    assert full.persistence == "persistent" && full.tenant == "public" && full.namespace == "default" && full.topic == "orders";
+    assert renderTopic(bare) == "persistent://public/default/orders" && renderTopic(parseTopic(renderTopic(bare))) == renderTopic(bare);
+}
+
+test "topics: non-persistent is kept" {
+    assert renderTopic(parseTopic("non-persistent://acme/ops/metrics")) == "non-persistent://acme/ops/metrics";
+}
+
+test "settings: subscription types, start positions and authentication are checked at boot" {
+    assert subscriptionTypeProblem("l", "key_shared") == "" && subscriptionTypeProblem("l", "broadcast").contains("exclusive, shared, failover or key_shared");
+    assert startPositionProblem("r", "earliest") == "" && startPositionProblem("r", "latest") == "" && startPositionProblem("r", "12:7") == "" && startPositionProblem("r", "12:7:3") == "";
+    assert startPositionProblem("r", "yesterday").contains("earliest, latest or a message id <ledger>:<entry>[:<partition>]");
+    val _t = rkSetProp("rakun.pulsar.auth.type", "oauth2");
+    val p = authProblem();
+    val _u = rkSetProp("rakun.pulsar.auth.type", "");
+    assert p == "rakun pulsar: auth.type=oauth2 needs rakun.pulsar.auth.issuer-url, rakun.pulsar.auth.private-key, rakun.pulsar.auth.audience", p;
+}
+
+test "codec: CRC32C matches the Castagnoli known-answer vector" {
+    assert pulsarCrc32cHex("123456789") == "e3069283";
+}
+
+test "codec: a frame split across two reads is reassembled, and an oversized one is refused naming the limit" {
+    val ping = pulsarSimpleFrameHex("PING");
+    val send = pulsarPayloadFrameHex("SEND", "meta", "body");
+    assert pulsarDecodeSplit(ping, 5, 1000) == "more|PING" && pulsarDecodeSplit(send, 10, 1000) == "more|SEND";
+    assert pulsarDecodeSplit(send, 10, 16) == "error:the frame of 26 bytes exceeds the maximum of 16|error:the frame of 26 bytes exceeds the maximum of 16", pulsarDecodeSplit(send, 10, 16);
+}
+
+test "codec: the protocol lives in the Erlang cell - no byte manipulation in the botopink sources" {
+    val hits = process.runShell("grep -nE 'bsl|bsr|band|bor|<<[0-9]' src/pulsar/*.bp src/pulsar_host.bp | grep -v '^[^:]*:[0-9]*:#\\[@External' | head -3");
+    assert hits == "", hits;
+}

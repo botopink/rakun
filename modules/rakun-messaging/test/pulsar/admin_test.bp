@@ -1,0 +1,43 @@
+//// rakun-messaging — the Pulsar admin arm (front 91 step 1) over front 13's
+//// client against a stub admin API served by front 04's listener.
+
+import {testing.asserts} from "std";
+import {rkSetProp, rkServe, Response} from "rakun";
+import {createTopic, subscriptionsOf, backlogOf, readSubscriptions, readBacklog} from "pulsar/pulsar";
+
+fn stub(method: string, path: string) -> Response {
+    if (method == "PUT" && path == "/admin/v2/persistent/public/default/orders") return Response.withStatus(204, "");
+    if (method == "PUT") return Response.withStatus(409, "exists");
+    if (path.endsWith("/subscriptions")) return Response.ok("[\"billing\",\"audit\"]");
+    if (path.endsWith("/stats")) return Response.ok("{\"msgRateIn\":0.0,\"subscriptions\":{\"billing\":{\"msgBacklog\":42,\"type\":\"Shared\"}}}");
+    return Response.withStatus(404, "");
+}
+
+fn serve() -> i32 {
+    val _k = rkSetProp("rakun.main.keep-alive", "false");
+    val port = rkServe(0, { m, path, h, q, b -> stub(m, path) });
+    val _a = rkSetProp("rakun.http.clients.allow", "127.0.0.0/8,::1/128");
+    val _u = rkSetProp("rakun.pulsar.admin-url", "http://127.0.0.1:" + port.toString());
+    return port;
+}
+
+test "admin: create a topic, list its subscriptions and read a backlog through front 13's client" {
+    val _s = serve();
+    val made = createTopic("orders");
+    val again = createTopic("persistent://public/default/existing");
+    val subs = subscriptionsOf("orders");
+    val backlog = backlogOf("orders", "billing");
+    assert made.unwrapOr(-1) == 1 && again.unwrapOr(-1) == 0;
+    assert subs.unwrapOr([]).join(",") == "billing,audit" && backlog.unwrapOr(-1) == 42;
+}
+
+test "admin: each reader is tested against a captured body, and another shape is an error, not a zero" {
+    val a = readSubscriptions("[\"a\"]").unwrapOr([]).join(",");
+    val b = readSubscriptions("{\"a\":1}").isError();
+    val c = readSubscriptions("[1]").isError();
+    val d = readSubscriptions("nope").isError();
+    val e = readBacklog("{\"subscriptions\":{\"s\":{\"msgBacklog\":7}}}", "s").unwrapOr(-1);
+    val f = readBacklog("{\"subscriptions\":{}}", "s").isError();
+    val g = readBacklog("{\"subscriptions\":{\"s\":{\"msgBacklog\":\"7\"}}}", "s").isError();
+    assert a == "a" && b && c && d && e == 7 && f && g, a + " " + b.toString() + c.toString() + d.toString() + " " + e.toString() + " " + f.toString() + g.toString();
+}
