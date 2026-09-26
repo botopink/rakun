@@ -2760,11 +2760,24 @@ bundle registry.
   fn is an `Error` value. `language-gaps.md`; the test's CSV converter keeps its
   refusal in a module fn.
 
+### Step 8 — API versioning (`apiversion.bp`, order −150)
+
+One source, the one the configuration names: `rakun.web.apiversion.use.header`,
+`.use.query` or `.use.path-segment` (1-based; the segment `v2` or `2` is REMOVED
+from the dispatch target, so `/v2/users` routes as `/users`), else
+`rakun.web.apiversion.default`. `v2`, `V2` and `2` are one version. The version
+is this request's `api-version` chain signal (`apiVersion()`), cleared between
+requests with the rest. `rakun.web.apiversion.supported` lists the versions
+that exist — a version outside it is a 400 problem naming them; a version in
+`rakun.web.apiversion.deprecated` answers with `Deprecation`
+(`rakun.web.apiversion.deprecation.<v>`, `true` when unset) and, when
+`rakun.web.apiversion.sunset.<v>` is set, `Sunset`. With nothing configured the
+entry passes every request through. `installBuiltins` registers seven entries.
+
 ### What front 07 did NOT reach
 
 | Step | What it needs |
 |---|---|
-| 8 — API versioning | The resolution is string work with no blocker; the `Deprecation`/`Sunset` pair needs front 05 keys that exist |
 | 10 — graceful shutdown | The listening socket is `rakun_runtime.erl`'s (front 04's), and front 76's `readinessDrained()` is the soft half the spec says how to land without |
 
 ## Validation — the bundled `validation` library (front 14, moved by decision 116 rule 5)

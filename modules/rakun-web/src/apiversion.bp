@@ -1,0 +1,117 @@
+//// rakun-web — API versioning (front 07 step 8): an entry at order −150.
+////
+//// The version is read from the ONE place the configuration names — a header
+//// (`rakun.web.apiversion.use.header=X-Version`), a query parameter
+//// (`.use.query=v`) or a path segment (`.use.path-segment=1`, 1-based, the
+//// segment spelled `v2` or `2`) — and a request that carries none gets
+//// `rakun.web.apiversion.default`. A path-segment version is REMOVED from the
+//// dispatch target, so `/v2/users` matches the route `/users`. The resolved
+//// version is this request's `api-version` signal (the per-request table front
+//// 07's chain already clears between requests), read with `apiVersion()`.
+////
+//// `rakun.web.apiversion.supported=1,2` names the versions that exist; a
+//// version outside it is a 400 problem detail naming them. A version listed in
+//// `rakun.web.apiversion.deprecated` answers with a `Deprecation` header (its
+//// `rakun.web.apiversion.deprecation.<v>` value, `true` when none) and, when
+//// `rakun.web.apiversion.sunset.<v>` is set, a `Sunset` header carrying it.
+//// With no `use.*` key and no default the entry passes every request through.
+
+import {Response, rkProp} from "rakun";
+import {WebRequest, Chain, withHeader, retarget, sentinelStatus, rkChainSignal, rkChainPutSignal} from "filter";
+import {problemFor, problemResponse} from "error";
+
+fn listOf(key: string) -> string[] {
+    return rkProp(key).split(",").map({ t -> normalize(t) }).filter({ t -> t != "" });
+}
+
+// `v2`, `V2` and `2` are one version.
+pub fn normalize(raw: string) -> string {
+    val t: string = raw.trim();
+    if (t.startsWith("v") || t.startsWith("V")) return t.slice(1, t.length) else return t;
+}
+
+pub fn apiVersion() -> string {
+    return rkChainSignal("api-version");
+}
+
+pub fn supportedVersions() -> string[] {
+    return listOf("rakun.web.apiversion.supported");
+}
+
+pub fn unknownVersionProblem(version: string) -> string {
+    return "unknown API version `" + version + "` - the versions are " + supportedVersions().join(", ");
+}
+
+fn segmentIndex() -> i32 {
+    val raw: string = rkProp("rakun.web.apiversion.use.path-segment");
+    if (raw == "") return 0;
+    val n: i32 = toIndex(raw);
+    return n;
+}
+
+fn toIndex(raw: string) -> i32 {
+    val digits: string = "0123456789";
+    var n = 0;
+    var ok = true;
+    for (raw.trim().split("")) { c ->
+        val d: i32 = digits.indexOf(c);
+        if (d < 0) ok = false else n = n * 10 + d;
+    };
+    if (ok) return n else return 0;
+}
+
+fn segmentsOf(path: string) -> string[] {
+    return path.split("/").filter({ s -> s != "" });
+}
+
+// The version a path segment carries, or `""`.
+fn pathVersion(path: string, index: i32) -> string {
+    if (index <= 0) return "";
+    val seg: string = segmentsOf(path).at(index - 1) ?? "";
+    val v: string = normalize(seg);
+    val digits: string = v.split(".").join("");
+    if ((v == "") || (toIndex(digits) == 0 && digits != "0")) return "";
+    return v;
+}
+
+fn withoutSegment(path: string, index: i32) -> string {
+    var kept: string[] = [];
+    var i = 1;
+    for (segmentsOf(path)) { s ->
+        if (i != index) kept.push(s);
+        i = i + 1;
+    };
+    return "/" + kept.join("/");
+}
+
+pub fn resolveVersion(req: WebRequest) -> string {
+    val header: string = rkProp("rakun.web.apiversion.use.header");
+    val query: string = rkProp("rakun.web.apiversion.use.query");
+    val fromHeader: string = if (header == "") "" else normalize(req.header(header.toLower()));
+    val fromQuery: string = if (query == "") "" else normalize(req.query(query));
+    val fromPath: string = pathVersion(req.target, segmentIndex());
+    val found: string = if (fromHeader != "") fromHeader else if (fromQuery != "") fromQuery else fromPath;
+    if (found != "") return found else return normalize(rkProp("rakun.web.apiversion.default"));
+}
+
+pub fn apiVersionEntry(req: WebRequest, chain: Chain) -> Response {
+    val version: string = resolveVersion(req);
+    if (version == "") return chain.next(req);
+    val known: string[] = supportedVersions();
+    val listed: bool = known.filter({ k -> k == version }).length > 0;
+    if ((known.length > 0) && (listed == false)) {
+        return problemResponse(problemFor(400, unknownVersionProblem(version), req.path));
+    };
+    val _s = rkChainPutSignal("api-version", version);
+    val index: i32 = segmentIndex();
+    val inPath: bool = pathVersion(req.target, index) != "";
+    val forward: WebRequest = if (inPath) retarget(req, withoutSegment(req.target, index)) else req;
+    val res: Response = chain.next(forward);
+    if (res.status == sentinelStatus()) return res;
+    val deprecated: bool = listOf("rakun.web.apiversion.deprecated").filter({ d -> d == version }).length > 0;
+    if (deprecated == false) return res;
+    val when: string = rkProp("rakun.web.apiversion.deprecation." + version);
+    val _d = withHeader(res, "Deprecation", if (when == "") "true" else when);
+    val sunset: string = rkProp("rakun.web.apiversion.sunset." + version);
+    if (sunset == "") return res else return withHeader(res, "Sunset", sunset);
+}

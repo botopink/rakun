@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### rakun-web: API versioning (botopink front 07 step 8)
+
+- `apiversion.bp`: the version entry at order −150 — header, query or path
+  segment (removed from the target), the default, a 400 naming the supported
+  versions, `Deprecation` / `Sunset` for a deprecated one; `apiVersion()`.
+  `installBuiltins` registers seven entries. `rakun-web` 138 / 0 → **146 / 0**.
+
 ### rakun-web: message converters and `WebCustomizer` (botopink front 07 steps 6 and 7)
 
 - `negotiation.bp`: the converter registry (text/plain, then JSON), the

@@ -1,0 +1,98 @@
+//// rakun-web — API versioning (front 07 step 8), through the chain with the
+//// version entry at its band order and a terminal that echoes what reached it.
+
+import {Response, rkSetProp} from "rakun";
+import {runChain, registerFilter, resetChain, headerValue, rkChainSetTerminal, orderApiVersion} from "filter";
+import {apiVersionEntry, apiVersion, normalize} from "apiversion";
+
+fn versioned() -> i32 {
+    val _r = resetChain();
+    val _t = rkChainSetTerminal({ method, path, headersWire, queryWire, body ->
+        Response.ok(path + "@" + apiVersion());
+    });
+    return registerFilter("api-version", orderApiVersion(), { req, chain -> apiVersionEntry(req, chain) });
+}
+
+fn clear() -> i32 {
+    for (["use.header", "use.query", "use.path-segment", "default", "supported", "deprecated", "deprecation.1", "sunset.1"]) { k ->
+        val _k = rkSetProp("rakun.web.apiversion." + k, "");
+    };
+    return resetChain();
+}
+
+test "rakun-web apiversion: v2, V2 and 2 are one version" {
+    assert normalize("v2") == "2";
+    assert normalize(" V2 ") == "2";
+    assert normalize("2.1") == "2.1";
+}
+
+test "rakun-web apiversion: use.header resolves the version from that header" {
+    val _v = versioned();
+    val _h = rkSetProp("rakun.web.apiversion.use.header", "X-Version");
+    val res: Response = runChain("GET", "/users", "x-version\t2", "", "");
+    val _c = clear();
+    assert res.body == "/users@2";
+}
+
+test "rakun-web apiversion: use.path-segment=1 resolves /v2/users to 2 and routes /users" {
+    val _v = versioned();
+    val _p = rkSetProp("rakun.web.apiversion.use.path-segment", "1");
+    val res: Response = runChain("GET", "/v2/users", "", "", "");
+    val _c = clear();
+    assert res.body == "/users@2";
+}
+
+test "rakun-web apiversion: use.query reads the parameter" {
+    val _v = versioned();
+    val _q = rkSetProp("rakun.web.apiversion.use.query", "v");
+    val res: Response = runChain("GET", "/users", "", "v\t3", "");
+    val _c = clear();
+    assert res.body == "/users@3";
+}
+
+test "rakun-web apiversion: a request with no version gets the default" {
+    val _v = versioned();
+    val _h = rkSetProp("rakun.web.apiversion.use.header", "X-Version");
+    val _d = rkSetProp("rakun.web.apiversion.default", "1.0.0");
+    val res: Response = runChain("GET", "/users", "", "", "");
+    val _c = clear();
+    assert res.body == "/users@1.0.0";
+}
+
+test "rakun-web apiversion: an unknown version answers 400 naming the known versions" {
+    val _v = versioned();
+    val _h = rkSetProp("rakun.web.apiversion.use.header", "X-Version");
+    val _s = rkSetProp("rakun.web.apiversion.supported", "1,2");
+    val res: Response = runChain("GET", "/users", "x-version\t9", "", "");
+    val ct: string = headerValue("Content-Type");
+    val _c = clear();
+    assert res.status == 400;
+    assert ct == "application/problem+json";
+    assert res.body.contains("unknown API version `9` - the versions are 1, 2");
+}
+
+test "rakun-web apiversion: a deprecated version carries Deprecation and Sunset" {
+    val _v = versioned();
+    val _h = rkSetProp("rakun.web.apiversion.use.header", "X-Version");
+    val _s = rkSetProp("rakun.web.apiversion.supported", "1,2");
+    val _d = rkSetProp("rakun.web.apiversion.deprecated", "1");
+    val _w = rkSetProp("rakun.web.apiversion.sunset.1", "Wed, 01 Jan 2027 00:00:00 GMT");
+    val old: Response = runChain("GET", "/users", "x-version\t1", "", "");
+    val deprecation: string = headerValue("Deprecation");
+    val sunset: string = headerValue("Sunset");
+    val current: Response = runChain("GET", "/users", "x-version\t2", "", "");
+    val currentDeprecation: string = headerValue("Deprecation");
+    val _c = clear();
+    assert old.body == "/users@1";
+    assert deprecation == "true";
+    assert sunset == "Wed, 01 Jan 2027 00:00:00 GMT";
+    assert current.body == "/users@2";
+    assert currentDeprecation == "";
+}
+
+test "rakun-web apiversion: with nothing configured every request passes through" {
+    val _v = versioned();
+    val res: Response = runChain("GET", "/v2/users", "", "", "");
+    val _c = clear();
+    assert res.body == "/v2/users@";
+}
