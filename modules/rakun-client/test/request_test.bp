@@ -57,6 +57,10 @@ fn stub(method: string, path: string, headersJson: string, body: string) -> Resp
 // Boot the stub once per file run; answer its port.
 fn port() -> i32 {
     val _a = rkSetProp("rakun.http.clients.allow", "127.0.0.0/8");
+    // Every exchange with the stub is expected to answer; ten seconds is a read
+    // budget no scheduling delay crosses (the default second is not, against a
+    // `/slow/150` on a loaded machine). The read-timeout test sets its own.
+    val _r = rkSetProp("rakun.http.clients.read-timeout-millis", "10000");
     val known = rkProp("test.client.request.port");
     if (known != "") return toI32(known);
     val _k = rkSetProp("rakun.main.keep-alive", "false");
@@ -149,11 +153,12 @@ test "request: a non-2xx response is returned, not raised" {
 }
 
 test "request: a read timeout answers status -1 with the reason in the body" {
+    // The stub sleeps a minute, so only the 100 ms timeout can answer.
     val quick = RestClient.builder().baseUrl(base()).readTimeout(100).build();
-    val res = quick.get("/slow/400").retrieve();
+    val res = quick.get("/slow/60000").retrieve();
     assert res.status == -1;
     try asserts.contains(res.body, "read timeout after 100 ms");
-    try asserts.contains(res.body, "GET " + base() + "/slow/400");
+    try asserts.contains(res.body, "GET " + base() + "/slow/60000");
 }
 
 test "request: a refused connection answers status -1 naming the failure" {

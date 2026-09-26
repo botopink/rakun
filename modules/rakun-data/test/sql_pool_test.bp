@@ -11,7 +11,7 @@
 
 import {testing.asserts} from "std";
 import {io: {clock}} from "std";
-import {async} from "std";
+import {async, async.Gate} from "std";
 import {
     PooledDataSource,
     PoolStats,
@@ -43,11 +43,6 @@ fn raiseElsewhere(sql: SqlTemplate) -> @Task<i32> {
     return sql.query("SELECT 1", []).rowCount();
 }
 
-fn waitingAfter(name: string, millis: i32) -> @Task<string> {
-    val _s = rkDataSleep(millis);
-    return poolStats(name).waiting.toString();
-}
-
 // What each transaction thunk below runs. `await` is legal only in a
 // `-> @Task` fn or a test block, not in a lambda, so the thunks call these.
 fn probeInside(sql: SqlTemplate) -> @Task<string[]> {
@@ -59,13 +54,48 @@ fn raiseInside(sql: SqlTemplate) -> @Task<i32> {
     return counts.length;
 }
 
-fn statsInside(sql: SqlTemplate) -> @Task<string> {
-    val busy = poolStats("tiny").busy;
-    val answers = await async.runAll([
-        { -> fromElsewhere(sql) },
-        { -> waitingAfter("tiny", 60) },
-    ]);
-    return busy.toString() + "|" + answers.at(1).unwrapOr("");
+// ── the waiting count, observed rather than timed ───────────────────────────
+// Three tasks and two gates: `holding` checks the pool's one connection out
+// (a transaction) and keeps it until the count has been OBSERVED; the borrower
+// asks for a connection only once it is held, so it has to wait; the observer
+// reads the stats until that wait shows. Nothing here is a race against a
+// clock — a 60 ms sleep before the read, against a 150 ms checkout timeout,
+// measured the machine's load as much as the pool.
+
+fn holding(sql: SqlTemplate, held: Gate, observed: Gate) -> @Task<string> {
+    return await sql.transaction({ tx -> holdUntilObserved(held, observed) });
+}
+
+fn holdUntilObserved(held: Gate, observed: Gate) -> @Task<string> {
+    async.openGate(held);
+    val seen = await async.awaitGate(observed, 10000);
+    return if (seen) "held" else "never observed";
+}
+
+fn borrowWhenHeld(sql: SqlTemplate, held: Gate) -> @Task<string> {
+    val _h = await async.awaitGate(held, 10000);
+    return await fromElsewhere(sql);
+}
+
+fn observeWaiting(name: string, held: Gate, observed: Gate) -> @Task<string> {
+    val _h = await async.awaitGate(held, 10000);
+    val seen = busyAndWaiting(name);
+    async.openGate(observed);
+    return seen;
+}
+
+// `busy|waiting` of `name` once a borrower is waiting, polled every
+// millisecond; after ten thousand polls (at least ten seconds) with nobody
+// waiting it answers what it sees, and the assertion reds.
+fn busyAndWaiting(name: string) -> string {
+    var polls = 0;
+    var s: PoolStats = poolStats(name);
+    while (s.waiting < 1 && polls < 10000) {
+        val _s = rkDataSleep(1);
+        polls = polls + 1;
+        s = poolStats(name);
+    };
+    return s.busy.toString() + "|" + s.waiting.toString();
 }
 
 test "pool: the configured number of connection processes start under rakun_pool_sup" {
@@ -96,10 +126,19 @@ test "pool: the raising surface raises when the checkout times out" {
 }
 
 test "pool: rkPoolStats reports size, in-use and waiting" {
-    val sql = sqlTemplate("tiny");
-    val seen = await sql.transaction({ tx -> statsInside(sql) });
-    assert seen == "1|1";
-    val after = poolStats("tiny");
+    val _d = startDataSource("watched", "ets:memory", 1, 10000, "eager");
+    val sql = sqlTemplate("watched");
+    val held = async.newGate();
+    val observed = async.newGate();
+    val answers = await async.runAll([
+        { -> holding(sql, held, observed) },
+        { -> borrowWhenHeld(sql, held) },
+        { -> observeWaiting("watched", held, observed) },
+    ]);
+    // The borrower waited, then got the connection once the transaction
+    // ended: its statement succeeded (no error text).
+    assert answers.join(",") == "held,,1|1", answers.join(",");
+    val after = poolStats("watched");
     assert after.size == 1;
     assert after.busy == 0;
     assert after.waiting == 0;

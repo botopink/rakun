@@ -1,9 +1,11 @@
 //// rakun-actuator-api — spans with no host and (mostly) no subscriber.
 ////
 //// The parenting assertions compare ids; the cost assertion runs a million
-//// no-subscriber emissions and bounds the elapsed time, which is the one
-//// honest timing test here because the claim is an order of magnitude
-//// (under a microsecond each), not a millisecond. Every test that subscribes
+//// no-subscriber emissions and bounds the WORK they did in reductions (the
+//// BEAM's per-process count of function calls), not the elapsed time: a
+//// microsecond budget measured on the wall clock depends on how busy the machine
+//// is, and a reduction count is the same on an idle machine and a
+//// loaded one. Every test that subscribes
 //// unsubscribes before it returns — the subscriber list is node-global.
 
 import {testing.asserts} from "std";
@@ -16,7 +18,6 @@ import {
     validTraceparent,
     continueTrace,
     rkSpanEmitStart,
-    rkSpanNowMicros,
     rkSpanClear,
     rkSpanSubscriberCount,
     rkSpanUnsubscribeAll,
@@ -97,16 +98,25 @@ fn loopOnly(n: i32) -> i32 {
     return i;
 }
 
-test "span: with no subscriber an emission costs under a microsecond" {
+// The reductions this process has spent — the BEAM's own count of the work a
+// process did (roughly one per function call). Unlike elapsed time it does not
+// move when the machine is busy or the process is descheduled.
+#[@External.Erlang("""element(2, erlang:process_info(self(), reductions))""")]
+declare fn reductions() -> i64;
+
+test "span: with no subscriber an emission costs a handful of reductions, not a delivery" {
     val _u = rkSpanUnsubscribeAll();
     assert rkSpanSubscriberCount() == 0;
-    val a: i64 = rkSpanNowMicros();
+    val a: i64 = reductions();
     val _n = emitMany(1000000);
-    val b: i64 = rkSpanNowMicros();
+    val b: i64 = reductions();
     val _m = loopOnly(1000000);
-    val c: i64 = rkSpanNowMicros();
+    val c: i64 = reductions();
     val emitting: i64 = b - a;
     val looping: i64 = c - b;
     val cost: i64 = emitting - looping;
-    assert cost < 1000000, "a million no-subscriber emissions took " + cost.toString() + " us over the bare loop";
+    // Six reductions each today (the subscriber lookup and the return); ten is
+    // the ceiling for "a check and a return", where a delivery builds event
+    // atoms and a measurement map for every emission.
+    assert cost < 10000000, "a million no-subscriber emissions cost " + cost.toString() + " reductions over the bare loop (" + looping.toString() + ")";
 }

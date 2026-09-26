@@ -13,7 +13,7 @@
 
 import {testing.asserts} from "std";
 import {component, rkScan, rkSingleton, rkEnter, rkDone} from "rakun";
-import {rkDispatchHttp, rkSetProp, rkReplyHeaders, rkReqSleep, rkCtxBump, rkCtxCount, Response} from "rakun";
+import {rkDispatchHttp, rkSetProp, rkReplyHeaders, rkReqSleep, rkCtxBump, Response} from "rakun";
 import {Health, healthIndicator, rkRegisterHealthIndicator, rkApiHealthRemove, healthIndicatorIds} from "rakun-actuator-api";
 import {rkSpanNowMicros} from "rakun-actuator-api";
 import {mountActuator} from "actuator";
@@ -40,12 +40,6 @@ fn raising() -> Health {
     @panic("broker unreachable");
 }
 
-fn sleeping(ms: i32, marker: string) -> Health {
-    val _s = rkReqSleep(ms);
-    val _b = rkCtxBump(marker);
-    return Health(status: "UP", details: "{}");
-}
-
 // Leaves `ping` alone: the decorated and built-in extras are taken out for the
 // duration of one assertion and put back by `restore()`.
 fn onlyPing() -> i32 {
@@ -56,6 +50,54 @@ fn onlyPing() -> i32 {
 fn restore() -> i32 {
     val _o = rkRegisterHealthIndicator("orders", "OrdersHealth", { -> __rkMake_OrdersHealth().check() });
     return registerHealthBuiltins();
+}
+
+// ── ordering by signal, not by clock ────────────────────────────────────────
+// A health probe is a set of processes racing deadlines, so a test that says
+// "this check is slow" with a 400 ms sleep against a 100 ms timeout, or "ten
+// checks overlapped" with an elapsed-time budget, measures the machine as much
+// as the code: under load a 100 ms deadline can fire after 400 ms of sleep.
+// These cells make the order logical. A check that must NOT finish sleeps a
+// minute (no run lasts that long, so only the probe's kill ends it) and sends
+// its pid to the test first; `survivors` then proves each such check is DEAD.
+// Checks that must overlap meet at a barrier none of them can pass alone.
+
+// The test process, handed to a check so it can report its own pid.
+#[@External.Erlang("""self()""")]
+declare fn selfPid() -> any;
+
+// Send this process's pid to `to` as `{rk_hung, Pid}`.
+#[@External.Erlang("""(fun(__To) -> __To ! {rk_hung, self()}, 0 end)($0)""")]
+declare fn reportPid(to: any) -> i32;
+
+// How many of the checks that reported their pid are still alive after
+// `budgetMs`: each pid already in the mailbox is monitored and its `'DOWN'`
+// awaited (an already-dead pid answers `noproc` at once). A killed check is
+// down in microseconds; the budget only turns a live one into a count instead
+// of a hang.
+#[@External.Erlang("""(fun(__Ms) -> __Pids = (fun BpDrain(__Acc) -> receive {rk_hung, __P} -> BpDrain([__P | __Acc]) after 0 -> __Acc end end)([]), length([__Q || __Q <- __Pids, (fun(__Pid) -> __M = erlang:monitor(process, __Pid), receive {'DOWN', __M, process, __Pid, _} -> false after __Ms -> erlang:demonitor(__M, [flush]), true end end)(__Q)]) end)($0)""")]
+declare fn survivors(budgetMs: i32) -> i32;
+
+// Block until `parties` processes have arrived under `key`, then let them all
+// through; `false` when `budgetMs` passes first. The barrier is one registered
+// process (`rk_test_meet`), started by the first caller.
+#[@External.Erlang("""(fun(__K, __N, __Ms) -> __S = case whereis(rk_test_meet) of undefined -> __P = spawn(fun() -> (fun BpMeet(__Map) -> receive {arrive, __K2, __N2, __F, __R} -> __W = [{__F, __R} | maps:get(__K2, __Map, [])], case length(__W) >= __N2 of true -> lists:foreach(fun({__F2, __R2}) -> __F2 ! {__R2, go} end, __W), BpMeet(maps:remove(__K2, __Map)); false -> BpMeet(__Map#{__K2 => __W}) end end end)(#{}) end), try register(rk_test_meet, __P), __P catch error:badarg -> exit(__P, kill), whereis(rk_test_meet) end; __Q -> __Q end, __Ref = make_ref(), __S ! {arrive, __K, __N, self(), __Ref}, receive {__Ref, go} -> true after __Ms -> false end end)($0, $1, $2)""")]
+declare fn meet(key: string, parties: i32, budgetMs: i32) -> bool;
+
+// A check that never answers inside a run: reports its pid to `to`, then
+// sleeps a minute. Only the probe's kill ends it early.
+fn hung(to: any, marker: string) -> Health {
+    val _p = reportPid(to);
+    val _s = rkReqSleep(60000);
+    val _b = rkCtxBump(marker);
+    return Health(status: "UP", details: "{}");
+}
+
+// A check that answers UP only once all `parties` checks under `key` are
+// running at the same time.
+fn meeting(key: string, parties: i32) -> Health {
+    val met = meet(key, parties, 10000);
+    return if (met) Health(status: "UP", details: "{}") else Health(status: "DOWN", details: "{\"error\":\"ran alone\"}");
 }
 
 // Microseconds since `since`; the bounds below are written in microseconds
@@ -125,38 +167,41 @@ test "health: an indicator past its timeout becomes UNKNOWN, is abandoned, and t
     val _m = mountActuator();
     val _o = onlyPing();
     val _t = rkSetProp("rakun.management.health.slow.timeout", "100ms");
-    val before: i32 = rkCtxCount("slow finished");
-    val _s = rkRegisterHealthIndicator("slow", "SlowHealth", { -> sleeping(400, "slow finished") });
+    val me = selfPid();
+    val _s = rkRegisterHealthIndicator("slow", "SlowHealth", { -> hung(me, "slow finished") });
     val started: i64 = rkSpanNowMicros();
     val res = get("/actuator/health");
     val took: i64 = elapsedMicros(started);
     val rendered = renderHealth(healthReport());
-    val _w = rkReqSleep(600);
-    val after: i32 = rkCtxCount("slow finished");
+    val alive: i32 = survivors(10000);
     val _x = rkApiHealthRemove("slow");
     val _u = rkSetProp("rakun.management.health.slow.timeout", "");
     val _r = restore();
     assert rendered == "status UNKNOWN\ncomponents:\n  ping UP {}\n  slow UNKNOWN {\"error\":\"timeout after 100ms\"}";
     assert res.status == 200;
-    assert took < 350000, "the probe took " + took.toString() + " us";
-    assert after == before, "the abandoned check ran to completion";
+    // The budget was waited out, and the minute-long check was not: the probe
+    // answered by its deadline, not by the check.
+    assert took >= 100000, "the probe took " + took.toString() + " us";
+    assert took < 30000000, "the probe took " + took.toString() + " us";
+    assert alive == 0, "an abandoned check is still running";
 }
 
-test "health: ten indicators at 300 ms each complete in about 300 ms, not 3 s" {
+test "health: ten indicators run at once — each waits for all ten, so none answers alone" {
+    // A probe that ran its checks one after another would leave the first one
+    // at the barrier alone: DOWN ("ran alone") or, past its deadline, UNKNOWN.
     val _m = mountActuator();
     val ids = ["c0", "c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8", "c9"];
     for (ids) { id ->
-        val _r = rkRegisterHealthIndicator(id, "Concurrent" + id, { -> sleeping(300, "concurrent") });
+        val _t = rkSetProp("rakun.management.health." + id + ".timeout", "10000ms");
+        val _r = rkRegisterHealthIndicator(id, "Concurrent" + id, { -> meeting("ten-at-once", 10) });
     };
-    val started: i64 = rkSpanNowMicros();
     val report: HealthReport = healthReport();
-    val took: i64 = elapsedMicros(started);
     for (ids) { id ->
         val _x = rkApiHealthRemove(id);
+        val _u = rkSetProp("rakun.management.health." + id + ".timeout", "");
     };
     assert report.components.length >= 10;
-    assert report.status == "UP";
-    assert took < 1000000, "ten concurrent indicators took " + took.toString() + " us";
+    assert report.status == "UP", renderHealth(report);
 }
 
 test "health: four badly behaved indicators cannot break the endpoint" {
@@ -164,7 +209,8 @@ test "health: four badly behaved indicators cannot break the endpoint" {
     val _o = onlyPing();
     val _t = rkSetProp("rakun.management.health.hung.timeout", "150ms");
     val _a = rkRegisterHealthIndicator("raises", "RaisesHealth", { -> raising() });
-    val _b = rkRegisterHealthIndicator("hung", "HungHealth", { -> sleeping(2000, "hung finished") });
+    val me = selfPid();
+    val _b = rkRegisterHealthIndicator("hung", "HungHealth", { -> hung(me, "hung finished") });
     val _c = rkRegisterHealthIndicator("weird", "WeirdHealth", { -> fixture("MOSTLY_FINE", "{}") });
     val _d = rkRegisterHealthIndicator("garbled", "GarbledHealth", { -> fixture("UP", "{not json") });
     val started: i64 = rkSpanNowMicros();
@@ -178,7 +224,11 @@ test "health: four badly behaved indicators cannot break the endpoint" {
     val _r = restore();
     assert res.status == 503;
     assert res.body == "{\"status\":\"DOWN\"}";
-    assert took < 500000, "the probe took " + took.toString() + " us";
+    // The hung check sleeps a minute: answering at all, by its 150 ms deadline,
+    // is the proof the probe did not wait for it.
+    assert took >= 150000, "the probe took " + took.toString() + " us";
+    assert took < 30000000, "the probe took " + took.toString() + " us";
+    assert survivors(10000) == 0, "an abandoned check is still running";
     assert rendered == "status DOWN\ncomponents:\n  garbled UP {\"error\":\"details are not a JSON object\"}\n  hung UNKNOWN {\"error\":\"timeout after 150ms\"}\n  ping UP {}\n  raises DOWN {\"error\":\"broker unreachable\"}\n  weird UNKNOWN {\"error\":\"unknown status MOSTLY_FINE\"}";
 }
 

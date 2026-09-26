@@ -29,15 +29,15 @@ declare fn copyFile(src: string, dest: string) -> i32;
 // GET `/tls/peer` over TLS, verifying the server against `ca`; a client
 // certificate when `cert` is not `""`. Answers `status|body`, or `error` when
 // the handshake or the exchange fails.
-#[@External.Erlang("""(fun(__Port, __Ca, __Cert, __Key, __Vsn) -> _ = application:ensure_all_started(ssl), __Mine = case __Cert of <<>> -> []; _ -> [{certfile, binary_to_list(__Cert)}, {keyfile, binary_to_list(__Key)}] end, __Opts = [binary, {active, false}, {verify, verify_peer}, {cacertfile, binary_to_list(__Ca)}, {server_name_indication, "localhost"}, {versions, [binary_to_atom(__Vsn, utf8)]}] ++ __Mine, case ssl:connect("localhost", __Port, __Opts, 3000) of {error, _} -> <<"error">>; {ok, __S} -> case ssl:send(__S, <<"GET /tls/peer HTTP/1.1", 13, 10, "Host: localhost", 13, 10, 13, 10>>) of ok -> __R = ssl:recv(__S, 0, 3000), ssl:close(__S), case __R of {ok, __Bin} -> case binary:split(__Bin, <<13, 10, 13, 10>>) of [__H, __B] -> [_, __St | _] = binary:split(__H, <<" ">>, [global]), <<__St/binary, "|", __B/binary>>; _ -> <<"error">> end; _ -> <<"error">> end; _ -> ssl:close(__S), <<"error">> end end end)($0, $1, $2, $3, $4)""")]
+#[@External.Erlang("""(fun(__Port, __Ca, __Cert, __Key, __Vsn) -> _ = application:ensure_all_started(ssl), __Mine = case __Cert of <<>> -> []; _ -> [{certfile, binary_to_list(__Cert)}, {keyfile, binary_to_list(__Key)}] end, __Opts = [binary, {active, false}, {verify, verify_peer}, {cacertfile, binary_to_list(__Ca)}, {server_name_indication, "localhost"}, {versions, [binary_to_atom(__Vsn, utf8)]}] ++ __Mine, case ssl:connect("localhost", __Port, __Opts, 10000) of {error, _} -> <<"error">>; {ok, __S} -> case ssl:send(__S, <<"GET /tls/peer HTTP/1.1", 13, 10, "Host: localhost", 13, 10, 13, 10>>) of ok -> __R = ssl:recv(__S, 0, 10000), ssl:close(__S), case __R of {ok, __Bin} -> case binary:split(__Bin, <<13, 10, 13, 10>>) of [__H, __B] -> [_, __St | _] = binary:split(__H, <<" ">>, [global]), <<__St/binary, "|", __B/binary>>; _ -> <<"error">> end; _ -> <<"error">> end; _ -> ssl:close(__S), <<"error">> end end end)($0, $1, $2, $3, $4)""")]
 declare fn tlsGet(port: i32, ca: string, cert: string, key: string, version: string) -> string;
 
 // The subject of the certificate the server presented.
-#[@External.Erlang("""(fun(__Port, __Ca) -> case ssl:connect("localhost", __Port, [binary, {active, false}, {verify, verify_peer}, {cacertfile, binary_to_list(__Ca)}, {server_name_indication, "localhost"}], 3000) of {ok, __S} -> {ok, __Der} = ssl:peercert(__S), ssl:close(__S), rakun_ssl:peer_subject(__Der); _ -> <<"error">> end end)($0, $1)""")]
+#[@External.Erlang("""(fun(__Port, __Ca) -> case ssl:connect("localhost", __Port, [binary, {active, false}, {verify, verify_peer}, {cacertfile, binary_to_list(__Ca)}, {server_name_indication, "localhost"}], 10000) of {ok, __S} -> {ok, __Der} = ssl:peercert(__S), ssl:close(__S), rakun_ssl:peer_subject(__Der); _ -> <<"error">> end end)($0, $1)""")]
 declare fn serverSubject(port: i32, ca: string) -> string;
 
 // Open a plain TCP connection and send nothing; answers `ok` when it was open.
-#[@External.Erlang("""(fun(__Port) -> case gen_tcp:connect("127.0.0.1", __Port, [binary, {active, false}], 1000) of {ok, __S} -> put(rakun_test_silent, __S), <<"ok">>; _ -> <<"error">> end end)($0)""")]
+#[@External.Erlang("""(fun(__Port) -> case gen_tcp:connect("127.0.0.1", __Port, [binary, {active, false}], 10000) of {ok, __S} -> put(rakun_test_silent, __S), <<"ok">>; _ -> <<"error">> end end)($0)""")]
 declare fn openSilent(port: i32) -> string;
 
 // Whether the silent connection was closed by the server within `ms`.
@@ -117,6 +117,9 @@ test "rakun tls: protocols=tlsv1.2 refuses a TLS 1.3-only client and logs the re
 
 test "rakun tls: the handshake runs in the connection process, so a silent client delays nobody" {
     val d: string = configure("none", "tlsv1.3,tlsv1.2");
+    // The silent client's handshake may take a minute; a listener that did the
+    // handshake itself would hold the next client that long.
+    val _t = rkSetProp("rakun.ssl.handshake-timeout", "60000");
     val port: i32 = serveTls();
     assert openSilent(port) == "ok";
     val before: i32 = nowMs();
@@ -125,15 +128,18 @@ test "rakun tls: the handshake runs in the connection process, so a silent clien
     val _c = closeSilent();
     val _p = plainAgain();
     assert got == "200|tls ";
-    assert took < 1000;
+    assert took < 30000;
 }
 
-test "rakun tls: rakun.ssl.handshake-timeout=200 closes a silent connection within 500 ms" {
+test "rakun tls: rakun.ssl.handshake-timeout=200 closes a silent connection, well before the 5 s default" {
     val d: string = configure("none", "tlsv1.3,tlsv1.2");
     val _t = rkSetProp("rakun.ssl.handshake-timeout", "200");
     val port: i32 = serveTls();
     assert openSilent(port) == "ok";
-    val closed: bool = silentClosedWithin(500);
+    // Four seconds is a margin no scheduling delay crosses against 200 ms, and
+    // still short of the 5000 ms default a runtime that ignored the property
+    // would wait.
+    val closed: bool = silentClosedWithin(4000);
     val _c = closeSilent();
     val after: string = tlsGet(port, d + "/ca.pem", "", "", "tlsv1.3");
     val _p = plainAgain();

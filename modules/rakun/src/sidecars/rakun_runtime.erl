@@ -1252,11 +1252,15 @@ live_connections() ->
     [{P, S} || {P, S} <- ets:tab2list(?CONNS), is_process_alive(P)].
 
 %% Answers `<<"Drained|Killed">>`: how many busy connections finished inside the
-%% timeout, and how many were still running at it and were killed.
+%% timeout, and how many were still running at it and were killed. The moment
+%% the busy set is taken is published as `rakun.server.draining-busy` (its
+%% size), so a request can tell it is being waited for — how the shutdown tests
+%% keep a request in flight across the drain without a timer.
 drain(TimeoutMs) ->
     ensure_started(),
     [exit(P, kill) || {P, idle} <- live_connections()],
     Busy = [P || {P, busy} <- live_connections()],
+    _ = set_prop(<<"rakun.server.draining-busy">>, integer_to_binary(length(Busy))),
     Deadline = now_ms() + TimeoutMs,
     Left = await_connections(Busy, Deadline),
     [exit(P, kill) || P <- Left],

@@ -8,7 +8,7 @@
 //// buffer); the second half over front 04's listener, where the writer streams
 //// HTTP/1.1 chunks and a raw client reads them as bytes.
 
-import {testing.asserts, async, collections.Dict} from "std";
+import {testing.asserts, async, async.Gate, collections.Dict} from "std";
 import {Request, Response, rkSetProp, rkDispatchHttp, rkServe} from "rakun";
 import {rkAppReset} from "file_router";
 import {
@@ -151,14 +151,18 @@ fn paramsBody(req: Request, out: ChunkWriter) -> @Task<@Result<void, string>> {
     return;
 }
 
-fn slowSecond() -> PageRenderer {
-    return { req, out -> slowBody(out) };
+// Writes the second chunk only once `released` opens — which the test does
+// after its client has READ the first one off the socket. A renderer whose
+// first chunk sat in a buffer would leave the client waiting, the gate shut,
+// and write "never-released" after the gate's budget.
+fn slowSecond(released: Gate) -> PageRenderer {
+    return { req, out -> slowBody(out, released) };
 }
 
-fn slowBody(out: ChunkWriter) -> @Task<@Result<void, string>> {
+fn slowBody(out: ChunkWriter, released: Gate) -> @Task<@Result<void, string>> {
     await writeTo(out, "shell;");
-    val _s = sleepMs(400);
-    await writeTo(out, "tail");
+    val opened = await async.awaitGate(released, 10000);
+    await writeTo(out, if (opened) "tail" else "never-released");
     return;
 }
 
@@ -171,9 +175,6 @@ fn plainBody(out: ChunkWriter) -> @Task<@Result<void, string>> {
     await writeTo(out, "x");
     return;
 }
-
-#[@External.Erlang("rakun_request_context", "sleep")]
-declare fn sleepMs(ms: i32) -> i32;
 
 fn fresh() -> i32 {
     val _r = rkAppReset();
@@ -298,10 +299,24 @@ test "rakun ssr: a strict render raises on a query read instead of marking it" {
 
 // ── step 3, over the socket ─────────────────────────────────────────────────
 
-// One raw exchange: the head and the chunked body, as bytes, plus how long the
-// first body chunk took to arrive and how long the whole response took.
-#[@External.Erlang("""(fun(__Port, __Path) -> {ok, __S} = gen_tcp:connect("127.0.0.1", __Port, [binary, {active, false}]), __T0 = erlang:monotonic_time(millisecond), ok = gen_tcp:send(__S, [<<"GET ">>, __Path, <<" HTTP/1.1", 13, 10, "Host: x", 13, 10, 13, 10>>]), __Loop = fun __Loop(__Acc, __First) -> case binary:match(__Acc, <<"0", 13, 10, 13, 10>>) of nomatch -> case gen_tcp:recv(__S, 0, 3000) of {ok, __M} -> __F2 = case {__First, binary:match(<<__Acc/binary, __M/binary>>, <<"shell;">>)} of {undefined, {_, _}} -> erlang:monotonic_time(millisecond) - __T0; _ -> __First end, __Loop(<<__Acc/binary, __M/binary>>, __F2); _ -> {__Acc, __First} end; _ -> {__Acc, __First} end end, {__All, __FirstAt} = __Loop(<<>>, undefined), __Total = erlang:monotonic_time(millisecond) - __T0, gen_tcp:close(__S), iolist_to_binary([__All, <<"|first=">>, integer_to_binary(case __FirstAt of undefined -> -1; __X -> __X end), <<"|total=">>, integer_to_binary(__Total)]) end)($0, $1)""")]
+// One raw exchange: the head and the chunked body, as bytes.
+#[@External.Erlang("""(fun(__Port, __Path) -> {ok, __S} = gen_tcp:connect("127.0.0.1", __Port, [binary, {active, false}]), ok = gen_tcp:send(__S, [<<"GET ">>, __Path, <<" HTTP/1.1", 13, 10, "Host: x", 13, 10, 13, 10>>]), __Loop = fun __Loop(__Acc) -> case binary:match(__Acc, <<"0", 13, 10, 13, 10>>) of nomatch -> case gen_tcp:recv(__S, 0, 10000) of {ok, __M} -> __Loop(<<__Acc/binary, __M/binary>>); _ -> __Acc end; _ -> __Acc end end, __All = __Loop(<<>>), gen_tcp:close(__S), __All end)($0, $1)""")]
 declare fn rawGet(port: i32, path: string) -> string;
+
+// The first half of a raw exchange: connect, send the request, and read until
+// `marker` has arrived (or the socket stays quiet for ten seconds). Answers the
+// open connection and the bytes read so far, for `rawRest`.
+#[@External.Erlang("""(fun(__Port, __Path, __Marker) -> {ok, __S} = gen_tcp:connect("127.0.0.1", __Port, [binary, {active, false}]), ok = gen_tcp:send(__S, [<<"GET ">>, __Path, <<" HTTP/1.1", 13, 10, "Host: x", 13, 10, 13, 10>>]), __Loop = fun __Loop(__Acc) -> case binary:match(__Acc, __Marker) of nomatch -> case gen_tcp:recv(__S, 0, 10000) of {ok, __M} -> __Loop(<<__Acc/binary, __M/binary>>); _ -> __Acc end; _ -> __Acc end end, {__S, __Loop(<<>>)} end)($0, $1, $2)""")]
+declare fn rawUntil(port: i32, path: string, marker: string) -> any;
+
+// Whether the bytes `rawUntil` read already hold `marker`.
+#[@External.Erlang("""(binary:match(element(2, $0), $1) =/= nomatch)""")]
+declare fn rawSaw(conn: any, marker: string) -> bool;
+
+// The rest of the exchange `rawUntil` started, to the last chunk: every byte
+// read, the first half included.
+#[@External.Erlang("""(fun({__S, __Acc0}) -> __Loop = fun __Loop(__Acc) -> case binary:match(__Acc, <<"0", 13, 10, 13, 10>>) of nomatch -> case gen_tcp:recv(__S, 0, 10000) of {ok, __M} -> __Loop(<<__Acc/binary, __M/binary>>); _ -> __Acc end; _ -> __Acc end end, __All = __Loop(__Acc0), gen_tcp:close(__S), __All end)($0)""")]
+declare fn rawRest(conn: any) -> string;
 
 fn start() -> i32 {
     val _k = rkSetProp("rakun.main.keep-alive", "false");
@@ -326,18 +341,22 @@ test "rakun ssr: a header the renderer set replaces the default by name" {
 
 test "rakun ssr: the first chunk reaches the socket before the second is written" {
     val _f = fresh();
-    val _p = page("stream", slowSecond());
-    val raw: string = rawGet(start(), "/stream");
-    val afterFirst: string = raw.split("|first=").at(1) ?? "-1";
-    val first: i32 = toInt(afterFirst.split("|").at(0) ?? "-1");
-    val total: i32 = toInt(raw.split("|total=").at(1) ?? "-1");
+    val released = async.newGate();
+    val _p = page("stream", slowSecond(released));
+    val conn = rawUntil(start(), "/stream", "shell;");
+    // The client holds the first chunk while the renderer is still waiting to
+    // write the second.
+    val sawFirst: bool = rawSaw(conn, "shell;");
+    val sawSecond: bool = rawSaw(conn, "tail");
+    async.openGate(released);
+    val raw: string = rawRest(conn);
     val _s = stopServingPages();
-    assert first >= 0;
-    assert total - first >= 300;
+    assert sawFirst;
+    assert sawSecond == false;
+    assert raw.contains("shell;");
+    assert raw.contains("tail");
+    assert raw.contains("never-released") == false;
 }
-
-#[@External.Erlang("""binary_to_integer($0)""")]
-declare fn toInt(s: string) -> i32;
 
 // ── the query codec ─────────────────────────────────────────────────────────
 
