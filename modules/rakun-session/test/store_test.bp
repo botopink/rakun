@@ -1,0 +1,99 @@
+//// One suite, run once per arm: ETS always, SQL over rakun-data's
+//// `ets:memory` datasource, Redis only when `RAKUN_TEST_REDIS_URL` is set
+//// (reported as skipped otherwise — there is no Redis on this machine's PATH).
+
+import {io: {clock, env}} from "std";
+import {Session, SessionRepository, newSession, touchedAt} from "session";
+import {etsRepository} from "store_ets";
+import {sqlRepository, sessionDdl, initializeSessionSchema} from "store_sql";
+import {redisRepository, saveCommand} from "store_redis";
+import {startDataSource} from "rakun-data";
+import {rkSessSpawnCrash, rkSessEtsOwnerFacts, rkSessEtsClear} from "host";
+
+fn at(ms: i32) -> i64 {
+    return clock.millis(ms).millis;
+}
+
+fn aged(s: Session, lastMs: i32) -> Session {
+    return touchedAt(s, at(lastMs));
+}
+
+// The suite: "" when every expectation holds, else the first that failed.
+fn suite(repo: SessionRepository) -> string {
+    val a: Session = repo.create("alice");
+    val b: Session = repo.create("alice");
+    val c: Session = repo.create("bob");
+    if (a.id == b.id) return "two creates answered one id";
+    val found: ?Session = repo.findById(a.id);
+    if (found == null) return "a created session is not found";
+    val cart: Session = a.withAttribute("cart", "[1,2]");
+    val _s = repo.save(cart);
+    val back: ?Session = repo.findById(a.id);
+    var cartBack = "";
+    if (back) { s -> cartBack = s.attribute("cart"); };
+    if (cartBack != "[1,2]") return "a saved attribute did not come back: " + cartBack;
+    // One of alice's two sessions expires long ago; findByPrincipal skips it.
+    val _x = repo.save(aged(b, 1000));
+    val live: Array<Session> = repo.findByPrincipal("alice");
+    if (live.length != 1) return "findByPrincipal answered " + live.length.toString() + " live sessions, want 1";
+    val liveId: string = live.at(0)?.id ?? "";
+    if (liveId != a.id) return "findByPrincipal answered the wrong session";
+    // deleteExpired removes exactly the expired one and says so.
+    val removed: i32 = repo.deleteExpired(clock.nowMillis());
+    if (removed != 1) return "deleteExpired reported " + removed.toString() + ", want 1";
+    val gone: ?Session = repo.findById(b.id);
+    if (gone != null) return "the expired session survived deleteExpired";
+    val kept: ?Session = repo.findById(c.id);
+    if (kept == null) return "deleteExpired removed a live session";
+    val _d = repo.deleteById(a.id);
+    val deleted: ?Session = repo.findById(a.id);
+    if (deleted != null) return "deleteById left the session";
+    if (repo.probe() != "") return "probe: " + repo.probe();
+    return "";
+}
+
+test "store: the suite passes on the ETS arm" {
+    val _c = rkSessEtsClear("suite-ets");
+    val out: string = suite(etsRepository("suite-ets", 60));
+    assert out == "", out;
+}
+
+test "store: the suite passes unchanged on the SQL arm" {
+    val _d = startDataSource("sessions-suite", "ets:memory", 2, 1000, "eager");
+    assert initializeSessionSchema("sessions-suite", "SESSIONS", "always");
+    val out: string = suite(sqlRepository("sessions-suite", "SESSIONS", 60));
+    assert out == "", out;
+}
+
+test "store: the suite runs on the Redis arm when RAKUN_TEST_REDIS_URL is set" {
+    val url: string = env.read("RAKUN_TEST_REDIS_URL") ?? "";
+    val out: string = if (url == "") "" else suite(redisRepository(url, 60));
+    if (url == "") @print("store: Redis arm SKIPPED - RAKUN_TEST_REDIS_URL is not set");
+    assert out == "", out;
+}
+
+test "store: the SQL arm ships DDL and creates nothing unless initialize-schema=always" {
+    val _d = startDataSource("sessions-ddl", "ets:memory", 2, 1000, "eager");
+    assert sessionDdl("SESSIONS").startsWith("CREATE TABLE SESSIONS (ID text PRIMARY KEY");
+    assert initializeSessionSchema("sessions-ddl", "SESSIONS", "never") == false;
+    assert sqlRepository("sessions-ddl", "SESSIONS", 60).probe() != "";
+}
+
+test "store: the Redis arm stores every session with a server-side TTL equal to its timeout" {
+    val s: Session = newSession("rid", "ana", at(1000), 1800);
+    val cmd: string[] = saveCommand(s);
+    assert cmd.join(" ").startsWith("SET rakun:session:rid ");
+    assert cmd.join(" ").endsWith(" EX 1800");
+}
+
+test "store: the ETS table survives a crashing worker - its owner is not the worker" {
+    val repo = etsRepository("suite-crash", 60);
+    val reason: string = rkSessSpawnCrash({ ->
+        val s: Session = repo.create("crash");
+        s.id;
+    });
+    assert reason == "worker_crashed";
+    val all: Array<Session> = repo.findByPrincipal("crash");
+    assert all.length == 1;
+    assert rkSessEtsOwnerFacts() == "owner=rakun_session_owner alive=true caller=not-owner";
+}

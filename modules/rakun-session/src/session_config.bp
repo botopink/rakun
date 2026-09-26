@@ -1,0 +1,89 @@
+//// rakun-session — the `rakun.session.*` keys and every boot refusal. Front 18
+//// steps 2 and 4.
+////
+//// There is no key that removes `HttpOnly` or `Secure`. `Secure` has ONE
+//// exemption and it is structural, not a flag: the listener is plaintext (no
+//// `rakun.server.ssl.bundle`) AND bound to a loopback address
+//// (`rakun.server.address` is `127.0.0.1`, `::1` or `localhost`), AND
+//// `rakun.server.forwarded-proto` is not `true`. That is a developer's machine
+//// and nothing else.
+
+import {rkProp, toI32} from "rakun";
+
+pub type SessionSettings(
+    store: string,
+    secret: string,
+    timeoutSeconds: i32,
+    cookieName: string,
+    cookiePath: string,
+    sameSite: string,
+    secure: bool,
+    sqlTable: string,
+    initializeSchema: string,
+    redisUrl: string,
+)
+
+pub fn storeKey() -> string { return "rakun.session.store"; }
+pub fn secretKey() -> string { return "rakun.session.secret"; }
+pub fn timeoutKey() -> string { return "rakun.session.timeout"; }
+pub fn cookieNameKey() -> string { return "rakun.session.cookie.name"; }
+pub fn cookiePathKey() -> string { return "rakun.session.cookie.path"; }
+pub fn sameSiteKey() -> string { return "rakun.session.cookie.same-site"; }
+pub fn sqlTableKey() -> string { return "rakun.session.sql.table-name"; }
+pub fn initializeSchemaKey() -> string { return "rakun.session.sql.initialize-schema"; }
+pub fn redisUrlKey() -> string { return "rakun.session.redis.url"; }
+
+fn or(value: string, fallback: string) -> string {
+    return if (value == "") fallback else value;
+}
+
+// `30m`, `90s`, `2h`, or a bare number of seconds. The default is 30 minutes.
+pub fn parseTimeout(text: string) -> i32 {
+    if (text == "") return 1800;
+    val unit: string = text.slice(text.length() - 1, text.length());
+    val digits: string = text.slice(0, text.length() - 1);
+    return if (unit == "m") toI32(digits) * 60 else if (unit == "h") toI32(digits) * 3600 else if (unit == "s") toI32(digits) else toI32(text);
+}
+
+pub fn isLoopback(address: string) -> bool {
+    return address == "127.0.0.1" || address == "::1" || address == "localhost";
+}
+
+// `Secure` everywhere but a plaintext listener bound to loopback, and never
+// dropped when a TLS-terminating proxy says the scheme was https.
+pub fn secureApplies(tlsBundle: string, address: string, forwardedProto: string) -> bool {
+    if (tlsBundle != "") return true;
+    if (forwardedProto == "true") return true;
+    return isLoopback(address) == false;
+}
+
+pub fn sessionSettings() -> SessionSettings {
+    return SessionSettings(
+        store: or(rkProp(storeKey()), "ets"),
+        secret: rkProp(secretKey()),
+        timeoutSeconds: parseTimeout(rkProp(timeoutKey())),
+        cookieName: or(rkProp(cookieNameKey()), "SESSION"),
+        cookiePath: or(rkProp(cookiePathKey()), "/"),
+        sameSite: or(rkProp(sameSiteKey()), "Lax"),
+        secure: secureApplies(rkProp("rakun.server.ssl.bundle"), rkProp("rakun.server.address"), rkProp("rakun.server.forwarded-proto")),
+        sqlTable: or(rkProp(sqlTableKey()), "SESSIONS"),
+        initializeSchema: or(rkProp(initializeSchemaKey()), "never"),
+        redisUrl: rkProp(redisUrlKey()),
+    );
+}
+
+// `""` when the settings may boot; otherwise the one refusal, naming the key.
+pub fn sessionConfigProblem(s: SessionSettings) -> string {
+    if (s.secret == "") return "rakun-session: `" + secretKey() + "` is not set - the session cookie is HMAC-signed and a default signing key is the same as no signing; set a secret of at least 32 characters";
+    if (s.secret.length() < 32) return "rakun-session: `" + secretKey() + "` is shorter than 32 characters - a short HMAC key is guessable";
+    val arms: string[] = ["ets", "sql", "redis"];
+    if (arms.indexOf(s.store) < 0) return "rakun-session: `" + storeKey() + "` is `" + s.store + "` - the arms are ets, sql and redis";
+    val sites: string[] = ["Lax", "Strict", "None"];
+    if (sites.indexOf(s.sameSite) < 0) return "rakun-session: `" + sameSiteKey() + "` is `" + s.sameSite + "` - it is Lax or Strict (None only with Secure)";
+    if (s.sameSite == "None" && s.secure == false) return "rakun-session: `" + sameSiteKey() + "=None` needs Secure, and this listener is plaintext on loopback - a SameSite=None cookie without Secure is refused by browsers and by rakun";
+    if (s.timeoutSeconds < 1) return "rakun-session: `" + timeoutKey() + "` must be a positive duration (`30m`, `90s`, `2h`)";
+    if (s.store == "redis" && s.redisUrl == "") return "rakun-session: `" + storeKey() + "=redis` needs `" + redisUrlKey() + "`";
+    val modes: string[] = ["never", "always"];
+    if (modes.indexOf(s.initializeSchema) < 0) return "rakun-session: `" + initializeSchemaKey() + "` is `never` or `always`";
+    return "";
+}

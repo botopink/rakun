@@ -1,0 +1,87 @@
+//// rakun-session — the SQL arm over rakun-data's `SqlTemplate`. Front 18
+//// step 3.
+////
+//// One row per session in `rakun.session.sql.table-name` (default
+//// `SESSIONS`). The arm OWNS its schema and ships the DDL (`sessionDdl`); it
+//// creates the table at boot only under
+//// `rakun.session.sql.initialize-schema=always`, never on its own.
+//// Attributes travel as one form-encoded column (std's codec).
+
+import {io: {clock}} from "std";
+import {Session, SessionRepository, newSession, encodeSession, decodeSession} from "session";
+import {newSessionId} from "signing";
+import {sqlTemplate, SqlTemplate, Row, Rows, param} from "rakun-data";
+
+pub fn sessionDdl(table: string) -> string {
+    return "CREATE TABLE " + table + " (ID text PRIMARY KEY, PRINCIPAL text, EXPIRES_AT text, BODY text)";
+}
+
+// Runs the DDL only under `always`; answers whether it ran.
+pub fn initializeSessionSchema(dataSource: string, table: string, mode: string) -> bool {
+    if (mode != "always") return false;
+    val _c = sqlTemplate(dataSource).update(sessionDdl(table), []);
+    return true;
+}
+
+fn sqlSave(dataSource: string, table: string, s: Session) -> i32 {
+    val t: SqlTemplate = sqlTemplate(dataSource);
+    val _d = t.update("DELETE FROM " + table + " WHERE ID = :id", [param("id", s.id)]);
+    return t.update("INSERT INTO " + table + " (ID, PRINCIPAL, EXPIRES_AT, BODY) VALUES (:id, :principal, :expires, :body)", [param("id", s.id), param("principal", s.principal), param("expires", s.expiresAt().toString()), param("body", encodeSession(s))]);
+}
+
+fn sessionsOf(rows: Rows) -> Array<Session> {
+    var out: Array<Session> = [];
+    for (rows.toList()) { r ->
+        val decoded: ?Session = decodeSession(r.get("BODY"));
+        if (decoded) { s -> out.push(s); };
+    };
+    return out;
+}
+
+fn sqlFind(dataSource: string, table: string, id: string) -> ?Session {
+    val none: ?Session = null;
+    val rows: Rows = sqlTemplate(dataSource).query("SELECT BODY FROM " + table + " WHERE ID = :id", [param("id", id)]);
+    val found: Array<Session> = sessionsOf(rows);
+    return if (found.length == 0) none else found.at(0);
+}
+
+fn sqlDelete(dataSource: string, table: string, id: string) -> i32 {
+    return sqlTemplate(dataSource).update("DELETE FROM " + table + " WHERE ID = :id", [param("id", id)]);
+}
+
+fn sqlByPrincipal(dataSource: string, table: string, principal: string, now: i64) -> Array<Session> {
+    val rows: Rows = sqlTemplate(dataSource).query("SELECT BODY FROM " + table + " WHERE PRINCIPAL = :p", [param("p", principal)]);
+    return sessionsOf(rows).filter({ s -> s.isExpired(now) == false });
+}
+
+fn sqlExpire(dataSource: string, table: string, now: i64) -> i32 {
+    val rows: Rows = sqlTemplate(dataSource).query("SELECT BODY FROM " + table, []);
+    val stale: Array<Session> = sessionsOf(rows).filter({ s -> s.isExpired(now) });
+    for (stale) { s -> val _d = sqlDelete(dataSource, table, s.id); };
+    return stale.length;
+}
+
+fn sqlProbe(dataSource: string, table: string) -> string {
+    val r = sqlTemplate(dataSource).tryQuery("SELECT ID FROM " + table + " WHERE ID = :id", [param("id", "")]);
+    return case r {
+        Ok(_rows) -> "";
+        Error(e) -> e;
+    };
+}
+
+pub fn sqlRepository(dataSource: string, table: string, timeoutSeconds: i32) -> SessionRepository {
+    return SessionRepository(
+        arm: "sql",
+        createFn: { principal ->
+            val s: Session = newSession(newSessionId(), principal, clock.nowMillis(), timeoutSeconds);
+            val _p = sqlSave(dataSource, table, s);
+            s;
+        },
+        saveFn: { s -> sqlSave(dataSource, table, s) },
+        findFn: { id -> sqlFind(dataSource, table, id) },
+        deleteFn: { id -> sqlDelete(dataSource, table, id) },
+        byPrincipalFn: { principal -> sqlByPrincipal(dataSource, table, principal, clock.nowMillis()) },
+        expireFn: { now -> sqlExpire(dataSource, table, now) },
+        probeFn: { -> sqlProbe(dataSource, table) },
+    );
+}

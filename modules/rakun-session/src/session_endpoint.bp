@@ -1,0 +1,68 @@
+//// rakun-session — the `sessions` endpoint and the `session` health
+//// indicator. Front 18 step 6.
+////
+//// `GET <base>/sessions?principal=alice` lists that principal's live
+//// sessions: creation time, last access, expiry and attribute NAMES — never a
+//// value — with the id TRUNCATED to its first eight characters. An operator
+//// counts sessions and ends the one they were given; a monitoring dashboard
+//// never shows a usable credential. `DELETE <base>/sessions/:id` ends one
+//// session: the next request presenting its cookie carries no session.
+////
+//// Both sit behind the actuator's exposure decision (front 11's endpoint
+//// host; front 76 installs the access rule): unexposed, both answer the
+//// host's own 404 problem, the answer an unknown id gets, so the endpoint's
+//// existence is not disclosed. There is no opt-out here.
+////
+//// The actuator host routes one segment (`GET <base>/:endpoint`), so the
+//// DELETE is this module's own route, mounted by `mountSessionsEndpoint` and
+//// refused by the same `exposed("sessions")` check.
+
+import {json} from "std";
+import {Request, Response, rkRegisterRoute} from "rakun";
+import {EndpointResponse, endpointJson, Health, healthUp, healthDown, rkRegisterEndpoint, rkRegisterHealthIndicator} from "rakun-actuator-api";
+import {exposed, basePath, notFoundProblem} from "rakun-actuator";
+import {Session, SessionRepository} from "session";
+import {installedRepository} from "session_filter";
+
+pub fn truncatedId(id: string) -> string {
+    return if (id.length() > 8) id.slice(0, 8) + "..." else id;
+}
+
+pub fn sessionListing(s: Session) -> string {
+    return json.object([
+        #("id", json.quote(truncatedId(s.id))),
+        #("principal", json.quote(s.principal)),
+        #("createdAt", s.createdAt.toString()),
+        #("lastAccessedAt", s.lastAccessedAt.toString()),
+        #("expiresAt", s.expiresAt().toString()),
+        #("attributeNames", json.array(s.attributeNames().map({ n -> json.quote(n) }))),
+    ]);
+}
+
+pub fn sessionsRead(req: Request) -> EndpointResponse {
+    val principal: string = req.query("principal");
+    if (principal == "") return EndpointResponse(status: 400, contentType: "application/json", body: "{\"error\":\"the principal query parameter is required\"}");
+    val sessions: Array<Session> = installedRepository().findByPrincipal(principal);
+    return endpointJson(json.object([#("sessions", json.array(sessions.map({ s -> sessionListing(s) })))]));
+}
+
+pub fn sessionsDelete(req: Request) -> Response {
+    val id: string = req.param("id");
+    if (exposed("sessions") == false) return notFoundProblem("sessions", req.path);
+    val n: i32 = installedRepository().deleteById(id);
+    return if (n > 0) Response.withStatus(204, "") else notFoundProblem("sessions", req.path);
+}
+
+// DOWN naming the arm when the configured store does not answer.
+pub fn sessionHealth() -> Health {
+    val repo: SessionRepository = installedRepository();
+    val reason: string = repo.probe();
+    if (reason == "") return Health(status: "UP", details: json.object([#("arm", json.quote(repo.arm))]));
+    return healthDown(json.object([#("arm", json.quote(repo.arm)), #("reason", json.quote(reason))]));
+}
+
+pub fn mountSessionsEndpoint() -> i32 {
+    val _e = rkRegisterEndpoint("sessions", "rakun-session", "read", { req -> sessionsRead(req) });
+    val _h = rkRegisterHealthIndicator("session", "rakun-session", { -> sessionHealth() });
+    return rkRegisterRoute("DELETE", basePath() + "/sessions/:id", { req -> sessionsDelete(req) });
+}

@@ -712,6 +712,10 @@ seed_failures() ->
           <<"`rakun.server.ssl.bundle` names a bundle that does not resolve to TLS material.">>,
           <<"Configure `rakun.ssl.bundle.pem.<name>.keystore.certificate` and `.private-key`, "
             "or remove `rakun.server.ssl.bundle` - rakun will not fall back to plaintext.">>},
+         {server_address,
+          <<"`rakun.server.address` is not an IPv4 or IPv6 address.">>,
+          <<"Set it to an address of this host (`127.0.0.1`, `::1`, ...) or remove it "
+            "to listen on every interface.">>},
          {transport,
           <<"An unknown or unloadable transport.">>,
           <<"Set `rakun.server.transport` to `gen_tcp` (the default) or to a "
@@ -858,7 +862,7 @@ transport() ->
 start_listener(Port, Dispatcher, Tls) ->
     Backlog = prop_int_default(<<"rakun.server.backlog">>, ?DEFAULT_BACKLOG),
     Base = [binary, {packet, http_bin}, {active, false},
-            {reuseaddr, true}, {backlog, Backlog}],
+            {reuseaddr, true}, {backlog, Backlog}] ++ bind_address(),
     {Mod, Opts} = case Tls of
                       plain -> {gen_tcp, Base};
                       {tls, _Bundle, SslOpts, _Timeout} -> {ssl, Base ++ SslOpts}
@@ -884,6 +888,22 @@ start_listener(Port, Dispatcher, Tls) ->
         {Pid, {error, Reason}} -> {error, {listen, Reason, Port}}
     after 5000 ->
         {error, {listen, timeout, Port}}
+    end.
+
+%% `rakun.server.address` binds the listener to one interface (`127.0.0.1`,
+%% `::1`, an address of the host); unset, it listens on every interface. An
+%% address that does not parse is a startup failure naming it, never a quiet
+%% bind to everything. Front 18 reads the same key to tell a loopback-only
+%% listener, the one structural exemption from `Secure`.
+bind_address() ->
+    case prop(<<"rakun.server.address">>) of
+        <<>> -> [];
+        Text ->
+            case inet:parse_address(binary_to_list(Text)) of
+                {ok, Addr} when tuple_size(Addr) =:= 8 -> [inet6, {ip, Addr}];
+                {ok, Addr} -> [{ip, Addr}];
+                {error, _} -> fail({server_address, Text})
+            end
     end.
 
 listen_port(gen_tcp, LSock) -> inet:port(LSock);

@@ -1,0 +1,279 @@
+//// rakun-session — the session VALUE, the `SessionStore` behavior and the
+//// `SessionRepository` handle every caller holds. Front 18 step 1.
+////
+//// THE VALUE IS IMMUTABLE. Spring writes `session.setAttribute("cart", v)`;
+//// botopink has no assignment to a `self` field, so a mutation is
+//// `val next = s.withAttribute(k, v); repo.save(next);` and forgetting the save
+//// is a bug the compiler cannot catch (README § Language gaps). It is not
+//// worked around: every workaround is worse than the threading.
+////
+//// WHY A HANDLE BESIDE THE BEHAVIOR. `SessionStore` is the shape every arm
+//// implements (`EtsSessionStore`, `SqlSessionStore`, `RedisSessionStore`). A
+//// call through a behavior-typed value is NOT lowered on erlang — `st.save(s)`
+//// with `st: SessionStore` emits a local `save/2` that does not exist
+//// (measured, `~/.cache/bp-rakun/front-18/probe/`) — and a value of an
+//// implementing type does not convert to the behavior's type anyway (front
+//// 10's finding 3). So the container, the chain entry and the tests hold a
+//// `SessionRepository`: the six operations as FUNCTION VALUES, which is what a
+//// behavior value would have been, built from an arm by `etsRepository`,
+//// `sqlRepository`, `redisRepository` — or by a test double.
+
+import {io: {clock}} from "std";
+import {encoding} from "std";
+import {rkSessToI64} from "host";
+
+// ── the value ───────────────────────────────────────────────────────────────
+
+pub type Session(
+    id: string,
+    principal: string,
+    attributes: Array<#(string, string)>,
+    createdAt: i64,
+    lastAccessedAt: i64,
+    maxInactiveSeconds: i32,
+) {
+    // `""` for a missing name — `Request.header`'s convention, not a second one.
+    pub fn attribute(self: Self, name: string) -> string {
+        var out = "";
+        for (self.attributes) { p -> if (p.0 == name) out = p.1; };
+        return out;
+    }
+
+    pub fn hasAttribute(self: Self, name: string) -> bool {
+        var hit = false;
+        for (self.attributes) { p -> if (p.0 == name) hit = true; };
+        return hit;
+    }
+
+    // A NEW session; the receiver is unchanged. An existing name is REPLACED
+    // in place (its position kept), never appended a second time.
+    pub fn withAttribute(self: Self, name: string, value: string) -> Session {
+        var next: Array<#(string, string)> = [];
+        var replaced = false;
+        for (self.attributes) { p ->
+            if (p.0 == name) {
+                next.push(#(name, value));
+                replaced = true;
+            } else {
+                next.push(p);
+            };
+        };
+        if (replaced == false) next.push(#(name, value));
+        return withAttributes(self, next);
+    }
+
+    pub fn withoutAttribute(self: Self, name: string) -> Session {
+        var next: Array<#(string, string)> = [];
+        for (self.attributes) { p -> if (p.0 != name) next.push(p); };
+        return withAttributes(self, next);
+    }
+
+    pub fn attributeNames(self: Self) -> string[] {
+        var out: string[] = [];
+        for (self.attributes) { p -> out.push(p.0); };
+        return out;
+    }
+
+    // The instant the session stops being valid: last access plus the
+    // inactivity budget.
+    pub fn expiresAt(self: Self) -> i64 {
+        return self.lastAccessedAt + clock.seconds(self.maxInactiveSeconds).millis;
+    }
+
+    // Against a clock PASSED IN, never read here — so it is testable without
+    // waiting. Expired AT the instant, not one millisecond after.
+    pub fn isExpired(self: Self, nowMillis: i64) -> bool {
+        return nowMillis >= self.expiresAt();
+    }
+}
+
+pub fn withAttributes(s: Session, attributes: Array<#(string, string)>) -> Session {
+    return Session(
+        id: s.id,
+        principal: s.principal,
+        attributes: attributes,
+        createdAt: s.createdAt,
+        lastAccessedAt: s.lastAccessedAt,
+        maxInactiveSeconds: s.maxInactiveSeconds,
+    );
+}
+
+pub fn touchedAt(s: Session, nowMillis: i64) -> Session {
+    return Session(
+        id: s.id,
+        principal: s.principal,
+        attributes: s.attributes,
+        createdAt: s.createdAt,
+        lastAccessedAt: nowMillis,
+        maxInactiveSeconds: s.maxInactiveSeconds,
+    );
+}
+
+pub fn withId(s: Session, id: string) -> Session {
+    return Session(
+        id: id,
+        principal: s.principal,
+        attributes: s.attributes,
+        createdAt: s.createdAt,
+        lastAccessedAt: s.lastAccessedAt,
+        maxInactiveSeconds: s.maxInactiveSeconds,
+    );
+}
+
+pub fn withPrincipal(s: Session, principal: string) -> Session {
+    return Session(
+        id: s.id,
+        principal: principal,
+        attributes: s.attributes,
+        createdAt: s.createdAt,
+        lastAccessedAt: s.lastAccessedAt,
+        maxInactiveSeconds: s.maxInactiveSeconds,
+    );
+}
+
+pub fn newSession(id: string, principal: string, nowMillis: i64, maxInactiveSeconds: i32) -> Session {
+    return Session(
+        id: id,
+        principal: principal,
+        attributes: [],
+        createdAt: nowMillis,
+        lastAccessedAt: nowMillis,
+        maxInactiveSeconds: maxInactiveSeconds,
+    );
+}
+
+// The placeholder an optional read falls back to; never stored, never served.
+pub fn noSession() -> Session {
+    return newSession("", "", clock.millis(0).millis, 0);
+}
+
+// ── the wire form (SQL's ATTRIBUTES column, Redis's value) ─────────────────
+//
+// `application/x-www-form-urlencoded`, std's codec: every piece percent-
+// encoded, so a value holding `&`, `=` or a newline round-trips.
+
+pub fn encodeAttributes(attributes: Array<#(string, string)>) -> string {
+    return encoding.formStringify(attributes);
+}
+
+pub fn decodeAttributes(text: string) -> Array<#(string, string)> {
+    if (text == "") return [];
+    return encoding.formParse(text);
+}
+
+pub fn encodeSession(s: Session) -> string {
+    var pairs: Array<#(string, string)> = [
+        #("id", s.id),
+        #("principal", s.principal),
+        #("createdAt", s.createdAt.toString()),
+        #("lastAccessedAt", s.lastAccessedAt.toString()),
+        #("maxInactiveSeconds", s.maxInactiveSeconds.toString()),
+    ];
+    for (s.attributes) { p -> pairs.push(#("a." + p.0, p.1)); };
+    return encoding.formStringify(pairs);
+}
+
+fn pairValue(pairs: Array<#(string, string)>, key: string) -> string {
+    var out = "";
+    for (pairs) { p -> if (p.0 == key) out = p.1; };
+    return out;
+}
+
+pub fn decodeSession(text: string) -> ?Session {
+    val none: ?Session = null;
+    if (text == "") return none;
+    val pairs: Array<#(string, string)> = encoding.formParse(text);
+    val id: string = pairValue(pairs, "id");
+    if (id == "") return none;
+    var attributes: Array<#(string, string)> = [];
+    for (pairs) { p ->
+        if (p.0.startsWith("a.")) attributes.push(#(p.0.slice(2, p.0.length()), p.1));
+    };
+    return Session(
+        id: id,
+        principal: pairValue(pairs, "principal"),
+        attributes: attributes,
+        createdAt: rkSessToI64(pairValue(pairs, "createdAt")),
+        lastAccessedAt: rkSessToI64(pairValue(pairs, "lastAccessedAt")),
+        maxInactiveSeconds: toInt(pairValue(pairs, "maxInactiveSeconds")),
+    );
+}
+
+fn toInt(text: string) -> i32 {
+    var n = 0;
+    for (text.split("")) { c ->
+        val d: i32 = "0123456789".indexOf(c);
+        if (d >= 0) n = n * 10 + d;
+    };
+    return n;
+}
+
+// ── the behavior every arm implements ───────────────────────────────────────
+
+pub behavior SessionStore {
+    fn create(self: Self, principal: string) -> Session;
+    fn save(self: Self, session: Session) -> i32;
+    fn findById(self: Self, id: string) -> ?Session;
+    fn deleteById(self: Self, id: string) -> i32;
+    fn findByPrincipal(self: Self, principal: string) -> Array<Session>;
+    fn deleteExpired(self: Self, nowMillis: i64) -> i32;
+}
+
+// ── the handle ──────────────────────────────────────────────────────────────
+//
+// `arm` names the arm (`ets`, `sql`, `redis`, or a double's own name) — what
+// health and the refusals say. `probe` answers `""` when the backing store is
+// reachable and the reason otherwise; it never raises.
+
+pub type SessionRepository(
+    arm: string,
+    createFn: fn(principal: string) -> Session,
+    saveFn: fn(session: Session) -> i32,
+    findFn: fn(id: string) -> ?Session,
+    deleteFn: fn(id: string) -> i32,
+    byPrincipalFn: fn(principal: string) -> Array<Session>,
+    expireFn: fn(nowMillis: i64) -> i32,
+    probeFn: fn() -> string,
+) implement SessionStore {
+    pub fn create(self: Self, principal: string) -> Session {
+        val f = self.createFn;
+        return f(principal);
+    }
+
+    pub fn save(self: Self, session: Session) -> i32 {
+        val f = self.saveFn;
+        return f(session);
+    }
+
+    pub fn findById(self: Self, id: string) -> ?Session {
+        val f = self.findFn;
+        return f(id);
+    }
+
+    pub fn deleteById(self: Self, id: string) -> i32 {
+        val f = self.deleteFn;
+        return f(id);
+    }
+
+    pub fn findByPrincipal(self: Self, principal: string) -> Array<Session> {
+        val f = self.byPrincipalFn;
+        return f(principal);
+    }
+
+    pub fn deleteExpired(self: Self, nowMillis: i64) -> i32 {
+        val f = self.expireFn;
+        return f(nowMillis);
+    }
+
+    pub fn probe(self: Self) -> string {
+        val f = self.probeFn;
+        return f();
+    }
+}
+
+// The typed read of an optional lookup: the optional a record method answers
+// loses its type when the receiver is a call (front 62's `headerOf` note).
+pub fn findSession(repo: SessionRepository, id: string) -> ?Session {
+    val found: ?Session = repo.findById(id);
+    return found;
+}

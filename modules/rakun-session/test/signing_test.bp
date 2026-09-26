@@ -1,0 +1,124 @@
+import {io: {clock, fs}} from "std";
+import {Response, rkSetProp} from "rakun";
+import {resetChain, runChain, rkChainSetTerminal} from "rakun-web";
+import {Session, SessionRepository, newSession} from "session";
+import {newSessionId, cookieValueFor, verifyCookieValue, resolveCookie, Verified, Resolution} from "signing";
+import {SessionSettings, sessionSettings, sessionConfigProblem} from "session_config";
+import {etsRepository} from "store_ets";
+import {installSessionWith, optionalSession, sessionOutcome} from "session_filter";
+import {rkSessBump, rkSessCount, rkSessCountReset} from "host";
+
+fn secret() -> string {
+    return "front-18-signing-secret-0123456789abcdef";
+}
+
+fn at(ms: i32) -> i64 {
+    return clock.millis(ms).millis;
+}
+
+// A store double that counts every lookup it is asked for.
+fn countingRepo(inner: SessionRepository) -> SessionRepository {
+    return SessionRepository(
+        arm: "counting",
+        createFn: { p -> inner.create(p) },
+        saveFn: { s -> inner.save(s) },
+        findFn: { id ->
+            val _b = rkSessBump("lookups");
+            inner.findById(id);
+        },
+        deleteFn: { id -> inner.deleteById(id) },
+        byPrincipalFn: { p -> inner.findByPrincipal(p) },
+        expireFn: { n -> inner.deleteExpired(n) },
+        probeFn: { -> "" },
+    );
+}
+
+fn settings() -> SessionSettings {
+    val _s = rkSetProp("rakun.session.secret", secret());
+    return sessionSettings();
+}
+
+test "signing: an id is 32 random bytes as base64url, and two ids differ" {
+    val a: string = newSessionId();
+    val b: string = newSessionId();
+    assert a.length() == 43;
+    assert a != b;
+    assert a.contains("+") == false && a.contains("/") == false && a.contains("=") == false;
+}
+
+test "signing: a forged signature is rejected without the store being asked" {
+    val repo = countingRepo(etsRepository("sign-forge", 60));
+    val _r = rkSessCountReset("lookups");
+    val s: Session = repo.create("");
+    val forged: string = s.id + ".AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    val r: Resolution = resolveCookie(repo, secret(), forged, clock.nowMillis());
+    assert r.outcome == "bad-signature";
+    assert rkSessCount("lookups") == 0;
+    val good: Resolution = resolveCookie(repo, secret(), cookieValueFor(secret(), s.id), clock.nowMillis());
+    assert good.outcome == "ok";
+    assert rkSessCount("lookups") == 1;
+}
+
+test "signing: a valid signature for a deleted session is not-found, distinct from bad-signature" {
+    val repo = etsRepository("sign-deleted", 60);
+    val s: Session = repo.create("");
+    val _d = repo.deleteById(s.id);
+    val r: Resolution = resolveCookie(repo, secret(), cookieValueFor(secret(), s.id), clock.nowMillis());
+    assert r.outcome == "not-found";
+}
+
+fn probe(headersWire: string) -> string {
+    val _t = rkChainSetTerminal({ method, path, hw, qw, body ->
+        val s: ?Session = optionalSession();
+        Response.ok(if (s == null) "anonymous" else "session");
+    });
+    val res: Response = runChain("GET", "/probe", headersWire, "", "");
+    return res.status.toString() + " " + res.body;
+}
+
+test "signing: a bad signature and an unknown id look the same to the client" {
+    val _r = resetChain();
+    val repo = etsRepository("sign-client", 60);
+    val _i = installSessionWith(repo, settings());
+    val s: Session = repo.create("");
+    val _d = repo.deleteById(s.id);
+    val missing: string = probe("cookie\tSESSION=" + cookieValueFor(secret(), s.id));
+    assert sessionOutcome() == "not-found";
+    val forged: string = probe("cookie\tSESSION=" + s.id + ".bad");
+    assert sessionOutcome() == "bad-signature";
+    assert missing == forged;
+    assert missing == "200 anonymous";
+    val _z = resetChain();
+}
+
+test "signing: the verification path compares signatures only in constant time" {
+    val text: string = fs.readText("src/signing.bp").unwrapOr("");
+    assert text.contains("hash.equalsConstantTime(");
+    var offending: string[] = [];
+    for (text.split("\n")) { line ->
+        val t: string = line.trim();
+        val code: bool = t.startsWith("//") == false;
+        if (code && (t.contains(" == ") || t.contains(" != "))) offending.push(t);
+    };
+    assert offending.length == 0, offending.join(" | ");
+}
+
+test "signing: with the secret unset the boot refuses naming the key" {
+    val _s = rkSetProp("rakun.session.secret", "");
+    val problem: string = sessionConfigProblem(sessionSettings());
+    assert problem.contains("rakun.session.secret");
+    val _k = rkSetProp("rakun.session.secret", "short");
+    assert sessionConfigProblem(sessionSettings()).contains("shorter than 32");
+    val _g = rkSetProp("rakun.session.secret", secret());
+    assert sessionConfigProblem(sessionSettings()) == "";
+}
+
+test "signing: rotating the secret invalidates existing cookies without crashing" {
+    val repo = etsRepository("sign-rotate", 60);
+    val s: Session = repo.create("");
+    val old: string = cookieValueFor(secret(), s.id);
+    val r: Resolution = resolveCookie(repo, "a-completely-different-secret-0123456789", old, clock.nowMillis());
+    assert r.outcome == "bad-signature";
+    assert verifyCookieValue("a-completely-different-secret-0123456789", "no-dot-at-all").outcome == "malformed";
+    assert verifyCookieValue("a-completely-different-secret-0123456789", "a.b.c").outcome == "malformed";
+}

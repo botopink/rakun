@@ -1,0 +1,183 @@
+//// rakun-session — the chain entry and the handler surface. Front 18 step 5.
+////
+//// `installSession(repo)` checks the settings (a refusal panics, naming the
+//// key), installs the repository and registers the entry `session` at −350 —
+//// ahead of front 10's security entry (−300), so authentication already sees
+//// the session. Per request the entry:
+////
+////   1. clears the per-request slots FIRST (a keep-alive connection serves many
+////      requests from one process);
+////   2. reads the session cookie, verifies its signature (constant time,
+////      `signing.bp`) and only then asks the store; a bad signature, an unknown
+////      id and an expired session all leave the request WITHOUT a session — one
+////      behaviour at the client, three outcomes in `sessionOutcome()`;
+////   3. on a hit, moves `lastAccessedAt` to now and saves it — once per
+////      request, here and nowhere else;
+////   4. runs the rest of the chain, then queues `Set-Cookie` when the request
+////      created or rotated a session, or the expired cookie when it ended one.
+////
+//// A handler never parses or writes a cookie: `currentSession()` answers the
+//// loaded session or creates one (a request that never asks creates nothing),
+//// `saveSession(next)` persists an immutable update, `rotateSession()` issues
+//// a new id, `authenticateSession(principal)` rotates and records the
+//// principal (the session-fixation defence: call it on every login and every
+//// privilege change), `invalidateSession()` ends it.
+
+import {io: {clock}} from "std";
+import {Response} from "rakun";
+import {rkScheduleFixedDelay} from "rakun-scheduling";
+import {WebRequest, Chain, registerFilter, rkCookieAdd} from "rakun-web";
+import {Session, SessionRepository, withId, withPrincipal, touchedAt, noSession} from "session";
+import {newSessionId, cookieValueFor, resolveCookie, Resolution} from "signing";
+import {SessionSettings, sessionSettings, sessionConfigProblem} from "session_config";
+import {sessionCookieHeader, expiredCookieHeader, cookieFromHeader} from "session_cookie";
+import {rkSessSlotPut, rkSessSlot, rkSessSlotsClear, rkSessPutCurrent, rkSessCurrent, rkSessClearCurrent, rkSessInstallRepo, rkSessRepo} from "host";
+
+pub fn orderSession() -> i32 {
+    return -350;
+}
+
+pub fn noRepositoryProblem() -> string {
+    return "rakun-session: no session repository is installed - call installSession(repo) at boot";
+}
+
+pub fn installedRepository() -> SessionRepository {
+    val found: ?SessionRepository = rkSessRepo();
+    if (found == null) @panic(noRepositoryProblem());
+    return found ?? noRepo();
+}
+
+fn noRepo() -> SessionRepository {
+    return SessionRepository(
+        arm: "none",
+        createFn: { p -> noSession() },
+        saveFn: { s -> 0 },
+        findFn: { id -> null },
+        deleteFn: { id -> 0 },
+        byPrincipalFn: { p -> [] },
+        expireFn: { n -> 0 },
+        probeFn: { -> noRepositoryProblem() },
+    );
+}
+
+// Boot: every refusal first, then the repository, then the entry.
+pub fn installSession(repo: SessionRepository) -> i32 {
+    return installSessionWith(repo, sessionSettings());
+}
+
+pub fn installSessionWith(repo: SessionRepository, settings: SessionSettings) -> i32 {
+    val problem: string = sessionConfigProblem(settings);
+    if (problem != "") @panic(problem);
+    val _r = rkSessInstallRepo(repo);
+    return registerFilter("session", orderSession(), { req, chain -> sessionEntry(settings, req, chain) });
+}
+
+// What the entry concluded about the presented cookie: `none` (no cookie),
+// `ok`, `malformed`, `bad-signature`, `not-found` or `expired`.
+pub fn sessionOutcome() -> string {
+    return rkSessSlot("outcome");
+}
+
+pub fn sessionEntry(settings: SessionSettings, req: WebRequest, chain: Chain) -> Response {
+    val _c = rkSessSlotsClear();
+    val presented: string = cookieFromHeader(req.header("cookie"), settings.cookieName);
+    val _o = rkSessSlotPut("outcome", "none");
+    if (presented != "") {
+        val repo: SessionRepository = installedRepository();
+        val now: i64 = clock.nowMillis();
+        val r: Resolution = resolveCookie(repo, settings.secret, presented, now);
+        val _p = rkSessSlotPut("outcome", r.outcome);
+        if (r.outcome == "ok") {
+            val touched: Session = touchedAt(r.session, now);
+            val _s = repo.save(touched);
+            val _t = rkSessSlotPut("touches", "1");
+            val _k = rkSessPutCurrent(touched);
+        };
+    };
+    val res: Response = chain.next(req);
+    val cookie: string = rkSessSlot("cookie");
+    if (cookie == "issue") {
+        val current: ?Session = rkSessCurrent();
+        if (current) { s -> val _a = rkCookieAdd(sessionCookieHeader(settings, cookieValueFor(settings.secret, s.id))); };
+    };
+    if (cookie == "end") {
+        val _e = rkCookieAdd(expiredCookieHeader(settings));
+    };
+    return res;
+}
+
+// The session this request carries, if any — never creates one.
+pub fn optionalSession() -> ?Session {
+    val current: ?Session = rkSessCurrent();
+    return current;
+}
+
+// The session this request carries, created (and its cookie queued) when it
+// has none.
+pub fn currentSession() -> Session {
+    val current: ?Session = rkSessCurrent();
+    return if (current == null) createSession() else current ?? noSession();
+}
+
+fn createSession() -> Session {
+    val created: Session = installedRepository().create("");
+    val _k = rkSessPutCurrent(created);
+    val _i = rkSessSlotPut("cookie", "issue");
+    return created;
+}
+
+// Persist an immutable update and make it the request's session.
+pub fn saveSession(next: Session) -> Session {
+    val _s = installedRepository().save(next);
+    val _k = rkSessPutCurrent(next);
+    return next;
+}
+
+// A new id for the same session: saved under the new id, the old one deleted.
+pub fn rotate(repo: SessionRepository, s: Session) -> Session {
+    val next: Session = withId(s, newSessionId());
+    val _s = repo.save(next);
+    val _d = repo.deleteById(s.id);
+    return next;
+}
+
+pub fn rotateSession() -> Session {
+    val next: Session = rotate(installedRepository(), currentSession());
+    val _k = rkSessPutCurrent(next);
+    val _i = rkSessSlotPut("cookie", "issue");
+    return next;
+}
+
+// Login and every privilege change: a NEW id carrying the principal. A
+// session id planted before login is worth nothing after it.
+pub fn authenticateSession(principal: string) -> Session {
+    val repo: SessionRepository = installedRepository();
+    val next: Session = rotate(repo, withPrincipal(currentSession(), principal));
+    val _s = repo.save(next);
+    val _k = rkSessPutCurrent(next);
+    val _i = rkSessSlotPut("cookie", "issue");
+    return next;
+}
+
+pub fn invalidateSession() -> i32 {
+    val current: ?Session = rkSessCurrent();
+    if (current) { s -> val _d = installedRepository().deleteById(s.id); };
+    val _c = rkSessClearCurrent();
+    return rkSessSlotPut("cookie", "end");
+}
+
+// How many times this request moved `lastAccessedAt` (0 or 1).
+pub fn touchesThisRequest() -> i32 {
+    return if (rkSessSlot("touches") == "1") 1 else 0;
+}
+
+// The expiry sweep is a front-16 `fixedDelay` task (`session-sweeper`), not a
+// timer this module owns: every `millis` it deletes the expired sessions of
+// the installed repository and answers how many.
+pub fn sweepExpiredSessions() -> i32 {
+    return installedRepository().deleteExpired(clock.nowMillis());
+}
+
+pub fn installSessionSweeper(millis: i32) -> i32 {
+    return rkScheduleFixedDelay("session-sweeper", "rakun-session", millis, { -> sweepExpiredSessions() });
+}

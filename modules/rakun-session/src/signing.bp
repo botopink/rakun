@@ -1,0 +1,94 @@
+//// rakun-session — ids, the signed cookie value, and verification. Front 18
+//// step 2. THIS FILE IS THE VERIFICATION PATH, and `test/signing_test.bp`
+//// greps it: no line of code here may compare with `==` or `!=`. Equality of a
+//// supplied signature with the computed one goes through std's
+//// `hash.equalsConstantTime` and through nothing else — `==` on two strings
+//// leaks the length of the matching prefix through timing, which over enough
+//// requests is a forgery oracle. Lengths and outcomes are compared with `<` /
+//// `>` and chosen with `if`, so the grep can be total rather than clever.
+////
+//// THE THREE RULES.
+////
+////   1. An id is 32 bytes from the host's CSPRNG (`random.secureToken(32)`:
+////      `crypto:strong_rand_bytes/1`), base64url without padding — 43
+////      characters. Not a UUID: a v4 UUID carries 122 bits in a shape that
+////      invites a v1 to be substituted later.
+////   2. The cookie value is `<id>.<base64url(hmacSha256(secret, id))>`. A value
+////      whose signature does not verify is rejected BEFORE the store is asked,
+////      so a scanner's forged ids never reach it.
+////   3. Verification is constant time (above).
+////
+//// A bad signature and a valid signature for a session the store does not
+//// hold are two DIFFERENT outcomes here (`bad-signature`, `not-found`) — a log
+//// line and a test can tell them apart — and ONE behaviour at the client: the
+//// request carries no session, and a handler that asks gets a new one.
+
+import {hash, io.random} from "std";
+import {Session, SessionRepository, findSession, noSession} from "session";
+
+pub fn idBytes() -> i32 {
+    return 32;
+}
+
+pub fn newSessionId() -> string {
+    return random.secureToken(idBytes());
+}
+
+pub fn signatureOf(secret: string, id: string) -> string {
+    return hash.hmacSha256Base64Url(secret, id);
+}
+
+pub fn cookieValueFor(secret: string, id: string) -> string {
+    return id + "." + signatureOf(secret, id);
+}
+
+// THE compare, and the only one: constant time over the whole signature.
+pub fn signatureMatches(secret: string, id: string, supplied: string) -> bool {
+    return hash.equalsConstantTime(signatureOf(secret, id), supplied);
+}
+
+// `outcome` is `ok`, `absent`, `malformed` or `bad-signature`; `id` is set only
+// for `ok`.
+pub type Verified(
+    outcome: string,
+    id: string,
+)
+
+pub fn verifyCookieValue(secret: string, value: string) -> Verified {
+    if (value.length() < 1) return Verified(outcome: "absent", id: "");
+    val parts: string[] = value.split(".");
+    if (parts.length < 2) return Verified(outcome: "malformed", id: "");
+    if (parts.length > 2) return Verified(outcome: "malformed", id: "");
+    val id: string = parts.at(0).unwrapOr("");
+    val supplied: string = parts.at(1).unwrapOr("");
+    val empty: bool = (id.length() < 1) || (supplied.length() < 1) || (secret.length() < 1);
+    if (empty) return Verified(outcome: "malformed", id: "");
+    if (signatureMatches(secret, id, supplied)) return Verified(outcome: "ok", id: id);
+    return Verified(outcome: "bad-signature", id: "");
+}
+
+fn refused(outcome: string) -> bool {
+    return if (outcome.startsWith("ok")) false else true;
+}
+
+// The verified cookie resolved against the store. `outcome` adds `not-found`
+// and `expired` to the four above; `session` is meaningful only for `ok`. An
+// expired session found here is deleted on the way.
+pub type Resolution(
+    outcome: string,
+    session: Session,
+)
+
+pub fn resolveCookie(repo: SessionRepository, secret: string, value: string, nowMillis: i64) -> Resolution {
+    val v: Verified = verifyCookieValue(secret, value);
+    if (refused(v.outcome)) return Resolution(outcome: v.outcome, session: noSession());
+    val found: ?Session = findSession(repo, v.id);
+    var out = Resolution(outcome: "not-found", session: noSession());
+    if (found) { s ->
+        out = if (s.isExpired(nowMillis)) Resolution(outcome: "expired", session: s) else Resolution(outcome: "ok", session: s);
+    };
+    if (out.outcome.startsWith("expired")) {
+        val _d = repo.deleteById(out.session.id);
+    };
+    return out;
+}

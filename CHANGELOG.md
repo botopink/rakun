@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Sessions (botopink front 18)
+
+- `modules/rakun-session`: the immutable `Session`, `SessionStore` + the
+  `SessionRepository` handle, ETS / SQL / Redis arms, 32-byte ids,
+  HMAC-signed cookies verified in constant time before the store is asked,
+  `HttpOnly`/`Secure` with no off switch, rotation (`authenticateSession`), the
+  `session` chain entry at −350, the `sessions` endpoint and the `session`
+  health indicator; 36 tests.
+- Core: `rakun.server.address` binds the listener to one interface.
+
 ### Test utilities: FakeRequest, assertions, MockMvc, context control (botopink front 19)
 
 - `modules/rakun-test` gets its first code: `FakeRequest` with `fakeGet`/`fakePost`/

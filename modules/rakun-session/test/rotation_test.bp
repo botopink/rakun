@@ -1,0 +1,117 @@
+import {Response, rkSetProp} from "rakun";
+import {resetChain, runChain, rkChainSetTerminal, cookieLines, chainNames, orderSecurity} from "rakun-web";
+import {Session, SessionRepository} from "session";
+import {cookieValueFor} from "signing";
+import {sessionSettings} from "session_config";
+import {cookieFromHeader} from "session_cookie";
+import {etsRepository} from "store_ets";
+import {installSessionWith, orderSession, currentSession, optionalSession, saveSession, rotate, authenticateSession, sessionOutcome, touchesThisRequest, installSessionSweeper, sweepExpiredSessions} from "session_filter";
+import {taskNames, rkRunTaskNow} from "rakun-scheduling";
+
+fn secret() -> string {
+    return "front-18-rotation-secret-0123456789abcdef";
+}
+
+fn boot(store: string) -> SessionRepository {
+    val _r = resetChain();
+    val _s = rkSetProp("rakun.session.secret", secret());
+    val repo = etsRepository(store, 60);
+    val _i = installSessionWith(repo, sessionSettings());
+    return repo;
+}
+
+// The session id a response's Set-Cookie carries, "" when none was queued.
+fn issuedId() -> string {
+    var out = "";
+    for (cookieLines()) { line ->
+        val value: string = cookieFromHeader(line.split(";").at(0) ?? "", "SESSION");
+        if (value != "") out = value.split(".").at(0) ?? "";
+    };
+    return out;
+}
+
+test "rotation: rotate issues a new id, keeps every attribute, and the old id is gone" {
+    val repo = boot("rot-plain");
+    val s: Session = repo.create("").withAttribute("cart", "[1]").withAttribute("theme", "dark");
+    val _p = repo.save(s);
+    val next: Session = rotate(repo, s);
+    assert next.id != s.id;
+    assert next.attribute("cart") == "[1]" && next.attribute("theme") == "dark";
+    val old: ?Session = repo.findById(s.id);
+    assert old == null;
+    val moved: ?Session = repo.findById(next.id);
+    assert moved != null;
+}
+
+test "rotation: a planted session id is worth nothing after login" {
+    val repo = boot("rot-fixation");
+    // The attacker obtains a valid session and plants its cookie in the victim's browser.
+    val planted: Session = repo.create("");
+    val cookie: string = "cookie\tSESSION=" + cookieValueFor(secret(), planted.id);
+    val _t = rkChainSetTerminal({ method, path, hw, qw, body ->
+        val s: Session = authenticateSession("victim");
+        Response.ok(s.principal);
+    });
+    val res: Response = runChain("POST", "/login", cookie, "", "");
+    assert res.body == "victim";
+    assert sessionOutcome() == "ok";
+    val issued: string = issuedId();
+    assert issued != "";
+    assert issued != planted.id;
+    val stale: ?Session = repo.findById(planted.id);
+    assert stale == null;
+    val _z = resetChain();
+}
+
+test "rotation: the session entry runs before authentication" {
+    val _r = boot("rot-order");
+    assert orderSession() < orderSecurity();
+    assert chainNames().indexOf("session") >= 0;
+    val _z = resetChain();
+}
+
+test "rotation: a handler reads currentSession without parsing a header" {
+    val repo = boot("rot-read");
+    val s: Session = repo.create("").withAttribute("cart", "[7]");
+    val _p = repo.save(s);
+    val _t = rkChainSetTerminal({ method, path, hw, qw, body -> Response.ok(currentSession().attribute("cart")) });
+    val res: Response = runChain("GET", "/cart", "cookie\tSESSION=" + cookieValueFor(secret(), s.id), "", "");
+    assert res.body == "[7]";
+    assert cookieLines().length == 0;
+    val _z = resetChain();
+}
+
+test "rotation: an anonymous GET that never asks creates no session" {
+    val repo = boot("rot-anon");
+    val _t = rkChainSetTerminal({ method, path, hw, qw, body -> Response.ok("static") });
+    val res: Response = runChain("GET", "/static.css", "", "", "");
+    assert res.body == "static";
+    assert cookieLines().length == 0;
+    assert sessionOutcome() == "none";
+    val _a = rkChainSetTerminal({ method, path, hw, qw, body -> Response.ok(currentSession().id) });
+    val made: Response = runChain("GET", "/cart", "", "", "");
+    assert issuedId() == made.body;
+    val _z = resetChain();
+}
+
+test "rotation: lastAccessedAt moves once per request" {
+    val repo = boot("rot-touch");
+    val s: Session = repo.create("");
+    val _t = rkChainSetTerminal({ method, path, hw, qw, body ->
+        val a: Session = currentSession();
+        val b: Session = currentSession();
+        Response.ok(touchesThisRequest().toString() + (if (a.lastAccessedAt == b.lastAccessedAt) " same" else " moved"));
+    });
+    val res: Response = runChain("GET", "/x", "cookie\tSESSION=" + cookieValueFor(secret(), s.id), "", "");
+    assert res.body == "1 same";
+    val _z = resetChain();
+}
+
+test "rotation: the sweeper is a fixedDelay task over the installed repository" {
+    val repo = boot("rot-sweep");
+    val _t = installSessionSweeper(60000);
+    assert taskNames().indexOf("session-sweeper") >= 0;
+    assert rkRunTaskNow("session-sweeper") >= 0;
+    assert sweepExpiredSessions() == 0;
+    val _z = resetChain();
+}

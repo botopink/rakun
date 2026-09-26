@@ -1,0 +1,90 @@
+//// rakun-session — the Redis arm. Front 18 step 3.
+////
+//// One key per session, `rakun:session:<id>`, written with `SET … EX
+//// <timeout>`: the server expires an abandoned session even when the sweeper
+//// never runs. A principal's ids sit in the set `rakun:session:principal:<p>`;
+//// a member whose session key has expired is pruned when read. One RESP
+//// command per connection (`rakun_session:redis/3`); a failure answers
+//// `err …` and is a store error, never a silent miss.
+
+import {Session, SessionRepository, newSession, encodeSession, decodeSession} from "session";
+import {newSessionId} from "signing";
+import {io: {clock}} from "std";
+import {rkSessRedis} from "host";
+
+pub fn sessionKey(id: string) -> string {
+    return "rakun:session:" + id;
+}
+
+pub fn principalKey(principal: string) -> string {
+    return "rakun:session:principal:" + principal;
+}
+
+// The command that stores a session: the value and a server-side TTL equal to
+// the session's own inactivity budget.
+pub fn saveCommand(s: Session) -> string[] {
+    return ["SET", sessionKey(s.id), encodeSession(s), "EX", s.maxInactiveSeconds.toString()];
+}
+
+fn redisTimeout() -> i32 {
+    return 2000;
+}
+
+fn call(url: string, args: string[]) -> string {
+    val out: string = rkSessRedis(url, args, redisTimeout());
+    if (out.startsWith("err ")) @panic("rakun-session: redis " + args.at(0).unwrapOr("") + " failed: " + out.slice(4, out.length()));
+    return out;
+}
+
+fn redisSave(url: string, s: Session) -> i32 {
+    val _s = call(url, saveCommand(s));
+    val _p = if (s.principal != "") call(url, ["SADD", principalKey(s.principal), s.id]) else "";
+    return 1;
+}
+
+fn redisFind(url: string, id: string) -> ?Session {
+    val none: ?Session = null;
+    val out: string = call(url, ["GET", sessionKey(id)]);
+    if (out.startsWith("ok ") == false) return none;
+    return decodeSession(out.slice(3, out.length()));
+}
+
+fn redisDelete(url: string, id: string) -> i32 {
+    val found: ?Session = redisFind(url, id);
+    if (found) { s -> val _r = if (s.principal != "") call(url, ["SREM", principalKey(s.principal), id]) else ""; };
+    val out: string = call(url, ["DEL", sessionKey(id)]);
+    return if (out == "ok 1") 1 else 0;
+}
+
+fn redisByPrincipal(url: string, principal: string, now: i64) -> Array<Session> {
+    val out: string = call(url, ["SMEMBERS", principalKey(principal)]);
+    var sessions: Array<Session> = [];
+    if (out.startsWith("ok ")) {
+        for (out.slice(3, out.length()).split("\n")) { id ->
+            val found: ?Session = if (id == "") null else redisFind(url, id);
+            if (found) { s -> if (s.isExpired(now) == false) sessions.push(s); };
+        };
+    };
+    return sessions;
+}
+
+pub fn redisRepository(url: string, timeoutSeconds: i32) -> SessionRepository {
+    return SessionRepository(
+        arm: "redis",
+        createFn: { principal ->
+            val s: Session = newSession(newSessionId(), principal, clock.nowMillis(), timeoutSeconds);
+            val _p = redisSave(url, s);
+            s;
+        },
+        saveFn: { s -> redisSave(url, s) },
+        findFn: { id -> redisFind(url, id) },
+        deleteFn: { id -> redisDelete(url, id) },
+        byPrincipalFn: { principal -> redisByPrincipal(url, principal, clock.nowMillis()) },
+        // The server's TTL is the sweeper; there is nothing left to delete.
+        expireFn: { now -> 0 },
+        probeFn: { ->
+            val out: string = rkSessRedis(url, ["PING"], redisTimeout());
+            if (out.startsWith("err ")) out.slice(4, out.length()) else "";
+        },
+    );
+}

@@ -1,0 +1,70 @@
+import {io: {fs}} from "std";
+import {rkSetProp} from "rakun";
+import {SessionSettings, sessionSettings, sessionConfigProblem, secureApplies} from "session_config";
+import {sessionCookieHeader, expiredCookieHeader, cookieFromHeader} from "session_cookie";
+
+fn secret() -> string {
+    return "front-18-cookie-secret-0123456789abcdef";
+}
+
+fn fresh() -> SessionSettings {
+    val _s = rkSetProp("rakun.session.secret", secret());
+    val _a = rkSetProp("rakun.server.address", "");
+    val _b = rkSetProp("rakun.server.ssl.bundle", "");
+    val _f = rkSetProp("rakun.server.forwarded-proto", "");
+    val _m = rkSetProp("rakun.session.cookie.same-site", "");
+    return sessionSettings();
+}
+
+test "cookie: the default line carries HttpOnly, Secure, SameSite=Lax, Path=/ and Max-Age" {
+    val line: string = sessionCookieHeader(fresh(), "id.sig");
+    assert line == "SESSION=id.sig; Path=/; Max-Age=1800; HttpOnly; Secure; SameSite=Lax";
+    assert expiredCookieHeader(fresh()) == "SESSION=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax";
+}
+
+test "cookie: Secure is dropped only on a plaintext listener bound to loopback" {
+    assert secureApplies("", "", "");
+    assert secureApplies("", "0.0.0.0", "");
+    assert secureApplies("", "10.0.0.5", "");
+    assert secureApplies("web", "127.0.0.1", "");
+    assert secureApplies("", "127.0.0.1", "true");
+    assert secureApplies("", "127.0.0.1", "") == false;
+    assert secureApplies("", "::1", "") == false;
+    val _f = fresh();
+    val _a = rkSetProp("rakun.server.address", "127.0.0.1");
+    assert sessionCookieHeader(sessionSettings(), "v").contains("Secure") == false;
+    val _t = rkSetProp("rakun.server.ssl.bundle", "web");
+    assert sessionCookieHeader(sessionSettings(), "v").contains("; Secure");
+}
+
+test "cookie: SameSite=None without Secure refuses the boot" {
+    val _f = fresh();
+    val _a = rkSetProp("rakun.server.address", "127.0.0.1");
+    val _n = rkSetProp("rakun.session.cookie.same-site", "None");
+    assert sessionConfigProblem(sessionSettings()).contains("SameSite=None");
+    val _t = rkSetProp("rakun.server.address", "");
+    assert sessionConfigProblem(sessionSettings()) == "";
+    val _x = rkSetProp("rakun.session.cookie.same-site", "Loose");
+    assert sessionConfigProblem(sessionSettings()).contains("Lax or Strict");
+    val _r = rkSetProp("rakun.session.cookie.same-site", "");
+}
+
+test "cookie: no key in this module turns HttpOnly or Secure off" {
+    val files: string[] = ["session_config.bp", "session_cookie.bp", "session_filter.bp", "signing.bp", "session.bp"];
+    var flags: string[] = [];
+    for (files) { f ->
+        val text: string = fs.readText("src/" + f).unwrapOr("");
+        for (text.split("\n")) { line ->
+            val t: string = line.trim();
+            val code: bool = t.startsWith("//") == false;
+            if (code && (t.contains("http-only") || t.contains("\"rakun.session.cookie.secure"))) flags.push(f + ": " + t);
+        };
+    };
+    assert flags.length == 0, flags.join(" | ");
+}
+
+test "cookie: one cookie is read out of a Cookie header" {
+    assert cookieFromHeader("a=1; SESSION=x.y; b=2", "SESSION") == "x.y";
+    assert cookieFromHeader("a=1", "SESSION") == "";
+    assert cookieFromHeader("", "SESSION") == "";
+}

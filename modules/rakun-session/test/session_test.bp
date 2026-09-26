@@ -1,0 +1,62 @@
+import {io: {clock, fs}} from "std";
+import {Session, newSession, encodeSession, decodeSession, noSession} from "session";
+
+fn at(ms: i32) -> i64 {
+    return clock.millis(ms).millis;
+}
+
+test "value: withAttribute returns a new session and leaves the receiver unchanged" {
+    val s = newSession("id-1", "", at(1000), 60);
+    val next = s.withAttribute("cart", "[]");
+    assert s.attribute("cart") == "";
+    assert next.attribute("cart") == "[]";
+    assert s.attributes.length == 0;
+}
+
+test "value: withAttribute on an existing name replaces it in place" {
+    val s = newSession("id-1", "", at(1000), 60).withAttribute("a", "1").withAttribute("b", "2").withAttribute("a", "3");
+    assert s.attributes.length == 2;
+    assert s.attribute("a") == "3";
+    assert s.attributeNames().join(",") == "a,b";
+}
+
+test "value: a missing attribute reads as the empty string" {
+    assert newSession("id-1", "", at(1000), 60).attribute("nope") == "";
+}
+
+test "value: isExpired is lastAccessedAt plus the budget, against a passed clock" {
+    val s = newSession("id-1", "", at(1000), 60);
+    assert s.isExpired(at(1000)) == false;
+    assert s.isExpired(at(60999)) == false;
+    assert s.isExpired(at(61000));
+}
+
+test "value: withoutAttribute drops the name and leaves the receiver alone" {
+    val s = newSession("id-1", "", at(1000), 60).withAttribute("a", "1");
+    val t = s.withoutAttribute("a");
+    assert t.attribute("a") == "" && s.attribute("a") == "1";
+}
+
+test "value: the wire form round-trips attributes holding & = and a newline" {
+    val s = newSession("id-9", "ana", at(5000), 90).withAttribute("cart", "a=1&b=2\nc");
+    val back: ?Session = decodeSession(encodeSession(s));
+    var ok = false;
+    if (back) { b ->
+        ok = b.id == "id-9" && b.principal == "ana" && b.attribute("cart") == "a=1&b=2\nc" && b.maxInactiveSeconds == 90 && b.createdAt == s.createdAt;
+    };
+    assert ok;
+}
+
+test "value: SessionStore is a behavior and no type body in session.bp has a bodyless method" {
+    val text: string = fs.readText("src/session.bp").unwrapOr("");
+    assert text.contains("pub behavior SessionStore {");
+    var bodyless = 0;
+    var inBehavior = false;
+    for (text.split("\n")) { line ->
+        if (line.startsWith("pub behavior")) inBehavior = true;
+        if (line.startsWith("}")) inBehavior = false;
+        val t: string = line.trim();
+        if (inBehavior == false && t.startsWith("pub fn") && t.endsWith(";")) bodyless = bodyless + 1;
+    };
+    assert bodyless == 0;
+}

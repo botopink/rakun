@@ -1,0 +1,103 @@
+import {io: {clock}} from "std";
+import {Request, Response, rkDispatchHttp, rkSetProp} from "rakun";
+import {resetChain, runChain, rkChainSetTerminal} from "rakun-web";
+import {Health} from "rakun-actuator-api";
+import {mountActuator, installExposure, clearExposure} from "rakun-actuator";
+import {Session, SessionRepository, noSession} from "session";
+import {cookieValueFor} from "signing";
+import {sessionSettings} from "session_config";
+import {etsRepository} from "store_ets";
+import {installSessionWith, optionalSession, sessionOutcome} from "session_filter";
+import {mountSessionsEndpoint, sessionHealth, truncatedId} from "session_endpoint";
+
+fn secret() -> string {
+    return "front-18-endpoint-secret-0123456789abcdef";
+}
+
+fn boot(repo: SessionRepository) -> i32 {
+    val _r = resetChain();
+    val _s = rkSetProp("rakun.session.secret", secret());
+    val _i = installSessionWith(repo, sessionSettings());
+    val _a = mountActuator();
+    return mountSessionsEndpoint();
+}
+
+fn get(path: string) -> Response {
+    return rkDispatchHttp("GET", path, "{}", "{}", "");
+}
+
+fn getQ(path: string, queryJson: string) -> Response {
+    return rkDispatchHttp("GET", path, "{}", queryJson, "");
+}
+
+test "endpoint: the listing reports times and attribute names, never values, ids truncated" {
+    val repo = etsRepository("ep-list", 60);
+    val _b = boot(repo);
+    val _o = installExposure({ id -> true });
+    val s: Session = repo.create("alice").withAttribute("card", "4111-1111-1111-1111");
+    val _p = repo.save(s);
+    val res: Response = getQ("/actuator/sessions", "{\"principal\":\"alice\"}");
+    assert res.status == 200, res.body;
+    assert res.body.contains("\"attributeNames\":[\"card\"]");
+    assert res.body.contains("4111") == false;
+    assert res.body.contains(s.id) == false;
+    assert res.body.contains(truncatedId(s.id));
+    assert res.body.contains("\"createdAt\":") && res.body.contains("\"lastAccessedAt\":") && res.body.contains("\"expiresAt\":");
+    val _c = clearExposure();
+}
+
+test "endpoint: DELETE ends the session and its cookie then carries none" {
+    val repo = etsRepository("ep-delete", 60);
+    val _b = boot(repo);
+    val _o = installExposure({ id -> true });
+    val s: Session = repo.create("bob");
+    val res: Response = rkDispatchHttp("DELETE", "/actuator/sessions/" + s.id, "{}", "{}", "");
+    assert res.status == 204;
+    val _t = rkChainSetTerminal({ method, path, hw, qw, body ->
+        val cur: ?Session = optionalSession();
+        Response.ok(if (cur == null) "anonymous" else "session");
+    });
+    val next: Response = runChain("GET", "/me", "cookie\tSESSION=" + cookieValueFor(secret(), s.id), "", "");
+    assert next.body == "anonymous";
+    assert sessionOutcome() == "not-found";
+    val _c = clearExposure();
+    val _z = resetChain();
+}
+
+test "endpoint: unexposed, both routes answer the host's 404 like an unknown id" {
+    val repo = etsRepository("ep-refused", 60);
+    val _b = boot(repo);
+    val _c = clearExposure();
+    val s: Session = repo.create("carol");
+    val listing: Response = getQ("/actuator/sessions", "{\"principal\":\"carol\"}");
+    val other: Response = get("/actuator/nothing-here");
+    assert listing.status == 404;
+    assert other.status == 404;
+    val del: Response = rkDispatchHttp("DELETE", "/actuator/sessions/" + s.id, "{}", "{}", "");
+    assert del.status == 404;
+    val still: ?Session = repo.findById(s.id);
+    assert still != null;
+}
+
+test "endpoint: health reports UP naming the arm, and DOWN naming it when the store is unreachable" {
+    val _b = boot(etsRepository("ep-health", 60));
+    val up: Health = sessionHealth();
+    assert up.status == "UP";
+    assert up.details == "{\"arm\":\"ets\"}";
+    val broken = SessionRepository(
+        arm: "sql",
+        createFn: { p -> noSession() },
+        saveFn: { s -> 0 },
+        findFn: { id -> null },
+        deleteFn: { id -> 0 },
+        byPrincipalFn: { p -> [] },
+        expireFn: { n -> 0 },
+        probeFn: { -> "connection refused" },
+    );
+    val _r = resetChain();
+    val _i = installSessionWith(broken, sessionSettings());
+    val down: Health = sessionHealth();
+    assert down.status == "DOWN";
+    assert down.details.contains("\"arm\":\"sql\"") && down.details.contains("connection refused");
+    val _z = resetChain();
+}

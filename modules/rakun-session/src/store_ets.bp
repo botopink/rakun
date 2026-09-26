@@ -1,0 +1,44 @@
+//// rakun-session — the ETS arm (the default). Front 18 step 3.
+////
+//// One table for every ETS store, keyed by `{store, id}`, owned by a dedicated
+//// process (`rakun_session_owner`) that does nothing else — a crashing request
+//// worker takes no session with it. Nothing survives a node restart.
+
+import {io: {clock}} from "std";
+import {Session, SessionRepository, newSession} from "session";
+import {newSessionId} from "signing";
+import {rkSessEtsPut, rkSessEtsGet, rkSessEtsDelete, rkSessEtsByPrincipal, rkSessEtsAll, rkSessEtsAlive} from "host";
+
+fn etsFind(store: string, id: string) -> ?Session {
+    val found: ?Session = rkSessEtsGet(store, id);
+    return found;
+}
+
+fn etsLive(store: string, principal: string, now: i64) -> Array<Session> {
+    val all: Session[] = rkSessEtsByPrincipal(store, principal);
+    return all.filter({ s -> s.isExpired(now) == false });
+}
+
+fn etsExpire(store: string, now: i64) -> i32 {
+    val all: Session[] = rkSessEtsAll(store);
+    val stale: Session[] = all.filter({ s -> s.isExpired(now) });
+    for (stale) { s -> val _d = rkSessEtsDelete(store, s.id); };
+    return stale.length;
+}
+
+pub fn etsRepository(store: string, timeoutSeconds: i32) -> SessionRepository {
+    return SessionRepository(
+        arm: "ets",
+        createFn: { principal ->
+            val s: Session = newSession(newSessionId(), principal, clock.nowMillis(), timeoutSeconds);
+            val _p = rkSessEtsPut(store, s.id, s.principal, s);
+            s;
+        },
+        saveFn: { s -> rkSessEtsPut(store, s.id, s.principal, s) },
+        findFn: { id -> etsFind(store, id) },
+        deleteFn: { id -> rkSessEtsDelete(store, id) },
+        byPrincipalFn: { principal -> etsLive(store, principal, clock.nowMillis()) },
+        expireFn: { now -> etsExpire(store, now) },
+        probeFn: { -> if (rkSessEtsAlive()) "" else "the ETS owner process is not running" },
+    );
+}

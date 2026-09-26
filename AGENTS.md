@@ -3116,6 +3116,60 @@ and ships no runner (tests are `test` blocks under `botopink test`).
   on front 15's listener registry; `bootAndExit` waits on the listener and task
   registries and a duplicate-route check.
 
+## Sessions — `modules/rakun-session/` (front 18)
+
+Depends on `rakun`, `rakun-web` (the chain), `rakun-data` (the SQL arm),
+`rakun-actuator-api` / `rakun-actuator` (endpoint, health) and
+`rakun-scheduling` (the sweeper). Sidecar `rakun_session.erl`: per-request
+slots in the process dictionary, the installed repository in a
+`persistent_term`, the ETS arm's table owned by the dedicated
+`rakun_session_owner` process, lookup counters, and the Redis wire (RESP,
+one connection per command).
+
+- **Value** (`session.bp`) — `Session(id, principal, attributes, createdAt,
+  lastAccessedAt, maxInactiveSeconds)`, immutable: `withAttribute` (replaces in
+  place), `withoutAttribute`, `attribute` (`""` when absent), `isExpired(now)`
+  against a passed clock. A mutation is `saveSession(s.withAttribute(k, v))`.
+- **Store** — `pub behavior SessionStore` is the shape; every caller holds a
+  `SessionRepository` (the six operations as function values plus `probe`),
+  because a call through a behavior-typed value does not lower on erlang and
+  an implementer does not convert to its behavior. Arms: `etsRepository(store,
+  timeout)` (default), `sqlRepository(dataSource, table, timeout)` over
+  rakun-data (`sessionDdl`; the table is created only by
+  `initializeSessionSchema(…, "always")`), `redisRepository(url, timeout)`
+  (`SET … EX <timeout>`, a principal set per user). One suite
+  (`test/store_test.bp`) runs on ETS and SQL; Redis runs when
+  `RAKUN_TEST_REDIS_URL` is set and prints SKIPPED otherwise.
+- **Ids and signing** (`signing.bp`, the verification path) — 32 bytes from
+  `random.secureToken`, base64url; cookie value `<id>.<hmacSha256Base64Url>`;
+  the signature is checked with `hash.equalsConstantTime` BEFORE the store is
+  asked, and `test/signing_test.bp` fails on any `==`/`!=` in that file.
+  Outcomes `none`, `ok`, `malformed`, `bad-signature`, `not-found`, `expired`
+  (`sessionOutcome()`); every refusal leaves the request without a session.
+- **Settings** (`session_config.bp`) — `rakun.session.store` (ets · sql · redis),
+  `.secret` (required, ≥ 32 characters, no default), `.timeout` (`30m`),
+  `.cookie.name` (`SESSION`), `.cookie.path` (`/`), `.cookie.same-site` (Lax ·
+  Strict · None only with Secure), `.sql.table-name` (`SESSIONS`),
+  `.sql.initialize-schema` (never · always), `.redis.url`. No key removes
+  `HttpOnly` or `Secure`; `Secure` is dropped only for a plaintext listener
+  bound to loopback (`rakun.server.address`, which the core now binds) without
+  `rakun.server.forwarded-proto=true`.
+- **Chain entry** (`session_filter.bp`) — `installSession(repo)` refuses bad
+  settings, installs the repository and registers `session` at −350 (before
+  security's −300). Per request: clear the slots, verify and load, touch
+  `lastAccessedAt` once, run the chain, then queue `Set-Cookie` (through
+  rakun-web's cookie list) when the request created or rotated a session.
+  Handlers: `currentSession()` (creates lazily), `optionalSession()`,
+  `saveSession`, `rotate(repo, s)`, `rotateSession()`,
+  `authenticateSession(principal)` (the fixation defence — call it on login and
+  on every privilege change), `invalidateSession()`.
+  `installSessionSweeper(millis)` registers the `session-sweeper` fixedDelay task.
+- **Endpoint and health** (`session_endpoint.bp`) — `mountSessionsEndpoint()`
+  registers `sessions` (GET `?principal=`: times and attribute NAMES, ids
+  truncated to 8 characters), its own `DELETE <base>/sessions/:id` route behind
+  the same `exposed("sessions")` check, and the `session` health indicator (DOWN
+  naming the arm and the probe's reason).
+
 ## Validation — the bundled `validation` library (front 14, moved by decision 116 rule 5)
 
 Front 14's member `modules/rakun-validation` is gone: its seven modules are the

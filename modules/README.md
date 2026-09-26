@@ -36,7 +36,7 @@ refusal is the core's `config_check.bp`.
 | [rakun-messaging](./rakun-messaging/) | root | erlang | `-amqp` / `-kafka` / `-activemq` / `-artemis` | 15 · 86 · 90 | scaffold |
 | [rakun-scheduling](./rakun-scheduling/) | root · cron · registry · markers · executor · endpoint | erlang | `@Scheduled` / `-quartz` | 16 · 84 | real code, 67 tests |
 | [rakun-security](./rakun-security/) | root · principal · policy · jwt · password · users · users_sql · basic · csrf · method_security · security_filter · security | erlang | `-security`, `-oauth2-client`, `-saml2` | 10 · 79 | real code, 73 tests |
-| [rakun-session](./rakun-session/) | root | erlang | `spring-session-jdbc` / `-data-redis` | 18 | scaffold |
+| [rakun-session](./rakun-session/) | root · host · session · signing · session_config · session_cookie · store_ets · store_sql · store_redis · session_filter · session_endpoint | erlang | `spring-session-jdbc` / `-data-redis` | 18 | real code, 36 tests |
 | [rakun-test](./rakun-test/) | root | erlang | `-test` | 19 | FakeRequest + toRequest, expect* assertions, MockMvc, resetSingletons/resetContext/contextSnapshot; 26 tests |
 | [rakun-web](./rakun-web/) | root · filter · negotiation · error · middleware · cors · compression · customizer · apiversion · shutdown · convention · tls | erlang | `-webmvc` (websocket is `rakun-websocket`) | 07 · 65 · 82 | real code, 154 tests |
 
