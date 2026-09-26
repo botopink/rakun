@@ -1,0 +1,155 @@
+//// rakun-app — parallel routes: slot enumeration, per-slot matching and
+//// `default.bp` (front 61 steps 1, 2, 5, 6).
+////
+//// A slot entry of front 22's table carries its slot name and a pattern with
+//// the `@slot` segment removed: `dashboard/@team/settings` is
+//// `P|/dashboard/settings|team`. A slot belongs to the NEAREST layout above its
+//// shortest entry (the `@team` folder sits under `dashboard`'s layout).
+//// `tableForSlot` is the view of the table a slot matches in — its own
+//// entries with the slot field cleared, so front 22's `matchPath` (which
+//// matches only the children slot) answers for it — and its own `S` loading
+//// and `E` error entries, never the children slot's.
+////
+//// RESOLUTION, per slot of a layout, in declaration order:
+////
+//// | the slot's subtree matches the URL | soft navigation | the slot has `default.bp` | state |
+//// |---|---|---|---|
+//// | yes | any | any | `M` matched, with its params |
+//// | no | yes | any | `U` unchanged — the client keeps what it shows |
+//// | no | no | yes | `D` defaulted |
+//// | no | no | no | `E` empty — a resolution, not a missing slot |
+////
+//// The resolutions are data: onze maps each entry to the UI function it
+//// registered and jhonstart's `compose` places it. This module names no
+//// element. The `z` payload section is `routing`'s `writeSlotStates` of
+//// `slotStateLines`.
+
+import {table: {RouteEntry, parseTable}, match: {RouteMatch, matchPath, ancestorPatterns}, slot_states: {SlotState}} from "routing";
+import {collections.Dict} from "std";
+import {rkAppTable} from "file_router";
+
+pub type SlotEntry(slot: string, pattern: string)
+
+pub type SlotResolution(
+    slot: string,
+    state: SlotState,
+    entry: ?RouteEntry,
+    params: Dict<string, string>,
+)
+
+fn blank() -> RouteEntry {
+    return RouteEntry(kind: "", pattern: "", slot: "", verb: "");
+}
+
+pub fn appTableEntries() -> RouteEntry[] {
+    return parseTable(rkAppTable());
+}
+
+fn isAncestorOrSelf(ancestor: string, pattern: string) -> bool {
+    if (ancestor == "/" || ancestor == pattern) return true;
+    return pattern.startsWith(ancestor + "/");
+}
+
+// The shortest pattern among a slot's entries.
+fn slotRoot(table: RouteEntry[], slot: string) -> string {
+    var root = "";
+    for (table) { e ->
+        if (e.slot == slot && (root == "" || e.pattern.length() < root.length())) root = e.pattern;
+    };
+    return root;
+}
+
+// The layout a slot belongs to: the nearest `L` entry of the children slot at
+// or above its root.
+pub fn ownerLayout(table: RouteEntry[], slot: string) -> string {
+    val root = slotRoot(table, slot);
+    var best = "";
+    for (table) { e ->
+        if (e.kind == "L" && e.slot == "" && isAncestorOrSelf(e.pattern, root) && e.pattern.length() >= best.length()) best = e.pattern;
+    };
+    return best;
+}
+
+// The slots declared under `layoutPattern`, in registration order, never the
+// children slot.
+pub fn slotsOf(table: RouteEntry[], layoutPattern: string) -> string[] {
+    var out: string[] = [];
+    for (table) { e ->
+        if (e.slot != "" && out.filter({ s -> s == e.slot }).length == 0 && ownerLayout(table, e.slot) == layoutPattern) out.push(e.slot);
+    };
+    return out;
+}
+
+pub fn tableForSlot(table: RouteEntry[], slot: string) -> RouteEntry[] {
+    return table.filter({ e -> e.slot == slot }).map({ e -> RouteEntry(kind: e.kind, pattern: e.pattern, slot: "", verb: e.verb) });
+}
+
+fn defaultOf(view: RouteEntry[]) -> ?RouteEntry {
+    val ds = view.filter({ e -> e.kind == "D" });
+    if (ds.length == 0) return null;
+    return ds.at(0) ?? blank();
+}
+
+pub fn resolveSlot(table: RouteEntry[], slot: string, layoutPattern: string, pathname: string, soft: bool) -> SlotResolution {
+    val view = tableForSlot(table, slot);
+    val found: ?RouteMatch = matchPath(view, pathname);
+    if (found != null) {
+        val m: RouteMatch = found ?? RouteMatch(entry: blank(), params: Dict.empty(), rest: [], chain: []);
+        return SlotResolution(slot: slot, state: SlotState.Matched, entry: m.entry, params: m.params);
+    };
+    if (soft) return SlotResolution(slot: slot, state: SlotState.Unchanged, entry: null, params: Dict.empty());
+    val d: ?RouteEntry = defaultOf(view);
+    if (d != null) return SlotResolution(slot: slot, state: SlotState.Defaulted, entry: d, params: Dict.empty());
+    return SlotResolution(slot: slot, state: SlotState.Empty, entry: null, params: Dict.empty());
+}
+
+pub fn resolveSlots(table: RouteEntry[], layoutPattern: string, pathname: string, soft: bool) -> SlotResolution[] {
+    return slotsOf(table, layoutPattern).map({ s -> resolveSlot(table, s, layoutPattern, pathname, soft) });
+}
+
+// The `z` triples `routing`'s `writeSlotStates` writes: the slot, the
+// resolved entry's pattern (`""` with none), the state.
+pub fn slotStateLines(rs: SlotResolution[]) -> Array<#(string, string, SlotState)> {
+    return rs.map({ r ->
+        val e: RouteEntry = r.entry ?? blank();
+        #(r.slot, e.pattern, r.state)
+    });
+}
+
+// The scan's refusals for `default.bp`, `""` when the table is sound: a `D`
+// entry outside any slot, or two under one slot.
+pub fn defaultProblem(table: RouteEntry[]) -> string {
+    var problem = "";
+    var seen: string[] = [];
+    for (table) { e ->
+        if (e.kind == "D") {
+            if (problem == "" && e.slot == "") problem = "rakun slots: a default.bp at `" + e.pattern + "` sits outside any @slot - it would be the default of nothing";
+            if (problem == "" && e.slot != "" && seen.filter({ s -> s == e.slot }).length > 0) problem = "rakun slots: @" + e.slot + " has two default.bp entries - one slot, one default";
+            seen.push(e.slot);
+        };
+    };
+    return problem;
+}
+
+// Two pages of ONE slot claiming the same URL pattern (two route groups of
+// `@team` both serving `/dashboard/x`) is a scan failure. Two DIFFERENT slots
+// at one URL is what parallel routes are for, and is not.
+pub fn slotConflictProblem(table: RouteEntry[]) -> string {
+    val pages = table.filter({ e -> e.kind == "P" && e.slot != "" });
+    var problem = "";
+    for (pages) { a -> problem = if (problem != "") problem else clashWith(pages, a); };
+    return problem;
+}
+
+fn clashWith(pages: RouteEntry[], a: RouteEntry) -> string {
+    val same = pages.filter({ b -> b.slot == a.slot && b.pattern == a.pattern });
+    if (same.length < 2) return "";
+    return "rakun slots: @" + a.slot + " has two pages claiming `" + a.pattern + "`";
+}
+
+// A bound parameter of a resolution, `""` when the slot binds none of that
+// name (read here, where the resolution's type is known).
+pub fn slotParam(r: SlotResolution, name: string) -> string {
+    val v: ?string = r.params.at(name);
+    return v ?? "";
+}

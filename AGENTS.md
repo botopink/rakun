@@ -1690,6 +1690,34 @@ gauge and the failure log.
   62's message), a handler route, a dynamic pattern without params, or a file
   outside `<out>` (`path.isInside`) fails it.
 
+## Parallel and intercepting routes — `route_slots.bp`, `route_intercept.bp` (front 61)
+
+Pure functions over front 22's table and `routing`'s matcher; no sidecar (nothing
+to hold). A slot entry is `P|/dashboard/settings|team` (the `@team` segment
+removed); a slot belongs to the NEAREST layout above its shortest entry.
+
+- **Slots** — `slotsOf(table, layout)` (registration order, never the children
+  slot), `tableForSlot(table, slot)` (its entries with the slot cleared, so
+  `matchPath` answers, and its own `S`/`E` boundaries), `resolveSlot(table, slot,
+  layout, pathname, soft)` / `resolveSlots` → `SlotResolution(slot, state, entry,
+  params)`: matched `M` (with params, `slotParam(r, name)`); unmatched and soft →
+  `U` unchanged; unmatched and hard → `D` its `default.bp` or `E` empty — always a
+  resolution, so positions never shift. `slotStateLines(rs)` are the triples
+  `routing`'s `writeSlotStates` writes (the `z` section). Scan refusals:
+  `defaultProblem` (a `D` outside any slot, two under one slot),
+  `slotConflictProblem` (two pages of ONE slot at one URL — two slots at one URL is
+  what parallel routes are for).
+- **Interception** — `parseIntercept(folder)` (`(.)` Same · `(..)` Up1 ·
+  `(..)(..)` Up2 · `(...)` Root; a route group or a plain folder is `null`; a
+  dots-only marker like `(....)` raises), `resolveIntercept(marker, from)` (climbing
+  past the root raises). The marker stays in the pattern as written
+  (`/feed/[id]/(.)photo/[photoId]`); `interceptions(table)` reads each one's
+  origin and claimed pattern. `interceptFor(table, from, to, soft)` answers the
+  intercepting entry ONLY when `soft`; `isSoftNavigation()` is `x-rakun-nav:
+  soft` read through front 62's `headers()` (so it raises outside a request); a
+  missing header is hard. `interceptProblem` refuses a claimed pattern no page
+  serves and two interceptions from one origin claiming one target.
+
 ## Navigation signals — `modules/rakun-app/src/navigation.bp` (front 63)
 
 `notFound()`, `redirect(loc)` (307), `permanentRedirect(loc)` (308) and

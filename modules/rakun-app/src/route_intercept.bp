@@ -1,0 +1,145 @@
+//// rakun-app — intercepting routes (front 61 steps 3–4).
+////
+//// A folder `(.)photo`, `(..)photo`, `(..)(..)photo` or `(...)photo` is an
+//// interception marker; `(marketing)` is a route group and `photo` a plain
+//// segment. `(....)photo` — a marker spelled wrong — RAISES rather than
+//// becoming a static folder nobody asked for. The marker stays in front 22's
+//// pattern as written (`/feed/[id]/(.)photo/[photoId]`), so an intercepting
+//// entry is recognised by its segments.
+////
+//// Resolution (`resolveIntercept`), from the pattern the marker sits in:
+//// `(.)` appends, `(..)` drops one segment first, `(..)(..)` two, `(...)`
+//// starts at `/`; climbing past the root raises.
+////
+//// THE GATE. An interception answers only on a SOFT navigation — a request
+//// carrying `x-rakun-nav: soft` (the header front 27's client router sets,
+//// read through front 62's `headers()`, compared case-insensitively). A
+//// missing header is a hard request, which renders the full route: serving a
+//// modal to a pasted URL is the failure that gets noticed. No property
+//// changes that.
+
+import {table: {RouteEntry}} from "routing";
+import {headers, headerOf} from "rakun";
+
+pub type InterceptKind {
+    Same,
+    Up1,
+    Up2,
+    Root,
+}
+
+pub type Intercept(kind: InterceptKind, target: string, raw: string)
+
+pub fn navHeader() -> string {
+    return "x-rakun-nav";
+}
+
+pub fn badMarkerProblem(folder: string) -> string {
+    return "rakun intercept: `" + folder + "` is not an interception marker - the markers are (.), (..), (..)(..) and (...)";
+}
+
+pub fn parseIntercept(folder: string) -> ?Intercept {
+    if (folder.startsWith("(") == false) return null;
+    val close = folder.indexOf(")");
+    if (close < 0) return null;
+    if (close == folder.length() - 1) return null;
+    if (folder.startsWith("(..)(..)")) return Intercept(kind: InterceptKind.Up2, target: folder.slice(8, folder.length()), raw: folder);
+    if (folder.startsWith("(...)")) return Intercept(kind: InterceptKind.Root, target: folder.slice(5, folder.length()), raw: folder);
+    if (folder.startsWith("(..)")) return Intercept(kind: InterceptKind.Up1, target: folder.slice(4, folder.length()), raw: folder);
+    if (folder.startsWith("(.)")) return Intercept(kind: InterceptKind.Same, target: folder.slice(3, folder.length()), raw: folder);
+    val inner = folder.slice(1, close);
+    val dotsOnly = inner.split("").filter({ c -> c != "." }).length == 0;
+    if (dotsOnly) @panic(badMarkerProblem(folder));
+    return null;
+}
+
+fn segmentsOf(pattern: string) -> string[] {
+    return pattern.split("/").filter({ s -> s != "" });
+}
+
+fn joined(parts: string[]) -> string {
+    return "/" + parts.join("/");
+}
+
+pub fn climbProblem(raw: string, fromPattern: string) -> string {
+    return "rakun intercept: `" + raw + "` in `" + fromPattern + "` climbs past the root";
+}
+
+pub fn resolveIntercept(marker: Intercept, fromPattern: string) -> string {
+    val segs = segmentsOf(fromPattern);
+    val drop = case marker.kind {
+        InterceptKind.Same -> 0;
+        InterceptKind.Up1 -> 1;
+        InterceptKind.Up2 -> 2;
+        InterceptKind.Root -> segs.length;
+    };
+    if (drop > segs.length) @panic(climbProblem(marker.raw, fromPattern));
+    val kept = segs.slice(0, segs.length - drop);
+    var parts: string[] = [];
+    for (kept) { s -> parts.push(s); };
+    for (segmentsOf(marker.target)) { s -> parts.push(s); };
+    return joined(parts);
+}
+
+// An intercepting entry of the table: where it sits (`origin`), the marker, the
+// pattern it claims.
+pub type Interception(entry: RouteEntry, origin: string, claims: string)
+
+pub fn interceptionOf(e: RouteEntry) -> ?Interception {
+    val segs = segmentsOf(e.pattern);
+    var at = -1;
+    var i = 0;
+    for (segs) { s ->
+        if (at < 0 && s.startsWith("(") && s.indexOf(")") < s.length() - 1) at = i;
+        i = i + 1;
+    };
+    if (at < 0) return null;
+    val folder: string = segs.at(at) ?? "";
+    val found: ?Intercept = parseIntercept(folder);
+    if (found == null) return null;
+    val marker: Intercept = found ?? Intercept(kind: InterceptKind.Same, target: "", raw: "");
+    val origin = joined(segs.slice(0, at));
+    var rest: string[] = [];
+    for (segs.slice(at + 1, segs.length)) { s -> rest.push(s); };
+    val base = resolveIntercept(marker, origin);
+    val claims = if (rest.length == 0) base else base + "/" + rest.join("/");
+    return Interception(entry: e, origin: origin, claims: claims);
+}
+
+pub fn interceptions(table: RouteEntry[]) -> Array<Interception> {
+    var out: Array<Interception> = [];
+    for (table) { e ->
+        val i: ?Interception = if (e.kind == "P") interceptionOf(e) else null;
+        if (i != null) out.push(i ?? Interception(entry: e, origin: "", claims: ""));
+    };
+    return out;
+}
+
+// The intercepting entry for a navigation from `fromPattern` to `toPattern`,
+// only when `soft`; `null` otherwise, so the full route renders.
+pub fn interceptFor(table: RouteEntry[], fromPattern: string, toPattern: string, soft: bool) -> ?RouteEntry {
+    if (soft == false) return null;
+    val hits = interceptions(table).filter({ i -> i.origin == fromPattern && i.claims == toPattern });
+    if (hits.length == 0) return null;
+    val first: Interception = hits.at(0) ?? Interception(entry: RouteEntry(kind: "", pattern: "", slot: "", verb: ""), origin: "", claims: "");
+    return first.entry;
+}
+
+// The request's navigation kind, through front 62 (so it raises outside one).
+pub fn isSoftNavigation() -> bool {
+    return headerOf(headers(), navHeader(), "") == "soft";
+}
+
+// The scan's refusals: an interception claiming a pattern the table has no
+// page for, or two interceptions from one origin claiming one target.
+pub fn interceptProblem(table: RouteEntry[]) -> string {
+    val all = interceptions(table);
+    var problem = "";
+    for (all) { i ->
+        val real = table.filter({ e -> e.kind == "P" && e.slot == "" && e.pattern == i.claims }).length > 0;
+        if (problem == "" && real == false) problem = "rakun intercept: `" + i.entry.pattern + "` claims `" + i.claims + "`, which no page of the table serves";
+        val same = all.filter({ j -> j.origin == i.origin && j.claims == i.claims }).length;
+        if (problem == "" && same > 1) problem = "rakun intercept: two interceptions from `" + i.origin + "` claim `" + i.claims + "`";
+    };
+    return problem;
+}
