@@ -1068,11 +1068,11 @@ Two deliberate departures from the spec, both arguable and both here:
   the `SCREAMING_SNAKE` one. A decorator body cannot call a helper, so the
   emitter would have to inline the string surgery in every marker; and the
   reader covers three spellings where the emitter would have produced one.
-- **A list field is recognised by an EMPTY `typeName`.** `@Decl` renders no name
-  for a generic type: `hosts: string[]` reflects as `typeName == ""`, exactly as
-  `Array<string>` would. An empty name is read as a list, which is right for
-  every array and wrong for any other generic field. It is the only signal the
-  reflection offers and it is a gap worth closing in `@Decl` rather than around.
+- **A list field is `string[]` or `Array<string>`.** `@Decl` spells a field's
+  type as written, so both bind through `rkPropList` and the catalogue shows the
+  spelling. A list of anything else (`i32[]`, `Array<Duration>`) has no reader
+  and is refused at the annotation (`cannot bind the list field …`), never
+  bound as a scalar.
 
 ### The key catalogue
 
@@ -2853,8 +2853,8 @@ The consumer imports the seams its markers use beside the markers
 Decisions:
 
 - **Three markers, not one `#[scheduled(cron:, fixedRate:, …)]`**: markers take
-  positional arguments and declared parameter defaults are never applied to a
-  decorator. `#[scheduler]` stacks under a STEREOTYPE (its closure is
+  positional arguments and a decorator argument's declared default is not
+  applied (the comptime call fails). `#[scheduler]` stacks under a STEREOTYPE (its closure is
   `{ -> __rkMake_<Type>().<fn>() }`, so a task and an HTTP handler share one instance;
   a type without one is refused naming the fix). Refused at comptime, located: a
   marker off a method, `#[scheduler]` with no trigger method, two triggers on one
@@ -3341,8 +3341,8 @@ that decision 118 removed (a `-> @Task<…>` return replaced it), and a marker
 that looks like a removed effect is a trap. The temporal markers are
 `#[pastDate]` and `#[futureDate]`.
 
-`#[sizeBetween]` takes BOTH bounds because a declared parameter default is never
-applied at a call site; Spring's single `@Size(min = …)` with the other half
+`#[sizeBetween]` takes BOTH bounds because a decorator argument's declared
+default is not applied (the comptime call fails); Spring's single `@Size(min = …)` with the other half
 optional has no botopink spelling, and pretending otherwise would produce a
 decorator that silently drops an argument.
 

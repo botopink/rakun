@@ -18,6 +18,14 @@
 - `absolutePath` knows a Windows absolute path (`C:\certs\server.pem`,
   `c:/certs`, `\\host\share`) and never joins it onto the working directory
   (`isWindowsAbsolute`).
+- `#[configurationProperties]`: an `Array<string>` field binds as a list like
+  `string[]`; a list of another element type is refused at the annotation; the
+  empty-`typeName` arm is gone (`@Decl` spells every type).
+- The "declared parameter defaults are never applied" notes are re-measured: a
+  closed default of a function, a record field or a method applies across a
+  module boundary, so the notes that said otherwise are gone; what stays is
+  narrower — a decorator argument's declared default is not applied (the
+  comptime call fails), and `@Decl.Field` carries no default.
 
 ### Static files (botopink front 82)
 
