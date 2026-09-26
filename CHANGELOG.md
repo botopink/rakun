@@ -8,7 +8,7 @@
   filesystem call, symlink containment, ETag / Last-Modified conditionals,
   ranges, pre-compressed `.br`/`.gz` negotiation, fingerprinted immutable
   assets, and `file:sendfile` streaming — no file body in a botopink value;
-  27 tests in `test/static_test.bp`.
+  26 tests in `test/static_test.bp`.
 
 ### Sessions (botopink front 18)
 
