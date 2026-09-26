@@ -99,7 +99,7 @@ fn readResponse(sock: Socket) -> string {
 }
 
 fn readMore(sock: Socket, acc: string) -> string {
-    val chunk = net.recv(sock, 0, 1000).unwrapOr("");
+    val chunk = sock.recv(0, 1000).unwrapOr("");
     val got = acc + chunk;
     if (chunk == "") {
         return got;
@@ -146,9 +146,9 @@ fn bodyOf(response: string) -> string {
 
 fn exchange(port: i32, request: string) -> string {
     val sock = open(port);
-    val _s = net.send(sock, request);
+    val _s = sock.send(request);
     val answer = readResponse(sock);
-    val _c = net.close(sock);
+    val _c = sock.close();
     return answer;
 }
 
@@ -204,11 +204,11 @@ test "rakun server: a reply header reaches the wire once, with the last value" {
 
 test "rakun server: headers of request n do not leak into n+1 on a keep-alive connection" {
     val sock = open(start());
-    val _a = net.send(sock, "GET /srv/trace HTTP/1.1\r\nHost: x\r\n\r\n");
+    val _a = sock.send("GET /srv/trace HTTP/1.1\r\nHost: x\r\n\r\n");
     val first = readResponse(sock);
-    val _b = net.send(sock, "GET /srv/hello HTTP/1.1\r\nHost: x\r\n\r\n");
+    val _b = sock.send("GET /srv/hello HTTP/1.1\r\nHost: x\r\n\r\n");
     val second = readResponse(sock);
-    val _c = net.close(sock);
+    val _c = sock.close();
     assert first.contains("x-trace: abc");
     assert statusOf(second) == "200";
     assert !second.contains("trace");
@@ -223,10 +223,10 @@ test "rakun server: over max-connections the next connection is answered 503 and
     val port = start();
     val _m = rkSetProp("rakun.server.max-connections", "1");
     val held = open(port);
-    val _h = net.send(held, "GET /srv/hello HTTP/1.1\r\nHost: x\r\n\r\n");
+    val _h = held.send("GET /srv/hello HTTP/1.1\r\nHost: x\r\n\r\n");
     val _r = readResponse(held);
     val answer = get(port, "/srv/hello");
-    val _c = net.close(held);
+    val _c = held.close();
     val _u = rkSetProp("rakun.server.max-connections", "16384");
     assert statusOf(answer) == "503";
 }
@@ -235,12 +235,12 @@ test "rakun server: an idle keep-alive connection is closed after rakun.server.i
     val _i = rkSetProp("rakun.server.idle-timeout", "200");
     val port = start();
     val sock = open(port);
-    val _s = net.send(sock, "GET /srv/hello HTTP/1.1\r\nHost: x\r\n\r\n");
+    val _s = sock.send("GET /srv/hello HTTP/1.1\r\nHost: x\r\n\r\n");
     val _r = readResponse(sock);
     // Nothing more is sent: the server closes within the idle timeout, so the
     // next read answers `closed` well inside 500 ms.
-    val next = net.recv(sock, 0, 500);
-    val _c = net.close(sock);
+    val next = sock.recv(0, 500);
+    val _c = sock.close();
     val _u = rkSetProp("rakun.server.idle-timeout", "60000");
     assert next.isError();
 }
@@ -248,20 +248,20 @@ test "rakun server: an idle keep-alive connection is closed after rakun.server.i
 test "rakun server: a slow request on one connection does not hold up another" {
     val port = start();
     val slow = open(port);
-    val _s = net.send(slow, "GET /srv/slow HTTP/1.1\r\nHost: x\r\n\r\n");
+    val _s = slow.send("GET /srv/slow HTTP/1.1\r\nHost: x\r\n\r\n");
     assert bodyOf(get(port, "/srv/hello")) == "hello";
     assert bodyOf(readResponse(slow)) == "slow";
-    val _c = net.close(slow);
+    val _c = slow.close();
 }
 
 test "rakun server: killing a connection process mid-request leaves another in-flight request alone" {
     val port = start();
     val slow = open(port);
-    val _s = net.send(slow, "GET /srv/slow HTTP/1.1\r\nHost: x\r\n\r\n");
+    val _s = slow.send("GET /srv/slow HTTP/1.1\r\nHost: x\r\n\r\n");
     val killed = get(port, "/srv/die");
     assert killed == "";
     assert bodyOf(readResponse(slow)) == "slow";
-    val _c = net.close(slow);
+    val _c = slow.close();
     assert bodyOf(get(port, "/srv/hello")) == "hello";
 }
 
