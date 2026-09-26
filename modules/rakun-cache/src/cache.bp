@@ -35,7 +35,7 @@
 //// every customizer: it is checked after the customizer fold.
 
 import {hash, json} from "std";
-import {rkProp, toI32, requestLive, requestPhase, phaseName} from "rakun";
+import {rkProp, toI32, requestLive, requestPhase, phaseName, rkReqSlot, rkReqPutSlot} from "rakun";
 import {Session, optionalSession, rkSessRedis} from "rakun-session";
 import {
     rkCacheRowPut, rkCacheRowGet, rkCacheRowMarked, rkCacheRowDelete, rkCacheClearName, rkCacheClearAll,
@@ -397,6 +397,11 @@ pub fn cacheThrough(policy: CachePolicy, keys: Array<string>, load: fn() -> stri
 }
 
 // ── Step 5 — tags and the three revalidation verbs ──────────────────────────
+//
+// Inside a server action (phase `action`) `revalidateTag` and
+// `revalidatePath` EXPIRE their rows rather than mark them stale: the action's
+// own re-render (front 24) must be built from the refilled cache, not from the
+// value the mutation just made stale. Everywhere else they mark stale.
 
 // The phase the request process is in, or `none` outside a request.
 pub fn rkCachePhase() -> string {
@@ -412,10 +417,24 @@ pub fn updateTagProblem(phase: string) -> string {
     return "rakun-cache: updateTag is legal only inside a server action (the phase is " + phase + ")";
 }
 
+// Inside a request, every invalidation is also written to the frame's
+// `revalidated` slot (newline-separated, call order) — what front 24 echoes in
+// an action envelope's `revalidated`, per request rather than per node.
+fn noteInRequest(entry: string) -> i32 {
+    if (requestLive() == false) return 0;
+    val before = rkReqSlot("revalidated");
+    return rkReqPutSlot("revalidated", if (before == "") entry else before + "\n" + entry);
+}
+
 pub fn revalidateTag(tag: string) -> i32 {
     val phase = rkCachePhase();
     if (phase == "render") @panic(renderProblem("revalidateTag"));
     val _l = rkCacheLogAdd("tag", tag);
+    val _q = noteInRequest(tag);
+    if (phase == "action") {
+        val _x = rkCacheTraceLine("expire key=* [" + tag + "]");
+        return rkCacheExpireTag(tag) + redisDropSet("rakun:cache:tag:" + tag);
+    };
     val _r = rkCacheTraceLine("revalidate key=* [" + tag + "]");
     return rkCacheMarkTag(tag) + redisDropSet("rakun:cache:tag:" + tag);
 }
@@ -424,6 +443,7 @@ pub fn updateTag(tag: string) -> i32 {
     val phase = rkCachePhase();
     if (phase != "action") @panic(updateTagProblem(phase));
     val _l = rkCacheLogAdd("tag", tag);
+    val _q = noteInRequest(tag);
     val _r = rkCacheTraceLine("expire key=* [" + tag + "]");
     return rkCacheExpireTag(tag) + redisDropSet("rakun:cache:tag:" + tag);
 }
@@ -432,6 +452,8 @@ pub fn revalidatePath(path: string) -> i32 {
     val phase = rkCachePhase();
     if (phase == "render") @panic(renderProblem("revalidatePath"));
     val _l = rkCacheLogAdd("path", path);
+    val _q = noteInRequest(path);
+    if (phase == "action") return rkCacheExpireTag("path:" + path) + redisDropSet("rakun:cache:tag:path:" + path);
     return rkCacheMarkTag("path:" + path) + redisDropSet("rakun:cache:tag:path:" + path);
 }
 

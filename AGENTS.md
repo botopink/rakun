@@ -388,6 +388,13 @@ on the warm path.
 - The router walks in registration order and takes the first route whose verb,
   segment count and every segment match (`:name` binding a path parameter).
   Registration order decides between two routes that both match, on both rows.
+- `serve_requests/2` carries the BODY hook (front 24): before a body is read,
+  a fun under the `rakun_body_hook` persistent term gets the verb, the path and
+  the headers as JSON and answers `<<>>` (read the body) or `"<status>\n<body>"`
+  — written with `Connection: close`, the socket half-closed, at most 8 KiB
+  drained for 200 ms so the answer reaches a client still sending, and the
+  bytes received recorded under `rakun.server.last-refused-bytes`. Not one
+  byte of a refused body is handed to the dispatcher.
 - `serve_requests/2` carries the UPGRADE hook (front 20): a request with
   `Upgrade: websocket` is dispatched as usual, and when a member put a fun under
   the `rakun_upgrade_hook` persistent term, that fun gets the socket, the
@@ -1587,6 +1594,51 @@ and `toResponse` for the single-chunk transport. The writer is front 23's, in
 handler mode (no default `Content-Type`, headers appended). `bodyText`,
 `bodyForm` (std's `encoding.formParse`, read with `formField`), `bodyJson`
 (validated by `json.decode`, answered as the RAW TEXT).
+
+## Server actions — `modules/rakun-app/src/actions.bp` (front 24)
+
+`#[serverAction]` on `pub fn name(form: FormData) -> @Task<ActionResult>` (or
+`-> @Task<@Result<ActionResult, E>>`) emits `val __rkAction_<name> =
+rkRegisterAction("<name>", <name>)`; the module imports `rkRegisterAction`.
+Reflection keeps only the return type's head, so the marker refuses a non-`@Task`
+and a `@Task` of anything else fails at its first dispatch. Sidecar
+`rakun_actions.erl`: the registry `{module, name} -> fun` (the module read off the
+fun with `erlang:fun_info/2`), the call (an `ActionResult`, `Ok`, `Error` or a
+raise, a `nav:` signal re-thrown), and the body hook.
+
+- **The id** (envelope version `v: 1`) — `actionId(module, name, buildId)` =
+  `a_` + the first 24 hex of `hash.hmacSha256(rakun.actions.secret, module + "."
+  + name + ":" + buildId)`; `actionIdOf(name)` is what onze hands a form;
+  `resolveAction(id)` compares every registered id with
+  `hash.equalsConstantTime`. The name alone never resolves.
+- **Configuration** — `rakun.actions.field`, `rakun.actions.header` (onze's
+  wire names; no default, no spelling here), `rakun.actions.secret` (≥ 32
+  characters), `rakun.actions.bodyLimit` (1048576, not below 4096).
+  `serveActions()` refuses a bad configuration naming the key, puts the action
+  path in front of front 25's `appResponse` and installs the body hook.
+- **Checks** (`preBodyRefusal`, in the hook before the body is read and again in
+  the dispatcher): no `Origin` or a host that is not `Host` → 403 (no key reaches
+  this), `multipart/form-data` → 415, over the limit → 413. Only POSTs to a PAGE
+  path are actions.
+- **Dispatch** (`dispatchAction(pathname, origin, host, contentType, body,
+  header)`): the header present is the scripted path (its value the id; `refresh`
+  re-renders); `application/json` is the JSON-RPC body (`actions`'
+  `parseRpcBody`, 400 when refused; each argument a form-encoded `name=value`
+  list); otherwise the configured field of the form body. Unknown id → 404,
+  empty. The action runs in its own frame in phase `Action` inside
+  `captureSignals`, the phase restored after. Progressive: a redirect → 303
+  `Location`, `notFound` → 404, else the page re-rendered (buffered, phase
+  `Render`) as the document. Scripted/RPC: 200 with `actions`' `writeEnvelope`
+  (`ok`, `state` = `writeState(message, fields)` or the failure's text,
+  `revalidated` = the frame's slot, `n` = `signalToWire`, `redirect` derived).
+  Refresh: an envelope whose `payload` is the re-rendered page. Queued cookies go
+  out as `Set-Cookie` through front 25's `writeHandlerResponse`.
+- `FormData(fields)` with `formValue(form, name)` (`""` when absent);
+  `ActionResult(message, fields)` with `done()`, `saying(msg)`,
+  `invalid(field, msg)` — an array of pairs, not a `Dict` (a `Dict` built in
+  another module does not dispatch its methods on erlang).
+- **Not here**: the file-level `pub val useServer = true;` is attached by
+  `onze build` (onze front 50); the markup is jhonstart front 67's.
 
 ## Navigation signals — `modules/rakun-app/src/navigation.bp` (front 63)
 
@@ -3238,7 +3290,10 @@ invalidation log and trace, the twin lookup and a RESP double for the tests.
   no session runs the loader and stores nothing.
 - **Verbs** — `revalidateTag(tag)` (marks stale), `updateTag(tag)` (expires now:
   read-your-own-writes), `revalidatePath(path)` (marks the rows tagged
-  `path:<path>`). `rkCachePhase()` reads front 62's phase (`none` outside a
+  `path:<path>`). Inside a server action (phase `action`) the first and the
+  third EXPIRE instead, so the action's re-render (front 24) reads the refilled
+  cache; and inside any request every verb also appends its tag or path to the
+  frame's `revalidated` slot, which front 24 echoes. `rkCachePhase()` reads front 62's phase (`none` outside a
   request): render refuses all three, `updateTag` is legal only in `action`.
   Seams: `revalidatedTags()`, `revalidatedPaths()` (call order, never cleared
   implicitly), `clearRevalidated()`; `cacheTraceOn()` / `cacheTrace()`

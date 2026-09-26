@@ -1045,23 +1045,78 @@ serve_requests(Sock, Dispatcher) ->
     case read_request(Sock, Idle) of
         {ok, Verb, Path, Headers} ->
             true = ets:insert(?CONNS, {self(), busy}),
-            Body = read_body(Sock, Headers, Idle),
             {RawPath, Query} = split_query(Path),
-            Response = run_handler(Dispatcher, Verb, RawPath, Headers, Query, Body),
-            case upgrade_hook(Headers) of
-                {ok, Hook} ->
-                    %% Front 20: an `Upgrade: websocket` request, and a member
-                    %% installed the hook. The dispatcher has already answered
-                    %% (the chain, security, the endpoint's own route); the hook
-                    %% reads that answer, owns the socket from here on, and this
-                    %% process becomes the WebSocket connection until it closes.
-                    _ = Hook(Sock, get(rakun_transport), RawPath, Headers, Response),
-                    close_connection(Sock);
-                none ->
-                    serve_answer(Sock, Dispatcher, Response)
+            case body_hook(Verb, RawPath, Headers) of
+                accept -> serve_request(Sock, Dispatcher, Verb, RawPath, Query, Headers, Idle);
+                {refuse, Status, Text} -> refuse_before_body(Sock, Status, Text)
             end;
         _ ->
             close_connection(Sock)
+    end.
+
+%% Front 24: a member may inspect a request's head BEFORE its body is read
+%% (`rakun_body_hook`: `fun(Verb, Path, HeadersJson) -> <<>> | <<"<status>\n<body>">>`).
+%% A refusal is written with `Connection: close` and the connection closed
+%% without reading one byte of the body; the bytes the socket had received by
+%% then are recorded under `rakun.server.last-refused-bytes`.
+body_hook(Verb, Path, Headers) ->
+    case persistent_term:get(rakun_body_hook, undefined) of
+        undefined -> accept;
+        Hook ->
+            case Hook(Verb, Path, iolist_to_binary(json:encode(Headers))) of
+                <<>> -> accept;
+                Answer ->
+                    [StatusText | Rest] = binary:split(Answer, <<"\n">>),
+                    {refuse, parse_int(StatusText), iolist_to_binary(Rest)}
+            end
+    end.
+
+refuse_before_body(Sock, Status, Text) ->
+    _ = t_send(Sock, [<<"HTTP/1.1 ">>, integer_to_binary(Status), <<" ">>, reason_phrase(Status),
+                      <<"\r\nContent-Length: ">>, integer_to_binary(byte_size(Text)),
+                      <<"\r\nConnection: close\r\n\r\n">>, Text]),
+    %% Half-close, then read and drop at most 8 KiB for 200 ms, so the refusal
+    %% reaches a client still sending before the close resets the connection.
+    Received = case get(rakun_transport) of
+                   ssl -> 0;
+                   _ ->
+                       _ = gen_tcp:shutdown(Sock, write),
+                       _ = inet:setopts(Sock, [{packet, raw}]),
+                       drain_upto(Sock, 8192, erlang:monotonic_time(millisecond) + 200),
+                       case inet:getstat(Sock, [recv_oct]) of
+                           {ok, [{recv_oct, N}]} -> N;
+                           _ -> 0
+                       end
+               end,
+    _ = set_prop(<<"rakun.server.last-refused-bytes">>, integer_to_binary(Received)),
+    close_connection(Sock).
+
+drain_upto(_Sock, Left, _Deadline) when Left =< 0 -> ok;
+drain_upto(Sock, Left, Deadline) ->
+    Wait = Deadline - erlang:monotonic_time(millisecond),
+    case Wait > 0 of
+        false -> ok;
+        true ->
+            case gen_tcp:recv(Sock, 0, Wait) of
+                {ok, Data} -> drain_upto(Sock, Left - byte_size(Data), Deadline);
+                _ -> ok
+            end
+    end.
+
+serve_request(Sock, Dispatcher, Verb, RawPath, Query, Headers, Idle) ->
+    Body = read_body(Sock, Headers, Idle),
+    Response = run_handler(Dispatcher, Verb, RawPath, Headers, Query, Body),
+    case upgrade_hook(Headers) of
+        {ok, Hook} ->
+            %% Front 20: an `Upgrade: websocket` request, and a member
+            %% installed the hook. The dispatcher has already answered
+            %% (the chain, security, the endpoint's own route); the hook
+            %% reads that answer, owns the socket from here on, and this
+            %% process becomes the WebSocket connection until it closes.
+            _ = Hook(Sock, get(rakun_transport), RawPath, Headers, Response),
+            close_connection(Sock);
+        none ->
+            serve_answer(Sock, Dispatcher, Response)
     end.
 
 upgrade_hook(Headers) ->
@@ -1075,18 +1130,18 @@ upgrade_hook(Headers) ->
     end.
 
 serve_answer(Sock, Dispatcher, Response) ->
-            %% A handler that streamed (front 23's chunk writer) already wrote
-            %% its head and its chunks; the acceptor writes nothing more.
-            KeepAlive = case get(rakun_streamed) of
-                            true -> true;
-                            _ -> write_response(Sock, Response)
-                        end,
-            _ = clear_reply_headers(),
-            Draining = persistent_term:get(rakun_draining, false),
-            case KeepAlive andalso not Draining of
-                true -> serve_requests(Sock, Dispatcher);
-                false -> close_connection(Sock)
-            end.
+    %% A handler that streamed (front 23's chunk writer) already wrote
+    %% its head and its chunks; the acceptor writes nothing more.
+    KeepAlive = case get(rakun_streamed) of
+                    true -> true;
+                    _ -> write_response(Sock, Response)
+                end,
+    _ = clear_reply_headers(),
+    Draining = persistent_term:get(rakun_draining, false),
+    case KeepAlive andalso not Draining of
+        true -> serve_requests(Sock, Dispatcher);
+        false -> close_connection(Sock)
+    end.
 
 close_connection(Sock) ->
     _ = ets:delete(?CONNS, self()),
@@ -1205,7 +1260,10 @@ write_response(Sock, #{status := Status, body := Body}) ->
 reason_phrase(200) -> <<"OK">>;
 reason_phrase(201) -> <<"Created">>;
 reason_phrase(400) -> <<"Bad Request">>;
+reason_phrase(403) -> <<"Forbidden">>;
 reason_phrase(404) -> <<"Not Found">>;
+reason_phrase(413) -> <<"Content Too Large">>;
+reason_phrase(415) -> <<"Unsupported Media Type">>;
 reason_phrase(500) -> <<"Internal Server Error">>;
 reason_phrase(503) -> <<"Service Unavailable">>;
 reason_phrase(_) -> <<"OK">>.

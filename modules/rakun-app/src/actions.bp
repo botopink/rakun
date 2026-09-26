@@ -1,0 +1,412 @@
+//// rakun-app — server actions (front 24): `#[serverAction]`, the action id,
+//// `actionIdOf`, the dispatcher, and the envelope written with the bundled
+//// library `actions`.
+////
+//// THE ID. `a_` + the first 24 hex characters of
+//// `hash.hmacSha256(rakun.actions.secret, module + "." + name + ":" + buildId)`
+//// — stable for a build (any node of it resolves a form another rendered), not
+//// guessable from the name (a `pub fn` nobody marked is not reachable by
+//// naming it), computed only here. The module is the one the function value
+//// was declared in (`rakun_actions:register/2` reads it off the fun). A
+//// request's id is compared with every registered id by std's
+//// `hash.equalsConstantTime`.
+////
+//// THE WIRE NAMES are configuration onze sets, never spelled here:
+//// `rakun.actions.field` (the hidden form field) and `rakun.actions.header`
+//// (the scripted path's header). With either unset — or `rakun.actions.secret`
+//// shorter than 32 characters, or `rakun.actions.bodyLimit` below 4096 —
+//// `serveActions()` refuses to start, naming the key.
+////
+//// THE PATH. `serveActions()` makes the app fallback (front 25's
+//// `appResponse`) answer a POST to a PAGE path as an action, and installs the
+//// body hook front 04's connection process asks before reading a body. For a
+//// POST to a page path the hook refuses, without reading the body:
+////
+//// | condition | answer |
+//// |---|---|
+//// | no `Origin` header, or its host is not `Host` | 403 |
+//// | `multipart/form-data` | 415 |
+//// | `Content-Length` over the limit (1 MiB default) | 413 |
+////
+//// There is no key, variable or argument that turns the first row off. The
+//// dispatcher (`dispatchAction`) repeats the three checks, so a request that
+//// never met the hook (`rkDispatchHttp`) meets them too, then: decode the
+//// body, resolve the id (404, empty, when unknown — no list of known ids),
+//// run the action in phase `Action` (front 62) inside `captureSignals` (front
+//// 63), restore the phase, and answer:
+////
+//// | path | answer |
+//// |---|---|
+//// | progressive (no header) | a redirect → 303 `Location`; `notFound` → 404; else the page re-rendered at the pathname (phase `Render`), its document |
+//// | scripted (the header) | 200, the `actions` envelope (`application/json`) |
+//// | refresh (the header = `refreshValue()`, no id) | 200, an envelope whose `payload` is the page re-rendered, `state` empty |
+////
+//// Revalidation happens inside the action, so the re-render reads the
+//// refilled cache. The envelope's `revalidated` is the frame's `revalidated`
+//// slot, which rakun-cache writes; `n` is `routing`'s `signalToWire` of the
+//// captured outcome, and the envelope derives `redirect` from it.
+
+import {hash, encoding} from "std";
+import {actions: {ActionEnvelope, writeEnvelope, writeState, parseRpcBody, RpcCall, refreshValue}} from "actions";
+import {navigation.NavOutcome, navigation.NavKind, navigation.signalToWire} from "routing";
+import {
+    Request, Response, rkProp, requestLive, beginRequest, endRequest, RequestScope, RequestPhase,
+    setPhase, requestPhase, rkReqSlot, rkReqPutSlot, rkReqCookieBlob, rkMakeRequest, toI32,
+} from "rakun";
+import {chunkWriter, servePage, matchPage, PageMatch, buildId, rkSsrBegin, rkSsrBody, rkSsrStatus, rkSsrHeader} from "ssr";
+import {captureSignals, takeSignal} from "navigation";
+import {appResponse, HandlerResponse, writeHandlerResponse} from "route_handler";
+
+// ── the values ──────────────────────────────────────────────────────────────
+
+// A form body: `field` answers `""` for an absent field, as `Request.param`
+// does — absent and empty are one thing to a validator.
+pub type FormData(fields: Array<#(string, string)>)
+
+pub fn formValue(form: FormData, name: string) -> string {
+    val hit = form.fields.filter({ f -> f._0 == name });
+    val first = hit.at(0).unwrapOr(#("", ""));
+    return first._1;
+}
+
+// What an action answers: a form-level message and per-field messages — the
+// `state` grammar of the bundled library `actions` (`message`, `f.<name>`).
+pub type ActionResult(message: string, fields: Array<#(string, string)>) {
+    pub fn done() -> ActionResult {
+        return ActionResult(message: "", fields: []);
+    }
+
+    pub fn saying(message: string) -> ActionResult {
+        return ActionResult(message: message, fields: []);
+    }
+
+    pub fn invalid(field: string, message: string) -> ActionResult {
+        return ActionResult(message: "", fields: [#(field, message)]);
+    }
+}
+
+// What the dispatcher answers, before it is written.
+pub type ActionOutcome(
+    status: i32,
+    contentType: string,
+    body: string,
+    location: string,
+    cookies: string,
+)
+
+// ── the host cells ──────────────────────────────────────────────────────────
+
+#[@External.Erlang("rakun_actions", "register")]
+pub declare fn rkRegisterAction<T>(name: string, run: fn(form: FormData) -> T) -> i32;
+
+// `module|name`, sorted.
+#[@External.Erlang("rakun_actions", "registered")]
+pub declare fn rkActionsRegistered() -> string[];
+
+#[@External.Erlang("rakun_actions", "run_of")]
+declare fn rkActionRunOf<T>(module: string, name: string) -> fn(form: FormData) -> T;
+
+// `ok` or `failed`; the value is kept for `rkActionResult` / `rkActionFailure`.
+// A navigation signal is re-thrown untouched.
+#[@External.Erlang("rakun_actions", "call")]
+declare fn rkActionCall<T>(run: fn(form: FormData) -> T, form: FormData) -> string;
+
+#[@External.Erlang("rakun_actions", "result")]
+declare fn rkActionResult() -> ActionResult;
+
+#[@External.Erlang("rakun_actions", "failure")]
+declare fn rkActionFailure() -> string;
+
+#[@External.Erlang("rakun_actions", "install_body_hook")]
+declare fn rkActionsInstallBodyHook(hook: fn(verb: string, path: string, headersJson: string) -> string) -> i32;
+
+#[@External.Erlang("rakun_actions", "uninstall_body_hook")]
+pub declare fn rkActionsUninstallBodyHook() -> i32;
+
+// How many request bodies the hook let the listener read.
+#[@External.Erlang("rakun_actions", "admitted")]
+pub declare fn rkActionsAdmitted() -> i32;
+
+#[@External.Erlang("rakun_actions", "reset")]
+pub declare fn rkActionsReset() -> i32;
+
+#[@External.Erlang("rakun_ssr", "begin_handler")]
+declare fn rkActBeginHandler() -> i32;
+
+// Runs `work` with the connection's socket hidden from the chunk writer, so a
+// page rendered for an envelope or a re-render is buffered, not streamed.
+#[@External.Erlang("""(fun(__W) -> __S = erase(rakun_conn_socket), try __W() after case __S of undefined -> ok; _ -> put(rakun_conn_socket, __S) end end end)($0)""")]
+declare fn rkActWithoutSocket<T>(work: fn() -> T) -> T;
+
+// A header of the JSON object front 04 hands the body hook (names lowercased).
+#[@External.Erlang("""(fun(__J, __N) -> case catch json:decode(__J) of #{} = __M -> case maps:get(__N, __M, <<>>) of __V when is_binary(__V) -> __V; _ -> <<>> end; _ -> <<>> end end)($0, $1)""")]
+declare fn rkActHeaderOf(headersJson: string, name: string) -> string;
+
+#[@External.Erlang("rakun_ssr", "set_fallback")]
+declare fn rkActSetFallback(dispatch: fn(req: Request) -> @Task<Response>) -> i32;
+
+#[@External.Erlang("""(fun(__R) -> maps:get(verb, __R) end)($0)""")]
+declare fn rkActVerb(req: Request) -> string;
+
+// ── the marker ──────────────────────────────────────────────────────────────
+//
+// `#[serverAction]` on `pub fn name(form: FormData) -> @Task<ActionResult>`
+// (or `-> @Task<@Result<ActionResult, E>>`, whose `Error` is a failed action)
+// emits `val __rkAction_<name> = rkRegisterAction("<name>", <name>);` into
+// the fn's module, which imports `rkRegisterAction`. Reflection keeps only the
+// return type's HEAD, so a `@Task` of anything else is refused at its first
+// dispatch, not here. A decorator body is comment-free and calls no function.
+
+pub fn serverAction(comptime decl: @Decl) {
+    if (decl.kind != DeclKind.Fn) decl.fail("#[serverAction] must annotate a function - an action is fn(form: FormData) -> @Task<ActionResult>");
+    if (decl.returnType != "Task") decl.fail("#[serverAction] " + decl.name + " returns `" + decl.returnType + "` - an action returns @Task<ActionResult> or @Task<@Result<ActionResult, E>>, so the dispatcher always awaits it");
+    @emit("val __rkAction_" + decl.name + " = rkRegisterAction(\"" + decl.name + "\", " + decl.name + ");");
+}
+
+// ── settings ────────────────────────────────────────────────────────────────
+
+pub fn defaultBodyLimit() -> i32 {
+    return 1048576;
+}
+
+pub fn fieldName() -> string {
+    return rkProp("rakun.actions.field");
+}
+
+pub fn headerName() -> string {
+    return rkProp("rakun.actions.header");
+}
+
+pub fn bodyLimit() -> i32 {
+    val raw = rkProp("rakun.actions.bodyLimit").trim();
+    if (raw == "") return defaultBodyLimit();
+    val digits = raw.split("").filter({ c -> "0123456789".contains(c) == false }).length == 0;
+    if (digits == false || raw.length() > 10) return -1;
+    return toI32(raw);
+}
+
+pub fn actionsConfigProblem() -> string {
+    if (fieldName() == "") return "rakun-app: rakun.actions.field is not set - the dispatcher reads the action id from the form field onze configures, and there is no default";
+    if (headerName() == "") return "rakun-app: rakun.actions.header is not set - the dispatcher reads the scripted path's header onze configures, and there is no default";
+    if (rkProp("rakun.actions.secret").length() < 32) return "rakun-app: rakun.actions.secret must be set to at least 32 characters - it keys every action id";
+    val limit = bodyLimit();
+    if (limit < 4096) return "rakun-app: rakun.actions.bodyLimit must be a whole number of bytes, at least 4096";
+    return "";
+}
+
+// ── ids ─────────────────────────────────────────────────────────────────────
+
+pub fn actionId(module: string, name: string, buildId: string) -> string {
+    val mac = hash.hmacSha256(rkProp("rakun.actions.secret"), module + "." + name + ":" + buildId);
+    return "a_" + mac.slice(0, 24);
+}
+
+fn moduleOf(entry: string) -> string {
+    return entry.split("|").at(0) ?? "";
+}
+
+fn nameOf(entry: string) -> string {
+    return entry.split("|").at(1) ?? "";
+}
+
+pub fn unknownActionProblem(name: string) -> string {
+    return "rakun-app: no server action is registered as `" + name + "` - a form pointing at nothing is a bug";
+}
+
+// The id a form carries for the registered action `name`; an unknown name
+// raises. Two modules registering one name: the first in module order.
+pub fn actionIdOf(name: string) -> string {
+    val hits = rkActionsRegistered().filter({ e -> nameOf(e) == name });
+    if (hits.length == 0) @panic(unknownActionProblem(name));
+    val entry = hits.at(0) ?? "";
+    return actionId(moduleOf(entry), name, buildId());
+}
+
+// The registered entry whose id equals `id`, `""` when none. Every entry is
+// compared, in constant time, whatever matched first.
+pub fn resolveAction(id: string) -> string {
+    var found = "";
+    for (rkActionsRegistered()) { e ->
+        val same = hash.equalsConstantTime(actionId(moduleOf(e), nameOf(e), buildId()), id);
+        if (same && found == "") found = e;
+    };
+    return found;
+}
+
+// ── the checks ──────────────────────────────────────────────────────────────
+
+fn hostOfOrigin(origin: string) -> string {
+    val rest = if (origin.contains("://")) origin.split("://").at(1) ?? "" else origin;
+    return rest.split("/").at(0) ?? "";
+}
+
+// The refusal a POST to a page earns before its body is read, `""` when none.
+pub fn preBodyRefusal(origin: string, host: string, contentType: string, contentLength: i32) -> string {
+    if (origin == "" || host == "" || hostOfOrigin(origin) != host) return "403\n";
+    if (contentType.toLower().startsWith("multipart/form-data")) return "415\nmultipart/form-data is not accepted - botopink has no byte type";
+    if (contentLength > bodyLimit()) return "413\n";
+    return "";
+}
+
+fn isPage(path: string) -> bool {
+    val m: PageMatch = matchPage(path);
+    return m.record != "";
+}
+
+fn bodyHook(verb: string, path: string, headersJson: string) -> string {
+    if (verb != "POST" || isPage(path) == false) return "";
+    val length = rkActHeaderOf(headersJson, "content-length");
+    val n = if (length == "") 0 else toI32(length);
+    return preBodyRefusal(rkActHeaderOf(headersJson, "origin"), rkActHeaderOf(headersJson, "host"), rkActHeaderOf(headersJson, "content-type"), n);
+}
+
+// ── running one action ──────────────────────────────────────────────────────
+
+fn outcome(status: i32, contentType: string, body: string) -> ActionOutcome {
+    return ActionOutcome(status: status, contentType: contentType, body: body, location: "", cookies: "");
+}
+
+fn refusal(text: string) -> ActionOutcome {
+    val lines = text.split("\n");
+    val head: string = lines.at(0) ?? "500";
+    val status: i32 = toI32(head);
+    val rest: string = lines.at(1) ?? "";
+    return outcome(status, "", rest);
+}
+
+fn formOf(pairs: Array<#(string, string)>) -> FormData {
+    return FormData(fields: pairs);
+}
+
+// Each RPC argument is a form-encoded `name=value` list; the arguments are
+// read in order into one form, so an RPC call and the form POST it stands for
+// give the action the same fields.
+fn rpcForm(args: Array<string>) -> FormData {
+    var pairs: Array<#(string, string)> = [];
+    for (args) { a -> for (encoding.formParse(a)) { p -> pairs.push(p); }; };
+    return FormData(fields: pairs);
+}
+
+fn envelopeOf(ok: bool, state: string, revalidated: Array<string>, n: string, payload: string) -> string {
+    return writeEnvelope(ActionEnvelope(ok: ok, state: state, revalidated: revalidated, n: n, payload: payload));
+}
+
+fn renderPage(pathname: string) -> @Task<i32> {
+    val _b = rkSsrBegin();
+    val status: i32 = await servePage(rkMakeRequest("GET", pathname, "{}", "{}", "{}", ""), chunkWriter());
+    return status;
+}
+
+// The page at `pathname` re-rendered (phase `Render`, front 23), buffered.
+fn rerender(pathname: string) -> @Task<ActionOutcome> {
+    val status: i32 = await rkActWithoutSocket({ -> renderPage(pathname) });
+    return outcome(status, rkSsrHeader("content-type"), rkSsrBody());
+}
+
+// Runs the resolved action inside the current frame in phase `Action`.
+fn runAction(entry: string, form: FormData) -> ActionRun {
+    val run: fn(form: FormData) -> ActionResult = rkActionRunOf(moduleOf(entry), nameOf(entry));
+    val previous: RequestPhase = requestPhase();
+    val _p = setPhase(RequestPhase.Action);
+    val _r = rkReqPutSlot("revalidated", "");
+    val word: string = captureSignals({ -> rkActionCall(run, form) }, "signal");
+    val _q = setPhase(previous);
+    val out: NavOutcome = takeSignal();
+    val revalidated = rkReqSlot("revalidated").split("\n").filter({ r -> r != "" });
+    val state: string = if (word == "ok") stateOf(rkActionResult()) else if (word == "failed") writeState(rkActionFailure(), []) else writeState("", []);
+    return ActionRun(ok: word != "failed", state: state, revalidated: revalidated, signal: out);
+}
+
+pub type ActionRun(ok: bool, state: string, revalidated: Array<string>, signal: NavOutcome)
+
+fn stateOf(r: ActionResult) -> string {
+    return writeState(r.message, r.fields);
+}
+
+fn isNone(out: NavOutcome) -> bool {
+    return case out.kind {
+        None -> true;
+        _ -> false;
+    };
+}
+
+// The dispatcher. `header` is the value of the configured header (`""` when
+// absent): its presence is the scripted path; `refreshValue()` in it with no
+// id is a refresh.
+pub fn dispatchAction(pathname: string, origin: string, host: string, contentType: string, body: string, header: string) -> @Task<ActionOutcome> {
+    val problem = actionsConfigProblem();
+    if (problem != "") @panic(problem);
+    val early = preBodyRefusal(origin, host, contentType, body.length());
+    if (early != "") return refusal(early);
+    val opened = requestLive() == false;
+    val _o = if (opened) beginRequest(RequestScope(id: "action", phase: RequestPhase.Action, method: "POST", path: pathname, query: "", headersWire: "", strict: false)) else 0;
+    val answer: ActionOutcome = await dispatchInFrame(pathname, contentType, body, header);
+    val cookies: string = if (opened) endRequest() else rkReqCookieBlob();
+    return ActionOutcome(status: answer.status, contentType: answer.contentType, body: answer.body, location: answer.location, cookies: cookies);
+}
+
+fn dispatchInFrame(pathname: string, contentType: string, body: string, header: string) -> @Task<ActionOutcome> {
+    val scripted = header != "";
+    if (scripted && header == refreshValue()) {
+        val page: ActionOutcome = await rerender(pathname);
+        return outcome(200, "application/json", envelopeOf(true, "", [], "", page.body));
+    };
+    val isRpc = contentType.toLower().startsWith("application/json");
+    val call = parseRpcBody(if (isRpc) body else "");
+    if (isRpc && call.isError()) return outcome(400, "", "");
+    val rpc: RpcCall = call.unwrapOr(RpcCall(id: "", args: []));
+    val pairs = if (isRpc) [] else encoding.formParse(body);
+    val form: FormData = if (isRpc) rpcForm(rpc.args) else formOf(pairs);
+    val id = if (isRpc) rpc.id else if (scripted) header else formValue(form, fieldName());
+    val entry = resolveAction(id);
+    if (entry == "") return outcome(404, "", "");
+    val r: ActionRun = runAction(entry, form);
+    val n = signalToWire(r.signal);
+    if (scripted || isRpc) return outcome(200, "application/json", envelopeOf(r.ok, r.state, r.revalidated, n, ""));
+    if (isNone(r.signal) == false) {
+        val status = case r.signal.kind {
+            Redirect -> 303;
+            _ -> 404;
+        };
+        val location = case r.signal.kind {
+            Redirect -> r.signal.location;
+            _ -> "";
+        };
+        return ActionOutcome(status: status, contentType: "", body: "", location: location, cookies: "");
+    };
+    val doc: ActionOutcome = await rerender(pathname);
+    return doc;
+}
+
+// ── the app path ────────────────────────────────────────────────────────────
+
+pub fn actionsResponse(req: Request) -> @Task<Response> {
+    if (rkActVerb(req) != "POST" || isPage(req.path) == false) {
+        val app: Response = await appResponse(req);
+        return app;
+    };
+    val o: ActionOutcome = await dispatchAction(req.path, req.header("origin"), req.header("host"), req.header("content-type"), req.body(), req.header(headerName()));
+    return writeOutcome(o);
+}
+
+// Written through front 23's writer in handler mode (front 25's
+// `writeHandlerResponse`): the status, `Content-Type`, `Location`, every
+// queued `Set-Cookie`, the body.
+fn writeOutcome(o: ActionOutcome) -> Response {
+    val _b = rkActBeginHandler();
+    var headers: Array<#(string, string)> = [];
+    if (o.contentType != "") headers.push(#("Content-Type", o.contentType));
+    if (o.location != "") headers.push(#("Location", o.location));
+    val chunks: Array<string> = if (o.body == "") [] else [o.body];
+    val status = writeHandlerResponse(HandlerResponse(status: o.status, headers: headers, chunks: chunks, tasks: []), false, o.cookies);
+    return Response(status: status, body: rkSsrBody());
+}
+
+// Refuses a bad configuration, then installs the action path in front of the
+// app fallback and the body hook in front of the listener's body read.
+pub fn serveActions() -> i32 {
+    val problem = actionsConfigProblem();
+    if (problem != "") @panic(problem);
+    val _h = rkActionsInstallBodyHook({ verb, path, headersJson -> bodyHook(verb, path, headersJson) });
+    return rkActSetFallback({ req -> actionsResponse(req) });
+}

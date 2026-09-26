@@ -2,7 +2,7 @@
 //// (front 12 step 5), with the test seams front 24 asserts through.
 
 import {testing.asserts} from "std";
-import {rkSetProp, rkPropInt, beginRequest, endRequest, RequestScope, RequestPhase} from "rakun";
+import {rkSetProp, rkPropInt, beginRequest, endRequest, RequestScope, RequestPhase, rkReqSlot} from "rakun";
 import {CacheScope, cachePolicy, cacheLife, cacheLifeOf, cacheThrough, resetCaches, drainRefreshes, revalidateTag, updateTag, revalidatePath, revalidatedPaths, revalidatedTags, clearRevalidated, rkCachePhase, cacheTraceOn, cacheTrace} from "cache";
 
 fn boot() -> i32 {
@@ -130,4 +130,31 @@ test "revalidate: the seams report what was invalidated, in call order, and clea
     assert revalidatedTags().join(",") == "price-42,products";
     val _z = clearRevalidated();
     assert revalidatedTags().length == 0 && revalidatedPaths().length == 0;
+}
+
+test "revalidate: inside a request every invalidation is also noted on the frame, in call order" {
+    val _b = boot();
+    val _o = open(RequestPhase.Action);
+    val _u = updateTag("price-42");
+    val _p = revalidatePath("/blog");
+    val _t = revalidateTag("products");
+    val noted = rkReqSlot("revalidated");
+    val _e = endRequest();
+    assert noted == "price-42\n/blog\nproducts";
+}
+
+test "revalidate: inside a server action revalidateTag and revalidatePath expire, so the next read is fresh" {
+    val _b = boot();
+    assert products() == "v1";
+    val page = cachePolicy(CacheScope.Shared, "rv-action-page", cacheLifeOf(0, 600, 600), ["path:/blog"]);
+    assert cacheThrough(page, ["doc"], { -> "doc-" + load() }) == "doc-v2";
+    val _o = open(RequestPhase.Action);
+    val t = revalidateTag("products");
+    val p = revalidatePath("/blog");
+    val afterTag = products();
+    val afterPath = cacheThrough(page, ["doc"], { -> "doc-" + load() });
+    val _e = endRequest();
+    assert t == 1 && p == 1;
+    assert afterTag == "v3";
+    assert afterPath == "doc-v4";
 }
