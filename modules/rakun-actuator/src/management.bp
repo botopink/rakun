@@ -1,0 +1,511 @@
+//// rakun-actuator — who may reach the actuator, on which listener, and what a
+//// response may contain; liveness and readiness (front 76).
+////
+//// FOUR GATES, the cheapest and least informative first — an endpoint that
+//// fails any of the first three answers EXACTLY like an id nobody registered
+//// (front 11's `notFoundProblem`), so a 404/403 difference discloses nothing:
+////
+////   1. LISTENER — with `rakun.management.server.port` set (`-1` included) the
+////      actuator answers only on the management listener; on the application
+////      listener every actuator path is the unknown-id 404.
+////   2. EXPOSURE — `rakun.management.endpoints.web.exposure.include` (default
+////      `health`, `*` for every id, read at request time so a late endpoint is
+////      covered) minus `.exclude` (which wins, over `*` too). An include naming
+////      an id nobody registered refuses the boot, listing the registered ids.
+////   3. ACCESS — `rakun.management.endpoint.<id>.access` (else
+////      `rakun.management.endpoints.access.default`, else `read-only`; `shutdown`
+////      defaults to `none`) ∈ none | read-only | unrestricted, CAPPED by
+////      `rakun.management.endpoints.access.max-permitted` (default
+////      `unrestricted`). `none` is the 404; `read-only` answers GET and 405s
+////      everything else. No key raises an endpoint above the ceiling.
+////   4. AUTHORIZATION — front 10's chain, as for every route.
+////
+//// SANITIZATION — `env` and `configprops` go through ONE filter: every
+//// `{"key", "value"}` object shows its key and, under
+//// `rakun.management.endpoint.<id>.show-values` = never (default) |
+//// when-authorized (`.roles`) | always, its value or `******`; a key matching
+//// the pattern set is `******` even under `always`. Patterns are additive only
+//// (`rakun.management.endpoint.sanitize.additional-keys`).
+////
+//// HEALTH GROUPS — `rakun.management.endpoint.health.group.<name>.include`
+//// (`.show-details`, `.roles`, `.additional-path=server:/path`) at
+//// `<base>/health/<name>`. PROBES
+//// (`rakun.management.endpoint.health.probes.enabled=true`) add the `liveness`
+//// (livenessState) and `readiness` (readinessState) groups and `/livez`,
+//// `/readyz` on the application listener. Liveness may include only local
+//// indicators (livenessState, ping, diskSpace). Readiness is refusing until
+//// front 06's ApplicationReady and from the first step of front 07's graceful
+//// shutdown (`rakun_probes:readiness_drained/0`, which holds for
+//// `rakun.lifecycle.pre-drain-period`, default 5000 ms; 0 is correct only
+//// where the balancer reacts synchronously).
+
+import {Request, Response, HttpMethod, rkProp, rkRegisterRoute, rkDispatchHttp, toI32, event, publishEvent} from "rakun";
+import {rkRegisterListener} from "rakun/events";
+import {json} from "std";
+import {problemFor, problemResponse, withHeader} from "rakun-web";
+import {EndpointResponse, Health, rkRegisterEndpoint, rkRegisterHealthIndicator, endpointIds, healthIndicatorIds} from "rakun-actuator-api";
+import {installExposure, basePath, idForSegment, notFoundProblem, render, readEndpoint, filtered} from "endpoint_host";
+import {HealthReport, ComponentHealth, aggregateStatus, httpStatusFor, healthTimeoutMillis, componentOf, rkActuatorRunHealth} from "health";
+
+// ── host cells ──────────────────────────────────────────────────────────────
+
+#[@External.Erlang("rakun_probes", "readiness")]
+pub declare fn rkProbesReadiness() -> string;
+
+#[@External.Erlang("rakun_probes", "set_readiness")]
+declare fn rkProbesSetReadiness(accepting: bool) -> i32;
+
+#[@External.Erlang("rakun_probes", "liveness")]
+pub declare fn rkProbesLiveness() -> string;
+
+#[@External.Erlang("rakun_probes", "set_liveness")]
+declare fn rkProbesSetLiveness(correct: bool) -> i32;
+
+#[@External.Erlang("rakun_probes", "refusing_since")]
+pub declare fn rkProbesRefusingSince() -> i32;
+
+#[@External.Erlang("rakun_probes", "role")]
+pub declare fn rkProbesRole() -> string;
+
+#[@External.Erlang("rakun_probes", "set_role")]
+declare fn rkProbesSetRole(role: string) -> i32;
+
+#[@External.Erlang("rakun_probes", "sanitize")]
+declare fn rkProbesSanitize(body: string, mode: string, authorized: bool, patterns: string[]) -> string;
+
+#[@External.Erlang("rakun_probes", "authorities")]
+pub declare fn rkProbesAuthorities() -> string[];
+
+#[@External.Erlang("rakun_probes", "filter_put")]
+declare fn rkProbesFilterPut(filter: fn(id: string, body: string) -> string) -> i32;
+
+#[@External.Erlang("rakun_probes", "env_json")]
+declare fn rkProbesEnvJson() -> string;
+
+#[@External.Erlang("rakun_probes", "prop_keys")]
+declare fn rkProbesPropKeys(prefix: string) -> string[];
+
+#[@External.Erlang("rakun_probes", "warn")]
+declare fn rkProbesWarn(text: string) -> i32;
+
+#[@External.Erlang("rakun_probes", "warnings")]
+pub declare fn rkProbesWarnings() -> string[];
+
+#[@External.Erlang("rakun_probes", "later")]
+declare fn rkProbesLater(millis: i32, work: fn() -> i32) -> i32;
+
+#[@External.Erlang("rakun_probes", "reset")]
+pub declare fn rkProbesReset() -> i32;
+
+#[@External.Erlang("rakun_runtime", "serve_management")]
+declare fn rkServeManagement(port: i32, dispatcher: fn(method: string, path: string, headersJson: string, queryJson: string, body: string) -> Response) -> i32;
+
+#[@External.Erlang("rakun_runtime", "stop_management")]
+pub declare fn rkStopManagement() -> i32;
+
+#[@External.Erlang("rakun_runtime", "management_port")]
+pub declare fn rkManagementPort() -> i32;
+
+fn csv(raw: string) -> string[] {
+    return raw.split(",").map({ s -> s.trim() }).filter({ s -> s != "" });
+}
+
+fn has(xs: string[], x: string) -> bool {
+    return xs.indexOf(x) >= 0;
+}
+
+// ── gate 2: exposure ────────────────────────────────────────────────────────
+
+pub fn exposureInclude() -> string[] {
+    val raw = rkProp("rakun.management.endpoints.web.exposure.include").trim();
+    return if (raw == "") ["health"] else csv(raw);
+}
+
+pub fn exposureExclude() -> string[] {
+    return csv(rkProp("rakun.management.endpoints.web.exposure.exclude"));
+}
+
+pub fn exposedByConfig(id: string) -> bool {
+    val ex = exposureExclude();
+    if (has(ex, id) || has(ex, "*")) return false;
+    val inc = exposureInclude();
+    return has(inc, "*") || has(inc, id);
+}
+
+// `""`, or the refusal for an include naming an id nobody registered.
+pub fn exposureProblem() -> string {
+    val ids = endpointIds();
+    val absent = exposureInclude().filter({ i -> i != "*" && has(ids, i) == false });
+    if (absent.length == 0) return "";
+    return "rakun-actuator: rakun.management.endpoints.web.exposure.include names `" + absent.join("`, `") + "`, which is not a registered endpoint - registered: " + ids.join(", ");
+}
+
+// ── gate 3: access ──────────────────────────────────────────────────────────
+
+pub fn accessLevels() -> string[] {
+    return ["none", "read-only", "unrestricted"];
+}
+
+fn rank(level: string) -> i32 {
+    return accessLevels().indexOf(level);
+}
+
+pub fn accessLevelProblem(key: string, value: string) -> string {
+    return "rakun-actuator: " + key + " is `" + value + "` - the levels are none, read-only and unrestricted";
+}
+
+fn level(key: string, fallback: string) -> string {
+    val raw = rkProp(key).trim();
+    val v = if (raw == "") fallback else raw;
+    if (rank(v) < 0) @panic(accessLevelProblem(key, v));
+    return v;
+}
+
+pub fn configuredAccess(id: string) -> string {
+    val dflt = if (id == "shutdown") "none" else level("rakun.management.endpoints.access.default", "read-only");
+    return level("rakun.management.endpoint." + id + ".access", dflt);
+}
+
+pub fn maxPermitted() -> string {
+    return level("rakun.management.endpoints.access.max-permitted", "unrestricted");
+}
+
+// The configured level, capped by the ceiling.
+pub fn effectiveAccess(id: string) -> string {
+    val configured = configuredAccess(id);
+    val ceiling = maxPermitted();
+    return if (rank(configured) > rank(ceiling)) ceiling else configured;
+}
+
+// Every key this front reads, as patterns (`<id>` and `<name>` stand for a
+// segment). The ceiling's absence of an escape hatch is asserted against it.
+pub fn managementKeys() -> string[] {
+    return [
+        "rakun.management.endpoints.web.exposure.include",
+        "rakun.management.endpoints.web.exposure.exclude",
+        "rakun.management.endpoint.<id>.access",
+        "rakun.management.endpoints.access.default",
+        "rakun.management.endpoints.access.max-permitted",
+        "rakun.management.server.port",
+        "rakun.management.server.address",
+        "rakun.management.server.ssl.bundle",
+        "rakun.management.endpoint.<id>.show-values",
+        "rakun.management.endpoint.<id>.roles",
+        "rakun.management.endpoint.sanitize.additional-keys",
+        "rakun.management.endpoint.health.show-details",
+        "rakun.management.endpoint.health.roles",
+        "rakun.management.endpoint.health.group.<name>.include",
+        "rakun.management.endpoint.health.group.<name>.show-details",
+        "rakun.management.endpoint.health.group.<name>.roles",
+        "rakun.management.endpoint.health.group.<name>.additional-path",
+        "rakun.management.endpoint.health.probes.enabled",
+        "rakun.lifecycle.pre-drain-period",
+    ];
+}
+
+// ── gate 1: the listener ────────────────────────────────────────────────────
+
+pub fn separateManagement() -> bool {
+    return rkProp("rakun.management.server.port").trim() != "";
+}
+
+pub fn listenerFor(id: string) -> string {
+    val p = rkProp("rakun.management.server.port").trim();
+    if (p == "") return "server";
+    if (p == "-1") return "none";
+    return "management";
+}
+
+// All three gates for a GET.
+pub fn reachable(id: string) -> bool {
+    if (separateManagement() && rkProbesRole() != "management") return false;
+    return exposedByConfig(id) && effectiveAccess(id) != "none";
+}
+
+// The management listener's dispatcher: marks its connection process, then
+// serves the actuator paths through the one route table and 404s the rest.
+pub fn managementDispatch(method: string, path: string, headersJson: string, queryJson: string, body: string) -> Response {
+    val _r = rkProbesSetRole("management");
+    val base = basePath();
+    if (path == base || path.startsWith(base + "/")) return rkDispatchHttp(method, path, headersJson, queryJson, body);
+    return notFoundProblem(path, path);
+}
+
+// Starts the management listener when a port is set (`-1`: none); answers its
+// bound port, or 0.
+pub fn startManagementListener() -> i32 {
+    val p = rkProp("rakun.management.server.port").trim();
+    if (p == "" || p == "-1") return 0;
+    return rkServeManagement(toI32(p), { m, path, h, q, b -> managementDispatch(m, path, h, q, b) });
+}
+
+// ── writes: the verbs past GET ──────────────────────────────────────────────
+
+pub fn serveWrite(req: Request) -> Response {
+    val segment: string = req.param("endpoint");
+    if (req.path != basePath() + "/" + segment) return notFoundProblem(segment, req.path);
+    val id = idForSegment(segment);
+    if (id == "" || reachable(id) == false) return notFoundProblem(segment, req.path);
+    if (effectiveAccess(id) != "unrestricted") return withHeader(problemResponse(problemFor(405, "the endpoint " + id + " is read-only", req.path)), "Allow", "GET");
+    val res: ?EndpointResponse = readEndpoint(id, req);
+    if (res == null) return notFoundProblem(segment, req.path);
+    return render(filtered(id, res ?? EndpointResponse(status: 404, contentType: "", body: "")));
+}
+
+// ── shutdown ────────────────────────────────────────────────────────────────
+
+pub fn shutdownRead(req: Request) -> EndpointResponse {
+    if (req.method != HttpMethod.Post) return EndpointResponse(status: 405, contentType: "application/json", body: "{\"message\":\"POST to shut down\"}");
+    val _l = rkProbesLater(50, { -> runShutdown() });
+    return EndpointResponse(status: 200, contentType: "application/json", body: "{\"message\":\"Shutting down, bye...\"}");
+}
+
+#[@External.Erlang("""(fun() -> case persistent_term:get(rakun_probes_shutdown, undefined) of undefined -> init:stop(), 0; F -> F() end end)()""")]
+declare fn runShutdown() -> i32;
+
+// What a `POST <base>/shutdown` runs, 50 ms after it answers (default: the
+// node's orderly stop, which runs front 07's graceful shutdown hook).
+#[@External.Erlang("""(fun(F) -> persistent_term:put(rakun_probes_shutdown, F), 0 end)($0)""")]
+pub declare fn setShutdownRunner(run: fn() -> i32) -> i32;
+
+// ── sanitization ────────────────────────────────────────────────────────────
+
+pub fn builtinPatterns() -> string[] {
+    return ["password", "secret", "key", "token", "credentials", "vcap_services", "sun.java.command"];
+}
+
+pub fn sanitizePatterns() -> string[] {
+    var out: string[] = builtinPatterns();
+    for (csv(rkProp("rakun.management.endpoint.sanitize.additional-keys"))) { k -> out.push(k.toLower()); };
+    return out;
+}
+
+pub fn showValues(id: string) -> string {
+    val raw = rkProp("rakun.management.endpoint." + id + ".show-values").trim();
+    return if (raw == "") "never" else raw;
+}
+
+// A caller holds one of `roles`; with no roles named, any authority will do.
+pub fn authorizedFor(roles: string[]) -> bool {
+    val mine = rkProbesAuthorities();
+    if (roles.length == 0) return mine.length > 0;
+    return roles.filter({ r -> has(mine, r) || has(mine, "ROLE_" + r.toUpper()) }).length > 0;
+}
+
+// The ONE filter `env` and `configprops` share.
+pub fn sanitizeBody(id: string, body: string) -> string {
+    if (id != "env" && id != "configprops") return body;
+    val roles = csv(rkProp("rakun.management.endpoint." + id + ".roles"));
+    return rkProbesSanitize(body, showValues(id), authorizedFor(roles), sanitizePatterns());
+}
+
+pub fn envRead(req: Request) -> EndpointResponse {
+    return EndpointResponse(status: 200, contentType: "application/json", body: rkProbesEnvJson());
+}
+
+// ── health groups and probes ────────────────────────────────────────────────
+
+pub fn probesEnabled() -> bool {
+    return rkProp("rakun.management.endpoint.health.probes.enabled").trim() == "true";
+}
+
+fn groupKey(name: string, field: string) -> string {
+    return "rakun.management.endpoint.health.group." + name + "." + field;
+}
+
+// The configured groups, plus `liveness` and `readiness` with probes on.
+pub fn groupNames() -> string[] {
+    val prefix = "rakun.management.endpoint.health.group.";
+    var out: string[] = [];
+    for (rkProbesPropKeys(prefix)) { k ->
+        val rest = k.slice(prefix.length(), k.length());
+        val name = rest.split(".").at(0) ?? "";
+        if (name != "" && has(out, name) == false) out.push(name);
+    };
+    if (probesEnabled()) {
+        if (has(out, "liveness") == false) out.push("liveness");
+        if (has(out, "readiness") == false) out.push("readiness");
+    };
+    return out;
+}
+
+pub fn groupInclude(name: string) -> string[] {
+    val given = csv(rkProp(groupKey(name, "include")));
+    if (given.length > 0) return given;
+    if (probesEnabled() && name == "liveness") return ["livenessState"];
+    if (probesEnabled() && name == "readiness") return ["readinessState"];
+    return given;
+}
+
+pub fn localIndicators() -> string[] {
+    return ["livenessState", "ping", "diskSpace"];
+}
+
+// `""`, or the first refusal the group configuration earns.
+pub fn groupProblem() -> string {
+    val known = healthIndicatorIds();
+    var problem = "";
+    for (groupNames()) { g ->
+        val inc = groupInclude(g);
+        if (problem == "" && inc.length == 0) problem = "rakun-actuator: the health group `" + g + "` includes no indicator - a group that checks nothing and answers UP is worse than no group";
+        val missing = inc.filter({ i -> has(known, i) == false });
+        if (problem == "" && missing.length > 0) problem = "rakun-actuator: the health group `" + g + "` includes `" + missing.join("`, `") + "`, which is not a registered indicator - registered: " + known.join(", ");
+        val external = if (g == "liveness") inc.filter({ i -> has(localIndicators(), i) == false }) else [];
+        if (problem == "" && external.length > 0) problem = "rakun-actuator: the liveness group includes `" + external.join("`, `") + "` - liveness must not depend on an external system (a dependency outage would restart every replica); it may include only " + localIndicators().join(", ");
+    };
+    return problem;
+}
+
+fn groupShowDetails(name: string) -> string {
+    val own = rkProp(groupKey(name, "show-details")).trim();
+    if (own != "") return own;
+    val global = rkProp("rakun.management.endpoint.health.show-details").trim();
+    return if (global == "") "never" else global;
+}
+
+fn groupRoles(name: string) -> string[] {
+    val own = csv(rkProp(groupKey(name, "roles")));
+    return if (own.length > 0) own else csv(rkProp("rakun.management.endpoint.health.roles"));
+}
+
+fn showDetailsNow(name: string) -> bool {
+    val mode = groupShowDetails(name);
+    if (mode == "always") return true;
+    if (mode == "when-authorized") return authorizedFor(groupRoles(name));
+    return false;
+}
+
+// Runs ONLY the group's indicators, so a slow indicator outside the group
+// never delays its probe.
+pub fn groupReport(name: string) -> HealthReport {
+    val inc = groupInclude(name).filter({ id -> has(healthIndicatorIds(), id) });
+    val jobs = inc.map({ id -> id + "=" + healthTimeoutMillis(id).toString() });
+    val wire: string = rkActuatorRunHealth(jobs.join("\n"), "");
+    val mine: ComponentHealth[] = if (wire == "") [] else wire.split("\n").map({ line -> componentOf(line) });
+    return HealthReport(status: aggregateStatus(mine.map({ c -> c.status })), components: mine);
+}
+
+pub fn groupBody(name: string, r: HealthReport) -> string {
+    if (showDetailsNow(name) == false) return json.object([#("status", json.quote(r.status))]);
+    val comps = r.components.map({ c -> #(c.id, json.object([#("status", json.quote(c.status)), #("details", c.details)])) });
+    return json.object([#("status", json.quote(r.status)), #("components", json.object(comps))]);
+}
+
+pub fn serveGroupDirect(name: string) -> Response {
+    val r = groupReport(name);
+    return withHeader(Response.withStatus(httpStatusFor(r.status), groupBody(name, r)), "Content-Type", "application/json");
+}
+
+pub fn serveGroup(req: Request) -> Response {
+    val name: string = req.param("group");
+    val segment = "health/" + name;
+    if (req.path != basePath() + "/health/" + name) return notFoundProblem(segment, req.path);
+    if (reachable("health") == false || has(groupNames(), name) == false) return notFoundProblem(segment, req.path);
+    return serveGroupDirect(name);
+}
+
+pub fn livenessHealth() -> Health {
+    val s = rkProbesLiveness();
+    return Health(status: if (s == "CORRECT") "UP" else "DOWN", details: json.object([#("state", json.quote(s))]));
+}
+
+pub fn readinessHealth() -> Health {
+    val s = rkProbesReadiness();
+    return Health(status: if (s == "ACCEPTING_TRAFFIC") "UP" else "OUT_OF_SERVICE", details: json.object([#("state", json.quote(s))]));
+}
+
+// Flips readiness and publishes `AvailabilityChange` through front 06.
+pub fn setReadiness(accepting: bool) -> i32 {
+    val _s = rkProbesSetReadiness(accepting);
+    return publishEvent(event("AvailabilityChange", "rakun-actuator", "readiness=" + rkProbesReadiness()));
+}
+
+pub fn setLiveness(correct: bool) -> i32 {
+    val _s = rkProbesSetLiveness(correct);
+    return publishEvent(event("AvailabilityChange", "rakun-actuator", "liveness=" + rkProbesLiveness()));
+}
+
+// ── the access report ───────────────────────────────────────────────────────
+
+pub fn accessReport() -> string {
+    val rows = endpointIds().map({ id ->
+        json.object([
+            #("id", json.quote(id)),
+            #("exposed", if (exposedByConfig(id)) "true" else "false"),
+            #("configured", json.quote(configuredAccess(id))),
+            #("effective", json.quote(effectiveAccess(id))),
+            #("listener", json.quote(listenerFor(id))),
+        ])
+    });
+    return json.object([#("maxPermitted", json.quote(maxPermitted())), #("endpoints", json.array(rows))]);
+}
+
+pub fn accessRead(req: Request) -> EndpointResponse {
+    return EndpointResponse(status: 200, contentType: "application/json", body: accessReport());
+}
+
+// ── boot ────────────────────────────────────────────────────────────────────
+
+#[@External.Erlang("rakun_actuator", "meta_get")]
+declare fn metaGet(key: string) -> string;
+
+#[@External.Erlang("rakun_actuator", "meta_put")]
+declare fn metaPut(key: string, value: string) -> i32;
+
+fn once(key: string) -> bool {
+    if (metaGet(key) == "1") return false;
+    val _p = metaPut(key, "1");
+    return true;
+}
+
+// Registers front 76's endpoints, groups, routes and the exposure decision,
+// then validates the configuration (a problem refuses the boot) and starts the
+// management listener. Call it after `mountActuator()` and after every module
+// has registered its endpoints and indicators — the checks list what is
+// registered. Idempotent.
+pub fn installManagement() -> i32 {
+    if (once("mgmt endpoints")) {
+        val _e = rkRegisterEndpoint("env", "rakun-actuator", "read", { req -> envRead(req) });
+        val _a = rkRegisterEndpoint("access", "rakun-actuator", "read", { req -> accessRead(req) });
+        val _s = rkRegisterEndpoint("shutdown", "rakun-actuator", "write", { req -> shutdownRead(req) });
+        val _ready = rkRegisterListener("ApplicationReady", "rakun-actuator-probes", { ev -> rkProbesSetReadiness(true) });
+    };
+    val base = basePath();
+    if (once("mgmt routes " + base)) {
+        val _p = rkRegisterRoute("POST", base + "/:endpoint", { req -> serveWrite(req) });
+        val _d = rkRegisterRoute("DELETE", base + "/:endpoint", { req -> serveWrite(req) });
+        val _g = rkRegisterRoute("GET", base + "/health/:group", { req -> serveGroup(req) });
+    };
+    val _x = installExposure({ id -> reachable(id) });
+    val _f = rkProbesFilterPut({ id, body -> sanitizeBody(id, body) });
+    for (["env", "configprops"]) { id ->
+        if (showValues(id) == "always" && once("mgmt warn " + id)) {
+            val _w = rkProbesWarn("rakun-actuator: rakun.management.endpoint." + id + ".show-values=always - the " + id + " endpoint shows every non-sensitive value to anyone it is exposed to");
+        };
+    };
+    if (probesEnabled() && once("mgmt probe indicators")) {
+        val _l = rkRegisterHealthIndicator("livenessState", "rakun-actuator", { -> livenessHealth() });
+        val _r = rkRegisterHealthIndicator("readinessState", "rakun-actuator", { -> readinessHealth() });
+    };
+    val e = exposureProblem();
+    if (e != "") @panic(e);
+    val g = groupProblem();
+    if (g != "") @panic(g);
+    for (groupNames()) { name -> val _a = additionalPath(name); };
+    if (probesEnabled()) {
+        if (once("mgmt probe paths")) {
+            val _lz = rkRegisterRoute("GET", "/livez", { req -> serveGroupDirect("liveness") });
+            val _rz = rkRegisterRoute("GET", "/readyz", { req -> serveGroupDirect("readiness") });
+        };
+    };
+    return startManagementListener();
+}
+
+// `server:/healthz` publishes the group on the application listener too.
+fn additionalPath(name: string) -> i32 {
+    val raw = rkProp(groupKey(name, "additional-path")).trim();
+    if (raw.startsWith("server:") == false) return 0;
+    val path = raw.slice(7, raw.length());
+    if (once("mgmt extra " + name + " " + path) == false) return 0;
+    return rkRegisterRoute("GET", path, { req -> serveGroupDirect(name) });
+}

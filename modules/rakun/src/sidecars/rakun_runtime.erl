@@ -80,7 +80,8 @@
          terminate/2, code_change/3]).
 
 %% ── supervised entry points ──────────────────────────────────────────────────
--export([start_registry/0, start_conn_sup/0, start_listener/3,
+-export([start_registry/0, start_conn_sup/0, start_listener/3, start_listener/5,
+         serve_management/2, management_port/0, stop_management/0,
          start_connection/3, connection/3, peer_subject/0]).
 
 -define(SCAN,     rakun_scan).        %% ordered_set: {Seq, Name}
@@ -749,6 +750,10 @@ seed_failures() ->
           <<"`rakun.server.ssl.bundle` names a bundle that does not resolve to TLS material.">>,
           <<"Configure `rakun.ssl.bundle.pem.<name>.keystore.certificate` and `.private-key`, "
             "or remove `rakun.server.ssl.bundle` - rakun will not fall back to plaintext.">>},
+         {management_address,
+          <<"`rakun.management.server.address` is not an IPv4 or IPv6 address.">>,
+          <<"Set it to an address of this host (`127.0.0.1` keeps the actuator private) "
+            "or remove it to listen on every interface.">>},
          {server_address,
           <<"`rakun.server.address` is not an IPv4 or IPv6 address.">>,
           <<"Set it to an address of this host (`127.0.0.1`, `::1`, ...) or remove it "
@@ -897,9 +902,14 @@ transport() ->
 %% port goes into `?PROPS` before the loop starts, so `serve/2` can answer it
 %% even when `port: 0` asked for an ephemeral one.
 start_listener(Port, Dispatcher, Tls) ->
+    start_listener(Port, Dispatcher, Tls, bind_address(), <<"rakun.server.bound-port">>).
+
+%% The same acceptor with its own bind options and its own bound-port key —
+%% the shape a second listener (front 76's management listener) needs.
+start_listener(Port, Dispatcher, Tls, BindOpts, PortKey) ->
     Backlog = prop_int_default(<<"rakun.server.backlog">>, ?DEFAULT_BACKLOG),
     Base = [binary, {packet, http_bin}, {active, false},
-            {reuseaddr, true}, {backlog, Backlog}] ++ bind_address(),
+            {reuseaddr, true}, {backlog, Backlog}] ++ BindOpts,
     {Mod, Opts} = case Tls of
                       plain -> {gen_tcp, Base};
                       {tls, _Bundle, SslOpts, _Timeout} -> {ssl, Base ++ SslOpts}
@@ -913,7 +923,7 @@ start_listener(Port, Dispatcher, Tls) ->
         case Mod:listen(Port, Opts) of
             {ok, LSock} ->
                 {ok, Bound} = listen_port(Mod, LSock),
-                _ = set_prop(<<"rakun.server.bound-port">>, integer_to_binary(Bound)),
+                _ = set_prop(PortKey, integer_to_binary(Bound)),
                 Parent ! {self(), listening},
                 accept_loop(LSock, Dispatcher, Tls);
             {error, Reason} ->
@@ -925,6 +935,60 @@ start_listener(Port, Dispatcher, Tls) ->
         {Pid, {error, Reason}} -> {error, {listen, Reason, Port}}
     after 5000 ->
         {error, {listen, timeout, Port}}
+    end.
+
+%% ═══ the management listener (front 76) ══════════════════════════════════════
+%% A second `rakun_sup` child, `rakun_management_listener`, beside
+%% `rakun_listener`: its own port (`rakun.management.server.port`), its own
+%% interface (`rakun.management.server.address`) and its own front 74 bundle
+%% (`rakun.management.server.ssl.bundle`, independent of the application's).
+%% Killing either child leaves the other serving. Answers the bound port.
+serve_management(Port, Dispatcher) ->
+    ensure_started(),
+    Tls = case prop(<<"rakun.management.server.ssl.bundle">>) of
+              <<>> -> plain;
+              Bundle -> tls_for(Bundle)
+          end,
+    Bind = address_opts(prop(<<"rakun.management.server.address">>), management_address),
+    Spec = #{id => rakun_management_listener,
+             start => {?MODULE, start_listener, [Port, Dispatcher, Tls, Bind, <<"rakun.management.server.bound-port">>]},
+             restart => permanent, shutdown => 5000, type => worker, modules => [?MODULE]},
+    _ = supervisor:terminate_child(rakun_sup, rakun_management_listener),
+    _ = supervisor:delete_child(rakun_sup, rakun_management_listener),
+    case supervisor:start_child(rakun_sup, Spec) of
+        {ok, _Pid} -> management_port();
+        {error, {Reason, _}} -> fail(Reason);
+        {error, Reason} -> fail(Reason)
+    end.
+
+management_port() ->
+    prop_int(<<"rakun.management.server.bound-port">>).
+
+stop_management() ->
+    ensure_started(),
+    _ = supervisor:terminate_child(rakun_sup, rakun_management_listener),
+    _ = supervisor:delete_child(rakun_sup, rakun_management_listener),
+    0.
+
+tls_for(Bundle) ->
+    case code:ensure_loaded(rakun_ssl) of
+        {module, rakun_ssl} ->
+            case rakun_ssl:transport(Bundle) of
+                ssl ->
+                    _ = application:ensure_all_started(ssl),
+                    {tls, Bundle, rakun_ssl:listen_options(Bundle),
+                     prop_int_default(<<"rakun.ssl.handshake-timeout">>, rakun_ssl:handshake_timeout(Bundle))};
+                _ -> fail({ssl_bundle, Bundle})
+            end;
+        _ -> fail({ssl_bundle, Bundle})
+    end.
+
+address_opts(<<>>, _Why) -> [];
+address_opts(Text, Why) ->
+    case inet:parse_address(binary_to_list(Text)) of
+        {ok, Addr} when tuple_size(Addr) =:= 8 -> [inet6, {ip, Addr}];
+        {ok, Addr} -> [{ip, Addr}];
+        {error, _} -> fail({Why, Text})
     end.
 
 %% `rakun.server.address` binds the listener to one interface (`127.0.0.1`,

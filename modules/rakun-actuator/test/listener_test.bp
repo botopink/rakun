@@ -1,0 +1,162 @@
+//// rakun-actuator — the management listener (front 76 step 3), over real
+//// sockets. The application listener is front 04's `rkServe`; the management
+//// listener is a second `rakun_sup` child started by `installManagement()`.
+
+import {io: {env}} from "std";
+import {Request, Response, rkDispatchHttp, rkSetProp, rkServe, rkRegisterRoute} from "rakun";
+import {bundleKey, sslRegister} from "rakun/ssl_bundle";
+import {endpointIds} from "rakun-actuator-api";
+import {mountActuator} from "actuator";
+import {installManagement, startManagementListener, rkStopManagement, rkManagementPort} from "management";
+
+// `status|body`, `closed`, or `refused` when the connect failed — to `host`.
+#[@External.Erlang("""(fun(__Host, __Port, __Path) -> case gen_tcp:connect(binary_to_list(__Host), __Port, [binary, {active, false}], 1000) of {error, _} -> <<"refused">>; {ok, __S} -> ok = gen_tcp:send(__S, [<<"GET ">>, __Path, <<" HTTP/1.1", 13, 10, "Host: x", 13, 10, 13, 10>>]), __Rd = fun __Rd(__Acc) -> case binary:split(__Acc, <<13, 10, 13, 10>>) of [__H, __B] -> case re:run(__H, <<"(?i)content-length: *([0-9]+)">>, [{capture, [1], binary}]) of {match, [__L]} -> case byte_size(__B) >= binary_to_integer(__L) of true -> {ok, __H, __B}; false -> case gen_tcp:recv(__S, 0, 3000) of {ok, __M} -> __Rd(<<__Acc/binary, __M/binary>>); _ -> closed end end; _ -> {ok, __H, __B} end; _ -> case gen_tcp:recv(__S, 0, 3000) of {ok, __M} -> __Rd(<<__Acc/binary, __M/binary>>); _ -> closed end end end, __R = __Rd(<<>>), gen_tcp:close(__S), case __R of closed -> <<"closed">>; {ok, __Hd, __Bd} -> [_, __St | _] = binary:split(__Hd, <<" ">>, [global]), <<__St/binary, "|", __Bd/binary>> end end end)($0, $1, $2)""")]
+declare fn httpGet(host: string, port: i32, path: string) -> string;
+
+// An IPv4 address of this host that is not loopback, or `""`.
+#[@External.Erlang("""(fun() -> {ok, __Ifs} = inet:getifaddrs(), __As = [__A || {_, __O} <- __Ifs, {addr, __A} <- __O, tuple_size(__A) =:= 4, element(1, __A) =/= 127], case __As of [__F | _] -> list_to_binary(inet:ntoa(__F)); [] -> <<>> end end)()""")]
+declare fn otherInterface() -> string;
+
+// Kills the given `rakun_sup` child's process; answers 1 when there was one.
+#[@External.Erlang("""(fun(__Id) -> case [__P || {__I, __P, _, _} <- supervisor:which_children(rakun_sup), __I =:= binary_to_atom(__Id), is_pid(__P)] of [__P | _] -> exit(__P, kill), timer:sleep(100), 1; [] -> 0 end end)($0)""")]
+declare fn killChild(id: string) -> i32;
+
+fn set(key: string, value: string) -> i32 {
+    return rkSetProp(key, value);
+}
+
+fn app() -> i32 {
+    val _k = set("rakun.main.keep-alive", "false");
+    return rkServe(0, { m, p, h, q, b -> rkDispatchHttp(m, p, h, q, b) });
+}
+
+fn hello(req: Request) -> Response {
+    return Response.ok("hello");
+}
+
+fn management() -> i32 {
+    val _p = set("rakun.management.server.port", "0");
+    val _m = mountActuator();
+    val _i = installManagement();
+    return rkManagementPort();
+}
+
+fn reset() -> i32 {
+    val _s = rkStopManagement();
+    val _p = set("rakun.management.server.port", "");
+    val _a = set("rakun.management.server.address", "");
+    val _b = set("rakun.management.endpoints.web.base-path", "");
+    return 0;
+}
+
+test "listener: with a management port no actuator path answers on the application listener" {
+    val appPort = app();
+    val mgmt = management();
+    val onApp = httpGet("127.0.0.1", appPort, "/actuator/health");
+    val onMgmt = httpGet("127.0.0.1", mgmt, "/actuator/health");
+    val _r = reset();
+    assert onApp.startsWith("404|"), onApp;
+    assert onMgmt == "200|{\"status\":\"UP\"}", onMgmt;
+}
+
+test "listener: the management listener bound to 127.0.0.1 refuses a connection on another interface" {
+    val other = otherInterface();
+    val _a = set("rakun.management.server.address", "127.0.0.1");
+    val mgmt = management();
+    val local = httpGet("127.0.0.1", mgmt, "/actuator/health");
+    val remote = if (other == "") "no-interface" else httpGet(other, mgmt, "/actuator/health");
+    val _r = reset();
+    assert local.startsWith("200|");
+    assert remote == "refused", other + ": " + remote;
+}
+
+test "listener: port -1 serves nothing over HTTP and the registries stay live" {
+    val appPort = app();
+    val _p = set("rakun.management.server.port", "-1");
+    val _m = mountActuator();
+    val _i = installManagement();
+    val started = startManagementListener();
+    val onApp = httpGet("127.0.0.1", appPort, "/actuator/health");
+    val _r = reset();
+    assert started == 0;
+    assert onApp.startsWith("404|");
+    assert endpointIds().indexOf("health") >= 0 && endpointIds().length >= 8;
+}
+
+test "listener: base-path moves every path on the management listener" {
+    val _b = set("rakun.management.endpoints.web.base-path", "/manage");
+    val mgmt = management();
+    val moved = httpGet("127.0.0.1", mgmt, "/manage/health");
+    val old = httpGet("127.0.0.1", mgmt, "/actuator/health");
+    val _r = reset();
+    assert moved == "200|{\"status\":\"UP\"}", moved;
+    assert old.startsWith("404|");
+}
+
+test "listener: the two listeners are separate children - killing one leaves the other serving" {
+    val _h = rkRegisterRoute("GET", "/listener/hello", { req -> hello(req) });
+    val appPort = app();
+    val mgmt = management();
+    val _k = killChild("rakun_management_listener");
+    val appAfter = httpGet("127.0.0.1", appPort, "/listener/hello");
+    val mgmt2 = rkManagementPort();
+    val _j = killChild("rakun_listener");
+    val mgmtAfter = httpGet("127.0.0.1", mgmt2, "/actuator/health");
+    val _r = reset();
+    assert appAfter == "200|hello", appAfter;
+    assert mgmtAfter.startsWith("200|"), mgmtAfter;
+}
+
+// ── TLS: the reference's own example ────────────────────────────────────────
+
+fn tmp() -> string {
+    val dir: string = env.read("BOTOPINK_TEST_TMPDIR") ?? "";
+    if (dir == "") @panic("BOTOPINK_TEST_TMPDIR is not set - botopink test sets it");
+    return dir + "/rakun-actuator-listener";
+}
+
+#[@External.Erlang("""(fun(__D) -> ok = filelib:ensure_path(binary_to_list(__D)), __Q = fun(__C) -> os:cmd("cd '" ++ binary_to_list(__D) ++ "' && " ++ __C ++ " 2>/dev/null") end, __Q("openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=rakun-test-ca -keyout ca.key -out ca.pem"), __Q("printf 'subjectAltName=DNS:localhost' > leaf.ext"), __Q("openssl req -newkey rsa:2048 -nodes -subj /CN=localhost -keyout key.pem -out leaf.csr"), __Q("openssl x509 -req -in leaf.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 2 -extfile leaf.ext -out cert.pem"), __D end)($0)""")]
+declare fn issueMaterial(dir: string) -> string;
+
+// GET over TLS verifying against `ca`: `status|body` or `error`.
+#[@External.Erlang("""(fun(__Port, __Path, __Ca) -> _ = application:ensure_all_started(ssl), case ssl:connect("localhost", __Port, [binary, {active, false}, {verify, verify_peer}, {cacertfile, binary_to_list(__Ca)}, {server_name_indication, "localhost"}], 3000) of {error, _} -> <<"error">>; {ok, __S} -> ok = ssl:send(__S, [<<"GET ">>, __Path, <<" HTTP/1.1", 13, 10, "Host: localhost", 13, 10, 13, 10>>]), __R = ssl:recv(__S, 0, 3000), ssl:close(__S), case __R of {ok, __Bin} -> case binary:split(__Bin, <<13, 10, 13, 10>>) of [__H, __B] -> [_, __St | _] = binary:split(__H, <<" ">>, [global]), <<__St/binary, "|", __B/binary>>; _ -> <<"error">> end; _ -> <<"error">> end end end)($0, $1, $2)""")]
+declare fn tlsGet(port: i32, path: string, ca: string) -> string;
+
+test "listener: a plaintext management listener behind a TLS application listener, each on its own material" {
+    val d = issueMaterial(tmp() + "/web");
+    val _a = set(bundleKey("mgmtweb", "keystore.certificate"), d + "/cert.pem");
+    val _b = set(bundleKey("mgmtweb", "keystore.private-key"), d + "/key.pem");
+    val _g = set("rakun.ssl.bundle.pem", "mgmtweb");
+    val _r = sslRegister("mgmtweb");
+    val _h = rkRegisterRoute("GET", "/listener/hello", { req -> hello(req) });
+    val _s = set("rakun.server.ssl.bundle", "mgmtweb");
+    val appPort = app();
+    val mgmt = management();
+    val secure = tlsGet(appPort, "/listener/hello", d + "/ca.pem");
+    val plain = httpGet("127.0.0.1", mgmt, "/actuator/health");
+    val _u = set("rakun.server.ssl.bundle", "");
+    val _v = set("rakun.ssl.bundle.pem", "");
+    val _x = reset();
+    val _p = app();
+    assert secure == "200|hello", secure;
+    assert plain == "200|{\"status\":\"UP\"}", plain;
+}
+
+test "listener: management.server.ssl.bundle gives the management listener its own TLS" {
+    val d = issueMaterial(tmp() + "/ops");
+    val _a = set(bundleKey("mgmtops", "keystore.certificate"), d + "/cert.pem");
+    val _b = set(bundleKey("mgmtops", "keystore.private-key"), d + "/key.pem");
+    val _g = set("rakun.ssl.bundle.pem", "mgmtops");
+    val _r = sslRegister("mgmtops");
+    val _h = rkRegisterRoute("GET", "/listener/hello", { req -> hello(req) });
+    val appPort = app();
+    val _s = set("rakun.management.server.ssl.bundle", "mgmtops");
+    val mgmt = management();
+    val secure = tlsGet(mgmt, "/actuator/health", d + "/ca.pem");
+    val plainApp = httpGet("127.0.0.1", appPort, "/listener/hello");
+    val _u = set("rakun.management.server.ssl.bundle", "");
+    val _v = set("rakun.ssl.bundle.pem", "");
+    val _x = reset();
+    assert secure == "200|{\"status\":\"UP\"}", secure;
+    assert plainApp == "200|hello", plainApp;
+}

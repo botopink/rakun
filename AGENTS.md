@@ -2521,6 +2521,52 @@ here they are `rakun.management.endpoints.web.base-path`, `rakun.management.endp
 `rakun.management.health.<id>.timeout` and `rakun.info.*`.
 
 
+## Actuator access and probes — `modules/rakun-actuator/src/management.bp` (front 76)
+
+`installManagement()` — after `mountActuator()` and after every module has
+registered its endpoints and indicators — installs the exposure decision, the
+response filter, the write routes and the groups, validates the configuration
+(a problem refuses the boot) and starts the management listener. Sidecar
+`rakun_probes.erl` holds readiness/liveness, the listener role and the
+sanitizer. Keys are all `rakun.management.*` (03r-t).
+
+- **Gates, in order** — listener (with `rakun.management.server.port` set,
+  `-1` included, the actuator answers only on the management listener), exposure
+  (`…endpoints.web.exposure.include`, default `health`, `*`; `.exclude` wins;
+  read at request time; an include naming an unregistered id refuses the boot),
+  access (`…endpoint.<id>.access`, else `…endpoints.access.default`, else
+  `read-only`; `shutdown` defaults to `none`; capped by
+  `…endpoints.access.max-permitted`). A failed gate is front 11's unknown-id
+  404, byte for byte. `read-only` 405s POST/DELETE (`<base>/:endpoint` write
+  routes); `shutdown` runs `setShutdownRunner`'s function 50 ms after it
+  answers (default `init:stop()`).
+- **Management listener** — `rakun_runtime:serve_management/2`, a second
+  `rakun_sup` child (`rakun_management_listener`) with its own
+  `rakun.management.server.address` and `.ssl.bundle`; its dispatcher marks
+  the connection process `management` and 404s everything outside the base
+  path. One route table serves both listeners.
+- **Sanitization** — one filter for `env` (all properties) and `configprops`:
+  `{"key","value"}` objects show the key and, per `…endpoint.<id>.show-values`
+  (never | when-authorized with `.roles` | always — which logs a warning at
+  boot), the value or `******`; a key matching `password, secret, key, token,
+  credentials, vcap_services, sun.java.command` or
+  `…endpoint.sanitize.additional-keys` is always `******`. Applied by front
+  11's host after the cache (`filtered`).
+- **Groups** — `…endpoint.health.group.<name>.include` / `.show-details` /
+  `.roles` / `.additional-path=server:/path` at `<base>/health/<name>`; a
+  group runs only its own indicators. Empty or unknown-indicator groups refuse
+  the boot.
+- **Probes** — `…endpoint.health.probes.enabled=true` registers
+  `livenessState` / `readinessState`, the `liveness` / `readiness` groups and
+  `/livez`, `/readyz` on the application listener. Liveness may include only
+  `livenessState`, `ping`, `diskSpace`. Readiness is refusing until
+  `ApplicationReady` and from `rakun_probes:readiness_drained/0` — front 07's
+  first shutdown step — which holds `rakun.lifecycle.pre-drain-period` (default
+  5000 ms) in full; `0` is correct only where the balancer reacts
+  synchronously. `setReadiness` / `setLiveness` publish `AvailabilityChange`.
+- **Report** — the `access` endpoint (gated like the rest, hidden by
+  default): per id, exposed, configured and effective level, listener.
+
 ## Observability — `modules/rakun-metrics/` (front 75)
 
 Sidecars `rakun_metrics.erl` (the registry, the renderers, the VM meters, the

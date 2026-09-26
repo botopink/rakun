@@ -177,6 +177,13 @@ fn endOfQuoted(s: string, open: i32) -> i32 {
     return i;
 }
 
+// The codepoint index of `needle` in `s`, or -1. `string.indexOf` counts
+// BYTES while `at`, `slice` and `length` count codepoints, so a manifest with
+// a non-ASCII description sends every byte index past its target
+// (language-gaps.md); every index this scanner uses is a codepoint index.
+#[@External.Erlang("""(fun(__S, __N) -> case binary:match(__S, __N) of nomatch -> -1; {__B, _} -> string:length(binary:part(__S, 0, __B)) end end)($0, $1)""")]
+pub declare fn codepointIndex(s: string, needle: string) -> i32;
+
 fn quotedAt(s: string, open: i32) -> string {
     val stop = endOfQuoted(s, open);
     val inner = stop - 1;
@@ -254,7 +261,7 @@ fn scanStep(text: string, isObject: bool, st: DepScan) -> DepScan {
 // back, with no file and no host between the two.
 pub fn manifestDependencies(text: string) -> string[] {
     val none: string[] = [];
-    val at = text.indexOf("\"dependencies\"");
+    val at = codepointIndex(text, "\"dependencies\"");
     if (at < 0) return none else {
         val open = openerAfter(text, at + 14);
         if (open < 0) return none else {
@@ -316,30 +323,30 @@ fn readOr(file: string) -> string {
 // The source a manifest's text gives dependency `name`: `path:<p>`,
 // `workspace`, or `""` (git, a bare name, the array form).
 pub fn dependencySource(text: string, name: string) -> string {
-    val at = text.indexOf("\"dependencies\"");
+    val at = codepointIndex(text, "\"dependencies\"");
     if (at < 0) return "";
     val tail = text.slice(at, text.length());
-    val key = tail.indexOf("\"" + name + "\"");
+    val key = codepointIndex(tail, "\"" + name + "\"");
     if (key < 0) return "";
     val rest = tail.slice(key + name.length() + 2, tail.length());
-    val close = rest.indexOf("}");
+    val close = codepointIndex(rest, "}");
     val spec = if (close < 0) rest else rest.slice(0, close);
     if (spec.startsWith(",") || nextSolid(spec, 0) != ":") return "";
     if (spec.contains("\"workspace\"")) return "workspace";
-    val pi = spec.indexOf("\"path\"");
+    val pi = codepointIndex(spec, "\"path\"");
     if (pi < 0) return "";
     val after = spec.slice(pi + 6, spec.length());
-    val q = after.indexOf("\"");
+    val q = codepointIndex(after, "\"");
     if (q < 0) return "";
     return "path:" + quotedAt(after, q);
 }
 
 // A manifest's `"name"`, or `""`.
 pub fn manifestPackageName(text: string) -> string {
-    val at = text.indexOf("\"name\"");
+    val at = codepointIndex(text, "\"name\"");
     if (at < 0) return "";
     val after = text.slice(at + 6, text.length());
-    val q = after.indexOf("\"");
+    val q = codepointIndex(after, "\"");
     if (q < 0) return "";
     return quotedAt(after, q);
 }
@@ -361,7 +368,7 @@ fn workspaceRootAbove(dir: string) -> string {
 }
 
 fn workspacePatterns(text: string) -> string[] {
-    val at = text.indexOf("\"workspaces\"");
+    val at = codepointIndex(text, "\"workspaces\"");
     val none: string[] = [];
     if (at < 0) return none;
     val open = openerAfter(text, at + 12);
