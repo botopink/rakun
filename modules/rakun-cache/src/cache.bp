@@ -396,6 +396,57 @@ pub fn cacheThrough(policy: CachePolicy, keys: Array<string>, load: fn() -> stri
     return etsThrough(policy, key, keys, load);
 }
 
+// ── direct reads and writes ─────────────────────────────────────────────────
+//
+// `cacheStore` writes a row whatever is there (a producer that computes on its
+// own schedule — front 60's prerender); `cachePeek` reads one without loading
+// and says whether it is stale (past its revalidate window, or marked by
+// `revalidateTag`). Both follow the policy's provider like `cacheThrough`, with
+// one STRUCTURAL exemption: a cache whose name starts with `rakun.` is the
+// framework's own (front 60's `rakun.prerender`), not application data, so it
+// is always ETS and the kill switch does not reach it.
+
+pub type CachePeek(found: bool, value: string, stale: bool)
+
+fn frameworkCache(name: string) -> bool {
+    return name.startsWith("rakun.");
+}
+
+fn directProvider(policy: CachePolicy) -> string {
+    return if (frameworkCache(policy.name)) "ets" else providerFor(policy);
+}
+
+pub fn cacheStore(policy: CachePolicy, keys: Array<string>, value: string) -> i32 {
+    val provider = directProvider(policy);
+    if (provider == "none") return 0;
+    val key = cacheKey(policy.name, keys);
+    if (provider == "redis") {
+        val rkey = "rakun:cache:" + key;
+        val life = effectiveLife(policy.life, cacheSettings(policy.name).ttlSeconds);
+        val _s = redis(["SET", rkey, value, "EX", life.expire.toString()]);
+        for (policy.tags) { t -> val _a = redis(["SADD", "rakun:cache:tag:" + t, rkey]); };
+        return 1;
+    };
+    val _t = trace("store", policy, keys);
+    return store(policy, key, value, effectiveLife(policy.life, cacheSettings(policy.name).ttlSeconds));
+}
+
+pub fn cachePeek(policy: CachePolicy, keys: Array<string>) -> CachePeek {
+    val provider = directProvider(policy);
+    if (provider == "none") return CachePeek(found: false, value: "", stale: false);
+    val key = cacheKey(policy.name, keys);
+    if (provider == "redis") {
+        val got = redis(["GET", "rakun:cache:" + key]);
+        return if (got.startsWith("ok ")) CachePeek(found: true, value: redisValue(got), stale: false) else CachePeek(found: false, value: "", stale: false);
+    };
+    val found: ?CacheRow = rkCacheRowGet(policy.name, key);
+    if (found == null) return CachePeek(found: false, value: "", stale: false);
+    val row: CacheRow = found ?? CacheRow(value: "", writtenAt: rkCacheWide(0), life: policy.life);
+    val state = freshness(rkCacheNow() - row.writtenAt, rkCacheRowMarked(policy.name, key), row.life);
+    if (state == "miss") return CachePeek(found: false, value: "", stale: false);
+    return CachePeek(found: true, value: row.value, stale: state == "stale");
+}
+
 // ── Step 5 — tags and the three revalidation verbs ──────────────────────────
 //
 // Inside a server action (phase `action`) `revalidateTag` and

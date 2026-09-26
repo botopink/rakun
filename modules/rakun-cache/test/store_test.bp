@@ -3,7 +3,7 @@
 
 import {rkSetProp, rkPropInt} from "rakun";
 import {io: {clock}} from "std";
-import {CacheScope, CacheSettings, CachePolicy, cachePolicy, cacheLife, cacheLifeOf, cacheThrough, cacheFn, cacheSettings, cacheSize, resetCaches, registerCacheCustomizer, clearCacheCustomizers, rkCacheEnabled} from "cache";
+import {CacheScope, CacheSettings, CachePolicy, cachePolicy, cacheLife, cacheLifeOf, cacheThrough, cacheFn, cacheSettings, cacheSize, resetCaches, registerCacheCustomizer, clearCacheCustomizers, rkCacheEnabled, cacheStore, cachePeek, revalidateTag} from "cache";
 import {rkCacheKeysOf, rkCacheRespDoubleStart, rkCacheRespDoubleLog, rkCacheRespDoubleStop, rkCacheSpawnMany, rkCacheFlightsLed, rkCacheOwnerFacts, rkCacheSpawnCrash} from "cache_host";
 
 fn boot(provider: string) -> i32 {
@@ -191,4 +191,27 @@ test "store: the ETS table is owned by the cache's own process, not by a worker"
     assert out.contains("worker_crashed");
     assert cacheThrough(policy("st-crash"), ["k"], { -> "lost" }) == "written by a worker";
     assert rkCacheOwnerFacts() == "owner=rakun_cache_owner alive=true caller=not-owner";
+}
+
+test "store: cacheStore overwrites and cachePeek reads without loading, stale once a tag marks it" {
+    val _b = boot("ets");
+    val p = cachePolicy(CacheScope.Shared, "st-direct", cacheLifeOf(0, 600, 600), ["t-direct"]);
+    assert cachePeek(p, ["k"]).found == false;
+    val _s = cacheStore(p, ["k"], "one");
+    val _t = cacheStore(p, ["k"], "two");
+    val peek = cachePeek(p, ["k"]);
+    assert peek.found && peek.value == "two" && peek.stale == false;
+    val _r = revalidateTag("t-direct");
+    assert cachePeek(p, ["k"]).stale;
+    assert cacheThrough(p, ["k"], { -> "loaded" }) == "two";
+}
+
+test "store: a rakun. cache is the framework's own - ETS whatever the kill switch says" {
+    val _b = boot("none");
+    val p = cachePolicy(CacheScope.Shared, "rakun.internal", cacheLifeOf(0, 600, 600), []);
+    val _s = cacheStore(p, ["k"], "kept");
+    assert cachePeek(p, ["k"]).value == "kept";
+    val app = cachePolicy(CacheScope.Shared, "app-data", cacheLifeOf(0, 600, 600), []);
+    val _a = cacheStore(app, ["k"], "dropped");
+    assert cachePeek(app, ["k"]).found == false;
 }

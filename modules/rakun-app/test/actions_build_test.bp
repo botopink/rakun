@@ -26,10 +26,16 @@ fn manifest(name: string, members: Array<string>) -> string {
     return "{\n  \"name\": \"" + name + "\",\n  \"version\": \"0.0.1\",\n  \"src\": \"src/\",\n  \"entry\": \"root.bp\",\n  \"target\": \"erlang\",\n  \"targets\": [\"erlang\"],\n  \"dependencies\": {\n" + deps.join(",\n") + "\n  }\n}\n";
 }
 
+// rakun-app and every member it depends on, in order: a transitive path
+// dependency is not loaded (`language-gaps.md`).
+fn chain() -> Array<string> {
+    return ["rakun", "rakun-actuator-api", "rakun-web", "rakun-actuator", "rakun-data", "rakun-scheduling", "rakun-session", "rakun-cache", "rakun-app"];
+}
+
 fn buildSource(name: string, source: string) -> string {
     val dir = root() + "/" + name;
     val _m = process.runShell("rm -rf '" + dir + "' && mkdir -p '" + dir + "/src'");
-    val _j = fs.writeText(dir + "/botopink.json", manifest(name, ["rakun", "rakun-app"]));
+    val _j = fs.writeText(dir + "/botopink.json", manifest(name, chain()));
     val _s = fs.writeText(dir + "/src/root.bp", source);
     return process.runShell(compilerCommand() + "cd '" + dir + "' && \"$B\" build --target erlang --out out 2>&1 < /dev/null; echo \"exit=$?\"");
 }
@@ -60,7 +66,7 @@ test "actions build: with rakun-cache, the re-render sees the action's revalidat
     val dir = root() + "/actions-cache";
     val src = process.cwd() + "/test/fixtures/actions-cache";
     val _m = process.runShell("rm -rf '" + dir + "' && mkdir -p '" + dir + "' && cp -r '" + src + "/.' '" + dir + "/' && for f in $(find '" + dir + "' -name '*.fixture'); do mv \"$f\" \"$(echo \"$f\" | sed 's/[.]fixture$//')\"; done");
-    val _j = fs.writeText(dir + "/botopink.json", manifest("actions-cache", ["rakun", "rakun-actuator-api", "rakun-web", "rakun-actuator", "rakun-data", "rakun-scheduling", "rakun-session", "rakun-cache", "rakun-app"]));
+    val _j = fs.writeText(dir + "/botopink.json", manifest("actions-cache", chain()));
     val out = process.runShell(compilerCommand() + "cd '" + dir + "' && \"$B\" test 2>&1 < /dev/null; echo \"exit=$?\"");
     try asserts.contains(out, "4 passed, 0 failed");
     try asserts.notContains(out, "FAIL");

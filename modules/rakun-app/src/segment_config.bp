@@ -1,0 +1,131 @@
+//// rakun-app — route segment config (front 60 step 1).
+////
+//// A segment declares its configuration with a module-level `val` — the
+//// rakun registration idiom:
+////
+////     val _cfg = registerSegmentConfig("blog/[slug]", SegmentConfig(
+////         dynamic: DynamicMode.Auto, dynamicParams: true, revalidate: 3600, fetchCache: FetchCache.Auto));
+////
+//// `configFor(pattern)` folds the configs of the pattern's ancestors from the
+//// root down, FIELD BY FIELD: a field a segment leaves at its default
+//// (`defaultSegmentConfig()`) is inherited, one it sets overrides. There is no
+//// "unset" in a record, so "equal to the default" is what "not declared"
+//// means — a segment cannot re-declare a default below an ancestor that
+//// changed it. `revalidate: 0` is normalised to `DynamicMode.ForceDynamic` at
+//// registration, so there is one representation of "always dynamic".
+//// Registering a pattern the route table does not hold, or one pattern twice,
+//// raises.
+
+import {rkAppTable} from "file_router";
+import {table: {RouteEntry, parseTable}} from "routing";
+import {rkStaticConfigPut, rkStaticConfigGet} from "static_host";
+
+pub type DynamicMode {
+    Auto,
+    ForceStatic,
+    ForceDynamic,
+    ErrorOnDynamic,
+}
+
+pub type FetchCache {
+    Auto,
+    DefaultCache,
+    ForceCache,
+    DefaultNoStore,
+    ForceNoStore,
+}
+
+pub type SegmentConfig(
+    dynamic: DynamicMode,
+    dynamicParams: bool,
+    revalidate: i32,
+    fetchCache: FetchCache,
+)
+
+pub fn defaultSegmentConfig() -> SegmentConfig {
+    return SegmentConfig(dynamic: DynamicMode.Auto, dynamicParams: true, revalidate: -1, fetchCache: FetchCache.Auto);
+}
+
+pub fn modeName(m: DynamicMode) -> string {
+    val n = case m {
+        DynamicMode.Auto -> "auto";
+        DynamicMode.ForceStatic -> "force-static";
+        DynamicMode.ForceDynamic -> "force-dynamic";
+        DynamicMode.ErrorOnDynamic -> "error";
+    };
+    return n;
+}
+
+pub fn fetchCacheName(f: FetchCache) -> string {
+    val n = case f {
+        FetchCache.Auto -> "auto";
+        FetchCache.DefaultCache -> "default-cache";
+        FetchCache.ForceCache -> "force-cache";
+        FetchCache.DefaultNoStore -> "default-no-store";
+        FetchCache.ForceNoStore -> "force-no-store";
+    };
+    return n;
+}
+
+// A pattern as the route table spells it: a leading `/`, no trailing one.
+pub fn normalizePattern(seg: string) -> string {
+    val trimmed = if (seg.endsWith("/") && seg.length() > 1) seg.slice(0, seg.length() - 1) else seg;
+    return if (trimmed.startsWith("/")) trimmed else "/" + trimmed;
+}
+
+pub fn unknownPatternProblem(pattern: string) -> string {
+    return "rakun static: no route in the table has the pattern `" + pattern + "` - a segment config for it would configure nothing";
+}
+
+pub fn duplicateConfigProblem(pattern: string) -> string {
+    return "rakun static: `" + pattern + "` already has a segment config - one segment, one config";
+}
+
+pub fn patternInTable(pattern: string) -> bool {
+    val entries: RouteEntry[] = parseTable(rkAppTable());
+    return entries.filter({ e -> e.pattern == pattern }).length > 0;
+}
+
+pub fn normalizeConfig(c: SegmentConfig) -> SegmentConfig {
+    if (c.revalidate == 0) return SegmentConfig(dynamic: DynamicMode.ForceDynamic, dynamicParams: c.dynamicParams, revalidate: 0, fetchCache: c.fetchCache);
+    return c;
+}
+
+pub fn registerSegmentConfig(seg: string, config: SegmentConfig) -> i32 {
+    val pattern = normalizePattern(seg);
+    if (patternInTable(pattern) == false) @panic(unknownPatternProblem(pattern));
+    val stored = rkStaticConfigPut(pattern, normalizeConfig(config));
+    if (stored == 0) @panic(duplicateConfigProblem(pattern));
+    return 1;
+}
+
+// The ancestors of a pattern, root first: `/blog/[slug]` → `/`, `/blog`,
+// `/blog/[slug]`.
+pub fn ancestors(pattern: string) -> Array<string> {
+    val parts = pattern.split("/").filter({ p -> p != "" });
+    var out: Array<string> = ["/"];
+    var acc = "";
+    for (parts) { p ->
+        acc = acc + "/" + p;
+        out.push(acc);
+    };
+    return out;
+}
+
+fn overlay(base: SegmentConfig, own: SegmentConfig) -> SegmentConfig {
+    val d = defaultSegmentConfig();
+    val dynamic = if (modeName(own.dynamic) != modeName(d.dynamic)) own.dynamic else base.dynamic;
+    val dynamicParams = if (own.dynamicParams != d.dynamicParams) own.dynamicParams else base.dynamicParams;
+    val revalidate = if (own.revalidate != d.revalidate) own.revalidate else base.revalidate;
+    val fetchCache = if (fetchCacheName(own.fetchCache) != fetchCacheName(d.fetchCache)) own.fetchCache else base.fetchCache;
+    return SegmentConfig(dynamic: dynamic, dynamicParams: dynamicParams, revalidate: revalidate, fetchCache: fetchCache);
+}
+
+pub fn configFor(pattern: string) -> SegmentConfig {
+    var acc = defaultSegmentConfig();
+    for (ancestors(normalizePattern(pattern))) { a ->
+        val own: ?SegmentConfig = rkStaticConfigGet(a);
+        if (own != null) acc = overlay(acc, own ?? defaultSegmentConfig());
+    };
+    return acc;
+}

@@ -1640,6 +1640,47 @@ raise, a `nav:` signal re-thrown), and the body hook.
 - **Not here**: the file-level `pub val useServer = true;` is attached by
   `onze build` (onze front 50); the markup is jhonstart front 67's.
 
+## Static generation — `modules/rakun-app/src/static_gen.bp`, `segment_config.bp` (front 60)
+
+rakun-app depends on rakun-cache (and so lists its chain — a transitive
+dependency is not loaded) because the prerendered entries live in front 12's
+store. Sidecar `rakun_static_gen.erl`: the config and params registries, the
+decided kinds, the bounded fan-out, single-flight regeneration, counters, a
+gauge and the failure log.
+
+- **Segment config** — `registerSegmentConfig(seg, SegmentConfig(dynamic,
+  dynamicParams, revalidate, fetchCache))`; `configFor(pattern)` folds the
+  ancestors root-down FIELD BY FIELD, a field left at `defaultSegmentConfig()`
+  (Auto · true · −1 · Auto) being inherited. `revalidate: 0` is normalised to
+  `ForceDynamic`. An unknown pattern or a second config raises.
+- **The decision** — `decideKind(config, hasParams, patternIsDynamic,
+  touchedDynamic, reason)`: ForceDynamic → D; ForceStatic/ErrorOnDynamic → S
+  (`force-static[ over <reason>]`); dynamic pattern without params → D, or S
+  with nothing enumerated under `dynamicParams: false`; touched → D (front 62's
+  reason); else S with `""`. The test asserts all 64 rows.
+- **Enumeration** — `registerStaticParams(seg, fn() -> @Task<StaticParams[]>)`,
+  `expandParams(pattern, rows)` (catch-all spans `/`, optional catch-all may be
+  empty; a missing, extra, slashed or duplicated binding raises).
+- **Prerender** — every page path rendered once in its own front 62 frame
+  (`renderOnce`), as unstarted thunks in at most `rakun.static.concurrency`
+  processes (default: the scheduler count); `prerenderAll(strict)`,
+  `prerenderPath(path, strict)`, `lookupPrerendered(path)`. An entry
+  (`PrerenderEntry(path, html, payload, tags, revalidateAt, buildHash)`) is JSON
+  stored with rakun-cache's `cacheStore` in the framework cache
+  `rakun.prerender` (shared scope, tagged `path:<path>`), which the kill switch
+  does not reach. `payload` is `""`: the payload is the HTML library's.
+- **Serving** — `serveStatic(path)`: a draft request (`draftBypass()`) gets
+  `null`; a stale entry (past `revalidateAt`, or marked by `revalidateTag` /
+  `revalidatePath`) is served at once and ONE regeneration starts
+  (`ets:insert_new` claim; the worker re-reads the store and renders only while
+  still stale); a failing regeneration keeps the entry and is logged to standard
+  error and `regenerationFailures()`.
+- **Kinds** — `routeKinds()` is `routing`'s `writeKinds` of the decisions.
+- **Export** — `staticExport(outDir)`: every page path rendered STRICT into
+  `<out>/<path>/index.html` plus `payload.json` beside it; a dynamic read (front
+  62's message), a handler route, a dynamic pattern without params, or a file
+  outside `<out>` (`path.isInside`) fails it.
+
 ## Navigation signals — `modules/rakun-app/src/navigation.bp` (front 63)
 
 `notFound()`, `redirect(loc)` (307), `permanentRedirect(loc)` (308) and
