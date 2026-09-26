@@ -1028,9 +1028,9 @@ own function (`durationProblem` / `dataSizeProblem` / `boolProblem`) and the
 parser asserts on it, which is what lets a test read the message without the
 halt taking the test with it.
 
-Both carry `i32` where the spec writes `i64`: an integer literal is `i32` and
-there is no widening and no cast, so an `i64` field cannot be given a value at
-all. It is not the narrowing it reads as — a botopink integer is a JavaScript
+Both carry `i32` where the spec writes `i64`, written when an integer literal
+could not fill an `i64` field (it can now: a literal takes the width its
+position asks for, a labelled field included). It is not the narrowing it reads as — a botopink integer is a JavaScript
 number on the node row and a BEAM integer on the erlang one, so `10GB`
 (10737418240) is exact on both and is asserted as such.
 
@@ -1107,40 +1107,17 @@ guessed, and each costs a spelling in `src/config.bp`:
   1.0.10-beta when the compiler began refusing an unqualified import that two
   modules both satisfy: `sub` is declared `pub` by `file_router` and by `config`,
   and this import does not say which.
-- `Array.pop` is `lists:last/1` on the erlang row — it READS the last element, it
-  does not remove it. Nothing here pops; a stack shrinks with `dropLast`.
 - `&&` and `||` cannot appear directly inside an `if (…)` or `while (…)` head;
   they need their own parentheses (`if ((a && b))`) or a `val` binding.
-- A `val` bound inside a `loop` lambda loses its string type, and `.length()` is
-  then emitted as a call against JavaScript's `length` PROPERTY. Every such
-  binding is annotated `val x: string = …`.
-- A `//` comment inside a braced block is fatal on the node row: the commonJS
-  emitter flattens the block onto one line and the comment swallows the closing
-  brace.
-- On the erlang row `try` unwraps only in a `val` binding — `return try f()` and
-  `g(try f())` both hand on the `{ok, …}` wrapper.
 - `from` is a keyword and cannot name a parameter.
 - `${…}` INTERPOLATES inside a string literal, so a literal `${` has to be built
   (`"$" + "{"`); `"${" + body + "}"` silently compiles to the interpolation of
   `" + body + "` and the value comes out as that text.
-- `x.field.length()` is emitted as a call against JavaScript's `length` PROPERTY
-  and dies on the node row; bind the field to a local first.
-- A `while (cond)` or `for (0..n)` body is lowered to recursion on commonJS, so a
-  thousand iterations exceeds the JavaScript stack. std's
-  `random.intInRange` also floors a float by walking one recursive step per unit
-  of range, which blows the stack for anything the size of a port space — hence
-  `randomBelow`, rejection sampling over composed decimal digits.
-- A module-level `val` with an ALL-CAPS name is emitted as an erlang VARIABLE and
-  comes back `unbound`, which takes the whole module down; every constant here is
-  a function.
-- The `files` ORDER in a member's `botopink.json` is a dependency order: a module
-  has to be listed after every sibling it imports (`http` before `runtime`,
-  `profiles` before `config`). It compiles inside the member either way; a
-  CONSUMER's build reds with `unbound variable` inside rakun's own source.
-- An `if` expression cannot sit on the right of `+` (`i = i + if (…) 2 else 1`),
-  and a `var` declared inside a NESTED block of a loop body comes out `unbound`
-  on the erlang row — which is why `profiles.matches` is a chain of functions
-  over a `Stacks` value rather than one loop with inner loops.
+- std's `random.intInRange` floors a float by walking one recursive step per
+  unit of range, which blows the stack for anything the size of a port space —
+  hence `randomBelow`, rejection sampling over composed decimal digits.
+- An `if` expression cannot sit on the right of `+` (`i = i + if (…) 2 else 1`);
+  parenthesise it (`i + (if (…) { 2 } else { 1 })`).
 
 ## The container's doors
 
@@ -1301,11 +1278,9 @@ Dispatch is synchronous and in registration order. A listener that raises is
 recorded with its owner and the sequence continues, because a broken audit
 listener must not take the boot down; `listenerFailures()` reads them back.
 
-**`Event(name: …, timestampMillis: 0)` — the front's own example — does not
-compile.** An integer LITERAL is `i32`, there is no widening and no cast, so an
-`i64` field cannot be given a value at all; it is the same gap `config.bp`'s
-`Duration` and `DataSize` record. `event(name, source, payload)` is the writable
-constructor and stamps `std/io/clock` itself, which is what a publisher wanted
+**`event(name, source, payload)` is the writable constructor** — written when
+`Event(name: …, timestampMillis: 0)` could not fill the `i64` field from a
+literal (it can now) — and stamps `std/io/clock` itself, which is what a publisher wanted
 anyway. `std/io/clock` is imported by `events.bp` (a `src/` module) and never by a
 test, for the § Language notes reason.
 
@@ -3435,16 +3410,11 @@ Each measured against the pinned binary, not guessed.
   `type mismatch: expected Greeter, got En` on both rows; so is
   `val g: Greeter = En(…)` and `fn f() -> Greeter { return En(…); }`. The SPI is
   written around it (above).
-- **An integer literal does not widen to `i64` in arithmetic.** `fn shrink(x:
-  i64) -> i64 { return x - 1000; }` is `type mismatch: expected i64, got i32` on
-  both rows, **with no line or column** — only the file. A COMPARISON widens
-  (`x > 0` is fine) and so does a call argument bound to an `i64` PARAMETER from
-  an `i64` VALUE; an `i32` literal passed where an `i64` is expected does not
-  (`vPastDate("a", 1)` reds, located). There is no `i64` literal spelling, so a
-  test that needs one builds it from the clock
-  (`clock.nowMillis() - clock.nowMillis()`). This is why `#[minValue]`/`#[maxValue]`
-  are REFUSED on an `i64` field rather than emitted as something that reds, and
-  why `parseI64` is the module's only host cell in the coercion path.
+- **An integer literal takes the `i64` width its position asks for** — an
+  operand (`x - 1000`), a parameter (`vPastDate("a", 1)`), a labelled field. The
+  module was written before it did: `#[minValue]`/`#[maxValue]` are still
+  REFUSED on an `i64` field, and `parseI64` is the module's only host cell in the
+  coercion path.
 - **A record method's owner module is resolved only when the type is imported.**
   On erlang, calling a method on a value whose type is not imported into the
   calling module emits an unqualified local call: `erlc` answers

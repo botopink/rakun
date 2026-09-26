@@ -480,16 +480,14 @@ pub fn jhonstartView() -> ElementView<Element> {
 }
 ```
 
-Two rules, both of which cost an hour if you learn them from an erlang
-diagnostic instead of from here:
+One rule, which costs an hour if you learn it from a diagnostic instead of
+from here:
 
-- **Wrap every function in a lambda.** `isVoid: isVoidTag` compiles on node and
-  is `variable 'IsVoidTag' is unbound` on erlang. `{ t -> isVoidTag(t) }` is the
-  same value and lowers on both.
-- **Read a field before you call it.** `v.tagOf(e)` is a METHOD call to the
-  compiler and reds with `function tagOf/2 undefined` on erlang. Write
-  `val tagOf = v.tagOf; tagOf(e)`. The same holds for every field of
-  `RenderHooks`.
+- **Wrap an imported function in a lambda.** `isVoid: isVoidTag` with
+  `isVoidTag` imported is `unbound variable 'isVoidTag'`; `{ t -> isVoidTag(t) }`
+  is the same value and lowers on every row.
+
+A function-valued field is called in place — `v.tagOf(e)` applies the field.
 
 The four readers are named functions taking a typed parameter — a field read
 inside a lambda loses the parameter's type on the erlang row.
