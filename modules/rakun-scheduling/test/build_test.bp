@@ -5,8 +5,8 @@
 //// not compile. So each cell here WRITES a one-file project that depends on
 //// this member by path, runs the compiler on it and asserts the refusal text
 //// and its location in the compiler's output (rakun-data's `sql_build_test.bp`
-//// shape). The projects live under `.botopinkbuild/tmp/rakun-scheduling-fixtures/`
-//// (git-ignored), not under `test/`: the runner compiles every `.bp` below `test/`.
+//// shape). The projects live under `$BOTOPINK_TEST_TMPDIR/rakun-scheduling-fixtures/`
+//// (the run's own), not under `test/`: the runner compiles every `.bp` below `test/`.
 ////
 //// The compiler is `$BOTOPINK_BIN`, else `botopink` on `PATH`, else the
 //// meta-repository's `repository/botopink-lang/zig-out/bin/botopink`. With
@@ -17,11 +17,18 @@
 //// rules because it cannot call it, and this is what keeps the two from drifting.
 
 import {testing.asserts} from "std";
-import {io: {fs, process}} from "std";
+import {io: {fs, process, env}} from "std";
 import {cronProblem} from "cron";
 
+// This run's own scratch directory, `""` outside `botopink test`. `botopink
+// test` names it in `BOTOPINK_TEST_TMPDIR` — unique to the run and the target,
+// removed when the run ends. Never a path under the member's own directory:
+// the commonJS and the erlang cell of this member run side by side with that
+// directory as their cwd, and each `rm -rf`s a fixture before writing it, so
+// one deleted the other's project between its write and its compile.
 fn fixtureRoot() -> string {
-    return process.cwd() + "/.botopinkbuild/tmp/rakun-scheduling-fixtures";
+    val tmp = env.read("BOTOPINK_TEST_TMPDIR").unwrapOr("");
+    return if (tmp == "") "" else tmp + "/rakun-scheduling-fixtures";
 }
 
 fn compilerCommand() -> string {
@@ -35,7 +42,11 @@ fn dep(name: string, dir: string) -> string {
 // Writes `source` as the root of a project named `name`, builds it for erlang,
 // and answers the compiler's output followed by `exit=<status>`.
 fn buildFixture(name: string, source: string) -> string {
-    val dir = fixtureRoot() + "/" + name;
+    val root = fixtureRoot();
+    return if (root == "") "BOTOPINK_TEST_TMPDIR is not set: run this suite under `botopink test`" else buildFixtureIn(root + "/" + name, name, source);
+}
+
+fn buildFixtureIn(dir: string, name: string, source: string) -> string {
     val here = process.cwd();
     val _m = process.runShell("rm -rf '" + dir + "' && mkdir -p '" + dir + "/src'");
     val deps = [

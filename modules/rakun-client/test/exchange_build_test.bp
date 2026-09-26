@@ -4,15 +4,22 @@
 //// it (that module would not compile, and the runner skips it), so each cell
 //// writes a one-file project depending on this member by path, runs the
 //// compiler on it and asserts the refusal and its location. The projects live
-//// under `.botopinkbuild/tmp/rakun-client-fixtures/` (git-ignored). The
+//// under `$BOTOPINK_TEST_TMPDIR/rakun-client-fixtures/` (the run's own). The
 //// compiler is `$BOTOPINK_BIN`, else `botopink` on `PATH`, else the
 //// meta-repository's build; with none of them the cells FAIL saying so.
 
 import {testing.asserts} from "std";
-import {io: {fs, process}} from "std";
+import {io: {fs, process, env}} from "std";
 
+// This run's own scratch directory, `""` outside `botopink test`. `botopink
+// test` names it in `BOTOPINK_TEST_TMPDIR` — unique to the run and the target,
+// removed when the run ends. Never a path under the member's own directory:
+// the commonJS and the erlang cell of this member run side by side with that
+// directory as their cwd, and each `rm -rf`s a fixture before writing it, so
+// one deleted the other's project between its write and its compile.
 fn fixtureRoot() -> string {
-    return process.cwd() + "/.botopinkbuild/tmp/rakun-client-fixtures";
+    val tmp = env.read("BOTOPINK_TEST_TMPDIR").unwrapOr("");
+    return if (tmp == "") "" else tmp + "/rakun-client-fixtures";
 }
 
 fn compilerCommand() -> string {
@@ -23,7 +30,11 @@ fn compilerCommand() -> string {
 // dependency is not loaded for a consumer (rakun AGENTS.md, front 08
 // finding 2), so a consumer names it itself.
 fn buildFixture(name: string, source: string) -> string {
-    val dir = fixtureRoot() + "/" + name;
+    val root = fixtureRoot();
+    return if (root == "") "BOTOPINK_TEST_TMPDIR is not set: run this suite under `botopink test`" else buildFixtureIn(root + "/" + name, name, source);
+}
+
+fn buildFixtureIn(dir: string, name: string, source: string) -> string {
     val here = process.cwd();
     val _m = process.runShell("rm -rf '" + dir + "' && mkdir -p '" + dir + "/src'");
     val manifest = "{\n  \"name\": \"" + name + "\",\n  \"version\": \"0.0.1\",\n  \"src\": \"src/\",\n  \"entry\": \"root.bp\",\n  \"target\": \"erlang\",\n  \"targets\": [\"erlang\"],\n  \"dependencies\": {\n    \"rakun\": { \"path\": \"" + here + "/../rakun\" },\n    \"rakun-actuator-api\": { \"path\": \"" + here + "/../rakun-actuator-api\" },\n    \"rakun-client\": { \"path\": \"" + here + "\" }\n  }\n}\n";
