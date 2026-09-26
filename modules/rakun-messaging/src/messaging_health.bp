@@ -1,0 +1,25 @@
+//// rakun-messaging — the `messaging.<arm>` health indicators. Front 15 step 6.
+////
+//// One per configured arm, registered by `startMessaging()`. DOWN naming the
+//// arm when it is not connected; DOWN naming the container when every worker
+//// of one of its enabled containers is gone, even with the arm connected — an
+//// arm that can publish but cannot consume is not healthy. UP otherwise.
+
+import {json} from "std";
+import {rkProp} from "rakun";
+import {Health, healthDown} from "rakun-actuator-api";
+import {rkMsgArmConnected, rkMsgListeners, rkMsgContainerWorkers, rkMsgContainers} from "messaging_host";
+
+pub fn armHealth(arm: string) -> Health {
+    if (rkMsgArmConnected(arm) == false) return healthDown(json.object([#("arm", json.quote(arm)), #("reason", json.quote("the broker is not connected"))]));
+    val running = rkMsgContainers();
+    var dead = "";
+    for (rkMsgListeners()) { line ->
+        val f = line.split("|");
+        val container = (f[4] ?? "");
+        val mine = (f[1] ?? "") == arm && running.filter({ c -> c == container }).length > 0;
+        if (dead == "" && mine && rkMsgContainerWorkers(container) == 0) dead = container;
+    };
+    if (dead != "") return healthDown(json.object([#("arm", json.quote(arm)), #("container", json.quote(dead)), #("reason", json.quote("no live worker"))]));
+    return Health(status: "UP", details: json.object([#("arm", json.quote(arm))]));
+}

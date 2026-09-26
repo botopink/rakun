@@ -1,0 +1,59 @@
+//// rakun-messaging — `#[listener]` and the four markers, applied in this
+//// module (front 15 step 3). The registrations are this module's own
+//// top-level vals, so they run once when the module loads; nothing here
+//// resets the registry.
+
+import {service, rkScan, rkSingleton, rkEnter, rkDone, rkBuildCount} from "rakun";
+import {listener, amqpListener, kafkaListener, redisListener, streamListener} from "markers";
+import {Message} from "message";
+import {rkRegisterListenerAs, rkListenerCount, rkDeliver, rkDeliverKeyed} from "registry";
+import {registeredListeners} from "container";
+
+#[service]
+#[listener]
+pub type DecoOrderListeners() {
+    #[amqpListener("deco-orders")]
+    pub fn onOrderPlaced(self: Self, msg: Message) -> i32 {
+        return msg.payload.length();
+    }
+
+    #[kafkaListener("deco-order-events", "order-service")]
+    pub fn onOrderEvent(self: Self, msg: Message) -> i32 {
+        return if (msg.key == "placed") 1 else 2;
+    }
+
+    #[redisListener("deco-cache-invalidation")]
+    pub fn onInvalidate(self: Self, msg: Message) -> i32 {
+        return 0;
+    }
+
+    pub fn helper(self: Self) -> i32 {
+        return 0;
+    }
+}
+
+#[service]
+#[listener]
+pub type DecoAuditListeners() {
+    #[streamListener("deco-audit", "first")]
+    pub fn onAudit(self: Self, msg: Message) -> i32 {
+        return 5;
+    }
+}
+
+test "decorators: one registration per annotated method across every #[listener] type" {
+    assert rkListenerCount() == 4;
+    val names = registeredListeners().map({ l -> l.name + " " + l.broker + " " + l.destination + " " + l.group + " " + l.container });
+    assert names.join("\n") == "DecoOrderListeners.onOrderPlaced amqp deco-orders  deco-orders\nDecoOrderListeners.onOrderEvent kafka deco-order-events order-service deco-order-events\nDecoOrderListeners.onInvalidate redis deco-cache-invalidation  deco-cache-invalidation\nDecoAuditListeners.onAudit stream deco-audit @first deco-audit";
+}
+
+test "decorators: the emitted handler reaches the component and returns its result" {
+    assert rkDeliver("amqp", "deco-orders", "abc") == 3;
+    assert rkDeliverKeyed("kafka", "deco-order-events", "placed", "{}") == 1;
+    assert rkDeliver("stream", "deco-audit", "x") == 5;
+}
+
+test "decorators: one component instance serves every message" {
+    for (["a", "b", "c", "d"]) { p -> val _d = rkDeliver("amqp", "deco-orders", p); };
+    assert rkBuildCount("DecoOrderListeners") == 1;
+}

@@ -1,0 +1,108 @@
+//// rakun-messaging — `#[listener]` and the four broker markers. Front 15 step 3.
+////
+//// `#[listener]` on a component type walks its methods the way
+//// `#[restController]` walks `#[getMapping]`, reads each one's broker marker
+//// and emits one registration per annotated method, spliced into the type's
+//// module (which imports `rkRegisterListenerAs`):
+////
+////     val __rkListener_OrderListeners_onOrderPlaced = rkRegisterListenerAs(
+////         "OrderListeners.onOrderPlaced", "amqp", "orders", "", "orders",
+////         { msg -> __rkMake_OrderListeners().onOrderPlaced(msg) });
+////
+//// The handler reaches the ONE instance the stereotype's factory keeps. The
+//// container is named after the destination:
+//// `rakun.messaging.listener.<destination>.*` configures it.
+////
+//// | Marker | Broker | Destination | Group |
+//// |---|---|---|---|
+//// | `#[amqpListener(queue)]` | `amqp` | the queue | — |
+//// | `#[kafkaListener(topic, groupId)]` | `kafka` | the topic | the consumer group |
+//// | `#[redisListener(channel)]` | `redis` | the channel | — |
+//// | `#[streamListener(stream, offset)]` | `stream` | the stream | `@first` · `@last` · `@next` · `@<n>` |
+////
+//// Declared parameter defaults are never applied, so `#[kafkaListener]` takes
+//// both arguments. A handler is `(self: Self, msg: Message) -> i32`. Decorator
+//// bodies are comment-free and call no function (the comptime rules), so the
+//// offset rule is spelled out inline.
+
+pub fn listener(comptime decl: @Decl) {
+    var stereotype = "";
+    decl.annotations.forEach({ a ->
+        val isStereo = a.name == "component" || a.name == "service" || a.name == "repository" || a.name == "controller" || a.name == "restController" || a.name == "configuration";
+        val st = if (isStereo) a.name else stereotype;
+        stereotype = st;
+    });
+    var regs: Array<string> = [];
+    var problem = "";
+    decl.methods.forEach({ m ->
+        var markers: Array<string> = [];
+        var broker = "";
+        var dest = "";
+        var group = "";
+        m.annotations.forEach({ a ->
+            val first = if (a.args.length > 0) a.args[0].replaceAll("\"", "").trim() else "";
+            val second = if (a.args.length > 1) a.args[1].replaceAll("\"", "").trim() else "";
+            if (a.name == "amqpListener") {
+                markers.push(a.name);
+                broker = "amqp";
+                dest = first;
+            };
+            if (a.name == "kafkaListener") {
+                markers.push(a.name);
+                broker = "kafka";
+                dest = first;
+                group = second;
+            };
+            if (a.name == "redisListener") {
+                markers.push(a.name);
+                broker = "redis";
+                dest = first;
+            };
+            if (a.name == "streamListener") {
+                markers.push(a.name);
+                broker = "stream";
+                dest = first;
+                group = "@" + second;
+            };
+        });
+        if (markers.length > 1 && problem == "") problem = decl.name + "." + m.name + " carries " + markers.length.toString() + " broker markers (" + markers.join(", ") + ") - one destination per handler";
+        var others: Array<string> = [];
+        var msgType = "";
+        m.params.forEach({ p ->
+            if (p.name != "self") {
+                others.push(p.name);
+                msgType = p.typeName;
+            };
+        });
+        if (markers.length == 1 && problem == "" && (others.length != 1 || msgType != "Message")) problem = decl.name + "." + m.name + " must take exactly one parameter of type Message - a handler is (self: Self, msg: Message) -> i32";
+        if (markers.length == 1 && problem == "" && m.returnType != "i32") problem = decl.name + "." + m.name + " returns `" + m.returnType + "` - a handler returns i32";
+        if (markers.length == 1) {
+            regs.push("val __rkListener_" + decl.name + "_" + m.name + " = rkRegisterListenerAs(\"" + decl.name + "." + m.name + "\", \"" + broker + "\", \"" + dest + "\", \"" + group + "\", \"" + dest + "\", { msg -> __rkMake_" + decl.name + "()." + m.name + "(msg) });");
+        };
+    });
+    if (decl.kind != DeclKind.Type || decl.variants.length > 0) decl.fail("#[listener] must annotate a component type - it reads the broker markers of the type's methods");
+    if (stereotype == "") decl.fail("#[listener] needs a stereotype on the same type (#[service] or #[component]) - the handler reaches the one instance __rkMake_" + decl.name + "() keeps");
+    if (problem != "") decl.fail("#[listener] " + problem);
+    if (regs.length == 0) decl.fail("#[listener] on " + decl.name + " finds no method carrying #[amqpListener], #[kafkaListener], #[redisListener] or #[streamListener] - it would register nothing");
+    @emit(regs.join("\n"));
+}
+
+pub fn amqpListener(comptime decl: @Decl, queue: string) {
+    if (decl.kind != DeclKind.Method) decl.fail("#[amqpListener] must annotate a method of a #[listener] type");
+}
+
+pub fn kafkaListener(comptime decl: @Decl, topic: string, groupId: string) {
+    if (decl.kind != DeclKind.Method) decl.fail("#[kafkaListener] must annotate a method of a #[listener] type");
+    if (groupId == "") decl.fail("#[kafkaListener] needs a consumer group id - the second argument");
+}
+
+pub fn redisListener(comptime decl: @Decl, channel: string) {
+    if (decl.kind != DeclKind.Method) decl.fail("#[redisListener] must annotate a method of a #[listener] type");
+}
+
+pub fn streamListener(comptime decl: @Decl, stream: string, offset: string) {
+    if (decl.kind != DeclKind.Method) decl.fail("#[streamListener] must annotate a method of a #[listener] type");
+    val digits = offset.length() > 0 && offset.split("").filter({ c -> c != "0" && c != "1" && c != "2" && c != "3" && c != "4" && c != "5" && c != "6" && c != "7" && c != "8" && c != "9" }).length == 0;
+    val keyword = offset == "first" || offset == "last" || offset == "next";
+    if (keyword == false && digits == false) decl.fail("#[streamListener] offset `" + offset + "` is not first, last, next or a decimal number");
+}

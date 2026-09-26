@@ -220,8 +220,12 @@ rakun/
 │   │                    `#[cached]` twin), `cache_endpoint.bp`, `cache_host.bp` over
 │   │                    `sidecars/rakun_cache.erl`; test/fixtures/{twin,imports} are
 │   │                    consumer projects `consumer_test.bp` copies and runs
+│   ├── rakun-messaging/ ← MESSAGING (§ Messaging, front 15): the listener registry,
+│   │                    the four markers, the in-process broker and the containers
+│   │                    (`sidecars/rakun_messaging.erl`), the templates, the
+│   │                    `messaging.<arm>` indicators
 │   └── rakun-<area>/  ← the remaining scaffolds (actuator · client ·
-│                        data · hateoas · logging · messaging · scheduling · security ·
+│                        data · hateoas · logging · scheduling · security ·
 │                        session): `botopink.json` (files [root.bp] · targets per
 │                        `specs/1.0.10-beta/03-rakun/modules.md` § Targets · dependencies
 │                        { "rakun": { "workspace": true } }) + a two-comment `src/root.bp`;
@@ -3255,6 +3259,74 @@ invalidation log and trace, the twin lookup and a RESP double for the tests.
   providers, DOWN naming the first that does not answer).
 - **Not reached** — the qualified import `import {cache} from "rakun-cache"`
   (a workspace module cannot be imported as a namespace).
+
+## Messaging — `modules/rakun-messaging/` (front 15)
+
+Depends on `rakun` and `rakun-actuator-api`. Sidecar `rakun_messaging.erl`: the
+listener registry, the IN-PROCESS broker (an append-only log per
+`{broker, destination}`; per consumer group a cursor, a redelivery list and the
+in-flight set, kept by `rakun_messaging_owner`, which monitors every worker), the
+containers, the arms' state, the published log and the startup log.
+
+- **One transport this milestone.** Every arm — `amqp`, `kafka`, `redis`,
+  `stream` — runs on the in-process broker (`rakun.messaging.<arm>.transport=memory`).
+  The real wires are OTP applications (`amqp_client`, `brod`,
+  `rabbitmq_stream_client`) a sidecar cannot load, so an address key
+  (`rakun.messaging.amqp.host` / `.addresses`, `.kafka.bootstrap-servers`,
+  `.redis.url`) without `transport=memory`, or any other transport value, REFUSES
+  the boot naming the driver. The arms differ only in how they read the log: a
+  queue is one shared cursor (`offset = -1`), a Kafka topic is read per group with
+  its offsets, a stream starts at `@first|@last|@next|@<n>` with its offsets,
+  Redis pub/sub starts at the end and never redelivers (a subscriber that was down
+  missed the message; one that crashes loses what it held).
+- **`Message`** (`message.bp`) — `broker, destination, key, payload, headersJson,
+  offset`, the same on every arm (`""` / `-1` where the arm has none; headers
+  `{"redelivered":true}` on a redelivery). `pub behavior MessageBroker`,
+  implemented by `InProcessBroker(arm)`. `ackMessage(msg)` / `nackMessage(msg)`
+  settle the message being handled (no-ops outside a container).
+- **Registry** (`registry.bp`) — `rkRegisterListener(broker, dest, group,
+  container, handler)` and the named `rkRegisterListenerAs(name, …)` `#[listener]`
+  emits; `rkListenerCount()`, `rkListenerDestinations()` (comma-joined, also
+  answered to the core's `contextSnapshot()` through the `rakun_listener_names`
+  persistent term); `rkDeliver(broker, dest, payload)` / `rkDeliverKeyed` call the
+  handler in the caller's process with no broker (an unknown destination raises).
+  A duplicate `{broker, destination}` is kept and the boot refuses it naming both.
+- **Markers** (`markers.bp`) — `#[listener]` on a stereotyped type emits
+  `val __rkListener_<T>_<m> = rkRegisterListenerAs("<T>.<m>", …, { msg ->
+  __rkMake_<T>().<m>(msg) })` per `#[amqpListener(queue)]` ·
+  `#[kafkaListener(topic, groupId)]` · `#[redisListener(channel)]` ·
+  `#[streamListener(stream, offset)]` method; the module imports
+  `rkRegisterListenerAs`. Refused at build: no marker, two markers on a method, a
+  handler not `(self, msg: Message) -> i32`, no stereotype, a marker off a method,
+  a stream offset other than `first`/`last`/`next`/decimal.
+- **Containers** (`container.bp`) — one per listener, NAMED AFTER ITS DESTINATION,
+  `rakun.messaging.listener.<destination>.concurrency` (1) · `.prefetch` (10) ·
+  `.ack-mode` (`auto`; `none` on redis, the only value redis accepts; refused on
+  amqp and kafka) · `.enabled` (true). `startMessaging()` refuses a bad
+  configuration, connects each configured arm with its
+  `rakun.messaging.<arm>.properties.*` keys verbatim (`armProperties(arm)`; the
+  startup log lists the key names or `(none)`), registers `messaging.<arm>`, and
+  starts a `simple_one_for_one` supervisor per enabled listener as a temporary
+  child of `rakun_sup`, with N permanent workers. The owner PUSHES each worker up
+  to `prefetch` unsettled messages; `auto` acks a non-raising return, `manual`
+  redelivers a handler that returned without `ackMessage`, and a raising handler
+  kills only its worker — the supervisor restarts it and its held messages are
+  redelivered first. `concurrency > 1` logs that ordering is not preserved.
+  `stopMessaging()` (containers + arms), `resetMessaging()` (everything, listeners
+  too), `stopBroker(arm)` / `startBroker(arm)` (an outage), `published(broker)` /
+  `clearPublished()` (the test seam: `destination|key|payload`).
+- **Templates** (`templates.bp`) — `AmqpTemplate.send(queue, payload)`,
+  `KafkaTemplate.send(topic, key, payload)`, `RedisPubSubTemplate.publish(channel,
+  payload)`, `StreamTemplate.append(stream, payload)`: 0, or non-zero with no
+  connection (never a raise). Injected through the hand-written
+  `__rkMake_<Template>()`, which a consumer imports.
+- **Health** (`messaging_health.bp`) — `messaging.<arm>` DOWN naming the arm when
+  not connected, DOWN naming the container when an enabled container has no live
+  worker; UP otherwise.
+- **Out of scope** (each its own front): JMS 90 · Pulsar 91 · RSocket 92 ·
+  Spring Integration and Kafka Streams 89 · retry, dead letters, idempotency 86 ·
+  exchange topology and audit 87 · transactional publish 83. Non-text payloads
+  wait on a byte type.
 
 ## Static files — `modules/rakun-web/src/static.bp` (front 82)
 

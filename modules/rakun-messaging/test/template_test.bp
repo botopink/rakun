@@ -1,0 +1,91 @@
+//// rakun-messaging — the templates, publishing without a connection, the
+//// passthrough and the boot refusals of the arms (front 15 step 5).
+
+import {testing.asserts} from "std";
+import {io: {fs}} from "std";
+import {service, rkScan, rkSingleton, rkEnter, rkDone, rkSetProp} from "rakun";
+import {AmqpTemplate, KafkaTemplate, RedisPubSubTemplate, StreamTemplate, __rkMake_AmqpTemplate, __rkMake_KafkaTemplate, __rkMake_RedisPubSubTemplate, __rkMake_StreamTemplate} from "templates";
+import {rkRegisterListener} from "registry";
+import {resetMessaging, stopMessaging, startMessaging, messagingConfigProblem, published, clearPublished, armProperties, messagingStartupLog} from "container";
+
+#[service]
+pub type TplPublisher(
+    amqp: AmqpTemplate,
+    kafka: KafkaTemplate,
+    redis: RedisPubSubTemplate,
+    stream: StreamTemplate,
+) {
+    pub fn all(self: Self) -> i32 {
+        return self.amqp.send("q", "a") + self.kafka.send("t", "k", "b") + self.redis.publish("c", "d") + self.stream.append("s", "e");
+    }
+}
+
+fn transports(value: string) -> i32 {
+    for (["amqp", "kafka", "redis", "stream"]) { a -> val _t = rkSetProp("rakun.messaging." + a + ".transport", value); };
+    return 0;
+}
+
+fn clean() -> i32 {
+    val _s = stopMessaging();
+    val _t = transports("");
+    return resetMessaging();
+}
+
+test "template: each template is injected by type into a service that declares it" {
+    val _c = clean();
+    val _t = transports("memory");
+    val _b = startMessaging();
+    val sent = __rkMake_TplPublisher().all();
+    val a = published("amqp").join(";");
+    val k = published("kafka").join(";");
+    val r = published("redis").join(";");
+    val s = published("stream").join(";");
+    val _y = clean();
+    assert sent == 0;
+    assert a == "q||a" && k == "t|k|b" && r == "c||d" && s == "s||e";
+}
+
+test "template: a publish with no broker connection answers non-zero and does not raise" {
+    val _c = clean();
+    assert __rkMake_AmqpTemplate().send("q", "x") != 0;
+    assert __rkMake_KafkaTemplate().send("t", "k", "x") != 0;
+    assert __rkMake_RedisPubSubTemplate().publish("c", "x") != 0;
+    assert __rkMake_StreamTemplate().append("s", "x") != 0;
+    assert published("amqp").length == 0;
+}
+
+test "template: every properties key reaches the arm unmodified and the startup log names them" {
+    val _c = clean();
+    val _t = transports("memory");
+    val _p1 = rkSetProp("rakun.messaging.kafka.properties.max.poll.records", "5");
+    val _p2 = rkSetProp("rakun.messaging.kafka.properties.client.id", "orders=a,b");
+    val _b = startMessaging();
+    val props = armProperties("kafka").join(";");
+    val amqpProps = armProperties("amqp").length;
+    val log = messagingStartupLog();
+    val _z1 = rkSetProp("rakun.messaging.kafka.properties.max.poll.records", "");
+    val _z2 = rkSetProp("rakun.messaging.kafka.properties.client.id", "");
+    val _y = clean();
+    assert props == "client.id=orders=a,b;max.poll.records=5";
+    assert amqpProps == 0;
+    assert log.filter({ l -> l == "passthrough kafka: client.id, max.poll.records" }).length == 1;
+    assert log.filter({ l -> l == "passthrough amqp: (none)" }).length == 1;
+}
+
+test "template: an address key without the memory transport refuses the boot naming the driver" {
+    val _c = clean();
+    val _h = rkSetProp("rakun.messaging.amqp.host", "rabbit.internal");
+    val problem = messagingConfigProblem();
+    val _z = rkSetProp("rakun.messaging.amqp.host", "");
+    assert problem.contains("rakun.messaging.amqp.host is set, but the amqp wire is not implemented - it needs amqp_client");
+    val _k = rkSetProp("rakun.messaging.kafka.transport", "tcp");
+    assert messagingConfigProblem().contains("rakun.messaging.kafka.transport is `tcp`");
+    val _y = clean();
+}
+
+test "template: a listener on an arm with no transport refuses the boot" {
+    val _c = clean();
+    val _l = rkRegisterListener("amqp", "lonely", "", "lonely", { msg -> 0 });
+    assert messagingConfigProblem().contains("amqp:lonely consumes amqp lonely, and no amqp transport is configured (rakun.messaging.amqp.transport)");
+    val _y = clean();
+}
