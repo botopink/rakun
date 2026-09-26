@@ -1,0 +1,146 @@
+//// The `Request` double (front 19 step 1).
+////
+//// `Request` is a behavior, so a test cannot construct one. `FakeRequest` is
+//// the builder a test writes, and `fake.toRequest()` is the `Request` a
+//// handler takes — the runtime's own request, built from the double's fields
+//// by `rkMakeRequest`, the same map a socket request gets. Every accessor
+//// answers `""` for an absent name, header names match case-insensitively,
+//// cookies are a field of their own (they reach the handler as one `cookie`
+//// header, the way the wire carries them), and the `with*` builders each
+//// return a new value.
+////
+//// WHY NOT `implement Request`. Two compiler gaps
+//// (`specs/1.0.10-beta/language-gaps.md`): an implementer does not convert to
+//// its behavior at a call site, so a `FakeRequest` is refused where `Request`
+//// is declared; and on erlang a `behavior` method call lowers to ANOTHER
+//// type's same-named method, so a `FakeRequest` declaring `param`/`header`
+//// would reroute every `req.header(…)` of a test module that imports it. The
+//// accessors are therefore `paramOf`/`queryOf`/`headerOf`/`bodyOf`, names no
+//// `Request` call can be confused with.
+
+import {json} from "std";
+import {Request, HttpMethod, rkMakeRequest} from "rakun";
+
+pub type FakeRequest(
+    method: HttpMethod,
+    path: string,
+    params: Array<#(string, string)>,
+    queries: Array<#(string, string)>,
+    headers: Array<#(string, string)>,
+    cookies: Array<#(string, string)>,
+    bodyText: string,
+) {
+    pub fn paramOf(self: Self, name: string) -> string {
+        return pairValue(self.params, name, false);
+    }
+
+    pub fn queryOf(self: Self, name: string) -> string {
+        return pairValue(self.queries, name, false);
+    }
+
+    pub fn headerOf(self: Self, name: string) -> string {
+        val wanted = name.toLower();
+        val named = pairValue(self.headers, wanted, true);
+        return if (wanted == "cookie" && named == "") cookieHeader(self.cookies) else named;
+    }
+
+    pub fn bodyOf(self: Self) -> string {
+        return self.bodyText;
+    }
+
+    pub fn cookieOf(self: Self, name: string) -> string {
+        return pairValue(self.cookies, name, false);
+    }
+
+    // The runtime's `Request` carrying this double's verb, path, params,
+    // headers (the cookies as one `cookie` header) and query.
+    pub fn toRequest(self: Self) -> Request {
+        return rkMakeRequest(verbOf(self.method), self.path, pairsJson(self.params), pairsJson(self.wireHeaders()), pairsJson(self.queries), self.bodyText);
+    }
+
+    // The headers as the wire carries them: the cookies folded into `cookie`
+    // unless one was set by name.
+    pub fn wireHeaders(self: Self) -> Array<#(string, string)> {
+        val explicit = pairValue(self.headers, "cookie", true);
+        return if (explicit != "" || self.cookies.length == 0) self.headers else self.headers.append([#("cookie", cookieHeader(self.cookies))]);
+    }
+
+    pub fn withParam(self: Self, name: string, value: string) -> FakeRequest {
+        return FakeRequest(method: self.method, path: self.path, params: replacePair(self.params, name, value, false), queries: self.queries, headers: self.headers, cookies: self.cookies, bodyText: self.bodyText);
+    }
+
+    pub fn withQuery(self: Self, name: string, value: string) -> FakeRequest {
+        return FakeRequest(method: self.method, path: self.path, params: self.params, queries: replacePair(self.queries, name, value, false), headers: self.headers, cookies: self.cookies, bodyText: self.bodyText);
+    }
+
+    pub fn withHeader(self: Self, name: string, value: string) -> FakeRequest {
+        return FakeRequest(method: self.method, path: self.path, params: self.params, queries: self.queries, headers: replacePair(self.headers, name, value, true), cookies: self.cookies, bodyText: self.bodyText);
+    }
+
+    pub fn withCookie(self: Self, name: string, value: string) -> FakeRequest {
+        return FakeRequest(method: self.method, path: self.path, params: self.params, queries: self.queries, headers: self.headers, cookies: replacePair(self.cookies, name, value, false), bodyText: self.bodyText);
+    }
+
+    pub fn withBody(self: Self, body: string) -> FakeRequest {
+        return FakeRequest(method: self.method, path: self.path, params: self.params, queries: self.queries, headers: self.headers, cookies: self.cookies, bodyText: body);
+    }
+}
+
+pub fn fakeRequest(method: HttpMethod, path: string) -> FakeRequest {
+    return FakeRequest(method: method, path: path, params: [], queries: [], headers: [], cookies: [], bodyText: "");
+}
+
+pub fn fakeGet(path: string) -> FakeRequest {
+    return fakeRequest(HttpMethod.Get, path);
+}
+
+pub fn fakePost(path: string, body: string) -> FakeRequest {
+    return fakeRequest(HttpMethod.Post, path).withBody(body);
+}
+
+pub fn fakePut(path: string, body: string) -> FakeRequest {
+    return fakeRequest(HttpMethod.Put, path).withBody(body);
+}
+
+pub fn fakeDelete(path: string) -> FakeRequest {
+    return fakeRequest(HttpMethod.Delete, path);
+}
+
+// The verb as the wire spells it — what `MockMvc` hands the router.
+pub fn verbOf(m: HttpMethod) -> string {
+    val t = case m {
+        HttpMethod.Get -> "GET";
+        HttpMethod.Post -> "POST";
+        HttpMethod.Put -> "PUT";
+        HttpMethod.Patch -> "PATCH";
+        HttpMethod.Delete -> "DELETE";
+        HttpMethod.Head -> "HEAD";
+        HttpMethod.Options -> "OPTIONS";
+    };
+    return t;
+}
+
+// `name=value; name=value`, in the order the cookies were added.
+pub fn cookieHeader(cookies: Array<#(string, string)>) -> string {
+    return cookies.map({ c -> c.0 + "=" + c.1 }).join("; ");
+}
+
+// A JSON object of the pairs, in order — the shape `rkDispatchHttp` and
+// `rkMakeRequest` read headers, query and params in.
+pub fn pairsJson(pairs: Array<#(string, string)>) -> string {
+    return json.object(pairs.map({ p -> #(p.0, json.quote(p.1)) }));
+}
+
+// Header names are stored lower-cased, so a lookup lower-cases too.
+fn pairValue(pairs: Array<#(string, string)>, name: string, fold: bool) -> string {
+    val key = if (fold) name.toLower() else name;
+    val found = pairs.filter({ p -> p.0 == key });
+    val last: string = found.at(found.length - 1)?.1 ?? "";
+    return last;
+}
+
+fn replacePair(pairs: Array<#(string, string)>, name: string, value: string, fold: bool) -> Array<#(string, string)> {
+    val key = if (fold) name.toLower() else name;
+    val kept = pairs.filter({ p -> p.0 != key });
+    return kept.append([#(key, value)]);
+}

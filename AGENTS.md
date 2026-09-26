@@ -210,9 +210,11 @@ rakun/
 │   │       └── decorators_test.bp ← the five markers and what they emit; NOTHING
 │   │                             here resets a table
 │   ├── rakun-test/    ← the `<lib>-test` member (front 95, `specs/1.0.10-beta/02-packaging/README.md`
-│   │                    § 5): files [root.bp], an EMPTY `pub` surface and one inline `test` proving
-│   │                    the core resolves from it; front 19 fills it (request doubles, MockMvc,
-│   │                    the `assert<Subject>(loc, …)` helpers). Re-exports nothing from std
+│   │                    § 5; front 19): `fake_request.bp` (FakeRequest + toRequest), `assertions.bp`
+│   │                    (expectStatus/BodyEquals/BodyContains/JsonField), `mockmvc.bp` (MockMvc over
+│   │                    rkDispatchHttp), `context.bp` (resetSingletons/resetContext/contextSnapshot);
+│   │                    test/ holds one file per piece plus the std-mocks + #[bean] pairing.
+│   │                    Re-exports nothing from std and ships no mocking code
 │   └── rakun-<area>/  ← the ten remaining scaffolds (actuator · cache · client ·
 │                        data · hateoas · logging · messaging · scheduling · security ·
 │                        session): `botopink.json` (files [root.bp] · targets per
@@ -3060,6 +3062,59 @@ profile active fails at boot); `rakun.security.password.encoder`;
 4. Gotchas met: `unknown` is a reserved word (`val unknown = …` does not parse); in a
    consumer fixture a property set with `rkSetProp` in one test cell was not visible
    in the next, so each cell sets what it reads.
+
+## Test utilities — `modules/rakun-test/` (front 19)
+
+The surface a handler test is written with; it depends on `rakun` and std only,
+and ships no runner (tests are `test` blocks under `botopink test`).
+
+- **`FakeRequest`** (`fake_request.bp`) — the builder: `fakeGet(path)`,
+  `fakePost(path, body)`, `fakePut`, `fakeDelete`, `fakeRequest(method, path)`,
+  then `withParam` / `withQuery` / `withHeader` / `withCookie` / `withBody`, each
+  a new value (a later call under the same name replaces the earlier). Accessors
+  `paramOf` / `queryOf` / `headerOf` (case-insensitive) / `cookieOf` / `bodyOf`
+  answer `""` when absent. **`toRequest()`** is what a handler takes: the
+  runtime's own `Request`, built from the fields by the core's `rkMakeRequest`
+  (`make_request/6`, the same map `request/6` builds for a socket request; the
+  cookies arrive as one `cookie` header). It does NOT `implement Request`, and
+  its accessors are not named `param`/`header`/…: an implementer does not
+  convert to its behavior at a call site, and on erlang a behavior method call
+  lowers to another type's same-named method, so a double declaring `header/2`
+  would reroute every `req.header(…)` of a test module importing it (both rows
+  in `specs/1.0.10-beta/language-gaps.md`). Annotate a local that holds a
+  `toRequest()` result (`val r: Request = …`) or pass it straight to a function;
+  an unannotated local in a `test` block lowers `r.header(…)` to a local call.
+- **Assertions** (`assertions.bp`) — `expectStatus`, `expectBodyEquals`,
+  `expectBodyContains`, `expectJsonField`: `true`, or `assert … , message` with
+  the expected value, the actual one and the status. `expectJsonField` is a
+  substring check for `"field":"value"` (or `": "`), not a parse.
+- **`MockMvc`** (`mockmvc.bp`) — `MockMvc.standalone()` / `MockMvc.under(base)`;
+  `perform(fake)` encodes headers (cookies folded in) and query as the JSON
+  objects `rkDispatchHttp` reads, so the router matches, binds `:params`, and a
+  miss is the router's own 404. No socket is opened (`mockmvc_test.bp` counts
+  the VM's `tcp_inet` ports).
+- **Context control** (`context.bp`) — `resetSingletons()` (instances, build
+  counts and in-flight claims go; registrations stay), `resetContext()` (also the
+  scan registry, route table, fallback, and every reset a member hung off the
+  core's `rkOnReset(name, fn)`), `contextSnapshot()` —
+  `{"scanned":[…],"routes":[…],"listeners":[…]}` in registration order; the
+  listener names come from whichever member keeps the `rakun_listener_names`
+  persistent term (none yet, so `[]`). `botopink test` runs each test FILE in its
+  own process, so a reset never reaches another file.
+- **Mocking is std's** (`testing.mocks`, decision 71). `#[mock]` fires only
+  inside `mocks.bp`, so a consumer writes the double over the qualified runtime
+  (`mocks.invoke(self.mockId, "find", [mocks.key(id)], "")`) and a
+  `#[configuration]` `#[bean]` returning the behavior makes it the injected
+  implementation — Spring's `@MockBean`. `__rkMake_<Behavior>()` hands the test
+  the same singleton to stub and `verify` (`test/mocks_pairing_test.bp`).
+- **The test-seam convention.** A front that mutates shared state exposes a
+  read-only accessor for tests (a value, never a handle; it clears nothing) and
+  never a public store: `revalidatedPaths()` (front 12) and `published(broker)`
+  (front 15) are its instances. A registry a test must be able to clear hangs
+  its reset off `rkOnReset`.
+- Not yet: the broker double (`deliver` / `published` / `clearPublished`) waits
+  on front 15's listener registry; `bootAndExit` waits on the listener and task
+  registries and a duplicate-route check.
 
 ## Validation — the bundled `validation` library (front 14, moved by decision 116 rule 5)
 

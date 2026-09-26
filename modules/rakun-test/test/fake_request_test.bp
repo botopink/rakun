@@ -1,0 +1,65 @@
+import {Request, Response, HttpMethod} from "rakun";
+import {FakeRequest, fakeGet, fakePost} from "fake_request";
+
+fn echoParam(req: Request) -> Response {
+    return Response.ok(req.param("id") + "|" + req.query("page") + "|" + req.header("x-trace") + "|" + req.body());
+}
+
+fn cookieHeaderOf(req: Request) -> string {
+    return req.header("Cookie");
+}
+
+test "rakun-test: toRequest hands a handler declaring Request the double's fields" {
+    val req = fakePost("/users/7", "b").withParam("id", "7").withQuery("page", "2").withHeader("X-Trace", "t1");
+    assert echoParam(req.toRequest()).body == "7|2|t1|b";
+}
+
+test "rakun-test: an absent name reads as the empty string" {
+    val req = fakeGet("/x");
+    assert req.paramOf("id") == "";
+    assert req.queryOf("page") == "";
+    assert req.headerOf("accept") == "";
+    assert req.bodyOf() == "";
+}
+
+test "rakun-test: header names match case-insensitively" {
+    val req = fakeGet("/x").withHeader("Content-Type", "text/plain");
+    assert req.headerOf("Content-Type") == "text/plain";
+    assert req.headerOf("content-type") == "text/plain";
+    assert req.headerOf("CONTENT-TYPE") == "text/plain";
+}
+
+test "rakun-test: the builders leave the receiver unchanged" {
+    val base = fakeGet("/x");
+    val q = base.withQuery("a", "1");
+    val h = base.withHeader("h", "1");
+    val c = base.withCookie("k", "1");
+    val p = base.withParam("id", "1");
+    assert base.queryOf("a") == "" && q.queryOf("a") == "1";
+    assert base.headerOf("h") == "" && h.headerOf("h") == "1";
+    assert base.cookieOf("k") == "" && c.cookieOf("k") == "1";
+    assert base.paramOf("id") == "" && p.paramOf("id") == "1";
+}
+
+test "rakun-test: fakeGet carries HttpMethod.Get and fakePost the body" {
+    assert fakeGet("/x").method == HttpMethod.Get;
+    assert fakePost("/x", "b").method == HttpMethod.Post;
+    assert fakePost("/x", "b").bodyOf() == "b";
+}
+
+test "rakun-test: cookies read back through the cookie header" {
+    val req = fakeGet("/x").withCookie("SESSION", "s.abc").withCookie("theme", "dark");
+    assert req.headerOf("cookie") == "SESSION=s.abc; theme=dark";
+    assert req.cookieOf("theme") == "dark";
+}
+
+test "rakun-test: a later builder call replaces the earlier value" {
+    assert fakeGet("/x").withQuery("a", "1").withQuery("a", "2").queryOf("a") == "2";
+}
+
+test "rakun-test: the cookies reach the handler as the cookie header" {
+    val req = fakeGet("/x").withCookie("SESSION", "s.abc").toRequest();
+    assert cookieHeaderOf(req) == "SESSION=s.abc";
+    assert req.method == HttpMethod.Get;
+    assert req.path == "/x";
+}

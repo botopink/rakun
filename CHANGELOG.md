@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Test utilities: FakeRequest, assertions, MockMvc, context control (botopink front 19)
+
+- `modules/rakun-test` gets its first code: `FakeRequest` with `fakeGet`/`fakePost`/
+  `fakePut`/`fakeDelete` and immutable `with*` builders, `toRequest()` answering the
+  runtime's own `Request`; `expectStatus`/`expectBodyEquals`/`expectBodyContains`/
+  `expectJsonField`; `MockMvc.standalone()`/`under(base)` with `perform`, dispatching
+  through the registered route table with no socket; `resetSingletons`,
+  `resetContext`, `contextSnapshot`.
+- Core: `rkMakeRequest`, `rkResetSingletons`, `rkResetContext`, `rkOnReset`,
+  `rkContextSnapshot` (`make_request/6`, `reset_singletons/0`, `reset_context/0`,
+  `on_reset/2`, `context_snapshot/0` in `rakun_runtime.erl`).
+- `req.method` is the `HttpMethod` variant on erlang, so `req.method == HttpMethod.Post`
+  holds; the router's verb stays under `verb`.
+- 26 tests in `modules/rakun-test` (was 1), including the std-mocks + `#[bean]`
+  pairing.
+
 ### Security: policy, JWT, Basic, PBKDF2, method security, CSRF (botopink front 10)
 
 - `modules/rakun-security` gets its first code (front 10 owns the manifest, `src/root.bp`,

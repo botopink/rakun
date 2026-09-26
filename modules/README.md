@@ -17,8 +17,8 @@ table of `03-rakun/modules.md` § Verdicts (no rename applied to a scaffold); ea
 `src/root.bp` until its front lands, and its manifest lists `files: ["root.bp"]` so it ships one module
 rather than nothing. `targets` follows `03-rakun/modules.md` § Targets. Three members hold real code
 today: the core (`rakun`, fronts 04 · 05 · 06 · 62 · 72 · 74), `rakun-app` (fronts 22 · 23, relocated
-out of the core by front 95) and `rakun-web` (front 07). `rakun-test` has an empty `pub` surface and
-one inline test until front 19 fills it. Front 14's
+out of the core by front 95) and `rakun-web` (front 07). `rakun-test` holds front 19's request double,
+assertions, MockMvc and context control. Front 14's
 `rakun-validation` moved to the compiler-bundled library `validation` (decision 116 rule 5); its boot
 refusal is the core's `config_check.bp`.
 
@@ -37,7 +37,7 @@ refusal is the core's `config_check.bp`.
 | [rakun-scheduling](./rakun-scheduling/) | root · cron · registry · markers · executor · endpoint | erlang | `@Scheduled` / `-quartz` | 16 · 84 | real code, 67 tests |
 | [rakun-security](./rakun-security/) | root · principal · policy · jwt · password · users · users_sql · basic · csrf · method_security · security_filter · security | erlang | `-security`, `-oauth2-client`, `-saml2` | 10 · 79 | real code, 73 tests |
 | [rakun-session](./rakun-session/) | root | erlang | `spring-session-jdbc` / `-data-redis` | 18 | scaffold |
-| [rakun-test](./rakun-test/) | root | erlang | `-test` | 19 | empty `pub` surface, 1 inline test |
+| [rakun-test](./rakun-test/) | root | erlang | `-test` | 19 | FakeRequest + toRequest, expect* assertions, MockMvc, resetSingletons/resetContext/contextSnapshot; 26 tests |
 | [rakun-web](./rakun-web/) | root · filter · negotiation · error · middleware · cors · compression · customizer · apiversion · shutdown · convention · tls | erlang | `-webmvc` (websocket is `rakun-websocket`) | 07 · 65 · 82 | real code, 154 tests |
 
 `modules/rakun-web/` stopped being a scaffold with front 07: it carries the filter chain, CORS and

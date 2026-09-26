@@ -53,6 +53,10 @@
          serve/2,
          config_check_register/2, config_check_run/0, config_check_reset/0]).
 
+%% ── the test seam (front 19): a real `Request` from scalars, the resets ──────
+-export([make_request/6, reset_singletons/0, reset_context/0,
+         on_reset/2, context_snapshot/0]).
+
 %% ── graceful shutdown (front 07 step 10): the socket half ────────────────────
 -export([set_fallback/1, clear_fallback/0, t_send/2]).
 -export([readiness_drained/0, stop_accepting/0, drain/1, connection_count/0,
@@ -204,6 +208,70 @@ scanned_names() ->
 scanned_count() ->
     ensure_started(),
     ets:info(?SCAN, size).
+
+%% ═══ the test seam (front 19) ═══════════════════════════════════════════════
+%% `rakun-test`'s `FakeRequest` cannot stand where a `Request` is declared (an
+%% implementer does not convert to its behavior type), so the double hands its
+%% fields here and receives the same map `request/6` builds for a socket
+%% request. Params, headers and query are JSON objects; header names are
+%% lower-cased on the way in, as the socket path does.
+make_request(Verb, Path, ParamsJson, HeadersJson, QueryJson, Body) ->
+    ensure_started(),
+    request(Verb, Path, decode_object(ParamsJson), decode_object(QueryJson),
+            lower_keys(decode_object(HeadersJson)), Body).
+
+%% Instances go, registrations stay: the next resolution constructs afresh and
+%% `build_count/1` answers 0 again.
+reset_singletons() ->
+    ensure_started(),
+    ets:delete_all_objects(?SINGLE),
+    ets:delete_all_objects(?BUILDS),
+    ets:delete_all_objects(?LOCKS),
+    0.
+
+%% Everything a module load registered: the scan registry, the route table,
+%% the fallback, the singletons, and whatever a member hung off `on_reset/2`
+%% (a listener or task registry lives in its own member's host module).
+reset_context() ->
+    _ = reset_singletons(),
+    ets:delete_all_objects(?SCAN),
+    ets:delete_all_objects(?ROUTES),
+    _ = clear_fallback(),
+    lists:foreach(fun({_Name, Reset}) -> _ = Reset() end, reset_hooks()),
+    0.
+
+%% A member registers its own registry's reset under a name; a second
+%% registration under the same name replaces the first.
+on_reset(Name, Reset) ->
+    Hooks = lists:keystore(Name, 1, reset_hooks(), {Name, Reset}),
+    persistent_term:put(rakun_reset_hooks, Hooks),
+    0.
+
+reset_hooks() ->
+    persistent_term:get(rakun_reset_hooks, []).
+
+%% `{"scanned":[…],"routes":["GET /x",…],"listeners":[…]}` — registration order,
+%% so the text is the same on every run of the same program. The listener
+%% destinations are answered by the member that owns listeners, through the
+%% fun it keeps under the `rakun_listener_names` persistent term; with no such
+%% member loaded they are `[]`.
+context_snapshot() ->
+    ensure_started(),
+    Scanned = [N || {_Seq, N} <- ets:tab2list(?SCAN)],
+    Routes = [<<V/binary, " ", P/binary>> || {_Seq, V, P, _Segs, _H} <- ets:tab2list(?ROUTES)],
+    Listeners = case persistent_term:get(rakun_listener_names, undefined) of
+        undefined -> [];
+        Names -> Names()
+    end,
+    iolist_to_binary(json:encode(#{<<"scanned">> => Scanned, <<"routes">> => Routes,
+                                   <<"listeners">> => Listeners},
+                                 fun ordered_encoder/2)).
+
+ordered_encoder(Map, Encode) when is_map(Map) ->
+    Keys = [K || K <- [<<"scanned">>, <<"routes">>, <<"listeners">>], maps:is_key(K, Map)],
+    json:encode_key_value_list([{K, maps:get(K, Map)} || K <- Keys], Encode);
+ordered_encoder(Other, Encode) ->
+    json:encode_value(Other, Encode).
 
 %% ═══ dependency-cycle guard ══════════════════════════════════════════════════
 %% `runtime.mjs:40-62`. The stack is per-process because a construction happens
