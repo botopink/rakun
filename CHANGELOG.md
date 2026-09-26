@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Row 7 beats row 8, asserted (botopink front 05 step 3)
+
+- `test/config_test.bp` "row 7 beats row 8": `rkSetProp` wins over a typed
+  reader's declared default, and the default answers when nothing set the key —
+  the one row of the source table without its own cell. `modules/rakun` 335 / 0
+  → **336 / 0**.
+
 ### The percent codec is std's `encoding` (botopink front 62 step 7)
 
 - `request_context.bp` no longer declares `percentEncode` / `percentDecode` /
