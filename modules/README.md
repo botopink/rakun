@@ -30,7 +30,7 @@ refusal is the core's `config_check.bp`.
 | [rakun-actuator](./rakun-actuator/) | root · endpoint_host · health · info · registry_endpoints · instrumentation · actuator | erlang | `-actuator` (host) | 11 · 76 · 87 | real code, 38 tests |
 | [rakun-cache](./rakun-cache/) | root | erlang | `-cache` | 12 | scaffold |
 | [rakun-client](./rakun-client/) | root | erlang | `RestClient` / `WebClient` | 13 | scaffold |
-| [rakun-data](./rakun-data/) | root | erlang | `-data-jpa` / `-data-jdbc` / `-data-mongodb` / `-data-redis` | 08 · 09 · 77 · 78 | scaffold |
+| [rakun-data](./rakun-data/) | root · datasource · sql | erlang | `-data-jpa` / `-data-jdbc` / `-data-mongodb` / `-data-redis` | 08 · 09 · 77 · 78 | real code, 77 tests |
 | [rakun-hateoas](./rakun-hateoas/) | root | erlang | `-hateoas` | 21 | scaffold |
 | [rakun-logging](./rakun-logging/) | root | erlang | `-logging` | 17 | scaffold |
 | [rakun-messaging](./rakun-messaging/) | root | erlang | `-amqp` / `-kafka` / `-activemq` / `-artemis` | 15 · 86 · 90 | scaffold |

@@ -1,0 +1,220 @@
+//// rakun-data — `SqlTemplate`, `Tx` and the local transaction. Front 08
+//// steps 4, 6 and 7.
+////
+//// TWO SURFACES, ON PURPOSE. `query`/`update`/`single` RAISE on a driver
+//// error, the way `JdbcTemplate` throws, and front 07's error entry turns the
+//// raise into a 500 problem detail. `tryQuery`/`tryUpdate` answer `@Result`
+//// for the caller who wants to branch. Both exist because a `-> @Result` fn
+//// cannot forward a `@Result` until front 24 lands decision 119: a repository
+//// that answered `@Result` would make every caller up the stack unwrap and
+//// re-wrap. Both are decided from ONE host answer (`SqlOutcome`), so they
+//// cannot disagree about what failed.
+////
+//// LAZY ACQUISITION. A template holds a datasource NAME and nothing else. The
+//// connection is checked out when a statement runs and given back when it
+//// returns, so a request that builds a repository and takes a branch that
+//// issues nothing borrows nothing.
+////
+//// TRANSACTIONS. `transaction({ tx -> … })` checks out one connection, marks
+//// it in the calling process, runs the thunk and commits — or rolls back and
+//// re-raises when the thunk raises. Every statement the process issues while
+//// the mark is set runs on that connection, and a nested `transaction` JOINS
+//// the open one (REQUIRED propagation: one begin, one commit). `REQUIRES_NEW`
+//// and `NESTED` (savepoints) are not implemented and are REFUSED, never
+//// accepted and ignored. The transaction is local to one connection; anything
+//// spanning two resources is front 83's.
+////
+//// FUTURES. `queryAsync`/`updateAsync`/`singleAsync` are the whole of the
+//// reactive story: on the BEAM a reactive query is a process doing a blocking
+//// call. `@Task` is eager on erlang, so the twin runs where it is called; two
+//// of them run CONCURRENTLY when started through `async.runAll`, each in its
+//// own process with its own connection. A statement run from a spawned
+//// process does not join the caller's transaction — the mark is per process.
+
+import {rkSingleton} from "rakun";
+import {ensureDataSource, rkDataSourceArm, defaultDataSourceName} from "datasource";
+import {Param, bindNamed, paramsLine} from "sql/params";
+import {SqlOutcome, Row, Rows} from "sql/rows";
+
+// ── the host cells (`src/sidecars/rakun_sql.erl`) ────────────────────────────
+
+#[@External.Erlang("rakun_sql", "exec")]
+pub declare fn rkSqlExec(name: string, statement: string, values: string[]) -> SqlOutcome;
+
+#[@External.Erlang("rakun_sql", "tx_run")]
+pub declare fn rkSqlTxRun<T>(name: string, label: string, work: fn() -> T) -> T;
+
+#[@External.Erlang("rakun_sql", "tx_open")]
+pub declare fn rkSqlTxOpen(name: string) -> bool;
+
+#[@External.Erlang("rakun_sql", "with_rollback")]
+pub declare fn rkSqlWithRollback<T>(name: string, work: fn() -> T) -> T;
+
+#[@External.Erlang("rakun_sql", "spawn_borrower")]
+pub declare fn rkSqlSpawnBorrower(name: string, statement: string, values: string[]) -> i32;
+
+#[@External.Erlang("rakun_sql", "drop_all")]
+pub declare fn rkSqlDropAll(name: string) -> i32;
+
+#[@External.Erlang("rakun_sql", "log")]
+pub declare fn rkSqlLog(line: string) -> i32;
+
+#[@External.Erlang("rakun_sql", "log_lines")]
+pub declare fn rkSqlLogLines() -> string[];
+
+#[@External.Erlang("rakun_sql", "log_reset")]
+pub declare fn rkSqlLogReset() -> i32;
+
+#[@External.Erlang("rakun_sql", "log_on")]
+pub declare fn rkSqlLogOn() -> i32;
+
+#[@External.Erlang("rakun_sql", "log_off")]
+pub declare fn rkSqlLogOff() -> i32;
+
+// ── one statement ────────────────────────────────────────────────────────────
+
+fn failedOutcome(reason: string) -> SqlOutcome {
+    return SqlOutcome(ok: false, error: reason, columns: [], rows: [], count: 0);
+}
+
+// Bind, log, run. A binding refusal never reaches the driver.
+pub fn runStatement(name: string, sql: string, params: Param[]) -> SqlOutcome {
+    val _e = ensureDataSource(name);
+    val bound = bindNamed(sql, params, rkDataSourceArm(name));
+    if (bound.problem != "") return failedOutcome(bound.problem) else {
+        val _l = rkSqlLog(sql + "  params=[" + paramsLine(params) + "]");
+        return rkSqlExec(name, bound.sql, bound.values);
+    };
+}
+
+fn rowsOf(o: SqlOutcome) -> Rows {
+    return Rows(columns: o.columns, rows: o.rows);
+}
+
+fn raising(o: SqlOutcome) -> SqlOutcome {
+    if (o.ok == false) @panic(o.error);
+    return o;
+}
+
+// `null` on no row, the row on one, a raise naming the statement on more.
+fn singleOf(o: SqlOutcome, sql: string) -> ?Row {
+    val rows = rowsOf(raising(o));
+    if (rows.rowCount() > 1) @panic("rakun-data: single() expected at most one row and got " + rows.rowCount().toString() + " - statement: " + sql);
+    return rows.first();
+}
+
+pub fn tryQueryOn(name: string, sql: string, params: Param[]) -> @Result<Rows, string> {
+    val o = runStatement(name, sql, params);
+    if (o.ok == false) throw o.error;
+    return rowsOf(o);
+}
+
+pub fn tryUpdateOn(name: string, sql: string, params: Param[]) -> @Result<i32, string> {
+    val o = runStatement(name, sql, params);
+    if (o.ok == false) throw o.error;
+    return o.count;
+}
+
+pub fn propagationProblem(propagation: string) -> string {
+    val p = propagation.toUpper().replaceAll("-", "_");
+    return if (p == "REQUIRED") "" else if (p == "REQUIRES_NEW" || p == "NESTED") "rakun-data: transaction propagation " + p + " is not implemented - rakun-data ships REQUIRED only (a nested transaction joins the open one); REQUIRES_NEW and NESTED (savepoints) are refused rather than ignored" else "rakun-data: unknown transaction propagation '" + propagation + "' - rakun-data ships REQUIRED only";
+}
+
+// ── the template ─────────────────────────────────────────────────────────────
+
+pub type SqlTemplate(dataSourceName: string) {
+    pub fn query(self: Self, sql: string, params: Param[]) -> Rows {
+        return rowsOf(raising(runStatement(self.dataSourceName, sql, params)));
+    }
+
+    pub fn update(self: Self, sql: string, params: Param[]) -> i32 {
+        return raising(runStatement(self.dataSourceName, sql, params)).count;
+    }
+
+    pub fn single(self: Self, sql: string, params: Param[]) -> ?Row {
+        return singleOf(runStatement(self.dataSourceName, sql, params), sql);
+    }
+
+    // The body is a module-level fn whose `@Result` the method hands back
+    // as is. Measured on erlang: a METHOD declared `-> @Result` is lowered as
+    // a plain function — a `throw` in it escapes as a raise and a returned
+    // value is not wrapped in `Ok` — while a module-level fn is lowered
+    // correctly. So the method forwards the fn's value untouched, which is
+    // also why this does not re-wrap (compiler finding, AGENTS.md; if methods
+    // start wrapping, this becomes `return try …` or decision 119's
+    // pass-through).
+    pub fn tryQuery(self: Self, sql: string, params: Param[]) -> @Result<Rows, string> {
+        return tryQueryOn(self.dataSourceName, sql, params);
+    }
+
+    pub fn tryUpdate(self: Self, sql: string, params: Param[]) -> @Result<i32, string> {
+        return tryUpdateOn(self.dataSourceName, sql, params);
+    }
+
+    pub fn transaction<T>(self: Self, work: fn(tx: Tx) -> T) -> T {
+        val _e = ensureDataSource(self.dataSourceName);
+        val ds = self.dataSourceName;
+        return rkSqlTxRun(ds, "transaction", { -> work(Tx(dataSourceName: ds)) });
+    }
+
+    // A transaction that is ALWAYS rolled back: what a test wraps its body in
+    // so that two test blocks never see each other's rows.
+    pub fn withRollback<T>(self: Self, work: fn(tx: Tx) -> T) -> T {
+        val _e = ensureDataSource(self.dataSourceName);
+        val ds = self.dataSourceName;
+        return rkSqlWithRollback(ds, { -> work(Tx(dataSourceName: ds)) });
+    }
+
+    pub fn inTransaction(self: Self) -> bool {
+        return rkSqlTxOpen(self.dataSourceName);
+    }
+
+    pub fn queryAsync(self: Self, sql: string, params: Param[]) -> @Task<Rows> {
+        return self.query(sql, params);
+    }
+
+    pub fn updateAsync(self: Self, sql: string, params: Param[]) -> @Task<i32> {
+        return self.update(sql, params);
+    }
+
+    pub fn singleAsync(self: Self, sql: string, params: Param[]) -> @Task<?Row> {
+        return self.single(sql, params);
+    }
+}
+
+// The handle a `transaction` thunk receives. Its statements run on the
+// transaction's connection because the mark is on the calling process; the
+// handle exists so the boundary is visible where the statements are written.
+pub type Tx(dataSourceName: string) {
+    pub fn query(self: Self, sql: string, params: Param[]) -> Rows {
+        return rowsOf(raising(runStatement(self.dataSourceName, sql, params)));
+    }
+
+    pub fn update(self: Self, sql: string, params: Param[]) -> i32 {
+        return raising(runStatement(self.dataSourceName, sql, params)).count;
+    }
+
+    pub fn single(self: Self, sql: string, params: Param[]) -> ?Row {
+        return singleOf(runStatement(self.dataSourceName, sql, params), sql);
+    }
+}
+
+pub fn sqlTemplate(dataSourceName: string) -> SqlTemplate {
+    return SqlTemplate(dataSourceName: dataSourceName);
+}
+
+// The injectable template: a `#[repository]` field `sql: SqlTemplate` resolves
+// through this factory (the consumer imports `__rkMake_SqlTemplate`).
+pub fn __rkMake_SqlTemplate() -> SqlTemplate {
+    return rkSingleton("SqlTemplate", { -> SqlTemplate(dataSourceName: defaultDataSourceName()) });
+}
+
+// What a `#[transactional]` proxy method calls: the thunk inside a REQUIRED
+// transaction on the default datasource. Any other propagation raises.
+pub fn rkTxRun<T>(label: string, propagation: string, work: fn() -> T) -> T {
+    val problem = propagationProblem(propagation);
+    if (problem != "") @panic(problem);
+    val ds = defaultDataSourceName();
+    val _e = ensureDataSource(ds);
+    return rkSqlTxRun(ds, label, work);
+}

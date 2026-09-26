@@ -2909,6 +2909,235 @@ here they are `rakun.management.endpoints.web.base-path`, `rakun.management.endp
 `rakun.management.health.<id>.timeout` and `rakun.info.*`.
 
 
+## SQL data access — `modules/rakun-data/` (front 08)
+
+`modules/rakun-data/` is the member fronts 08, 09, 77 and 78 share. Front 08 owns
+the manifest and `src/root.bp` (the lowest-numbered front in the member), the
+generic `src/datasource.bp`, the SQL arm under `src/sql/` and the host module
+`src/sidecars/rakun_sql.erl`. Fronts 09, 77 and 78 append `pub mod nosql;`,
+`pub mod migration;` and `pub mod orm;` to `src/root.bp` (and their files to the
+manifest's `files`) in front-number order and reorder nothing.
+
+**Measured 2026-09-26 against compiler `f011850c`:** `botopink test` in
+`modules/rakun-data/` (erlang, the member's only target) is **77 passed / 0 failed /
+0 compile failures**, with no database: every cell runs against the ETS arm. The
+member depends on `rakun` and `rakun-actuator-api` (`{ "workspace": true }`), never
+on `rakun-web`. `modules/rakun` is untouched by this front.
+
+| File | What |
+|---|---|
+| `src/datasource.bp` | `DataSource` / `Connection` behaviors (generic: `connect`, `close`, `stats` — front 09 reads it), `PooledDataSource`, `PoolStats`, arm selection from `rakun.datasource.url`, the refusals, `startDataSource`, `dataSourceBoot`, `rkPoolStats` |
+| `src/sql/params.bp` | `Param`, `param`, `bindNamed` (`:name` → `$1` / `?`), the missing / unused / duplicate refusals |
+| `src/sql/rows.bp` | `SqlOutcome` (the host's one answer), `Row` (`get` / `int` / `bool` / `has`), `Rows` (`rowCount` / `at` / `first` / `toList` / `column`) |
+| `src/sql/template.bp` | `SqlTemplate`, `Tx`, `__rkMake_SqlTemplate`, `rkTxRun`, the `*Async` twins, `withRollback` |
+| `src/sql/query.bp` | `#[query]`, `rkRegisterQuery`, `rkRegisteredQueries` |
+| `src/sql/transactional.bp` | `#[transactional]` (the `<Type>Tx` proxy), `#[noTransaction]`, `#[propagation]` |
+| `src/sql/health.bp` | the `db` indicator (`#[healthIndicator("db")]` + `registerDbHealth()`) |
+| `src/sidecars/rakun_sql.erl` | `rakun_pool_sup`, the connection processes, the three arms, the ETS store, transactions, the statement log |
+
+### The repository shape, decided once (front 09 follows it)
+
+A method in a `type` body must have a body, so Spring Data's bodyless
+`#[query("…")] pub fn findById(…);` does not parse. `#[query("…")]` is a
+METHOD-level decorator that emits a module-level helper, and the method's body
+calls it:
+
+```bp
+#[repository]
+pub type UserRepository(sql: SqlTemplate) {
+    #[query("SELECT id, name, email FROM users WHERE id = :id")]
+    pub fn findById(self: Self, id: i32) -> ?Row {
+        return self.sql.single(__rkQuery_findById(), [param("id", id.toString())]);
+    }
+}
+```
+
+emits `pub fn __rkQuery_findById() -> string` (the statement verbatim) and
+`val __rkQueryReg_findById = rkRegisterQuery("findById", "…")`. The statement is a
+declaration (a decorator argument is a literal, so it cannot be concatenated), it is
+registered (`rkRegisteredQueries()`, the inventory `/actuator/sql` and front 77's
+linter read), and it is checked at comptime: empty, a leading keyword outside
+`SELECT / INSERT / UPDATE / DELETE / WITH / CALL`, and a `'` next to a placeholder
+(`':id`, `'$1`, `'?`; `'…'::type` is a cast and passes) each fail the build at the
+method. Not checked: the placeholder count against the parameters — a method-level
+`@Decl` has no parameter list. Two `#[query]` methods of one name in one module
+collide on `__rkQuery_<name>` and erlc refuses the duplicate — a refusal that
+surfaces where erlc runs (`botopink test` / `run`); `botopink build` does not run
+erlc and exits 0. A consumer imports `query`, `rkRegisterQuery`, `param`, the
+types it names (`SqlTemplate`, `Rows`, `Row`, `Param`) and `__rkMake_SqlTemplate`
+(the injectable template's factory) beside the core's stereotype imports.
+
+### Two surfaces, one answer
+
+`query` / `update` / `single` RAISE on a driver error (`JdbcTemplate`'s shape);
+`tryQuery` / `tryUpdate` answer `@Result`. Both read one host answer, `SqlOutcome`,
+so they cannot disagree about what failed. `single` answers `null` on no row and
+raises naming the statement on two. `Row.int` / `Row.bool` refuse a value that is not
+one, naming the column. Everything is a string at this layer: typed mapping is front
+78's.
+
+Parameters are named. `bindNamed` rewrites `:name` to the arm's placeholder in the
+order names first appear — `$1…` for PostgreSQL and the ETS arm (a repeated name is
+ONE value), `?` for MySQL (a repeated name is passed per occurrence). A `:name` inside
+a quoted literal is text and `::` is a cast. A `:name` with no `Param`, a `Param` no
+statement mentions and a `Param` given twice are refusals naming it and the
+statement. A value is never spliced into the text.
+
+### The pool: processes, and a CAS on a row
+
+`rakun_pool_sup` (a `one_for_one` supervisor, intensity 1000/s) supervises one
+connection process per slot, fixed size (`rakun.datasource.pool.size`, default 10 —
+no `minimum-idle`: a process costs kilobytes). The supervisor and the ETS tables are
+owned by one registered owner process, so a test process that starts a pool and exits
+does not take it with it. A slot row is `{{Ds, Slot}, Pid, free | leased, Borrower}`;
+a checkout CLAIMS a free row with `ets:select_replace/2` (an atomic compare-and-swap),
+then asks the connection to lease itself, which monitors the borrower. A checkout
+that finds no free row polls until `rakun.datasource.pool.connection-timeout`
+(default 30 s) and then fails naming the datasource, the timeout and the size. A
+borrower that dies is a `'DOWN'` in the connection process: it rolls back the open
+transaction and frees its own row — there is no reclaim sweep and no test-on-borrow.
+A connection process that dies is restarted by the supervisor, whose `init/1`
+rewrites the slot row with the new pid. `PoolStats.size` is read from
+`supervisor:which_children/1`, not a counter. `rkPoolStats()` (the default
+datasource) and `poolStats(name)` are what front 11's metrics read.
+
+**Lazy acquisition.** A template holds a datasource NAME. The connection is checked
+out when a statement runs and given back when it returns.
+
+**Bootstrap mode** (`rakun.data.repositories.bootstrap-mode`) controls the pool:
+`eager` (default) connects every slot at boot, so an unreachable database fails the
+boot; `deferred` starts the processes unconnected and each connects on its first
+lease; `lazy` is `deferred` for the pool. `deferred`/`lazy` under an active
+`production` (or `prod`) profile writes a warning naming the profile (stderr and
+`rkDataWarnings()`) and still boots. The repository half of `lazy` — "each
+`#[repository]` is also `#[lazy]` to front 06's eager pass" — is NOT built: the
+bean record front 06 stores carries no stereotype, `#[repository]` is frozen, and a
+member cannot mark another member's beans lazy after registration without editing
+`context.bp`.
+
+### The arms, and no fallback
+
+`rakun.datasource.url`: `ets:memory` → the ETS arm (in `rakun_sql.erl`),
+`postgresql://` / `postgres://` → `epgsql`, `mysql://` → `mysql` (mysql-otp). An
+unknown scheme is a boot failure naming the value; a PostgreSQL or MySQL URL whose
+driver module is not loadable (`code:ensure_loaded/1`) is a boot failure naming the
+module and the OTP application — it never falls back to the ETS store. No URL
+selects `ets:memory` under the `test` profile and is a boot failure otherwise. A URL
+in any message has its password redacted (`user:***@host`). The PostgreSQL and
+MySQL arms (`epgsql:connect/equery`, `mysql:start_link/query`, reached through
+`apply/3` so the sidecar compiles without them) are written and UNEXERCISED: the
+opt-in suite gated on `RAKUN_TEST_PG_URL` / `RAKUN_TEST_MYSQL_URL` is not written;
+the dialect rewriting it was to prove is asserted without a database
+(`params: MySQL placeholders are positional, …`).
+
+**The ETS arm** is a small real store: one row per table, `{{Ds, Table}, Columns,
+Rows}`, statements parsed in the sidecar and applied under a per-datasource
+`global:trans` lock. The subset: `CREATE TABLE [IF NOT EXISTS]`, `DROP TABLE [IF
+EXISTS]`, `INSERT INTO t [(cols)] VALUES (…)[, (…)]`, `SELECT * | cols [AS a] |
+COUNT(*) [AS a] FROM t [WHERE] [ORDER BY c [ASC|DESC], …] [LIMIT n]`, `SELECT
+<literal>` (the liveness statement), `UPDATE … SET … [WHERE]`, `DELETE FROM t
+[WHERE]`, and `CALL rakun_sleep(ms)` (holds the connection, not the store — what the
+concurrency cell measures with). A predicate is `=` / `<>` / `!=` joined by `AND` /
+`OR` with parentheses; NULL equals nothing. Anything else — `JOIN`, `GROUP`, `LIKE`,
+`>`, a qualified name — is an error naming the construct, never an empty result.
+Transactions are snapshot-and-restore: atomic, NOT isolated (a second connection
+writing while a transaction is open is overwritten by its rollback). The
+"database is down" switch `rkEtsSetReachable(name, bool)` exists because an ETS
+store cannot be unreachable and `eager`/`deferred` would otherwise be untestable.
+Test isolation is `sql.withRollback({ tx -> … })`, a transaction that always rolls
+back.
+
+### Transactions, and why `#[transactional]` is a proxy
+
+`sql.transaction({ tx -> … })` checks out one connection, marks it in the CALLING
+process's dictionary, runs the thunk and commits — or rolls back and re-raises.
+Every statement the process issues on that datasource while the mark is set runs on
+the marked connection, and a nested `transaction` JOINS it (REQUIRED: one `begin`,
+one `commit`). A decorator cannot wrap a method body, so `#[transactional]` is
+TYPE-level and emits `<Type>Tx(inner: <Type>)` with one forwarding method per
+reflected method, each `rkTxRun("<Type>.<method>", "required", { -> self.inner.m(…) })`,
+plus `__rkMake_<Type>Tx()`. Injecting `<Type>Tx` gets the transaction; injecting
+`<Type>` gets the bare type. `#[noTransaction]` on a method emits a plain forward.
+`#[propagation("REQUIRES_NEW")]` / `("NESTED")` fail the build as not implemented,
+and `rkTxRun` refuses any propagation but `required` at run time. The proxy runs on
+the DEFAULT datasource. The application site imports `transactional`, `rkTxRun` and
+the core's `rkSingleton`.
+
+Reflection keeps only a type's HEAD: `Array<string>` reflects as `Array`, `@Result<…>`
+as `Result`, and `T[]`, `?T` and a function type as `""`; `Method` carries no
+visibility. So the proxy forwards every reflected method (a private one too),
+refuses a method whose PARAMETER type is lossy (`""` or a generic head) or whose
+RETURN type is a generic head, naming the method and parameter, and emits a `""`
+return as a void method — the inner call still runs in the transaction, and a caller
+that used the value fails to compile at its own call site.
+
+The statement log (`rkSqlLogOn()`, `rkSqlLogLines()`, `rkSqlLogReset()`) records
+each statement as written with its params (`SELECT … WHERE id = :id  params=[id=1]`)
+and the `begin` / `commit` / `rollback` lines; it is OFF until turned on, so an
+application that never reads it does not grow a table. `sql_query_test.bp` asserts
+the whole log as one string — the spec's `assertQuery` snapshot helper does not
+exist.
+
+### Futures and health
+
+`queryAsync` / `updateAsync` / `singleAsync` are the reactive story. `@Task` is eager
+on erlang, so the twin runs where it is called; two run concurrently when started
+through `async.runAll`, each in its own process with its own connection (a spawned
+process does not join the caller's transaction — the mark is per process).
+
+`#[component] #[healthIndicator("db")] DbHealthIndicator` checks the default
+datasource: `SELECT 1` through the pool → `UP` with `{"database":…,
+"validationQuery":"SELECT 1"}`, or `DOWN` with the reason; it never raises and never
+boots a datasource nobody started. Because a library module's body does not run on
+erlang (below), `registerDbHealth()` makes the same registration explicitly; the
+application calls it beside `dataSourceBoot()`.
+
+### Deviations from the README, each with its reason
+
+- `Rows.length()` is `Rows.rowCount()`: a record method named `length` in a module
+  makes `xs.length` on an ARRAY in that module lower to the record's method
+  (measured: `badarg` in `Rows.at`). `first`/`at`/`toList`/`isEmpty` work only because
+  consumers import `Rows` — without the import a call site dispatches to the builtin
+  of the same name (`bp_unsupported_method`).
+- Tests live flat in `test/sql_*_test.bp`, not `test/sql/`: a test file in a
+  subdirectory of `test/` compiles and every call it makes into the project is
+  `{error, undef}` on erlang.
+- `raiseProblem` (rakun-web) in the spec's shared source is `@panic`: rakun-data does
+  not depend on rakun-web. `OrderRepository.count()` is `orderCount()`.
+- The pool timeout is a `SqlOutcome` error like any driver error, so `tryQuery`
+  answers it as `Error` and `query` raises it.
+- `bootstrap-mode=lazy` does not reach the repositories (above).
+- The opt-in PostgreSQL / MySQL suite is not written (above).
+
+### Compiler findings (minimal repros under `~/.cache/bp-rakun/front-08/`)
+
+1. **A method declared `-> @Result` is lowered as a plain function on erlang**: a
+   `throw` in it escapes as `{throw, …}` and a returned value is not wrapped in `Ok`;
+   the same body as a module-level fn is correct (`repro_result_method.bp`).
+   `tryQuery`/`tryUpdate` therefore forward a module-level fn's `@Result` untouched
+   (`return tryQueryOn(…)`), which also avoids decision 119's re-wrap — revisit when
+   methods wrap.
+2. **Transitive dependencies are not loaded**: A → B (path) → C (path); compiling A,
+   B's call into C is `unbound variable` (`transitive/a`). A consumer of rakun-data
+   lists `rakun-actuator-api` itself, BEFORE `rakun-data` (`sql_build_test.bp`'s
+   fixture manifest does).
+3. **A library module's body never runs on erlang**: `'_botopink_init'/0` is called
+   for the entry module (build) or the test module (test) only, so a module-level
+   `val` — every decorator self-registration (`rkScan`, `rkRegisterQuery`,
+   `rkRegisterHealthIndicator`) — in a NON-entry module never executes. Hence
+   `registerDbHealth()`; `rkRegisteredQueries()` lists only the statements of
+   modules whose body ran. This touches every front that registers from a library
+   module (front 11's indicators too).
+4. **`try` inside a lambda does not propagate**: `{ -> try asserts.throwsWith(…, "no
+   match"); 0 }` passes. Assert refusals at the test's top level, or turn them into
+   a value inside the lambda.
+5. **A test file in a subdirectory of `test/`** is `{error, undef}` on every call
+   into the project (above).
+6. **`await` is legal only in a `-> @Task` fn or a test block**, not in a lambda
+   (`effect-await-without-task`), so a transaction thunk that awaits calls a named
+   `-> @Task` helper.
+7. A record method named `length` hijacks `xs.length` in its module (above).
+
 ## Validation — the bundled `validation` library (front 14, moved by decision 116 rule 5)
 
 Front 14's member `modules/rakun-validation` is gone: its seven modules are the

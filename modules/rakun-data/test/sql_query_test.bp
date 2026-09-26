@@ -1,0 +1,309 @@
+//// rakun-data — the repository shape and the transactions. Front 08 steps 5
+//// and 6, over the shared source of `specs/1.0.10-beta/03-rakun/test-snap.md`
+//// § 08 (with `@panic` where the spec's source reaches for `rakun-web`'s
+//// `raiseProblem`: rakun-data does not depend on rakun-web).
+////
+//// The snapshot helper the spec names (`assertQuery`) does not exist, so each
+//// cell asserts the statement LOG as one string instead — every statement
+//// with its bound params, and the `begin` / `commit` / `rollback` lines the
+//// transaction writes. A reordering or a second commit shows up in the whole
+//// string where per-statement assertions would miss it.
+////
+//// Everything runs against the ETS arm on the DEFAULT datasource, booted from
+//// `rakun.datasource.url=ets:memory` by the first cell. The cells run in file
+//// order and share the tables; each one that needs a clean slate says so.
+
+import {testing.asserts} from "std";
+import {rkScan, rkSingleton, rkEnter, rkDone, rkProp, rkPropInt, rkSetProp} from "rakun";
+import {service, repository, component} from "rakun";
+import {dataSourceBoot, defaultDataSourceName, PooledDataSource} from "datasource";
+import {Param, param} from "sql/params";
+import {Row, Rows} from "sql/rows";
+import {SqlTemplate, Tx, sqlTemplate, rkTxRun, __rkMake_SqlTemplate} from "sql/template";
+import {rkSqlLogOn, rkSqlLogReset, rkSqlLogLines, rkSqlDropAll} from "sql/template";
+import {query, rkRegisterQuery, rkRegisteredQueries} from "sql/query";
+import {transactional, noTransaction} from "sql/transactional";
+
+#[repository]
+pub type UserRepository(
+    sql: SqlTemplate,
+) {
+    #[query("SELECT id, name, email FROM users WHERE id = :id")]
+    pub fn findById(self: Self, id: i32) -> ?Row {
+        return self.sql.single(__rkQuery_findById(), [param("id", id.toString())]);
+    }
+
+    #[query("SELECT id FROM users WHERE id = :id OR parent = :id")]
+    pub fn findFamily(self: Self, id: i32) -> Rows {
+        return self.sql.query(__rkQuery_findFamily(), [param("id", id.toString())]);
+    }
+
+    #[query("INSERT INTO users (id, name, email) VALUES (:id, :name, :email)")]
+    pub fn insert(self: Self, id: i32, name: string, email: string) -> i32 {
+        return self.sql.update(__rkQuery_insert(), [
+            param("id", id.toString()),
+            param("name", name),
+            param("email", email),
+        ]);
+    }
+}
+
+#[repository]
+pub type OrderRepository(
+    sql: SqlTemplate,
+) {
+    #[query("SELECT id, user_id, total, state FROM orders WHERE user_id = :userId ORDER BY id")]
+    pub fn findByUser(self: Self, userId: i32) -> Rows {
+        return self.sql.query(__rkQuery_findByUser(), [param("userId", userId.toString())]);
+    }
+
+    #[query("INSERT INTO orders (id, user_id, total, state) VALUES (:id, :userId, :total, 'placed')")]
+    pub fn create(self: Self, id: i32, userId: i32, total: i32) -> i32 {
+        return self.sql.update(__rkQuery_create(), [
+            param("id", id.toString()),
+            param("userId", userId.toString()),
+            param("total", total.toString()),
+        ]);
+    }
+
+    #[query("INSERT INTO order_audit (order_id, action) VALUES (:orderId, :action)")]
+    pub fn audit(self: Self, orderId: i32, action: string) -> i32 {
+        return self.sql.update(__rkQuery_audit(), [
+            param("orderId", orderId.toString()),
+            param("action", action),
+        ]);
+    }
+
+    #[query("SELECT COUNT(*) AS n FROM orders")]
+    pub fn orderCount(self: Self) -> i32 {
+        val row = self.sql.single(__rkQuery_orderCount(), []);
+        var n = 0;
+        if (row) { r -> n = r.int("n"); };
+        return n;
+    }
+}
+
+#[service]
+#[transactional]
+pub type OrderService(
+    sql: SqlTemplate,
+    users: UserRepository,
+    orders: OrderRepository,
+) {
+    pub fn place(self: Self, userId: i32, total: i32) -> i32 {
+        val owner = self.users.findById(userId);
+        var exists = false;
+        if (owner) { u -> exists = true; };
+        if (!exists) @panic("user.not-found: no user " + userId.toString());
+        val id = self.orders.orderCount() + 1;
+        val _o = self.orders.create(id, userId, total);
+        val _a = self.orders.audit(id, "placed");
+        return id;
+    }
+
+    pub fn refund(self: Self, orderId: i32) -> i32 {
+        return self.sql.transaction({ tx ->
+            val _u = tx.update("UPDATE orders SET state = 'refunded' WHERE id = :id", [param("id", orderId.toString())]);
+            val _a = tx.update("INSERT INTO order_audit (order_id, action) VALUES (:id, 'refunded')", [param("id", orderId.toString())]);
+            orderId;
+        });
+    }
+
+    #[noTransaction]
+    pub fn history(self: Self, userId: i32) -> string {
+        val rows = self.orders.findByUser(userId);
+        return rows.toList().map({ r -> r.get("id") + ":" + r.get("total") }).join(",");
+    }
+}
+
+// A consumer of both: the transactional proxy and the bare service.
+#[component]
+pub type OrderDesk(
+    tx: OrderServiceTx,
+    bare: OrderService,
+)
+
+fn log() -> string {
+    return rkSqlLogLines().join("\n");
+}
+
+fn resetTables() -> i32 {
+    val sql = sqlTemplate(defaultDataSourceName());
+    val _d = rkSqlDropAll(defaultDataSourceName());
+    val _u = sql.update("CREATE TABLE users (id int, name text, email text, parent int)", []);
+    val _o = sql.update("CREATE TABLE orders (id int, user_id int, total int, state text)", []);
+    val _a = sql.update("CREATE TABLE order_audit (order_id int, action text)", []);
+    return rkSqlLogReset();
+}
+
+fn auditRows() -> string {
+    return sqlTemplate(defaultDataSourceName()).query("SELECT order_id, action FROM order_audit ORDER BY order_id", []).toList().map({ r -> r.get("order_id") + ":" + r.get("action") }).join(",");
+}
+
+// ── setup ────────────────────────────────────────────────────────────────────
+
+test "query: the default datasource boots on the ETS arm from rakun.datasource.url" {
+    val _p = rkSetProp("rakun.datasource.url", "ets:memory");
+    val ds = dataSourceBoot();
+    assert ds.arm == "ets";
+    val _l = rkSqlLogOn();
+    assert resetTables() == 0;
+}
+
+// ── step 5: #[query] ─────────────────────────────────────────────────────────
+
+test "query: #[query] emits __rkQuery_<name>() returning the statement verbatim" {
+    assert __rkQuery_findById() == "SELECT id, name, email FROM users WHERE id = :id";
+    assert __rkQuery_create() == "INSERT INTO orders (id, user_id, total, state) VALUES (:id, :userId, :total, 'placed')";
+}
+
+test "query: every #[query] statement is registered and rkRegisteredQueries lists it" {
+    val listed = rkRegisteredQueries().join("\n");
+    try asserts.contains(listed, "findById SELECT id, name, email FROM users WHERE id = :id");
+    try asserts.contains(listed, "findFamily SELECT id FROM users WHERE id = :id OR parent = :id");
+    try asserts.contains(listed, "orderCount SELECT COUNT(*) AS n FROM orders");
+}
+
+test "query: a named parameter binds by name and the statement is emitted verbatim" {
+    val _r = resetTables();
+    val _i = __rkMake_UserRepository().insert(1, "ana", "a@example.com");
+    val _x = rkSqlLogReset();
+    var name = "";
+    if (__rkMake_UserRepository().findById(1)) { r -> name = r.get("name"); };
+    assert name == "ana";
+    assert log() == "SELECT id, name, email FROM users WHERE id = :id  params=[id=1]";
+}
+
+test "query: the same name used twice binds once and is passed once" {
+    val _r = resetTables();
+    val sql = sqlTemplate(defaultDataSourceName());
+    val _a = sql.update("INSERT INTO users (id, name, parent) VALUES (7, 'root', 0)", []);
+    val _b = sql.update("INSERT INTO users (id, name, parent) VALUES (8, 'kid', 7)", []);
+    val _c = sql.update("INSERT INTO users (id, name, parent) VALUES (9, 'other', 3)", []);
+    val _x = rkSqlLogReset();
+    val family = __rkMake_UserRepository().findFamily(7);
+    assert family.column("id").join(",") == "7,8";
+    assert log() == "SELECT id FROM users WHERE id = :id OR parent = :id  params=[id=7]";
+}
+
+test "query: a hostile value is bound as a value and changes nothing" {
+    val _r = resetTables();
+    val _i = __rkMake_UserRepository().insert(1, "'; DROP TABLE users; --", "a@example.com");
+    var name = "";
+    if (__rkMake_UserRepository().findById(1)) { r -> name = r.get("name"); };
+    assert name == "'; DROP TABLE users; --";
+    assert log() == "INSERT INTO users (id, name, email) VALUES (:id, :name, :email)  params=[id=1, name='; DROP TABLE users; --, email=a@example.com]\nSELECT id, name, email FROM users WHERE id = :id  params=[id=1]";
+}
+
+// ── step 6: sql.transaction ──────────────────────────────────────────────────
+
+test "query: sql.transaction commits when the thunk returns" {
+    val _r = resetTables();
+    val sql = sqlTemplate(defaultDataSourceName());
+    val n = sql.transaction({ tx ->
+        tx.update("INSERT INTO order_audit (order_id, action) VALUES (:id, 'kept')", [param("id", "1")]);
+    });
+    assert n == 1;
+    assert log() == "begin\nINSERT INTO order_audit (order_id, action) VALUES (:id, 'kept')  params=[id=1]\ncommit";
+    assert auditRows() == "1:kept";
+}
+
+test "query: sql.transaction rolls back when the thunk raises, and the raise propagates" {
+    val _r = resetTables();
+    val sql = sqlTemplate(defaultDataSourceName());
+    try asserts.throwsWith({ ->
+        val _n = sql.transaction({ tx ->
+            val _i = tx.update("INSERT INTO order_audit (order_id, action) VALUES (:id, 'lost')", [param("id", "2")]);
+            @panic("refund.declined");
+        });
+        0;
+    }, "refund.declined");
+    try asserts.endsWith(log(), "\nrollback");
+    assert auditRows() == "";
+}
+
+test "query: two statements in one transaction are both visible or neither is" {
+    val _r = resetTables();
+    val sql = sqlTemplate(defaultDataSourceName());
+    val _ok = sql.transaction({ tx ->
+        val _a = tx.update("INSERT INTO order_audit (order_id, action) VALUES (1, 'a')", []);
+        tx.update("INSERT INTO order_audit (order_id, action) VALUES (2, 'b')", []);
+    });
+    assert auditRows() == "1:a,2:b";
+    try asserts.throwsWith({ ->
+        val _n = sql.transaction({ tx ->
+            val _a = tx.update("INSERT INTO order_audit (order_id, action) VALUES (3, 'c')", []);
+            tx.update("INSERT INTO no_such_table (x) VALUES (1)", []);
+        });
+        0;
+    }, "no table 'no_such_table'");
+    assert auditRows() == "1:a,2:b";
+}
+
+test "query: a nested transaction joins the open one with a single commit" {
+    val _r = resetTables();
+    val sql = sqlTemplate(defaultDataSourceName());
+    val _n = sql.transaction({ outer ->
+        val _a = outer.update("INSERT INTO order_audit (order_id, action) VALUES (1, 'outer')", []);
+        sql.transaction({ inner ->
+            inner.update("INSERT INTO order_audit (order_id, action) VALUES (2, 'inner')", []);
+        });
+    });
+    assert log() == "begin\nINSERT INTO order_audit (order_id, action) VALUES (1, 'outer')  params=[]\nINSERT INTO order_audit (order_id, action) VALUES (2, 'inner')  params=[]\ncommit";
+    assert auditRows() == "1:outer,2:inner";
+}
+
+// ── step 6: #[transactional] ─────────────────────────────────────────────────
+
+test "query: a transactional proxy call is wrapped in begin and commit" {
+    val _r = resetTables();
+    val _i = __rkMake_UserRepository().insert(1, "ana", "a@example.com");
+    val id = __rkMake_OrderServiceTx().place(1, 250);
+    assert id == 1;
+    assert log() == "INSERT INTO users (id, name, email) VALUES (:id, :name, :email)  params=[id=1, name=ana, email=a@example.com]\nbegin\nSELECT id, name, email FROM users WHERE id = :id  params=[id=1]\nSELECT COUNT(*) AS n FROM orders  params=[]\nINSERT INTO orders (id, user_id, total, state) VALUES (:id, :userId, :total, 'placed')  params=[id=1, userId=1, total=250]\nINSERT INTO order_audit (order_id, action) VALUES (:orderId, :action)  params=[orderId=1, action=placed]\ncommit";
+}
+
+test "query: a raise inside the proxy rolls back and the raise propagates" {
+    val _r = resetTables();
+    try asserts.throwsWith({ ->
+        val _id = __rkMake_OrderServiceTx().place(9, 10);
+        0;
+    }, "no user 9");
+    assert log() == "begin\nSELECT id, name, email FROM users WHERE id = :id  params=[id=9]\nrollback";
+}
+
+test "query: a nested transaction inside the proxy joins it with a single commit" {
+    val _r = resetTables();
+    val _o = sqlTemplate(defaultDataSourceName()).update("INSERT INTO orders (id, user_id, total, state) VALUES (1, 1, 250, 'placed')", []);
+    val _x = rkSqlLogReset();
+    assert __rkMake_OrderServiceTx().refund(1) == 1;
+    assert log() == "begin\nUPDATE orders SET state = 'refunded' WHERE id = :id  params=[id=1]\nINSERT INTO order_audit (order_id, action) VALUES (:id, 'refunded')  params=[id=1]\ncommit";
+}
+
+test "query: noTransaction emits a plain forward" {
+    val _r = resetTables();
+    val _o = sqlTemplate(defaultDataSourceName()).update("INSERT INTO orders (id, user_id, total, state) VALUES (1, 1, 250, 'placed')", []);
+    val _x = rkSqlLogReset();
+    assert __rkMake_OrderServiceTx().history(1) == "1:250";
+    assert log() == "SELECT id, user_id, total, state FROM orders WHERE user_id = :userId ORDER BY id  params=[userId=1]";
+}
+
+test "query: injecting the Tx proxy gets the transaction and injecting the bare type does not" {
+    val _r = resetTables();
+    val _i = __rkMake_UserRepository().insert(1, "ana", "a@example.com");
+    val desk = __rkMake_OrderDesk();
+    val _x = rkSqlLogReset();
+    val _b = desk.bare.place(1, 10);
+    assert log().contains("begin") == false;
+    assert log().contains("commit") == false;
+    val _y = rkSqlLogReset();
+    val _t = desk.tx.place(1, 20);
+    try asserts.startsWith(log(), "begin\n");
+    try asserts.endsWith(log(), "\ncommit");
+}
+
+test "query: REQUIRES_NEW and NESTED are refused at run time too, never ignored" {
+    try asserts.throwsWith({ -> rkTxRun("X.y", "requires_new", { -> 1 }); }, "REQUIRES_NEW is not implemented");
+    try asserts.throwsWith({ -> rkTxRun("X.y", "NESTED", { -> 1 }); }, "NESTED is not implemented");
+    try asserts.throwsWith({ -> rkTxRun("X.y", "mandatory", { -> 1 }); }, "unknown transaction propagation");
+}

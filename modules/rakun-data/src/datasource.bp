@@ -1,0 +1,257 @@
+//// rakun-data — the DataSource: which arm a URL selects, the pool behind it,
+//// and the boot that starts it. Front 08.
+////
+//// GENERIC ON PURPOSE. `DataSource` is `connect` / `close` / `stats` and
+//// nothing about statements, because front 09's document stores consume this
+//// module read-only and a statement surface here would be SQL's. The statement
+//// surface is each arm's: `SqlTemplate` in `sql/template.bp` for SQL.
+////
+//// THE ARMS. `rakun.datasource.url` selects one:
+////
+////   | URL                      | arm          | driver module (OTP application) |
+////   | `ets:memory`             | `ets`        | — ships in `rakun_sql.erl`      |
+////   | `postgresql://…`         | `postgresql` | `epgsql` (epgsql)               |
+////   | `mysql://…`              | `mysql`      | `mysql` (mysql-otp)             |
+////
+//// An unknown scheme is a boot failure naming the value. A PostgreSQL or MySQL
+//// URL whose driver module is not loadable is a boot failure naming the driver
+//// and the application that supplies it — it does NOT fall back to the ETS
+//// store, because an integration suite silently running against an in-memory
+//// store that is not SQL is worse than a suite that does not start.
+////
+//// No URL at all selects the ETS arm when the `test` profile is active
+//// (Spring's embedded-database convenience) and is a boot failure otherwise.
+////
+//// THE POOL is processes, not threads: `rakun_pool_sup` supervises one
+//// connection process per slot, fixed size (`rakun.datasource.pool.size`,
+//// default 10). There is no `minimum-idle`: a BEAM process costs a few
+//// kilobytes and shrinking the pool saves nothing. See `rakun_sql.erl`.
+////
+//// BOOTSTRAP MODE (`rakun.data.repositories.bootstrap-mode`) controls the
+//// POOL, not the repositories — on the BEAM a repository is a record and the
+//// expensive part is opening N connections:
+////
+////   | `eager` (default) | every connection opens at boot; an unreachable database fails the boot |
+////   | `deferred`        | the pool starts empty; a connection opens on its first checkout          |
+////   | `lazy`            | as `deferred` (the repository half is not built — see the README's box)  |
+////
+//// `deferred` or `lazy` under a production profile is a boot WARNING naming the
+//// profile: a blue/green start may legitimately precede the database, so it is
+//// not a failure, and the usual reason it is set in production is a forgotten
+//// debugging session, so it is not silence either.
+
+import {rkValue, rkPropIntOr, rkPropDuration, rkRegisterConfigKeys} from "rakun";
+import {isActive} from "rakun";
+
+// ── the host cells (`src/sidecars/rakun_sql.erl`) ────────────────────────────
+
+#[@External.Erlang("rakun_sql", "start_pool")]
+pub declare fn rkPoolStart(name: string, arm: string, url: string, size: i32, timeoutMs: i32, eager: bool) -> string;
+
+#[@External.Erlang("rakun_sql", "stop_pool")]
+pub declare fn rkPoolStop(name: string) -> i32;
+
+#[@External.Erlang("rakun_sql", "pool_started")]
+pub declare fn rkPoolStarted(name: string) -> bool;
+
+#[@External.Erlang("rakun_sql", "pool_stats")]
+pub declare fn rkPoolStatsOf(name: string) -> PoolStats;
+
+#[@External.Erlang("rakun_sql", "kill_slot")]
+pub declare fn rkPoolKillSlot(name: string, slot: i32) -> i32;
+
+#[@External.Erlang("rakun_sql", "settle")]
+pub declare fn rkPoolSettle(name: string, millis: i32) -> i32;
+
+#[@External.Erlang("rakun_sql", "driver_loadable")]
+pub declare fn rkDriverLoadable(module: string) -> bool;
+
+#[@External.Erlang("rakun_sql", "set_reachable")]
+pub declare fn rkEtsSetReachable(name: string, up: bool) -> i32;
+
+#[@External.Erlang("rakun_sql", "ds_arm")]
+pub declare fn rkDataSourceArm(name: string) -> string;
+
+#[@External.Erlang("rakun_sql", "warn")]
+pub declare fn rkDataWarn(line: string) -> i32;
+
+#[@External.Erlang("rakun_sql", "warnings")]
+pub declare fn rkDataWarnings() -> string[];
+
+#[@External.Erlang("rakun_sql", "warnings_reset")]
+pub declare fn rkDataWarningsReset() -> i32;
+
+#[@External.Erlang("rakun_sql", "sleep")]
+pub declare fn rkDataSleep(millis: i32) -> i32;
+
+// ── the contract ─────────────────────────────────────────────────────────────
+
+// What the pool reports, and what front 11 reads for the `db` metrics.
+// `size` comes from the supervisor (live connection processes), `busy` and
+// `free` from the slot rows, `waiting` is callers currently blocked in a
+// checkout, `checkouts`/`opened`/`reclaimed`/`peak` count since the pool
+// started.
+pub type PoolStats(
+    size: i32,
+    busy: i32,
+    free: i32,
+    waiting: i32,
+    checkouts: i32,
+    opened: i32,
+    reclaimed: i32,
+    peak: i32,
+)
+
+pub behavior DataSource {
+    fn connect(self: Self) -> string;
+    fn close(self: Self) -> i32;
+    fn stats(self: Self) -> PoolStats;
+}
+
+// One borrowed connection. The SQL arm's statement surface is `SqlTemplate`,
+// which borrows lazily and gives back itself; this behavior is what an arm
+// that hands out a connection OBJECT (front 09's stores) implements.
+pub behavior Connection {
+    fn execute(self: Self, statement: string, values: string[]) -> string;
+    fn release(self: Self) -> i32;
+}
+
+// A resolved, started datasource. `connect` starts (or restarts) its pool and
+// answers the refusal text, `""` when it started.
+pub type PooledDataSource(
+    name: string,
+    url: string,
+    arm: string,
+    size: i32,
+    timeoutMs: i32,
+    mode: string,
+) implement DataSource {
+    pub fn connect(self: Self) -> string {
+        return rkPoolStart(self.name, self.arm, self.url, self.size, self.timeoutMs, self.mode == "eager");
+    }
+
+    pub fn close(self: Self) -> i32 {
+        return rkPoolStop(self.name);
+    }
+
+    pub fn stats(self: Self) -> PoolStats {
+        return rkPoolStatsOf(self.name);
+    }
+}
+
+// ── arm selection ────────────────────────────────────────────────────────────
+
+pub fn defaultDataSourceName() -> string {
+    return "default";
+}
+
+// `""` for a scheme no arm serves.
+pub fn armOf(url: string) -> string {
+    val u = url.trim();
+    return if (u.startsWith("ets:")) "ets" else if (u.startsWith("postgresql://") || u.startsWith("postgres://")) "postgresql" else if (u.startsWith("mysql://")) "mysql" else "";
+}
+
+pub fn driverModule(arm: string) -> string {
+    return if (arm == "postgresql") "epgsql" else if (arm == "mysql") "mysql" else "";
+}
+
+pub fn driverApplication(arm: string) -> string {
+    return if (arm == "postgresql") "epgsql (https://github.com/epgsql/epgsql)" else if (arm == "mysql") "mysql-otp (https://github.com/mysql-otp/mysql-otp)" else "";
+}
+
+pub fn unknownSchemeProblem(url: string) -> string {
+    return "rakun-data: rakun.datasource.url is '" + url + "', whose scheme no arm serves - accepted: ets:memory, postgresql://..., mysql://...";
+}
+
+pub fn driverMissingProblem(url: string, arm: string) -> string {
+    return "rakun-data: rakun.datasource.url is '" + url + "' but the " + arm + " driver module '" + driverModule(arm) + "' is not loadable - put the OTP application " + driverApplication(arm) + " on the code path. rakun-data does not fall back to the ETS store";
+}
+
+pub fn noUrlProblem() -> string {
+    return "rakun-data: rakun.datasource.url is not set - configure a URL (ets:memory, postgresql://..., mysql://...); only the test profile selects the ETS store on its own";
+}
+
+// The URL a datasource runs on: the configured one, or `ets:memory` when none
+// is configured and the `test` profile is active; `""` otherwise.
+pub fn effectiveUrl(configured: string, testProfile: bool) -> string {
+    val c = configured.trim();
+    return if (c != "") c else if (testProfile) "ets:memory" else "";
+}
+
+// Everything a URL can be refused for before a connection is attempted: `""`
+// when it is usable. The driver check runs here, at boot, so a missing driver
+// is never discovered by the first request.
+pub fn urlProblem(url: string) -> string {
+    val arm = armOf(url);
+    return if (url == "") noUrlProblem() else if (arm == "") unknownSchemeProblem(url) else if (arm == "ets") "" else if (rkDriverLoadable(driverModule(arm))) "" else driverMissingProblem(url, arm);
+}
+
+pub fn bootstrapModeProblem(mode: string) -> string {
+    return if (mode == "eager" || mode == "deferred" || mode == "lazy") "" else "rakun-data: rakun.data.repositories.bootstrap-mode is '" + mode + "' - accepted: eager, deferred, lazy";
+}
+
+// `""`, or the warning a deferred pool under a production profile logs.
+pub fn productionWarning(mode: string) -> string {
+    val deferredPool = mode == "deferred" || mode == "lazy";
+    val profile = if (isActive("production")) "production" else if (isActive("prod")) "prod" else "";
+    return if (deferredPool && profile != "") "rakun-data: warning - rakun.data.repositories.bootstrap-mode is '" + mode + "' under the active profile '" + profile + "': the boot does not touch the database, so an unreachable one fails the first request instead of the deploy" else "";
+}
+
+// ── boot ─────────────────────────────────────────────────────────────────────
+
+// Start a datasource from explicit values. RAISES the refusal: a datasource
+// that cannot start is a boot failure. Answers the started datasource.
+pub fn startDataSource(name: string, url: string, size: i32, timeoutMs: i32, mode: string) -> PooledDataSource {
+    val problem = urlProblem(url);
+    if (problem != "") @panic(problem);
+    val modeProblem = bootstrapModeProblem(mode);
+    if (modeProblem != "") @panic(modeProblem);
+    if (size < 1) @panic("rakun-data: rakun.datasource.pool.size is " + size.toString() + " - a pool needs at least one connection");
+    val warning = productionWarning(mode);
+    if (warning != "") {
+        val _w = rkDataWarn(warning);
+    };
+    val ds = PooledDataSource(name: name, url: url.trim(), arm: armOf(url), size: size, timeoutMs: timeoutMs, mode: mode);
+    val failed = ds.connect();
+    if (failed != "") @panic("rakun-data: the datasource '" + name + "' failed to start - " + failed);
+    return ds;
+}
+
+// The keys this front reads, registered in the core's catalogue so a
+// `rakun config-catalogue` dump lists them.
+pub fn registerDataKeys() -> i32 {
+    val _d = rkRegisterConfigKeys("rakun.datasource", "url:string:|pool.size:i32:10|pool.connection-timeout:Duration:30000");
+    return rkRegisterConfigKeys("rakun.data", "repositories.bootstrap-mode:string:eager");
+}
+
+// The default datasource, from configuration: `rakun.datasource.url`,
+// `rakun.datasource.pool.size` (10), `rakun.datasource.pool.connection-timeout`
+// (30s) and `rakun.data.repositories.bootstrap-mode` (eager). The application
+// calls it once at boot; a statement against a datasource nobody booted boots
+// it on the spot from the same keys.
+pub fn dataSourceBoot() -> PooledDataSource {
+    val _k = registerDataKeys();
+    val url = effectiveUrl(rkValue("rakun.datasource.url"), isActive("test"));
+    val size = rkPropIntOr("rakun.datasource.pool.size", 10);
+    val raw = rkValue("rakun.datasource.pool.connection-timeout");
+    val timeoutMs = if (raw.trim() == "") 30000 else rkPropDuration("rakun.datasource.pool.connection-timeout", "millis").millis;
+    val rawMode = rkValue("rakun.data.repositories.bootstrap-mode").trim();
+    val mode = if (rawMode == "") "eager" else rawMode;
+    return startDataSource(defaultDataSourceName(), url, size, timeoutMs, mode);
+}
+
+pub fn ensureDataSource(name: string) -> i32 {
+    if (rkPoolStarted(name) == false && name == defaultDataSourceName()) {
+        val _b = dataSourceBoot();
+    };
+    return 0;
+}
+
+pub fn poolStats(name: string) -> PoolStats {
+    return rkPoolStatsOf(name);
+}
+
+// The default datasource's pool, for front 11's metrics.
+pub fn rkPoolStats() -> PoolStats {
+    return rkPoolStatsOf(defaultDataSourceName());
+}

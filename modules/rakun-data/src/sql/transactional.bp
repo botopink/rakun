@@ -1,0 +1,102 @@
+//// rakun-data — `#[transactional]`, `#[noTransaction]`, `#[propagation]`.
+//// Front 08 step 6.
+////
+//// WHY A PROXY. A decorator adds declarations; it cannot rewrite the body of
+//// the thing it annotates. So `#[transactional]` on a METHOD cannot open a
+//// transaction around it. What a TYPE-level decorator can do is emit a proxy,
+//// which is also what Spring does at run time:
+////
+////     #[service]
+////     #[transactional]
+////     pub type OrderService(sql: SqlTemplate, orders: OrderRepository) {
+////         pub fn place(self: Self, userId: i32, total: i32) -> i32 { … }
+////     }
+////
+//// emits
+////
+////     pub type OrderServiceTx(inner: OrderService) {
+////         pub fn place(self: Self, userId: i32, total: i32) -> i32 {
+////             return rkTxRun("OrderService.place", "required", { -> self.inner.place(userId, total) });
+////         }
+////     }
+////     pub fn __rkMake_OrderServiceTx() -> OrderServiceTx { … rkSingleton … }
+////
+//// A component injecting `OrderServiceTx` gets the transactional path;
+//// injecting `OrderService` gets the bare one — the distinction Spring hides,
+//// made visible. `#[noTransaction]` on a method emits a plain forward.
+//// The application site imports `rkTxRun` (rakun-data) and `rkSingleton`
+//// (rakun), and the type needs a stereotype for `__rkMake_<Type>()`.
+////
+//// WHAT REFLECTION LOSES, AND THE REFUSAL. A reflected parameter or return
+//// type keeps only its head: `Array<string>` and `@Result<T, E>` reflect as
+//// `Array` and `Result`, and an optional, an array (`T[]`) or a function type
+//// reflect as `""`. A proxy cannot redeclare a signature it cannot read, so a
+//// method with such a PARAMETER, or with a generic RETURN, fails the build
+//// naming the method. A `""` return is emitted as a void method — the inner
+//// call still runs inside the transaction, and a caller that used the value
+//// fails to compile at its own call site rather than getting a wrong one.
+//// Every reflected method is forwarded: `Method` carries no visibility, so a
+//// private method is forwarded too.
+////
+//// PROPAGATION. REQUIRED only. `#[propagation("REQUIRES_NEW")]` or
+//// `("NESTED")` on a method fails the build saying it is not implemented, and
+//// `rkTxRun` refuses any other value at run time — never accepted and ignored.
+
+pub fn transactional(comptime decl: @Decl) {
+    var methods: Array<string> = [];
+    var lossy = "";
+    var refused = "";
+    decl.methods.forEach({ m ->
+        var plain = false;
+        var prop = "REQUIRED";
+        m.annotations.forEach({ a ->
+            val p = if (a.name == "noTransaction") true else plain;
+            plain = p;
+            val q = if (a.name == "propagation") a.args.join("").replaceAll("\"", "").toUpper() else prop;
+            prop = q;
+        });
+        val badProp = if (prop != "REQUIRED" && refused == "") decl.name + "." + m.name + " asks for propagation " + prop else refused;
+        refused = badProp;
+        var params: Array<string> = [];
+        var args: Array<string> = [];
+        m.params.forEach({ p ->
+            val lost = p.typeName == "" || p.typeName == "Array" || p.typeName == "Result" || p.typeName == "Task" || p.typeName == "Map" || p.typeName == "Dict" || p.typeName == "Set" || p.typeName == "Option";
+            val note = if ((lost && p.name != "self" && lossy == "")) decl.name + "." + m.name + " parameter '" + p.name + "'" else lossy;
+            lossy = note;
+            if (p.name != "self") {
+                params.push(p.name + ": " + p.typeName);
+                args.push(p.name);
+            };
+        });
+        val ret = m.returnType;
+        val lostRet = ret == "Array" || ret == "Result" || ret == "Task" || ret == "Map" || ret == "Dict" || ret == "Set" || ret == "Option";
+        val retNote = if ((lostRet && lossy == "")) decl.name + "." + m.name + " return type '" + ret + "'" else lossy;
+        lossy = retNote;
+        val call = "self.inner." + m.name + "(" + args.join(", ") + ")";
+        val label = decl.name + "." + m.name;
+        val head = if (params.length > 0) "pub fn " + m.name + "(self: Self, " + params.join(", ") + ")" else "pub fn " + m.name + "(self: Self)";
+        val sig = if (ret != "") head + " -> " + ret else head;
+        val wrapped = "rkTxRun(\"" + label + "\", \"required\", { -> " + call + " })";
+        val voidWrapped = "val _tx = rkTxRun(\"" + label + "\", \"required\", { -> " + call + "; 0 });";
+        val body = if (plain) {
+            if (ret != "") "return " + call + ";" else call + ";";
+        } else {
+            if (ret != "") "return " + wrapped + ";" else voidWrapped;
+        };
+        methods.push(sig + " {\n        " + body + "\n    }");
+    });
+    @emit("pub type " + decl.name + "Tx(inner: " + decl.name + ") {\n    " + methods.join("\n\n    ") + "\n}");
+    @emit("pub fn __rkMake_" + decl.name + "Tx() -> " + decl.name + "Tx { return rkSingleton(\"" + decl.name + "Tx\", { -> " + decl.name + "Tx(inner: __rkMake_" + decl.name + "()) }); }");
+    if (decl.kind != DeclKind.Type) decl.fail("#[transactional] must annotate a type - a decorator cannot wrap a method body, so the transaction lives on the <Type>Tx proxy the type-level marker emits");
+    if (decl.variants.length > 0) decl.fail("#[transactional] must annotate a type with fields, not an enum");
+    if (refused != "") decl.fail("#[transactional]: " + refused + " - only REQUIRED is implemented (a nested call joins the open transaction); REQUIRES_NEW and NESTED (savepoints) are not implemented and are refused rather than ignored");
+    if (lossy != "") decl.fail("#[transactional] cannot forward " + lossy + ": reflection keeps only a type's head (an optional, an array, a function type or a generic argument is lost), so the proxy cannot redeclare it - pass a record instead, or move the method to a type without #[transactional]");
+}
+
+pub fn noTransaction(comptime decl: @Decl) {
+    if (decl.kind != DeclKind.Method) decl.fail("#[noTransaction] must annotate a method of a #[transactional] type");
+}
+
+pub fn propagation(comptime decl: @Decl, name: string) {
+    if (decl.kind != DeclKind.Method) decl.fail("#[propagation] must annotate a method of a #[transactional] type");
+}

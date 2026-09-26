@@ -2,6 +2,48 @@
 
 ## Unreleased
 
+### SQL data access: DataSource, pool, SqlTemplate, #[query], #[transactional] (botopink front 08)
+
+- `modules/rakun-data` gets its first code (front 08 owns the manifest and
+  `src/root.bp`; depends on `rakun` and `rakun-actuator-api`): `src/datasource.bp`,
+  `src/sql/{params,rows,template,query,transactional,health}.bp` and the host module
+  `src/sidecars/rakun_sql.erl`.
+- `DataSource` / `Connection` behaviors (generic — front 09 reads them), selected by
+  `rakun.datasource.url`: `ets:memory` (ships in the sidecar), `postgresql://`
+  (`epgsql`), `mysql://` (mysql-otp). An unknown scheme, and a driver whose module is
+  not loadable, fail the boot naming them — no fallback to ETS. No URL selects ETS
+  under the `test` profile only. URLs in messages are password-redacted.
+- The pool: `rakun_pool_sup` supervising one connection process per slot
+  (`rakun.datasource.pool.size`, default 10), atomic checkout by
+  `ets:select_replace/2`, `rakun.datasource.pool.connection-timeout` (default 30 s),
+  borrower monitoring (a dead borrower's transaction is rolled back and its
+  connection freed), supervisor restarts, lazy acquisition, `rkPoolStats()` /
+  `poolStats(name)`. `rakun.data.repositories.bootstrap-mode` = `eager` (default,
+  unreachable database fails the boot) / `deferred` / `lazy` (pool half only);
+  `deferred`/`lazy` under a production profile warns naming it.
+- The ETS arm: `CREATE`/`DROP TABLE`, `INSERT`, `SELECT` (`=`/`<>` with `AND`/`OR`,
+  `ORDER BY`, `LIMIT`, `COUNT(*)`), `UPDATE`, `DELETE`, `CALL rakun_sleep(ms)`;
+  anything else is an error naming the construct. Transactions by
+  snapshot-and-restore; `SqlTemplate.withRollback` isolates a test block.
+- `SqlTemplate` (`query`/`update`/`single` raise, `tryQuery`/`tryUpdate` answer
+  `@Result`, `queryAsync`/`updateAsync`/`singleAsync`, `transaction`), `Tx`, `Rows`
+  (`rowCount`/`at`/`first`/`toList`/`column`), `Row` (`get`/`int`/`bool`/`has`),
+  named parameters (`:name` → `$1` / `?`; missing, unused and duplicate `Param`s are
+  refused naming them).
+- `#[query("…")]` emits `__rkQuery_<method>()` and registers the statement
+  (`rkRegisteredQueries()`); an empty statement, an unknown leading keyword and a
+  quote next to a placeholder fail the build at the method.
+- `#[transactional]` (type-level) emits the `<Type>Tx` proxy and its factory;
+  `#[noTransaction]` forwards plainly; `#[propagation("REQUIRES_NEW" | "NESTED")]`
+  fails the build as not implemented and `rkTxRun` refuses them at run time. REQUIRED
+  only: a nested transaction joins the open one.
+- The `db` health indicator (`#[healthIndicator("db")]` + `registerDbHealth()`) into
+  `rakun-actuator-api`'s registry.
+- Tests: `modules/rakun-data` 0 → **77 passed / 0 failed / 0 compile failures**
+  (`test/sql_{build,datasource,pool,query,template,health}_test.bp`, ETS only, no
+  database). Open: `bootstrap-mode=lazy` does not reach `#[repository]` beans (the
+  bean record carries no stereotype); the opt-in PostgreSQL/MySQL suite.
+
 ### Auto-configuration: exclusion through the property, the short-circuit said (botopink front 72 steps 4 and 5)
 
 - The condition report's not-applied row says when evaluation stopped at the

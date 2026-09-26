@@ -1,0 +1,124 @@
+//// rakun-data — `Rows` and `Row`: the wire, as strings. Front 08 step 4.
+////
+//// Everything is a string at this layer. Typed row-to-record mapping is front
+//// 78's `#[entity]`, and a half version of it here would leave two. What this
+//// front owns is a column name, a value, and the three coercions a handler
+//// needs before an ORM exists: `get` (`""` when the column is absent or NULL),
+//// `int` and `bool` — which REFUSE a value that is not one, naming the column,
+//// rather than answering 0 or false.
+////
+//// Column names compare case-insensitively: an unquoted SQL identifier is.
+
+import {charOf, isDigit, toI32, sub} from "rakun";
+
+// What the host answers for one statement (`rakun_sql:exec/3`): the raising
+// and the `@Result` surfaces are both decided from this one record.
+pub type SqlOutcome(
+    ok: bool,
+    error: string,
+    columns: string[],
+    rows: string[][],
+    count: i32,
+)
+
+fn columnIndex(columns: string[], column: string) -> i32 {
+    val want = column.toLower();
+    var found = -1;
+    var i = 0;
+    for (columns) { c ->
+        if (found < 0 && c.toLower() == want) found = i;
+        i = i + 1;
+    };
+    return found;
+}
+
+fn valueAt(xs: string[], i: i32) -> string {
+    var out = "";
+    var k = 0;
+    for (xs) { x ->
+        if (k == i) out = x;
+        k = k + 1;
+    };
+    return out;
+}
+
+fn rowAt(xs: string[][], i: i32) -> string[] {
+    var out: string[] = [];
+    var k = 0;
+    for (xs) { x ->
+        if (k == i) out = x;
+        k = k + 1;
+    };
+    return out;
+}
+
+fn isInteger(v: string) -> bool {
+    val t = v.trim();
+    val body = if (charOf(t, 0) == "-") sub(t, 1, t.length()) else t;
+    var ok = body != "";
+    for (body.split("")) { c -> if (isDigit(c) == false) ok = false; };
+    return ok;
+}
+
+pub type Row(
+    columns: string[],
+    values: string[],
+) {
+    pub fn has(self: Self, column: string) -> bool {
+        return columnIndex(self.columns, column) >= 0;
+    }
+
+    pub fn get(self: Self, column: string) -> string {
+        val i = columnIndex(self.columns, column);
+        return if (i < 0) "" else valueAt(self.values, i);
+    }
+
+    pub fn int(self: Self, column: string) -> i32 {
+        val v = self.get(column);
+        if (isInteger(v) == false) @panic("rakun-data: column '" + column + "' is '" + v + "', which is not an integer");
+        return toI32(v);
+    }
+
+    pub fn bool(self: Self, column: string) -> bool {
+        val v = self.get(column).trim().toLower();
+        val yes = v == "true" || v == "t" || v == "1";
+        val no = v == "false" || v == "f" || v == "0";
+        if ((yes || no) == false) @panic("rakun-data: column '" + column + "' is '" + v + "', which is not a boolean");
+        return yes;
+    }
+}
+
+pub type Rows(
+    columns: string[],
+    rows: string[][],
+) {
+    pub fn rowCount(self: Self) -> i32 {
+        return self.rows.length;
+    }
+
+    pub fn isEmpty(self: Self) -> bool {
+        return self.rows.length == 0;
+    }
+
+    pub fn at(self: Self, i: i32) -> ?Row {
+        val none: ?Row = null;
+        return if (i < 0 || i >= self.rows.length) none else Row(columns: self.columns, values: rowAt(self.rows, i));
+    }
+
+    pub fn first(self: Self) -> ?Row {
+        return self.at(0);
+    }
+
+    pub fn toList(self: Self) -> Row[] {
+        var out: Row[] = [];
+        for (self.rows) { r -> out.push(Row(columns: self.columns, values: r)); };
+        return out;
+    }
+
+    // One column of every row — `rows.column("id").join(",")`.
+    pub fn column(self: Self, name: string) -> string[] {
+        var out: string[] = [];
+        for (self.toList()) { r -> out.push(r.get(name)); };
+        return out;
+    }
+}

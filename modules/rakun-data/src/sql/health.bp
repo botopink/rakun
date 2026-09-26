@@ -1,0 +1,61 @@
+//// rakun-data — the `db` health indicator. Front 08 step 7.
+////
+//// Registered with front 11's dependency-free `rakun-actuator-api` at module
+//// load: the host reads the registry and never learns what SQL is. The check
+//// borrows one connection from the default datasource, runs the arm's liveness
+//// statement and gives it back, answering `UP` with the arm and the statement,
+//// or `DOWN` with the reason. It never raises (a raise would be the host's to
+//// turn into `DOWN`, with a stack trace nobody asked for) and never boots a
+//// datasource nobody started: a health probe that opened the pool would make
+//// `bootstrap-mode=deferred` meaningless.
+////
+//// TWO REGISTRATION PATHS, BECAUSE ONE DOES NOT RUN. `#[healthIndicator("db")]`
+//// emits the registration as a module-level `val` of THIS module, and on the
+//// erlang backend a library module's `'_botopink_init'/0` is never called —
+//// neither `botopink test` nor a built application runs the module body of a
+//// module that is not the entry (compiler finding, AGENTS.md). So the
+//// decorator is kept (it is the shape front 11 documents and it starts working
+//// the day library module bodies run), and `registerDbHealth()` makes the same
+//// registration explicitly; the application calls it once at boot, beside
+//// `dataSourceBoot()`. Registering twice is harmless: the registry refuses a
+//// second OWNER for an id, not a second registration by the same one.
+////
+//// A reason never carries a password: the host side redacts a URL's
+//// credentials in every message it writes (`rakun_sql:redact/1`).
+
+import {rkScan, rkSingleton, rkEnter, rkDone, rkProp, rkPropInt, component} from "rakun";
+import {Health, healthDown, healthIndicator, rkRegisterHealthIndicator} from "rakun-actuator-api";
+import {rkPoolStarted, rkDataSourceArm, defaultDataSourceName} from "datasource";
+import {runStatement} from "sql/template";
+
+// `SELECT 1` on every arm this front ships; the ETS arm answers it as a
+// literal select.
+pub fn livenessStatement(arm: string) -> string {
+    return "SELECT 1";
+}
+
+fn jsonText(s: string) -> string {
+    return "\"" + s.replaceAll("\\", "\\\\").replaceAll("\"", "\\\"").replaceAll("\n", "\\n") + "\"";
+}
+
+pub fn dbHealth(name: string) -> Health {
+    if (rkPoolStarted(name) == false) return healthDown("{\"error\":" + jsonText("the datasource '" + name + "' has not been started") + "}") else {
+        val arm = rkDataSourceArm(name);
+        val statement = livenessStatement(arm);
+        val o = runStatement(name, statement, []);
+        if (o.ok) return Health(status: "UP", details: "{\"database\":" + jsonText(arm) + ",\"validationQuery\":" + jsonText(statement) + "}") else return healthDown("{\"database\":" + jsonText(arm) + ",\"error\":" + jsonText(o.error) + "}");
+    };
+}
+
+#[component]
+#[healthIndicator("db")]
+pub type DbHealthIndicator {
+    pub fn check(self: Self) -> Health {
+        return dbHealth(defaultDataSourceName());
+    }
+}
+
+// The explicit registration (see the header): same id, same owner, same check.
+pub fn registerDbHealth() -> i32 {
+    return rkRegisterHealthIndicator("db", "DbHealthIndicator", { -> dbHealth(defaultDataSourceName()) });
+}

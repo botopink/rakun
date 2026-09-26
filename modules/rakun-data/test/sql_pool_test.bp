@@ -1,0 +1,142 @@
+//// rakun-data — the pool. Front 08 step 3.
+////
+//// The cells that matter here are the ones about processes, and they are
+//// asserted by OBSERVING the pool, never by a counter kept for the test: a
+//// killed connection is proven restarted by the supervisor's child list being
+//// full again, and a borrower that died is proven reclaimed by every
+//// connection being free again and its uncommitted row being gone.
+////
+//// Every cell uses its own datasource name, so a pool one cell left behind is
+//// never the pool the next one reads.
+
+import {testing.asserts} from "std";
+import {io: {clock}} from "std";
+import {async} from "std";
+import {
+    PooledDataSource,
+    PoolStats,
+    startDataSource,
+    poolStats,
+    rkPoolStats,
+    rkPoolKillSlot,
+    rkPoolSettle,
+    rkDataSleep,
+} from "datasource";
+import {Param, param} from "sql/params";
+import {Row, Rows} from "sql/rows";
+import {SqlTemplate, Tx, sqlTemplate, rkSqlSpawnBorrower} from "sql/template";
+
+fn errorOf(r: @Result<Rows, string>) -> string {
+    return case r {
+        Ok(_rows) -> "";
+        Error(e) -> e;
+    };
+}
+
+// A statement from ANOTHER process, which has no transaction mark and so must
+// check a connection out of the pool.
+fn fromElsewhere(sql: SqlTemplate) -> @Task<string> {
+    return errorOf(sql.tryQuery("SELECT 1", []));
+}
+
+fn raiseElsewhere(sql: SqlTemplate) -> @Task<i32> {
+    return sql.query("SELECT 1", []).rowCount();
+}
+
+fn waitingAfter(name: string, millis: i32) -> @Task<string> {
+    val _s = rkDataSleep(millis);
+    return poolStats(name).waiting.toString();
+}
+
+// What each transaction thunk below runs. `await` is legal only in a
+// `-> @Task` fn or a test block, not in a lambda, so the thunks call these.
+fn probeInside(sql: SqlTemplate) -> @Task<string[]> {
+    return await async.runAll([{ -> fromElsewhere(sql) }]);
+}
+
+fn raiseInside(sql: SqlTemplate) -> @Task<i32> {
+    val counts = await async.runAll([{ -> raiseElsewhere(sql) }]);
+    return counts.length;
+}
+
+fn statsInside(sql: SqlTemplate) -> @Task<string> {
+    val busy = poolStats("tiny").busy;
+    val answers = await async.runAll([
+        { -> fromElsewhere(sql) },
+        { -> waitingAfter("tiny", 60) },
+    ]);
+    return busy.toString() + "|" + answers.at(1).unwrapOr("");
+}
+
+test "pool: the configured number of connection processes start under rakun_pool_sup" {
+    val ds = startDataSource("sized", "ets:memory", 4, 500, "eager");
+    val s = ds.stats();
+    assert s.size == 4;
+    assert s.free == 4;
+    assert s.busy == 0;
+    assert s.opened == 4;
+}
+
+test "pool: a checkout with an empty free list waits and then fails after connection-timeout" {
+    val _d = startDataSource("tiny", "ets:memory", 1, 150, "eager");
+    val sql = sqlTemplate("tiny");
+    val start = clock.monotonicMillis();
+    val answers = await sql.transaction({ tx -> probeInside(sql) });
+    val elapsed = clock.monotonicMillis() - start;
+    try asserts.contains(answers.join(""), "no connection available from datasource 'tiny' within 150 ms (pool size 1, all in use)");
+    assert elapsed >= 150;
+}
+
+test "pool: the raising surface raises when the checkout times out" {
+    val sql = sqlTemplate("tiny");
+    try asserts.throwsWith({ ->
+        val _t = sql.transaction({ tx -> raiseInside(sql) });
+        0;
+    }, "no connection available from datasource 'tiny'");
+}
+
+test "pool: rkPoolStats reports size, in-use and waiting" {
+    val sql = sqlTemplate("tiny");
+    val seen = await sql.transaction({ tx -> statsInside(sql) });
+    assert seen == "1|1";
+    val after = poolStats("tiny");
+    assert after.size == 1;
+    assert after.busy == 0;
+    assert after.waiting == 0;
+    val dflt: PoolStats = rkPoolStats();
+    assert dflt.size >= 0;
+}
+
+test "pool: a connection process killed while idle is restarted and the pool returns to full size" {
+    val _d = startDataSource("killed", "ets:memory", 3, 500, "eager");
+    val _k = rkPoolKillSlot("killed", 2);
+    val free = rkPoolSettle("killed", 1000);
+    assert free == 3;
+    assert poolStats("killed").size == 3;
+    val _c = sqlTemplate("killed").update("CREATE TABLE after_kill (id int)", []);
+    assert sqlTemplate("killed").query("SELECT id FROM after_kill", []).rowCount() == 0;
+}
+
+test "pool: a borrower that dies mid-query has its connection reclaimed and its transaction rolled back" {
+    val _d = startDataSource("orphan", "ets:memory", 2, 500, "eager");
+    val sql = sqlTemplate("orphan");
+    val _c = sql.update("CREATE TABLE ledger (id int)", []);
+    val spawned = rkSqlSpawnBorrower("orphan", "INSERT INTO ledger (id) VALUES ($1)", ["9"]);
+    assert spawned == 1;
+    val free = rkPoolSettle("orphan", 1000);
+    assert free == 2;
+    assert poolStats("orphan").busy == 0;
+    assert sql.query("SELECT id FROM ledger WHERE id = 9", []).rowCount() == 0;
+}
+
+test "pool: no connection is checked out until the first statement runs" {
+    val _d = startDataSource("lazyacq", "ets:memory", 2, 500, "eager");
+    val before = poolStats("lazyacq").checkouts;
+    val sql = sqlTemplate("lazyacq");
+    val other = SqlTemplate(dataSourceName: "lazyacq");
+    assert poolStats("lazyacq").checkouts == before;
+    assert other.inTransaction() == false;
+    val _c = sql.update("CREATE TABLE t (id int)", []);
+    assert poolStats("lazyacq").checkouts == before + 1;
+    assert poolStats("lazyacq").busy == 0;
+}

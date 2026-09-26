@@ -1,0 +1,279 @@
+//// rakun-data — the ETS arm, `SqlTemplate`, named parameters, `Rows`, and the
+//// futures. Front 08 steps 2, 4 and 7.
+////
+//// Every cell runs on its own datasource name (`tpl`, `iso`, `async`), so no
+//// cell here depends on what `sql_query_test.bp` left in the default one.
+//// Refusals are asserted with `asserts.throwsWith` (the raising surface) and by
+//// the `Error` text of the `try*` surface; every needle is plain ASCII.
+
+import {testing.asserts} from "std";
+import {io: {clock}} from "std";
+import {async} from "std";
+import {startDataSource, poolStats, PoolStats, PooledDataSource} from "datasource";
+import {Param, Bound, param, bindNamed, placeholderNames} from "sql/params";
+import {Row, Rows} from "sql/rows";
+import {SqlTemplate, Tx, sqlTemplate} from "sql/template";
+
+fn tpl() -> SqlTemplate {
+    return sqlTemplate("tpl");
+}
+
+fn errorOf(r: @Result<Rows, string>) -> string {
+    return case r {
+        Ok(_rows) -> "";
+        Error(e) -> e;
+    };
+}
+
+fn names(rows: Rows) -> string {
+    return rows.column("name").join(",");
+}
+
+// ── step 2: the ETS arm ──────────────────────────────────────────────────────
+
+test "ets: CREATE TABLE and INSERT work, and INSERT answers the row count" {
+    val _d = startDataSource("tpl", "ets:memory", 2, 1000, "eager");
+    val _c = tpl().update("CREATE TABLE people (id int PRIMARY KEY, name text, team text, age int)", []);
+    val n = tpl().update("INSERT INTO people (id, name, team, age) VALUES (:id, :name, :team, :age)", [param("id", "1"), param("name", "ana"), param("team", "red"), param("age", "31")]);
+    assert n == 1;
+    val many = tpl().update("INSERT INTO people (id, name, team, age) VALUES (2, 'bob', 'blue', 25), (3, 'cleo', 'red', 40), (4, 'dan', 'blue', 19)", []);
+    assert many == 3;
+}
+
+test "ets: SELECT with WHERE col = :p answers the matching rows" {
+    val rows = tpl().query("SELECT id, name FROM people WHERE team = :team", [param("team", "red")]);
+    assert rows.rowCount() == 2;
+    assert rows.columns.join(",") == "id,name";
+    assert names(rows) == "ana,cleo";
+}
+
+test "ets: WHERE combines AND, OR and parentheses" {
+    val rows = tpl().query("SELECT name FROM people WHERE (team = 'blue' AND age = 25) OR name = :n ORDER BY name", [param("n", "cleo")]);
+    assert names(rows) == "bob,cleo";
+    val other = tpl().query("SELECT name FROM people WHERE team <> 'red' ORDER BY id", []);
+    assert names(other) == "bob,dan";
+}
+
+test "ets: ORDER BY sorts numbers as numbers, ascending and descending" {
+    assert names(tpl().query("SELECT name FROM people ORDER BY age", [])) == "dan,bob,ana,cleo";
+    assert names(tpl().query("SELECT name FROM people ORDER BY age DESC", [])) == "cleo,ana,bob,dan";
+    assert names(tpl().query("SELECT name FROM people ORDER BY team, name DESC", [])) == "dan,bob,cleo,ana";
+    assert names(tpl().query("SELECT name FROM people ORDER BY id LIMIT 2", [])) == "ana,bob";
+}
+
+test "ets: UPDATE changes the matching rows and answers how many" {
+    val n = tpl().update("UPDATE people SET team = :team WHERE age = :age", [param("team", "green"), param("age", "19")]);
+    assert n == 1;
+    assert names(tpl().query("SELECT name FROM people WHERE team = 'green'", [])) == "dan";
+}
+
+test "ets: DELETE removes the matching rows and answers how many" {
+    val n = tpl().update("DELETE FROM people WHERE team = :team", [param("team", "green")]);
+    assert n == 1;
+    var count = "";
+    if (tpl().single("SELECT COUNT(*) AS n FROM people", [])) { r -> count = r.get("n"); };
+    assert count == "3";
+}
+
+test "ets: a statement outside the subset fails naming the unsupported construct" {
+    try asserts.contains(errorOf(tpl().tryQuery("SELECT p.name FROM people p JOIN teams t ON p.team = t.id", [])), "unsupported construct");
+    try asserts.contains(errorOf(tpl().tryQuery("SELECT name FROM people JOIN teams ON team = id", [])), "unsupported construct 'JOIN'");
+    try asserts.contains(errorOf(tpl().tryQuery("SELECT name FROM people WHERE age > 20", [])), "unsupported construct '>'");
+    try asserts.contains(errorOf(tpl().tryQuery("SELECT team FROM people GROUP BY team", [])), "unsupported construct 'GROUP'");
+    try asserts.contains(errorOf(tpl().tryQuery("SELECT name FROM people WHERE name LIKE 'a%'", [])), "unsupported construct 'LIKE'");
+    try asserts.contains(errorOf(tpl().tryQuery("MERGE INTO people USING x", [])), "unsupported construct 'MERGE'");
+}
+
+test "ets: a table or column that does not exist is an error, never an empty result" {
+    try asserts.contains(errorOf(tpl().tryQuery("SELECT name FROM nobody", [])), "no table 'nobody'");
+    try asserts.contains(errorOf(tpl().tryQuery("SELECT shoe FROM people", [])), "has no column 'shoe'");
+}
+
+// Two test blocks, each in a transaction that is always rolled back: the
+// second cannot see what the first created.
+test "ets: a test block wrapped in withRollback leaves nothing behind (1 of 2)" {
+    val _d = startDataSource("iso", "ets:memory", 1, 1000, "eager");
+    val seen = sqlTemplate("iso").withRollback({ tx ->
+        val _c = tx.update("CREATE TABLE scratch (id int)", []);
+        val _i = tx.update("INSERT INTO scratch (id) VALUES (1)", []);
+        tx.query("SELECT id FROM scratch", []).rowCount();
+    });
+    assert seen == 1;
+}
+
+test "ets: a test block wrapped in withRollback leaves nothing behind (2 of 2)" {
+    val r = sqlTemplate("iso").tryQuery("SELECT id FROM scratch", []);
+    try asserts.contains(errorOf(r), "no table 'scratch'");
+}
+
+// ── step 4: named parameters ─────────────────────────────────────────────────
+
+test "params: :name binds from the Param of the same name, in first-appearance order" {
+    val b = bindNamed("SELECT * FROM t WHERE b = :b AND a = :a", [param("a", "1"), param("b", "2")], "ets");
+    assert b.sql == "SELECT * FROM t WHERE b = $1 AND a = $2";
+    assert b.values.join(",") == "2,1";
+    assert b.problem == "";
+}
+
+test "params: the same :name used twice binds once and is passed once" {
+    val b = bindNamed("SELECT id FROM users WHERE id = :id OR parent = :id", [param("id", "7")], "postgresql");
+    assert b.sql == "SELECT id FROM users WHERE id = $1 OR parent = $1";
+    assert b.values.length == 1;
+    assert b.names.join(",") == "id";
+}
+
+test "params: MySQL placeholders are positional, so a repeated name is passed per occurrence" {
+    val b = bindNamed("SELECT id FROM users WHERE id = :id OR parent = :id", [param("id", "7")], "mysql");
+    assert b.sql == "SELECT id FROM users WHERE id = ? OR parent = ?";
+    assert b.values.join(",") == "7,7";
+}
+
+test "params: a quoted literal and a :: cast are not parameters" {
+    assert placeholderNames("SELECT ':nope', x::text FROM t WHERE a = :yes").join(",") == "yes";
+    val b = bindNamed("SELECT ':nope', x::text FROM t WHERE a = :yes", [param("yes", "1")], "ets");
+    assert b.sql == "SELECT ':nope', x::text FROM t WHERE a = $1";
+}
+
+test "params: a :name with no Param fails naming it, and so does an unused Param" {
+    try asserts.throwsWith({ ->
+        val _r = tpl().query("SELECT name FROM people WHERE id = :id", []);
+        0;
+    }, "names :id but no Param 'id' was given");
+    try asserts.throwsWith({ ->
+        val _r = tpl().query("SELECT name FROM people WHERE id = :id", [param("id", "1"), param("extra", "x")]);
+        0;
+    }, "Param 'extra' is not used by the statement");
+    try asserts.throwsWith({ ->
+        val _r = tpl().query("SELECT name FROM people WHERE id = :id", [param("id", "1"), param("id", "2")]);
+        0;
+    }, "Param 'id' is given twice");
+}
+
+test "params: a hostile value is bound as a value and changes nothing" {
+    val hostile = "'; DROP TABLE people; --";
+    val n = tpl().update("INSERT INTO people (id, name, team, age) VALUES (:id, :name, 'x', 1)", [param("id", "9"), param("name", hostile)]);
+    assert n == 1;
+    var name = "";
+    if (tpl().single("SELECT name FROM people WHERE id = :id", [param("id", "9")])) { r -> name = r.get("name"); };
+    assert name == hostile;
+    assert tpl().query("SELECT id FROM people", []).rowCount() == 4;
+}
+
+// ── step 4: single, Row coercions, the two surfaces ──────────────────────────
+
+test "template: single answers null on no row and fails naming the statement on two" {
+    val none = tpl().single("SELECT name FROM people WHERE id = :id", [param("id", "404")]);
+    var found = false;
+    if (none) { r -> found = true; };
+    assert found == false;
+    try asserts.throwsWith({ ->
+        val _r = tpl().single("SELECT name FROM people WHERE team = 'red'", []);
+        0;
+    }, "expected at most one row and got 2 - statement: SELECT name FROM people WHERE team = 'red'");
+}
+
+test "template: query raises on a driver error and tryQuery answers Error for the same input" {
+    try asserts.throwsWith({ ->
+        val _r = tpl().query("SELECT name FROM missing_table", []);
+        0;
+    }, "no table 'missing_table'");
+    val r = tpl().tryQuery("SELECT name FROM missing_table", []);
+    assert r.isError();
+    try asserts.contains(errorOf(r), "no table 'missing_table'");
+    val ok = tpl().tryQuery("SELECT name FROM people WHERE id = 1", []);
+    assert ok.isOk();
+}
+
+test "template: tryUpdate answers the count or the Error" {
+    val bad = tpl().tryUpdate("UPDATE nowhere SET a = 1", []);
+    assert bad.isError();
+    val good = tpl().tryUpdate("UPDATE people SET age = 32 WHERE id = 1", []);
+    assert good.unwrapOr(0) == 1;
+}
+
+test "rows: Row.int reads a number and fails naming a non-numeric column rather than answering 0" {
+    var age = 0;
+    if (tpl().single("SELECT age, name FROM people WHERE id = 1", [])) { r -> age = r.int("age"); };
+    assert age == 32;
+    try asserts.throwsWith({ ->
+        var n = 0;
+        if (tpl().single("SELECT age, name FROM people WHERE id = 1", [])) { r -> n = r.int("name"); };
+        n;
+    }, "column 'name' is 'ana', which is not an integer");
+}
+
+test "rows: Row.get answers empty for an absent column and Row.bool refuses a non-boolean" {
+    var got = "x";
+    var flag = false;
+    if (tpl().single("SELECT name FROM people WHERE id = 1", [])) { r -> got = r.get("nothing"); };
+    assert got == "";
+    val row = Row(columns: ["active", "name"], values: ["t", "ana"]);
+    assert row.bool("active");
+    assert row.has("NAME");
+    try asserts.throwsWith({ ->
+        val b = row.bool("name");
+        if (b) 1 else 0;
+    }, "column 'name' is 'ana', which is not a boolean");
+}
+
+test "rows: Rows answers rowCount, at, first and toList" {
+    val rows = tpl().query("SELECT id, name FROM people ORDER BY id", []);
+    assert rows.rowCount() == 4;
+    var second = "";
+    if (rows.at(1)) { r -> second = r.get("name"); };
+    assert second == "bob";
+    var first = "";
+    if (rows.first()) { r -> first = r.get("name"); };
+    assert first == "ana";
+    var beyond = false;
+    if (rows.at(9)) { r -> beyond = true; };
+    assert beyond == false;
+    assert rows.toList().map({ r -> r.get("id") }).join(",") == "1,2,3,9";
+}
+
+// ── step 7: futures ──────────────────────────────────────────────────────────
+
+test "async: await queryAsync answers the same rows as query" {
+    val direct = tpl().query("SELECT id, name FROM people ORDER BY id", []);
+    val later = await tpl().queryAsync("SELECT id, name FROM people ORDER BY id", []);
+    assert later.columns.join(",") == direct.columns.join(",");
+    assert names(later) == names(direct);
+    val n = await tpl().updateAsync("UPDATE people SET age = 33 WHERE id = 1", []);
+    assert n == 1;
+    var name = "";
+    val one = await tpl().singleAsync("SELECT name FROM people WHERE id = 2", []);
+    if (one) { r -> name = r.get("name"); };
+    assert name == "bob";
+}
+
+// `await` is only legal in a `-> @Task` fn (or a test block), so the raising
+// await sits in this helper and the cell calls it inside `throwsWith`.
+fn countMissing(sql: SqlTemplate) -> @Task<i32> {
+    val rows = await sql.queryAsync("SELECT name FROM missing_table", []);
+    return rows.rowCount();
+}
+
+test "async: a raise inside an async query surfaces at the await" {
+    try asserts.throwsWith({ ->
+        val _t = countMissing(tpl());
+        0;
+    }, "no table 'missing_table'");
+}
+
+fn sleepFor(sql: SqlTemplate, millis: i32) -> @Task<i32> {
+    return await sql.updateAsync("CALL rakun_sleep(:ms)", [param("ms", millis.toString())]);
+}
+
+test "async: two async queries from one request run concurrently and both complete" {
+    val _d = startDataSource("async", "ets:memory", 2, 2000, "eager");
+    val sql = sqlTemplate("async");
+    val start = clock.monotonicMillis();
+    val done = await async.runAll([
+        { -> sleepFor(sql, 200) },
+        { -> sleepFor(sql, 200) },
+    ]);
+    val elapsed = clock.monotonicMillis() - start;
+    assert done.length == 2;
+    assert elapsed < 350;
+    assert poolStats("async").peak == 2;
+}

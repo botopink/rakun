@@ -1,0 +1,63 @@
+//// rakun-data — `#[query]`: the repository shape, decided once. Front 08
+//// step 5 (front 09's `#[documentQuery]` follows it).
+////
+//// A method in a `type` body must have a body, so the Spring Data shape — a
+//// bodyless `#[query("…")] pub fn findById(…);` — does not parse. `#[query]` is
+//// therefore a METHOD-level decorator that emits a module-level helper, and the
+//// method's body calls it:
+////
+////     #[query("SELECT id, name FROM users WHERE id = :id")]
+////     pub fn findById(self: Self, id: i32) -> ?Row {
+////         return self.sql.single(__rkQuery_findById(), [param("id", id.toString())]);
+////     }
+////
+//// emits
+////
+////     pub fn __rkQuery_findById() -> string { return "SELECT id, name FROM users WHERE id = :id"; }
+////     val __rkQueryReg_findById = rkRegisterQuery("findById", "SELECT …");
+////
+//// What the decorator buys over an inline string:
+////   1. the statement is a DECLARATION — a decorator argument is a literal, so
+////      it cannot be built by concatenation (the injection rule, enforced by
+////      the shape);
+////   2. it is REGISTERED — `rkRegisteredQueries()` is the inventory of every
+////      statement the application can issue (`/actuator/sql`, front 77's
+////      linter);
+////   3. it is CHECKED at comptime for what the text shows: an empty statement,
+////      a leading keyword that is not SELECT / INSERT / UPDATE / DELETE / WITH /
+////      CALL, and a `'` immediately followed by a placeholder sigil (`':id`,
+////      `'$1`, `'?` — the concatenation smell; `'…'::type` is a cast and passes)
+////      each fail the build at the annotated method.
+////
+//// NOT checked: the placeholder count against the method's parameters — a
+//// method-level `@Decl` exposes no parameter list (language gap, README).
+////
+//// Two methods of the same name in ONE module collide on `__rkQuery_<name>`
+//// and the build fails on the duplicate definition (erlc: "function
+//// '__rkQuery_<name>'/0 already defined"). That is the right failure and it is
+//// not worked around: rename one method or move one repository to its own
+//// module.
+////
+//// Decorator-body rules (see rakun's AGENTS.md): no sibling calls, no `//`
+//// comments inside the body, `@emit`s first and the placement checks last.
+
+#[@External.Erlang("rakun_sql", "register_query")]
+pub declare fn rkRegisterQuery(name: string, sql: string) -> i32;
+
+#[@External.Erlang("rakun_sql", "registered_queries")]
+pub declare fn rkRegisteredQueries() -> string[];
+
+pub fn query(comptime decl: @Decl, sql: string) {
+    val literal = sql.replaceAll("\\", "\\\\").replaceAll("\"", "\\\"").replaceAll("\n", "\\n");
+    @emit("pub fn __rkQuery_" + decl.name + "() -> string { return \"" + literal + "\"; }");
+    @emit("val __rkQueryReg_" + decl.name + " = rkRegisterQuery(\"" + decl.name + "\", \"" + literal + "\");");
+    val trimmed = sql.trim();
+    val head = trimmed.replaceAll("\n", " ").replaceAll("\t", " ").replaceAll("(", " ").split(" ").at(0).unwrapOr("").toUpper();
+    val known = head == "SELECT" || head == "INSERT" || head == "UPDATE" || head == "DELETE" || head == "WITH" || head == "CALL";
+    val uncast = sql.replaceAll("'::", "");
+    val smell = uncast.contains("':") || uncast.contains("'$") || uncast.contains("'?");
+    if (decl.kind != DeclKind.Method) decl.fail("#[query] must annotate a method of a repository type");
+    if (trimmed == "") decl.fail("#[query] statement is empty");
+    if ((trimmed != "" && known == false)) decl.fail("#[query] statement starts with '" + head + "', which is not one of SELECT, INSERT, UPDATE, DELETE, WITH, CALL");
+    if (smell) decl.fail("#[query] statement has a quote next to a placeholder (':name, '$1 or '?) - a placeholder is a bound value, never text inside a literal; write :name without the quotes");
+}

@@ -1,0 +1,47 @@
+//// rakun-data — the `db` health indicator. Front 08 step 7.
+////
+//// The indicator registers into `rakun-actuator-api`'s registry at module
+//// load, which is the whole of what front 11's host reads: the cells assert
+//// the registry lists `db` and that the registered check answers `UP` / `DOWN`
+//// — the host itself is not in this member's dependency graph, by design.
+
+import {testing.asserts} from "std";
+import {Health, healthIndicatorIds, registryListing} from "rakun-actuator-api";
+import {PooledDataSource, startDataSource, rkEtsSetReachable, rkPoolStop, defaultDataSourceName} from "datasource";
+import {DbHealthIndicator, dbHealth, livenessStatement, registerDbHealth} from "sql/health";
+
+test "health: the db indicator is registered with the actuator contract without the host knowing SQL" {
+    val _r = registerDbHealth();
+    val _again = registerDbHealth();
+    assert healthIndicatorIds().join(",").contains("db");
+    try asserts.contains(registryListing(), "health db");
+}
+
+test "health: db answers UP with the arm and the liveness statement when the database is reachable" {
+    val _d = startDataSource("healthy", "ets:memory", 1, 200, "eager");
+    val h: Health = dbHealth("healthy");
+    assert h.status == "UP";
+    assert h.details == "{\"database\":\"ets\",\"validationQuery\":\"SELECT 1\"}";
+}
+
+test "health: db answers DOWN with the reason when the database is unreachable" {
+    val _down = rkEtsSetReachable("sick", false);
+    val _d = startDataSource("sick", "ets:memory", 1, 200, "deferred");
+    val h: Health = dbHealth("sick");
+    assert h.status == "DOWN";
+    try asserts.contains(h.details, "datasource 'sick' is unreachable");
+    val _up = rkEtsSetReachable("sick", true);
+    assert dbHealth("sick").status == "UP";
+}
+
+test "health: db answers DOWN, and does not boot anything, for a datasource nobody started" {
+    val h: Health = dbHealth("never-started");
+    assert h.status == "DOWN";
+    try asserts.contains(h.details, "has not been started");
+}
+
+test "health: the registered indicator checks the default datasource" {
+    val _d = startDataSource(defaultDataSourceName(), "ets:memory", 1, 200, "eager");
+    val h: Health = DbHealthIndicator().check();
+    assert h.status == "UP";
+}
