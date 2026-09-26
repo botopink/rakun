@@ -77,7 +77,7 @@ import {
     processExitCode,
     shutdown,
 } from "lifecycle";
-import {testing.asserts} from "std";
+import {testing.asserts, async} from "std";
 
 // ── the components under test ───────────────────────────────────────────────
 
@@ -646,11 +646,33 @@ test "rakun scope: a request bean is one instance within a request and another i
     if (c != null) inSecond = c.mark();
     assert inSecond == 3;
     // On the BEAM the cache is the process dictionary, so two CONCURRENT
-    // requests are two processes and never share; that half cannot be asserted
-    // from a `.bp` test, which has no way to spawn one. The bracket above is the
-    // half that can, and it is the same statement on both rows.
+    // requests are two processes and never share — asserted by the cell
+    // "two concurrent requests each get their own request instance".
     val second = rkRequestScopeEnd();
     assert second == 1;
+}
+
+// One request's view of a request-scoped value: resolved twice, the same.
+fn resolveTwice() -> string {
+    val a = rkRequestScoped("concurrent", { -> rkCtxBump("concurrent") });
+    val b = rkRequestScoped("concurrent", { -> rkCtxBump("concurrent") });
+    return a.toString() + "=" + b.toString();
+}
+
+test "rakun scope: two concurrent requests each get their own request instance" {
+    val _n = rkCtxNoteReset();
+    // `runAll` spawns one process per task on the BEAM, and a request IS a
+    // process: each task is a request of its own, running at the same time.
+    val views = await async.runAll([
+        { -> async { resolveTwice() } },
+        { -> async { resolveTwice() } },
+    ]);
+    val first = views.at(0) ?? "";
+    val second = views.at(1) ?? "";
+    assert rkCtxCount("concurrent") == 2;
+    assert first != second;
+    assert first == "1=1" || first == "2=2";
+    assert second == "1=1" || second == "2=2";
 }
 
 test "rakun scope: rkRequestScoped caches by key and the bracket clears it" {

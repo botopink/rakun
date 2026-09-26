@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Two concurrent requests, two request-scoped instances (botopink front 06 step 6)
+
+- `test/context_test.bp` spawns two requests with `async.runAll` (one process
+  each on the BEAM) and asserts each resolves its own request-scoped value, the
+  same one twice. `modules/rakun` 336 / 0 → **337 / 0**.
+
 ### Row 7 beats row 8, asserted (botopink front 05 step 3)
 
 - `test/config_test.bp` "row 7 beats row 8": `rkSetProp` wins over a typed
