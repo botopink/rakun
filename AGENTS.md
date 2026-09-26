@@ -1236,10 +1236,10 @@ type can promise. An empty `rakun.draft.secret` makes `enable()` RAISE at the
 first call: an unsigned bypass cookie is a public preview of every unpublished
 draft on the site.
 
-**Two deviations from the front's text, both because front 01 has not landed.**
-`libs/std` has no `hmac`, no `clock` and no `encoding` module today, so the
-signature is `crypto.hmacSha256` (hex, not base64url) and the token is
-`crypto.randomBytes(16)` (hex too). Both carry an `@External.Node` and an
+**Two deviations from the front's text, both from before front 01 landed.**
+The signature is `hash.hmacSha256` (hex, not base64url; was `crypto.hmacSha256`)
+and the token is `random.randomBytes(16)` from `io.random` (hex too; was
+`crypto.randomBytes`). Both carry an `@External.Node` and an
 `@External.Erlang` form and answer identically on the two rows, which is the
 property that matters; the encoding is wider on the wire and nothing else. When
 front 01 lands, `draftSign` is the one function to change.
@@ -1822,8 +1822,8 @@ listener must not take the boot down; `listenerFailures()` reads them back.
 compile.** An integer LITERAL is `i32`, there is no widening and no cast, so an
 `i64` field cannot be given a value at all; it is the same gap `config.bp`'s
 `Duration` and `DataSize` record. `event(name, source, payload)` is the writable
-constructor and stamps `std/time` itself, which is what a publisher wanted
-anyway. `std/time` is imported by `events.bp` (a `src/` module) and never by a
+constructor and stamps `std/io/clock` itself, which is what a publisher wanted
+anyway. `std/io/clock` is imported by `events.bp` (a `src/` module) and never by a
 test, for the § Language notes reason.
 
 ### The boot sequence, and why the failures come back instead of raising
@@ -2692,7 +2692,7 @@ stubbed:
 
 | Step | What it needs |
 |---|---|
-| 5 — static error pages | File IO from `src/` (`std/fs`), and a decision about `Accept: text/html` that belongs with step 6. The resolution ORDER is already fixed in `convention.bp` (`errorPageCandidates`): `<error-path>/404.html`, then `<…>/4xx.html`, then `<…>/5xx.html` |
+| 5 — static error pages | File IO from `src/` (`std/io/fs`), and a decision about `Accept: text/html` that belongs with step 6. The resolution ORDER is already fixed in `convention.bp` (`errorPageCandidates`): `<error-path>/404.html`, then `<…>/4xx.html`, then `<…>/5xx.html` |
 | 6 — content negotiation | The `MessageConverter` behavior, an `Accept` q-value parser and a media-type registry. No blocker; it is work |
 | 7 — `WebCustomizer` | `WebRegistry` with `addConverter`/`addCorsMapping`/`addFilter`/`addFormatter`, which needs step 6's converter registry first |
 | 8 — API versioning | The resolution is string work with no blocker; the `Deprecation`/`Sunset` pair needs front 05 keys that exist |
@@ -2782,7 +2782,7 @@ skips it silently. Measured — see § Language notes below.
 | `#[positive]` / `#[positiveOrZero]` | `i32`, `i64`, `f64` | sign |
 | `#[email]` | `string` | `^[^@ ]+@[^@ .]+([.][^@ .]+)+$` |
 | `#[pattern(regex)]` | `string` | `std/regex.matches` |
-| `#[pastDate]` / `#[futureDate]` | `i64` epoch millis | strictly before / after `std/time.nowMillis()` |
+| `#[pastDate]` / `#[futureDate]` | `i64` epoch millis | strictly before / after `std/io/clock.nowMillis()` |
 | `#[constraint(name)]` | `string` | the registered constraint named `name` answers `""` |
 
 There is **no `#[future]`**: the name reads as the `future` effect annotation
@@ -2884,7 +2884,7 @@ Each measured against the pinned binary, not guessed.
   an `i64` VALUE; an `i32` literal passed where an `i64` is expected does not
   (`vPastDate("a", 1)` reds, located). There is no `i64` literal spelling, so a
   test that needs one builds it from the clock
-  (`time.nowMillis() - time.nowMillis()`). This is why `#[minValue]`/`#[maxValue]`
+  (`clock.nowMillis() - clock.nowMillis()`). This is why `#[minValue]`/`#[maxValue]`
   are REFUSED on an `i64` field rather than emitted as something that reds, and
   why `parseI64` is the module's only host cell in the coercion path.
 - **A record method's owner module is resolved only when the type is imported.**
@@ -3050,7 +3050,8 @@ completed handshake.
   `1 passed, 0 failed`. Silent to the count, not to the exit code — which is the
   property that lets it survive in a suite somebody reads by eye. Clean on
   erlang. Measured against `2e6bb4ac` and again against `4fe1747e`, with a
-  two-file package whose only content is `import {process} from "std";` and one
+  two-file package whose only content is `import {process} from "std";` (today
+  `import {io.process} from "std";`) and one
   trivial assertion. A `src` module may import it; a `test` module may not — and
   the place the next reader will reach for it is `absolutePath`'s cell in
   `test/ssl_bundle_test.bp`, where the comment says so.
