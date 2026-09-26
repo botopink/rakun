@@ -1,0 +1,140 @@
+//// rakun-rsocket — RSocket (front 92): the four interaction models on BEAM
+//// processes, over `rakun_rsocket.erl` (the frame codec, the responder, the
+//// requester — the wire needs bytes, so it is Erlang).
+////
+//// ROUTES: `rsocketRoute(route, kind, handler)` with kind `fnf`,
+//// `request-response` or `stream`. Each is also a row in front 15's
+//// listener registry under the broker `rsocket` (container disabled), so one
+//// registry lists every non-HTTP entry point. A route registered twice is
+//// refused when the second registers, naming both.
+////   fnf               handler(data) -> ""  ; a raise is a Reject: front
+////                     86's DeadLetter goes to `<route>.dlq` (front 15 publish)
+////   request-response  handler(data) -> the one PAYLOAD
+////   stream            handler(data) -> items joined by "\n", emitted only
+////                     against the requester's REQUEST_N credit
+//// A raise in a request becomes an ERROR frame on that stream; the
+//// connection and the other streams live on.
+////
+//// SERVER: `startRSocketServer()` binds `rakun.rsocket.server.port` (its own
+//// port; nothing when unset). `transport=websocket` is refused (front 20's
+//// mount is not wired). Keep-alive: the requester's SETUP names the interval
+//// and max lifetime; silence past the lifetime closes the connection, and
+//// closing kills every stream process. `rakun.rsocket.server.lease=<n>`
+//// grants a lease of n requests after SETUP. RESUME is answered with
+//// UNSUPPORTED_SETUP.
+////
+//// REQUESTER: `rsocketRequester("tcp://host:port")`; `requestResponse` is a
+//// `@Task<string>` (eager on BEAM — concurrency comes from issuing thunks,
+//// front 02's pattern); `fireAndForget` returns once the frame is written;
+//// `requestStream` / `request` / `next` / `cancel`. Under a lease a request
+//// past the budget is rejected locally, writing nothing.
+
+import {rkProp, rkSetProp} from "rakun";
+import {rkRegisterListenerAs} from "rakun-messaging/registry";
+import {rkMsgPublish} from "rakun-messaging/messaging_host";
+import {DeadLetter, deadLetterJson} from "rakun-messaging/reliability/policy";
+import {rsServe, rsStop, rsConnect, rsClose, rsRequestResponse, rsFireAndForget, rsRequestStream, rsRequestN, rsNext, rsCancel} from "rsocket_host";
+
+#[@External.Erlang("""(fun(__R, __K, __F) -> __L = persistent_term:get(rakun_rsocket_routes, []), case lists:keyfind(__R, 1, __L) of {__R, _, _} -> 0; false -> persistent_term:put(rakun_rsocket_routes, __L ++ [{__R, __K, __F}]), 1 end end)($0, $1, $2)""")]
+declare fn storeRoute(route: string, kind: string, handler: fn(data: string) -> string) -> i32;
+#[@External.Erlang("""persistent_term:get(rakun_rsocket_routes, [])""")]
+declare fn routes() -> Array<#(string, string, fn(data: string) -> string)>;
+#[@External.Erlang("""(fun() -> persistent_term:erase(rakun_rsocket_routes), 0 end)()""")]
+pub declare fn clearRoutes() -> i32;
+#[@External.Erlang("""(fun(__S) -> try binary_to_integer(__S) catch _:_ -> 0 end end)($0)""")]
+declare fn toInt(s: string) -> i32;
+
+pub fn routeKinds() -> string[] {
+    return ["fnf", "request-response", "stream"];
+}
+
+fn wireKind(kind: string) -> string {
+    return if (kind == "request-response") "rr" else kind;
+}
+
+pub fn rsocketRoute(route: string, kind: string, handler: fn(data: string) -> string) -> i32 {
+    if (routeKinds().indexOf(kind) < 0) @panic("rakun rsocket: route " + route + " has the kind `" + kind + "` - fnf, request-response or stream");
+    if (storeRoute(route, wireKind(kind), handler) == 0) @panic("rakun rsocket: the route " + route + " is declared twice - one handler per route");
+    val _t = if (rkProp("rakun.messaging.rsocket.transport").trim() == "") rkSetProp("rakun.messaging.rsocket.transport", "memory") else 0;
+    val _e = rkSetProp("rakun.messaging.listener.rsocket-" + route + ".enabled", "false");
+    return rkRegisterListenerAs("rsocket:" + route, "rsocket", route, kind, "rsocket-" + route, { msg -> 0 });
+}
+
+fn deadLetter(route: string, data: string, reason: string) -> i32 {
+    return rkMsgPublish("amqp", route + ".dlq", "", deadLetterJson(DeadLetter(destination: route, body: data, reason: reason, attempt: 1, firstSeenMs: 0)));
+}
+
+pub fn rsocketConfigProblem() -> string {
+    val transport = rkProp("rakun.rsocket.server.transport").trim();
+    if (transport == "websocket") return "rakun rsocket: rakun.rsocket.server.transport=websocket needs front 20's mount at the mapping path, which is not wired - use tcp";
+    if (transport != "" && transport != "tcp") return "rakun rsocket: rakun.rsocket.server.transport is `" + transport + "` - tcp or websocket";
+    return "";
+}
+
+// Binds the configured port; 0 when no port is configured.
+pub fn startRSocketServer() -> i32 {
+    val problem = rsocketConfigProblem();
+    if (problem != "") @panic(problem);
+    val raw = rkProp("rakun.rsocket.server.port").trim();
+    if (raw == "") return 0;
+    return rsServe(toInt(raw), routes(), { route, data, reason -> deadLetter(route, data, reason) }, 0, toInt(rkProp("rakun.rsocket.server.lease").trim()));
+}
+
+pub fn stopRSocketServer(port: i32) -> i32 {
+    return rsStop(port);
+}
+
+// ── the requester ───────────────────────────────────────────────────────────
+
+pub type Requester(conn: string)
+pub type StreamHandle(conn: string, id: i32)
+
+pub fn rsocketRequester(url: string) -> Requester {
+    if (url.startsWith("tcp://") == false) @panic("rakun rsocket: `" + url + "` - the requester speaks tcp://host:port (ws:// and wss:// wait on front 20's transport)");
+    val hp = url.slice(6, url.length());
+    val colon = hp.indexOf(":");
+    val interval = toInt(rkProp("rakun.rsocket.client.keepalive-ms").trim());
+    val lifetime = toInt(rkProp("rakun.rsocket.client.max-lifetime-ms").trim());
+    val c = rsConnect(hp.slice(0, colon), toInt(hp.slice(colon + 1, hp.length())), if (interval == 0) 20000 else interval, if (lifetime == 0) 90000 else lifetime);
+    if (c.startsWith("error:")) @panic("rakun rsocket: cannot connect to " + url + " - " + c.slice(6, c.length()));
+    return Requester(conn: c);
+}
+
+pub fn closeRequester(r: Requester) -> i32 {
+    return rsClose(r.conn);
+}
+
+pub fn requestResponse(r: Requester, route: string, data: string) -> @Task<string> {
+    val out = rsRequestResponse(r.conn, route, data, 5000);
+    if (out.isError()) {
+        val reason = case out { Ok(v) -> ""; Error(e) -> e; };
+        @panic("rakun rsocket: " + route + " - " + reason);
+    };
+    return out.unwrapOr("");
+}
+
+// The outcome without raising: "" or the failure.
+pub fn tryRequestResponse(r: Requester, route: string, data: string) -> @Result<string, string> {
+    return rsRequestResponse(r.conn, route, data, 5000);
+}
+
+pub fn fireAndForget(r: Requester, route: string, data: string) -> string {
+    return rsFireAndForget(r.conn, route, data);
+}
+
+pub fn requestStream(r: Requester, route: string, data: string, initial: i32) -> StreamHandle {
+    return StreamHandle(conn: r.conn, id: rsRequestStream(r.conn, route, data, initial));
+}
+
+pub fn request(h: StreamHandle, n: i32) -> i32 {
+    return rsRequestN(h.conn, h.id, n);
+}
+
+// `item:<v>`, `done`, `timeout` or `error:<reason>`.
+pub fn next(h: StreamHandle, timeoutMs: i32) -> string {
+    return rsNext(h.id, timeoutMs);
+}
+
+pub fn cancelStream(h: StreamHandle) -> i32 {
+    return rsCancel(h.conn, h.id);
+}

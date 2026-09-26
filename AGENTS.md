@@ -2582,6 +2582,24 @@ hashes, module facts).
   path dependencies with a SHA-256 of their tree; `registerSbomEndpoint(file)`
   serves it at `sbom`.
 
+## RSocket — `modules/rakun-rsocket/` (front 92)
+
+`src/sidecars/rakun_rsocket.erl` is the wire (no byte type in botopink): the
+codec for the twelve frame types (24-bit length on TCP, metadata split,
+composite routing metadata `0x7E`), the responder (its own port, one process
+per stream; RESUME answered UNSUPPORTED_SETUP; a missed keep-alive past the
+SETUP's max lifetime closes; LEASE when `rakun.rsocket.server.lease` is set;
+closing kills the stream processes) and the requester (SETUP + keep-alives,
+the lease counted locally). `rsocket.bp`: `rsocketRoute(route, kind, handler)`
+(`fnf` — a raise is a Reject, dead-lettered with front 86's envelope to
+`<route>.dlq`; `request-response`; `stream` — items `\n`-joined, emitted
+against REQUEST_N credit) registers the route in front 15's registry under
+`rsocket`; `startRSocketServer()` on `rakun.rsocket.server.port`
+(`transport=websocket` refused: front 20's mount is not wired);
+`rsocketRequester("tcp://…")`, `requestResponse` (`@Task<string>`, eager —
+concurrency by thunks), `fireAndForget`, `requestStream` / `request` / `next`
+/ `cancelStream`.
+
 ## Stream pipelines — `modules/rakun-stream/` (front 89)
 
 GenStage / Broadway's shape over front 15's arms, no Elixir library.

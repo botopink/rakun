@@ -1,0 +1,177 @@
+//// rakun-rsocket — the responder and the requester over TCP (front 92
+//// steps 2-6).
+
+import {testing.asserts} from "std";
+import {async} from "std";
+import {rkSetProp} from "rakun";
+import {rkMsgListeners, rkMsgWaitUntil, rkMsgArmConnect} from "rakun-messaging/messaging_host";
+import {published} from "rakun-messaging/container";
+import {rsStreamProcs, rsWritten, rsConnect, rsClose} from "rsocket_host";
+import {rsocketRoute, clearRoutes, startRSocketServer, stopRSocketServer, rsocketRequester, closeRequester, requestResponse, tryRequestResponse, fireAndForget, requestStream, request, next, cancelStream, rsocketConfigProblem, Requester} from "rsocket";
+
+#[@External.Erlang("""(fun(__Ms) -> timer:sleep(__Ms), 0 end)($0)""")]
+declare fn pause(ms: i32) -> i32;
+#[@External.Erlang("""erlang:monotonic_time(millisecond)""")]
+declare fn nowMs() -> i32;
+// A raw exchange: SETUP (with RESUME when `resume`), then an optional
+// request frame; answers the data of the first ERROR frame received.
+#[@External.Erlang("""(fun(__P, __Resume, __Req) -> {ok, __S} = gen_tcp:connect("localhost", __P, [binary, {active, false}]), __Base = #{type => 1, stream => 0, interval => 1000, lifetime => 5000, data => <<>>}, ok = gen_tcp:send(__S, rakun_rsocket:encode(case __Resume of true -> __Base#{resume_token => <<"t">>}; false -> __Base end)), case __Req of true -> ok = gen_tcp:send(__S, rakun_rsocket:encode(#{type => 4, stream => 1, data => <<"x">>})); false -> ok end, __R = case gen_tcp:recv(__S, 0, 2000) of {ok, __B} -> case rakun_rsocket:decode(__B, 100000) of {ok, #{type := 11, data := __D}, _} -> __D; _ -> <<"not an error">> end; _ -> <<"no answer">> end, gen_tcp:close(__S), __R end)($0, $1, $2)""")]
+declare fn rawError(port: i32, resume: bool, request: bool) -> string;
+
+fn setUp() -> i32 {
+    val _c = clearRoutes();
+    val _a = rsocketRoute("echo", "request-response", { d -> "re:" + d });
+    val _b = rsocketRoute("slow", "request-response", { d ->
+        val _p = pause(if (d == "first") 300 else 0);
+        d
+    });
+    val _e = rsocketRoute("boom", "request-response", { d ->
+        if (true) @panic("handler failed");
+        d
+    });
+    val _s = rsocketRoute("count", "stream", { d -> "1\n2\n3" });
+    val _f = rsocketRoute("audit", "fnf", { d ->
+        if (d == "poison") @panic("unreadable");
+        ""
+    });
+    val _p = rkSetProp("rakun.rsocket.server.port", "0");
+    return startRSocketServer();
+}
+
+fn url(port: i32) -> string {
+    return "tcp://localhost:" + port.toString();
+}
+
+test "server: the TCP transport binds its own port, and none when unconfigured" {
+    val _c = clearRoutes();
+    val _u = rkSetProp("rakun.rsocket.server.port", "");
+    val none = startRSocketServer();
+    val port = setUp();
+    val _x = stopRSocketServer(port);
+    assert none == 0 && port > 0;
+    assert rsocketConfigProblem() == "";
+}
+
+test "request/response: one PAYLOAD resolves the requester's task; an error frame leaves the connection alive" {
+    val port = setUp();
+    val r = rsocketRequester(url(port));
+    val a = await requestResponse(r, "echo", "hi");
+    val bad = tryRequestResponse(r, "boom", "x");
+    val again = await requestResponse(r, "echo", "still here");
+    val missing = tryRequestResponse(r, "nowhere", "x");
+    val _c = closeRequester(r);
+    val _x = stopRSocketServer(port);
+    assert a == "re:hi" && again == "re:still here";
+    assert (case bad { Ok(v) -> ""; Error(e) -> e; }) == "handler failed" && (case missing { Ok(v) -> ""; Error(e) -> e; }) == "no handler for route nowhere";
+}
+
+test "request/stream: no more than the credit; the rest after request(1); CANCEL stops it" {
+    val port = setUp();
+    val r = rsocketRequester(url(port));
+    val h = requestStream(r, "count", "", 2);
+    val one = next(h, 1000);
+    val two = next(h, 1000);
+    val held = next(h, 300);
+    val _n = request(h, 1);
+    val three = next(h, 1000);
+    val end = next(h, 1000);
+    val h2 = requestStream(r, "count", "", 1);
+    val first = next(h2, 1000);
+    val _k = cancelStream(h2);
+    val _n2 = request(h2, 5);
+    val after = next(h2, 300);
+    val _c = closeRequester(r);
+    val _x = stopRSocketServer(port);
+    assert one == "item:1" && two == "item:2" && held == "timeout" && three == "item:3" && end == "done", one + two + held + three + end;
+    assert first == "item:1" && after == "timeout";
+}
+
+test "fire-and-forget: nothing comes back, it returns at once, and a Reject reaches the dead-letter path" {
+    val _a = rkMsgArmConnect("amqp", []);
+    val port = setUp();
+    val r = rsocketRequester(url(port));
+    val start = nowMs();
+    val ok = fireAndForget(r, "audit", "fine");
+    val bad = fireAndForget(r, "audit", "poison");
+    val took = nowMs() - start;
+    val lettered = rkMsgWaitUntil(2000, { -> published("amqp").filter({ l -> l.startsWith("audit.dlq|") && l.contains("\"reason\":\"unreadable\"") }).length == 1 });
+    val _c = closeRequester(r);
+    val _x = stopRSocketServer(port);
+    assert ok == "" && bad == "" && took < 200 && lettered, took.toString();
+}
+
+test "lease: a request past the responder's budget is rejected locally, writing nothing" {
+    val _l = rkSetProp("rakun.rsocket.server.lease", "1");
+    val port = setUp();
+    val _u = rkSetProp("rakun.rsocket.server.lease", "");
+    val r = rsocketRequester(url(port));
+    val _w = pause(100);
+    val first = tryRequestResponse(r, "echo", "a");
+    val before = rsWritten(r.conn);
+    val second = tryRequestResponse(r, "echo", "b");
+    val after = rsWritten(r.conn);
+    val _c = closeRequester(r);
+    val _x = stopRSocketServer(port);
+    assert first.isOk() && (case second { Ok(v) -> ""; Error(e) -> e; }).contains("rejected locally") && after == before, before.toString() + "/" + after.toString();
+}
+
+test "keep-alive: silence past the negotiated lifetime closes the connection and its streams" {
+    val port = setUp();
+    val c = rsConnect("localhost", port, 60000, 300);
+    val _w = pause(900);
+    val procs = rsStreamProcs(port);
+    val _c = rsClose(c);
+    val _x = stopRSocketServer(port);
+    assert procs == 0, procs.toString();
+}
+
+test "close: closing the connection terminates every stream process it owned" {
+    val port = setUp();
+    val r = rsocketRequester(url(port));
+    val h = requestStream(r, "count", "", 0);
+    val _w = pause(100);
+    val live = rsStreamProcs(port);
+    val _c = closeRequester(r);
+    val _v = pause(200);
+    val gone = rsStreamProcs(port);
+    val _x = stopRSocketServer(port);
+    assert live == 1 && gone == 0, live.toString() + "/" + gone.toString();
+}
+
+fn askSlow(r: Requester, d: string) -> @Task<string> {
+    val v = await requestResponse(r, "slow", d);
+    return v;
+}
+
+test "requester: concurrent calls as thunks gather in request order whatever the completion order" {
+    val port = setUp();
+    val r = rsocketRequester(url(port));
+    val results = await async.runAll([
+        { -> async { askSlow(r, "first") } },
+        { -> async { askSlow(r, "second") } },
+    ]);
+    val _c = closeRequester(r);
+    val _x = stopRSocketServer(port);
+    assert results.join(",") == "first,second", results.join(",");
+}
+
+test "routing: each route is a row in front 15's registry under the broker rsocket" {
+    val _p = setUp();
+    val rows = rkMsgListeners().filter({ l -> l.startsWith("rsocket:echo|") });
+    val _x = stopRSocketServer(_p);
+    assert (rows.at(0) ?? "") == "rsocket:echo|rsocket|echo|request-response|rsocket-echo", rows.join(";");
+}
+
+test "routing: a route declared twice is refused naming it" {
+    val _c = clearRoutes();
+    val _a = rsocketRoute("dup", "fnf", { d -> "" });
+    try asserts.throwsWith({ -> rsocketRoute("dup", "fnf", { d -> "" }) }, "the route dup is declared twice");
+}
+
+test "setup: RESUME is answered with a rejection naming resumption, and a request without routing metadata with an ERROR naming the route" {
+    val port = setUp();
+    val resumed = rawError(port, true, false);
+    val unrouted = rawError(port, false, true);
+    val _x = stopRSocketServer(port);
+    assert resumed == "resumption (RESUME / RESUME_OK) is not supported by this responder" && unrouted == "no route: the request carries no routing metadata", resumed + " / " + unrouted;
+}
