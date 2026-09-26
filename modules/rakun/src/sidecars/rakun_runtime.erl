@@ -75,8 +75,8 @@
          terminate/2, code_change/3]).
 
 %% ── supervised entry points ──────────────────────────────────────────────────
--export([start_registry/0, start_conn_sup/0, start_listener/2,
-         start_connection/2, connection/2]).
+-export([start_registry/0, start_conn_sup/0, start_listener/3,
+         start_connection/3, connection/3, peer_subject/0]).
 
 -define(SCAN,     rakun_scan).        %% ordered_set: {Seq, Name}
 -define(SINGLE,   rakun_singletons).  %% set:         {Name, Value}
@@ -606,6 +606,10 @@ seed_failures() ->
          {missing_property,
           <<"A #[value(\"key\")] field has no value and no default.">>,
           <<"Set the key in a property source, or give the field a default.">>},
+         {ssl_bundle,
+          <<"`rakun.server.ssl.bundle` names a bundle that does not resolve to TLS material.">>,
+          <<"Configure `rakun.ssl.bundle.pem.<name>.keystore.certificate` and `.private-key`, "
+            "or remove `rakun.server.ssl.bundle` - rakun will not fall back to plaintext.">>},
          {transport,
           <<"An unknown or unloadable transport.">>,
           <<"Set `rakun.server.transport` to `gen_tcp` (the default) or to a "
@@ -692,8 +696,9 @@ serve(Port, Dispatcher) ->
 listen(Port, Dispatcher) ->
     case transport() of
         gen_tcp ->
+            Tls = listener_tls(),
             Spec = #{id => rakun_listener,
-                     start => {?MODULE, start_listener, [Port, Dispatcher]},
+                     start => {?MODULE, start_listener, [Port, Dispatcher, Tls]},
                      restart => permanent, shutdown => 5000,
                      type => worker, modules => [?MODULE]},
             _ = supervisor:terminate_child(rakun_sup, rakun_listener),
@@ -705,6 +710,28 @@ listen(Port, Dispatcher) ->
             end;
         {adapter, Module} ->
             Module:serve(Port, Dispatcher)
+    end.
+
+%% Front 74's seam: `rakun.server.ssl.bundle` names the listener's bundle. With
+%% none the listener is `gen_tcp` and nothing below changes. With one, the
+%% bundle MUST resolve to TLS material — a named bundle that does not is a
+%% startup failure naming it, never a quiet plaintext listener.
+listener_tls() ->
+    case prop(<<"rakun.server.ssl.bundle">>) of
+        <<>> -> plain;
+        Bundle ->
+            case code:ensure_loaded(rakun_ssl) of
+                {module, rakun_ssl} ->
+                    case rakun_ssl:transport(Bundle) of
+                        ssl ->
+                            _ = application:ensure_all_started(ssl),
+                            {tls, Bundle, rakun_ssl:listen_options(Bundle),
+                             prop_int_default(<<"rakun.ssl.handshake-timeout">>,
+                                              rakun_ssl:handshake_timeout(Bundle))};
+                        _ -> fail({ssl_bundle, Bundle})
+                    end;
+                _ -> fail({ssl_bundle, Bundle})
+            end
     end.
 
 %% `rakun.server.transport` unset (or `gen_tcp`) is the acceptor. A named
@@ -726,22 +753,26 @@ transport() ->
 %% rather than inheriting a socket whose controlling process is gone. The bound
 %% port goes into `?PROPS` before the loop starts, so `serve/2` can answer it
 %% even when `port: 0` asked for an ephemeral one.
-start_listener(Port, Dispatcher) ->
+start_listener(Port, Dispatcher, Tls) ->
     Backlog = prop_int_default(<<"rakun.server.backlog">>, ?DEFAULT_BACKLOG),
-    Opts = [binary, {packet, http_bin}, {active, false},
+    Base = [binary, {packet, http_bin}, {active, false},
             {reuseaddr, true}, {backlog, Backlog}],
+    {Mod, Opts} = case Tls of
+                      plain -> {gen_tcp, Base};
+                      {tls, _Bundle, SslOpts, _Timeout} -> {ssl, Base ++ SslOpts}
+                  end,
     %% The ACCEPTOR opens the listening socket, so the socket's owner is the
     %% child the supervisor stops: terminating `rakun_listener` closes it
     %% (graceful shutdown's "stop accepting"), and a restart rebinds rather
     %% than leaving the old socket open in the supervisor.
     Parent = self(),
     Pid = proc_lib:spawn_link(fun() ->
-        case gen_tcp:listen(Port, Opts) of
+        case Mod:listen(Port, Opts) of
             {ok, LSock} ->
-                {ok, Bound} = inet:port(LSock),
+                {ok, Bound} = listen_port(Mod, LSock),
                 _ = set_prop(<<"rakun.server.bound-port">>, integer_to_binary(Bound)),
                 Parent ! {self(), listening},
-                accept_loop(LSock, Dispatcher);
+                accept_loop(LSock, Dispatcher, Tls);
             {error, Reason} ->
                 Parent ! {self(), {error, Reason}}
         end
@@ -753,42 +784,135 @@ start_listener(Port, Dispatcher) ->
         {error, {listen, timeout, Port}}
     end.
 
+listen_port(gen_tcp, LSock) -> inet:port(LSock);
+listen_port(ssl, LSock) ->
+    case ssl:sockname(LSock) of
+        {ok, {_Addr, Port}} -> {ok, Port};
+        Other -> Other
+    end.
+
 bound_port() ->
     prop_int(<<"rakun.server.bound-port">>).
 
-accept_loop(LSock, Dispatcher) ->
-    case gen_tcp:accept(LSock) of
+%% With TLS the acceptor only `transport_accept`s: the handshake runs in the
+%% CONNECTION process (front 74 step 2), so a client that opens a socket and
+%% sends nothing delays nobody else's acceptance.
+accept_loop(LSock, Dispatcher, Tls) ->
+    Accepted = case Tls of
+                   plain -> gen_tcp:accept(LSock);
+                   _ -> ssl:transport_accept(LSock)
+               end,
+    case Accepted of
         {ok, Sock} ->
+            Mod = transport_mod(Tls),
             case over_capacity() of
                 true ->
-                    _ = gen_tcp:send(Sock, [<<"HTTP/1.1 503 Service Unavailable\r\n">>,
-                                            <<"Content-Length: 0\r\n">>,
-                                            <<"Connection: close\r\n\r\n">>]),
-                    _ = gen_tcp:close(Sock);
+                    case Tls of
+                        plain ->
+                            _ = gen_tcp:send(Sock, [<<"HTTP/1.1 503 Service Unavailable\r\n">>,
+                                                    <<"Content-Length: 0\r\n">>,
+                                                    <<"Connection: close\r\n\r\n">>]);
+                        _ -> ok
+                    end,
+                    _ = Mod:close(Sock);
                 false ->
-                    case supervisor:start_child(rakun_conn_sup, [Sock, Dispatcher]) of
-                        {ok, Pid} -> _ = gen_tcp:controlling_process(Sock, Pid);
-                        _ -> _ = gen_tcp:close(Sock)
+                    case supervisor:start_child(rakun_conn_sup, [Sock, Dispatcher, Tls]) of
+                        {ok, Pid} -> _ = Mod:controlling_process(Sock, Pid), Pid ! {rakun_socket_handed, Sock};
+                        _ -> _ = Mod:close(Sock)
                     end
             end,
-            accept_loop(LSock, Dispatcher);
+            accept_loop(LSock, Dispatcher, Tls);
         {error, closed} ->
             ok;
         {error, _Reason} ->
-            accept_loop(LSock, Dispatcher)
+            accept_loop(LSock, Dispatcher, Tls)
     end.
+
+transport_mod(plain) -> gen_tcp;
+transport_mod(_) -> ssl.
 
 over_capacity() ->
     Max = prop_int_default(<<"rakun.server.max-connections">>, ?DEFAULT_MAX_CONNECTIONS),
     Counts = supervisor:count_children(rakun_conn_sup),
     proplists:get_value(active, Counts, 0) >= Max.
 
-start_connection(Sock, Dispatcher) ->
-    {ok, proc_lib:spawn_link(?MODULE, connection, [Sock, Dispatcher])}.
+start_connection(Sock, Dispatcher, Tls) ->
+    {ok, proc_lib:spawn_link(?MODULE, connection, [Sock, Dispatcher, Tls])}.
 
-connection(Sock, Dispatcher) ->
-    receive after 0 -> ok end,   %% let `controlling_process/2` land first
-    serve_requests(Sock, Dispatcher).
+%% The first act of a TLS connection process is the handshake, bounded by
+%% `rakun.ssl.handshake-timeout`. A failure is logged ONCE, with the peer and
+%% the reason, and ends this process only — the acceptor never sees it. After a
+%% successful handshake the peer's subject (verified, because verification is
+%% part of the handshake) is this process's `rakun_peer_subject`.
+connection(Sock0, Dispatcher, Tls) ->
+    receive {rakun_socket_handed, Sock0} -> ok after 1000 -> ok end,
+    put(rakun_transport, transport_mod(Tls)),
+    case Tls of
+        plain ->
+            serve_requests(Sock0, Dispatcher);
+        {tls, Bundle, _Opts, Timeout} ->
+            Peer = case ssl:peername(Sock0) of
+                       {ok, {Addr, P}} -> iolist_to_binary([inet:ntoa(Addr), ":", integer_to_binary(P)]);
+                       _ -> <<"unknown">>
+                   end,
+            case ssl:handshake(Sock0, Timeout) of
+                {ok, Sock} ->
+                    put(rakun_peer_subject, peer_subject_of(Sock)),
+                    serve_requests(Sock, Dispatcher);
+                {error, Reason} ->
+                    Line = iolist_to_binary(io_lib:format("rakun: TLS handshake with ~s failed on bundle ~s: ~0p",
+                                                          [Peer, Bundle, Reason])),
+                    _ = set_prop(<<"rakun.ssl.last-handshake-failure">>, Line),
+                    case in_test_run() of
+                        true -> ok;
+                        false -> io:put_chars(standard_error, [Line, $\n])
+                    end,
+                    _ = ssl:close(Sock0),
+                    ok
+            end
+    end.
+
+peer_subject_of(Sock) ->
+    case ssl:peercert(Sock) of
+        {ok, Der} ->
+            case erlang:function_exported(rakun_ssl, peer_subject, 1) of
+                true -> rakun_ssl:peer_subject(Der);
+                false -> <<>>
+            end;
+        _ -> <<>>
+    end.
+
+%% The verified peer subject of the request this process is serving; `""` over
+%% plaintext or when the client presented no certificate.
+peer_subject() ->
+    case get(rakun_peer_subject) of
+        undefined -> <<>>;
+        Subject -> Subject
+    end.
+
+t_recv(Sock, Len, Timeout) ->
+    case get(rakun_transport) of
+        ssl -> ssl:recv(Sock, Len, Timeout);
+        _ -> gen_tcp:recv(Sock, Len, Timeout)
+    end.
+
+t_send(Sock, Data) ->
+    case get(rakun_transport) of
+        ssl -> ssl:send(Sock, Data);
+        _ -> gen_tcp:send(Sock, Data)
+    end.
+
+t_setopts(Sock, Opts) ->
+    case get(rakun_transport) of
+        ssl -> ssl:setopts(Sock, Opts);
+        _ -> inet:setopts(Sock, Opts)
+    end.
+
+t_close(Sock) ->
+    case get(rakun_transport) of
+        ssl -> ssl:close(Sock);
+        _ -> gen_tcp:close(Sock)
+    end.
 
 serve_requests(Sock, Dispatcher) ->
     Idle = prop_int_default(<<"rakun.server.idle-timeout">>, ?DEFAULT_IDLE_TIMEOUT),
@@ -813,11 +937,11 @@ serve_requests(Sock, Dispatcher) ->
 
 close_connection(Sock) ->
     _ = ets:delete(?CONNS, self()),
-    gen_tcp:close(Sock).
+    t_close(Sock).
 
 read_request(Sock, Idle) ->
-    _ = inet:setopts(Sock, [{packet, http_bin}]),
-    case gen_tcp:recv(Sock, 0, Idle) of
+    _ = t_setopts(Sock, [{packet, http_bin}]),
+    case t_recv(Sock, 0, Idle) of
         {ok, {http_request, Method, {abs_path, Path}, _Version}} ->
             case read_headers(Sock, Idle, #{}) of
                 {ok, Headers} -> {ok, verb(Method), Path, Headers};
@@ -830,7 +954,7 @@ read_request(Sock, Idle) ->
     end.
 
 read_headers(Sock, Idle, Acc) ->
-    case gen_tcp:recv(Sock, 0, Idle) of
+    case t_recv(Sock, 0, Idle) of
         {ok, {http_header, _, Field, _, Value}} ->
             read_headers(Sock, Idle, Acc#{lower(to_binary(Field)) => to_binary(Value)});
         {ok, http_eoh} ->
@@ -847,8 +971,8 @@ read_body(Sock, Headers, Idle) ->
     case parse_int(maps:get(<<"content-length">>, Headers, <<"0">>)) of
         0 -> <<>>;
         Len ->
-            _ = inet:setopts(Sock, [{packet, raw}]),
-            case gen_tcp:recv(Sock, Len, Idle) of
+            _ = t_setopts(Sock, [{packet, raw}]),
+            case t_recv(Sock, Len, Idle) of
                 {ok, Body} -> Body;
                 {error, _} -> <<>>
             end
@@ -920,7 +1044,7 @@ write_response(Sock, #{status := Status, body := Body}) ->
     Head = [<<"HTTP/1.1 ">>, integer_to_binary(Status), <<" ">>, reason_phrase(Status),
             <<"\r\nContent-Length: ">>, integer_to_binary(byte_size(Body)),
             <<"\r\nConnection: keep-alive\r\n">>],
-    case gen_tcp:send(Sock, [Head, Extra, <<"\r\n">>, Body]) of
+    case t_send(Sock, [Head, Extra, <<"\r\n">>, Body]) of
         ok -> true;
         {error, _} -> false
     end.

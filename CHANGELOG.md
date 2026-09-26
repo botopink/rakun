@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### The listener over TLS (botopink front 74 steps 2, 3, 5 and 6)
+
+- `rakun_runtime.erl`: `rakun.server.ssl.bundle` makes the acceptor `ssl`
+  (a named bundle that does not resolve is a startup failure); the handshake
+  runs in the connection process under `rakun.ssl.handshake-timeout`, a failure
+  logged once with the peer and the bundle; the verified peer subject is
+  `rkPeerSubject()`. `sslReload` clears OTP's PEM cache.
+- `rakun-web`'s `tlsEntry` carries the peer into the request's signals.
+- `test/tls_listener_test.bp` (10 cells, fresh `openssl` material):
+  `modules/rakun` 337 / 0 → **347 / 0**; `rakun-web` 154 / 0.
+
 ### Graceful shutdown (botopink front 07 step 10)
 
 - `modules/rakun-web/src/shutdown.bp`: `gracefulShutdown()` — front 76's

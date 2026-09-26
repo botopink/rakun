@@ -42,7 +42,7 @@
 %% the registry cells of `src/ssl_bundle.bp`
 -export([put/3, get/2, names/0, forget/1, reset/0]).
 %% the X.509 reader
--export([cert_info/1, key_matches/2]).
+-export([cert_info/1, key_matches/2, peer_subject/1, clear_cache/0]).
 %% the five consumer seams
 -export([listener_opts/1, client_opts/2, expiry_days/1, subject/1,
          last_error/1]).
@@ -202,6 +202,19 @@ cert_info(Pem) ->
         end
     catch _:Reason ->
         <<"error|", (scrub(iolist_to_binary(io_lib:format("~p", [Reason]))))/binary>>
+    end.
+
+clear_cache() ->
+    try ssl:clear_pem_cache() of _ -> 0 catch _:_ -> 0 end.
+
+%% The subject of a peer's DER certificate, canonicalised like `cert_info/1`'s
+%% — what front 04's connection process records after a successful handshake.
+peer_subject(Der) ->
+    try
+        OTPCert = public_key:pkix_decode_cert(Der, otp),
+        rdn(element(7, element(2, OTPCert)))
+    catch _:_ ->
+        <<>>
     end.
 
 %% A certificate with no key is not a mismatch — a verify-only bundle has none,

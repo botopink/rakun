@@ -3056,6 +3056,28 @@ front 04's `server_test.bp:74,80`. `modules/rakun-web`: **104/104** on BOTH rows
 `botopink-lang/scripts/restricted-targets.txt` moves: `rakun-web commonJS 0`
 stays `0`, core rakun's `2` stays `2`.
 
+
+### The listener over TLS (landed with the track's second pass)
+
+Front 04's acceptor takes the transport from front 74's seam: with
+`rakun.server.ssl.bundle` naming a bundle, `rakun_runtime:listener_tls/0`
+reads `rakun_ssl:transport/1`, `listen_options/1` and `handshake_timeout/1`
+(`rakun.ssl.handshake-timeout` overrides it) and the listener is `ssl:listen/2`
+with the same `{packet, http_bin}` options; a named bundle that does not resolve
+to TLS material is a startup FAILURE (`{ssl_bundle, Name}` in the failure
+table), never a plaintext listener. The acceptor only `transport_accept`s; the
+CONNECTION process runs `ssl:handshake/2` as its first act, so a silent client
+delays nobody, and a failed handshake is logged once with the peer and the
+bundle (`rakun.ssl.last-handshake-failure`) and ends that process only. After a
+successful handshake — which is after verification — the peer's subject is the
+process's `rakun_peer_subject`, read by the core cell `rkPeerSubject()` and
+carried into the chain's signal table by rakun-web's `tlsEntry`. Every socket
+call on the connection path goes through `t_recv` / `t_send` / `t_setopts` /
+`t_close`. `sslReload` clears OTP's PEM cache on success (`rakun_ssl:clear_cache/0`),
+so the next handshake presents the rotated files while an established
+connection keeps its material. `test/tls_listener_test.bp` issues fresh material
+with `openssl` into a scratch directory, drives all of it with OTP `ssl`
+clients, and removes the material at the end.
 ### Why this front ships BOTH host files where its spec said erlang only
 
 The spec declares every host seam `#[@External.Erlang("rakun_ssl", …)]` only,

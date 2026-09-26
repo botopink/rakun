@@ -1,0 +1,223 @@
+//// rakun — the listener over TLS (front 74 steps 2, 3, 5 and 6), end to end.
+////
+//// Fresh material is issued by `openssl` into a scratch directory at the start
+//// of the run (a committed certificate expires on a date nobody chose): a CA, a
+//// `localhost` server certificate valid 30 days and a rotated one, a client
+//// certificate the CA signed, a self-signed stranger, and a server certificate
+//// valid 3 days. The listener is front 04's acceptor with
+//// `rakun.server.ssl.bundle` naming a bundle; the clients are OTP `ssl`, driven
+//// from host cells that answer `status|body` or `error`.
+
+import {Request, Response};
+import {rkSetProp, rkProp, rkRegisterRoute, rkServe, rkDispatchHttp, rkPeerSubject};
+import {bundleKey, sslBoot, sslRegister, sslReload, sslHealth, blobGet};
+import {io.fs} from "std";
+
+// ── material ────────────────────────────────────────────────────────────────
+
+#[@External.Erlang("""(fun() -> __D = string:trim(os:cmd("mktemp -d")), __Q = fun(__C) -> os:cmd("cd " ++ __D ++ " && " ++ __C ++ " 2>/dev/null") end, __Q("openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=rakun-test-ca -keyout ca.key -out ca.pem"), __Q("printf 'subjectAltName=DNS:localhost' > leaf.ext"), __Q("openssl req -newkey rsa:2048 -nodes -subj /CN=localhost -keyout key.pem -out leaf.csr"), __Q("openssl x509 -req -in leaf.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 30 -extfile leaf.ext -out cert.pem"), __Q("openssl req -newkey rsa:2048 -nodes -subj /CN=localhost/O=rotated -keyout key2.pem -out leaf2.csr"), __Q("openssl x509 -req -in leaf2.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 30 -extfile leaf.ext -out cert2.pem"), __Q("openssl x509 -req -in leaf.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 3 -extfile leaf.ext -out soon.pem"), __Q("openssl req -newkey rsa:2048 -nodes -subj /CN=rakun-client/O=rakun -keyout client.key -out client.csr"), __Q("openssl x509 -req -in client.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 2 -out client.pem"), __Q("openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=stranger -keyout stranger.key -out stranger.pem"), unicode:characters_to_binary(__D) end)()""")]
+declare fn issueMaterial() -> string;
+
+#[@External.Erlang("""(fun(__D) -> file:del_dir_r(__D), 0 end)($0)""")]
+declare fn removeTree(dir: string) -> i32;
+
+#[@External.Erlang("""(fun(__From, __To) -> {ok, __B} = file:read_file(__From), ok = file:write_file(__To, __B), 0 end)($0, $1)""")]
+declare fn copyFile(src: string, dest: string) -> i32;
+
+// ── clients ─────────────────────────────────────────────────────────────────
+
+// GET `/tls/peer` over TLS, verifying the server against `ca`; a client
+// certificate when `cert` is not `""`. Answers `status|body`, or `error` when
+// the handshake or the exchange fails.
+#[@External.Erlang("""(fun(__Port, __Ca, __Cert, __Key, __Vsn) -> _ = application:ensure_all_started(ssl), __Mine = case __Cert of <<>> -> []; _ -> [{certfile, binary_to_list(__Cert)}, {keyfile, binary_to_list(__Key)}] end, __Opts = [binary, {active, false}, {verify, verify_peer}, {cacertfile, binary_to_list(__Ca)}, {server_name_indication, "localhost"}, {versions, [binary_to_atom(__Vsn, utf8)]}] ++ __Mine, case ssl:connect("localhost", __Port, __Opts, 3000) of {error, _} -> <<"error">>; {ok, __S} -> case ssl:send(__S, <<"GET /tls/peer HTTP/1.1", 13, 10, "Host: localhost", 13, 10, 13, 10>>) of ok -> __R = ssl:recv(__S, 0, 3000), ssl:close(__S), case __R of {ok, __Bin} -> case binary:split(__Bin, <<13, 10, 13, 10>>) of [__H, __B] -> [_, __St | _] = binary:split(__H, <<" ">>, [global]), <<__St/binary, "|", __B/binary>>; _ -> <<"error">> end; _ -> <<"error">> end; _ -> ssl:close(__S), <<"error">> end end end)($0, $1, $2, $3, $4)""")]
+declare fn tlsGet(port: i32, ca: string, cert: string, key: string, version: string) -> string;
+
+// The subject of the certificate the server presented.
+#[@External.Erlang("""(fun(__Port, __Ca) -> case ssl:connect("localhost", __Port, [binary, {active, false}, {verify, verify_peer}, {cacertfile, binary_to_list(__Ca)}, {server_name_indication, "localhost"}], 3000) of {ok, __S} -> {ok, __Der} = ssl:peercert(__S), ssl:close(__S), rakun_ssl:peer_subject(__Der); _ -> <<"error">> end end)($0, $1)""")]
+declare fn serverSubject(port: i32, ca: string) -> string;
+
+// Open a plain TCP connection and send nothing; answers `ok` when it was open.
+#[@External.Erlang("""(fun(__Port) -> case gen_tcp:connect("127.0.0.1", __Port, [binary, {active, false}], 1000) of {ok, __S} -> put(rakun_test_silent, __S), <<"ok">>; _ -> <<"error">> end end)($0)""")]
+declare fn openSilent(port: i32) -> string;
+
+// Whether the silent connection was closed by the server within `ms`.
+#[@External.Erlang("""(fun(__Ms) -> case gen_tcp:recv(get(rakun_test_silent), 0, __Ms) of {error, closed} -> true; _ -> false end end)($0)""")]
+declare fn silentClosedWithin(ms: i32) -> bool;
+
+#[@External.Erlang("""(fun() -> gen_tcp:close(get(rakun_test_silent)), 0 end)()""")]
+declare fn closeSilent() -> i32;
+
+#[@External.Erlang("""erlang:monotonic_time(millisecond)""")]
+declare fn nowMs() -> i32;
+
+// ── the listener ────────────────────────────────────────────────────────────
+
+fn peer(req: Request) -> Response {
+    return Response.ok("tls " + rkPeerSubject());
+}
+
+fn material() -> string {
+    val known: string = rkProp("test.tls.dir");
+    if (known != "") return known;
+    val d: string = issueMaterial();
+    val _s = rkSetProp("test.tls.dir", d);
+    return d;
+}
+
+fn configure(clientAuth: string, protocols: string) -> string {
+    val d: string = material();
+    val _a = rkSetProp(bundleKey("web", "keystore.certificate"), d + "/cert.pem");
+    val _b = rkSetProp(bundleKey("web", "keystore.private-key"), d + "/key.pem");
+    val _c = rkSetProp(bundleKey("web", "truststore.certificate"), d + "/ca.pem");
+    val _e = rkSetProp(bundleKey("web", "client-auth"), clientAuth);
+    val _f = rkSetProp(bundleKey("web", "protocols"), protocols);
+    val _g = rkSetProp("rakun.ssl.bundle.pem", "web");
+    val _r = sslRegister("web");
+    return d;
+}
+
+fn serveTls() -> i32 {
+    if (rkProp("test.tls.route") != "yes") {
+        val _m = rkSetProp("test.tls.route", "yes");
+        val _r = rkRegisterRoute("GET", "/tls/peer", { r -> peer(r) });
+    };
+    val _s = rkSetProp("rakun.server.ssl.bundle", "web");
+    val _k = rkSetProp("rakun.main.keep-alive", "false");
+    return rkServe(0, { m, p, h, q, b -> rkDispatchHttp(m, p, h, q, b) });
+}
+
+fn plainAgain() -> i32 {
+    val _s = rkSetProp("rakun.server.ssl.bundle", "");
+    val _t = rkSetProp("rakun.ssl.handshake-timeout", "");
+    return 0;
+}
+
+// ── step 2: the server listener ─────────────────────────────────────────────
+
+test "rakun tls: with a bundle named, a TLS 1.3 client completes a handshake and receives the body" {
+    val d: string = configure("none", "tlsv1.3,tlsv1.2");
+    val port: i32 = serveTls();
+    val got: string = tlsGet(port, d + "/ca.pem", "", "", "tlsv1.3");
+    val _p = plainAgain();
+    assert got == "200|tls ";
+}
+
+test "rakun tls: protocols=tlsv1.2 refuses a TLS 1.3-only client and logs the refusal with the bundle" {
+    val d: string = configure("none", "tlsv1.2");
+    val _l = rkSetProp("rakun.ssl.last-handshake-failure", "");
+    val port: i32 = serveTls();
+    val refused: string = tlsGet(port, d + "/ca.pem", "", "", "tlsv1.3");
+    val allowed: string = tlsGet(port, d + "/ca.pem", "", "", "tlsv1.2");
+    val _p = plainAgain();
+    assert refused == "error";
+    assert allowed == "200|tls ";
+    assert rkProp("rakun.ssl.last-handshake-failure").contains("on bundle web");
+    assert rkProp("rakun.ssl.last-handshake-failure").contains("127.0.0.1");
+}
+
+test "rakun tls: the handshake runs in the connection process, so a silent client delays nobody" {
+    val d: string = configure("none", "tlsv1.3,tlsv1.2");
+    val port: i32 = serveTls();
+    assert openSilent(port) == "ok";
+    val before: i32 = nowMs();
+    val got: string = tlsGet(port, d + "/ca.pem", "", "", "tlsv1.3");
+    val took: i32 = nowMs() - before;
+    val _c = closeSilent();
+    val _p = plainAgain();
+    assert got == "200|tls ";
+    assert took < 1000;
+}
+
+test "rakun tls: rakun.ssl.handshake-timeout=200 closes a silent connection within 500 ms" {
+    val d: string = configure("none", "tlsv1.3,tlsv1.2");
+    val _t = rkSetProp("rakun.ssl.handshake-timeout", "200");
+    val port: i32 = serveTls();
+    assert openSilent(port) == "ok";
+    val closed: bool = silentClosedWithin(500);
+    val _c = closeSilent();
+    val after: string = tlsGet(port, d + "/ca.pem", "", "", "tlsv1.3");
+    val _p = plainAgain();
+    assert closed;
+    assert after == "200|tls ";
+}
+
+// ── step 3: mutual TLS ──────────────────────────────────────────────────────
+
+test "rakun tls: client-auth=none accepts no certificate and an untrusted one, and reads no subject" {
+    val d: string = configure("none", "tlsv1.3,tlsv1.2");
+    val port: i32 = serveTls();
+    val bare: string = tlsGet(port, d + "/ca.pem", "", "", "tlsv1.3");
+    val stranger: string = tlsGet(port, d + "/ca.pem", d + "/stranger.pem", d + "/stranger.key", "tlsv1.3");
+    val _p = plainAgain();
+    assert bare == "200|tls ";
+    assert stranger == "200|tls ";
+}
+
+test "rakun tls: client-auth=want accepts none, rejects an unverified certificate, and reads a verified subject" {
+    val d: string = configure("want", "tlsv1.3,tlsv1.2");
+    val port: i32 = serveTls();
+    val bare: string = tlsGet(port, d + "/ca.pem", "", "", "tlsv1.3");
+    val stranger: string = tlsGet(port, d + "/ca.pem", d + "/stranger.pem", d + "/stranger.key", "tlsv1.3");
+    val client: string = tlsGet(port, d + "/ca.pem", d + "/client.pem", d + "/client.key", "tlsv1.3");
+    val _p = plainAgain();
+    assert bare == "200|tls ";
+    assert stranger == "error";
+    assert client == "200|tls CN=rakun-client,O=rakun";
+}
+
+test "rakun tls: client-auth=need rejects a client presenting no certificate" {
+    val d: string = configure("need", "tlsv1.3,tlsv1.2");
+    val port: i32 = serveTls();
+    val bare: string = tlsGet(port, d + "/ca.pem", "", "", "tlsv1.3");
+    val client: string = tlsGet(port, d + "/ca.pem", d + "/client.pem", d + "/client.key", "tlsv1.3");
+    val _p = plainAgain();
+    assert bare == "error";
+    assert client == "200|tls CN=rakun-client,O=rakun";
+}
+
+// ── step 5: reload ──────────────────────────────────────────────────────────
+
+test "rakun tls: sslReload after replacing both files makes the next handshake present the new certificate" {
+    val d: string = configure("none", "tlsv1.3,tlsv1.2");
+    val live: string = d + "/live";
+    val _m = fs.mkdir(live);
+    val _a = copyFile(d + "/cert.pem", live + "/cert.pem");
+    val _b = copyFile(d + "/key.pem", live + "/key.pem");
+    val _c = rkSetProp(bundleKey("web", "keystore.certificate"), live + "/cert.pem");
+    val _k = rkSetProp(bundleKey("web", "keystore.private-key"), live + "/key.pem");
+    val _r = sslRegister("web");
+    val port: i32 = serveTls();
+    val before: string = serverSubject(port, d + "/ca.pem");
+    val _x = copyFile(d + "/cert2.pem", live + "/cert.pem");
+    val _y = copyFile(d + "/key2.pem", live + "/key.pem");
+    val reloaded: bool = sslReload("web");
+    val after: string = serverSubject(port, d + "/ca.pem");
+    val _p = plainAgain();
+    assert before == "CN=localhost";
+    assert reloaded;
+    assert after == "CN=localhost,O=rotated";
+}
+
+// ── step 6: health ──────────────────────────────────────────────────────────
+
+test "rakun tls: a certificate expiring in 3 days is OUT_OF_SERVICE, naming the bundle and the days" {
+    val d: string = material();
+    val _a = rkSetProp(bundleKey("soon", "keystore.certificate"), d + "/soon.pem");
+    val _b = rkSetProp(bundleKey("soon", "keystore.private-key"), d + "/key.pem");
+    val _n = rkSetProp("rakun.ssl.bundle.pem", "web,soon");
+    val _r = sslRegister("soon");
+    val health: string = sslHealth();
+    val _c = rkSetProp(bundleKey("soon", "keystore.certificate"), "");
+    val _k = rkSetProp(bundleKey("soon", "keystore.private-key"), "");
+    val _o = rkSetProp("rakun.ssl.bundle.pem", "web");
+    assert blobGet(health, "soon.status") == "OUT_OF_SERVICE";
+    val days: string = blobGet(health, "soon.days");
+    assert (days == "2") || (days == "3");
+}
+
+test "rakun tls: the scratch material is removed" {
+    val d: string = material();
+    val _r = removeTree(d);
+    val _s = rkSetProp("test.tls.dir", "");
+    assert fs.exists(d + "/ca.pem") == false;
+}
