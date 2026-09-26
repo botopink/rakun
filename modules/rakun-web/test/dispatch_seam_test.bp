@@ -9,17 +9,16 @@
 //// through the chain before it reaches the route. The last test resets the
 //// chain to empty, which makes the runner the identity for the files after it.
 ////
-//// The handler reads a PATH parameter, not a query: `req.query(…)` on a
-//// `Request` in a module that also imports `WebRequest` (which declares its own
-//// `query/2`) lowers to `WebRequest:query/2` on the erlang backend — a compiler
-//// defect recorded in the milestone's `language-gaps.md`, not worked around
-//// anywhere but here.
+//// The handler reads a path parameter and a query in a module that also
+//// imports `WebRequest` (which declares its own `query/2`): a call on a
+//// `Request`-typed receiver goes through the value, not to `WebRequest`.
 
 import {Request, Response, rkRegisterRoute, rkDispatchHttp} from "rakun";
 import {WebRequest, Chain, runChain, registerFilter, resetChain, rkChainSetRunner} from "filter";
 
 fn hello(req: Request) -> Response {
-    return Response.ok("seam " + req.param("who"));
+    val lang = req.query("lang");
+    return Response.ok("seam " + req.param("who") + (if (lang == "") "" else " " + lang));
 }
 
 fn gate(req: WebRequest, chain: Chain) -> Response {
@@ -45,6 +44,8 @@ test "rakun-web seam: with a runner installed, a core route still answers throug
     val open = rkDispatchHttp("GET", "/seam/open/ana", "{}", "{}", "");
     assert open.status == 200;
     assert open.body == "seam ana";
+    val withQuery = rkDispatchHttp("GET", "/seam/open/ana", "{}", "{\"lang\":\"pt\"}", "");
+    assert withQuery.body == "seam ana pt";
 }
 
 test "rakun-web seam: every request passes through the chain, so a filter can stop one" {

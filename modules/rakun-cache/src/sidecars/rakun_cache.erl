@@ -18,8 +18,6 @@
 %%%   * the monotonic clock the freshness arithmetic reads, with a test offset;
 %%%   * the invalidation log (`revalidatedTags()` / `revalidatedPaths()`) and
 %%%     the outcome trace;
-%%%   * the twin lookup: the module a `#[cached]` behavior's twin was emitted
-%%%     into, found by its name;
 %%%   * a RESP double for the tests (`resp_double_*`): a loopback listener
 %%%     that answers GET / SET / DEL / SADD / SMEMBERS / PING and records every
 %%%     command, so the Redis provider is exercised without a Redis.
@@ -43,7 +41,7 @@
          now/0, clock_advance/1, clock_reset/0, wide/1,
          log_add/2, logged/1, log_clear/1,
          trace_on/0, trace_off/0, trace/1, traced/0,
-         twin/2, owner_alive/0, owner_facts/0, spawn_crash/1,
+         owner_alive/0, owner_facts/0, spawn_crash/1,
          resp_double_start/0, resp_double_log/0, resp_double_stop/0,
          spawn_many/2]).
 
@@ -284,36 +282,6 @@ trace(Line) ->
     end.
 
 traced() -> logged(<<"trace">>).
-
-%% ═══ the twin ════════════════════════════════════════════════════════════════
-%%
-%% `#[cached]` emits `type Cached<Name>(inner: <Name>)` into the behavior's
-%% module; an emitted declaration cannot be imported from another module, so a
-%% consumer reaches it here. Element 1 of a record value is its type's module
-%% atom (decision 21), and the twin's module is `…@@Cached<Name>`: the twin
-%% value is `{Module, Inner}`. The lookup is by suffix over the modules the
-%% code server can load, cached per name.
-
-twin(Name, Inner) ->
-    Key = {rakun_cache, twin, Name},
-    Mod = case persistent_term:get(Key, undefined) of
-              undefined ->
-                  Suffix = "@@Cached" ++ binary_to_list(Name),
-                  Found = [list_to_atom(M) || {M, _, _} <- code:all_available(),
-                                              lists:suffix(Suffix, M)],
-                  case Found of
-                      [One] -> persistent_term:put(Key, One), One;
-                      [] -> erlang:error({rakun_cache, iolist_to_binary(
-                                  ["rakun-cache: no #[cached] behavior named ", Name,
-                                   " is compiled into this program - put #[cached] on the behavior"])});
-                      Many -> erlang:error({rakun_cache, iolist_to_binary(
-                                  ["rakun-cache: ", integer_to_list(length(Many)),
-                                   " #[cached] behaviors are named ", Name,
-                                   " - a behavior name is node-global on erlang, rename one"])})
-                  end;
-              M -> M
-          end,
-    {Mod, Inner}.
 
 %% ═══ the owner ═══════════════════════════════════════════════════════════════
 

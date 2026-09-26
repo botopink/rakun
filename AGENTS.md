@@ -1652,9 +1652,8 @@ raise, a `nav:` signal re-thrown), and the body hook.
 
 ## Static generation — `modules/rakun-app/src/static_gen.bp`, `segment_config.bp` (front 60)
 
-rakun-app depends on rakun-cache (and so lists its chain — a transitive
-dependency is not loaded) because the prerendered entries live in front 12's
-store. Sidecar `rakun_static_gen.erl`: the config and params registries, the
+rakun-app depends on rakun-cache because the prerendered entries live in
+front 12's store. Sidecar `rakun_static_gen.erl`: the config and params registries, the
 decided kinds, the bounded fan-out, single-flight regeneration, counters, a
 gauge and the failure log.
 
@@ -3171,6 +3170,11 @@ profile active fails at boot); `rakun.security.password.encoder`;
 
 ### Compiler findings (minimal repros under `~/.cache/bp-rakun/front-10/`)
 
+Findings 1–3 are fixed in the compiler (the rakun language-gaps sweep): two
+`#[methodSecurity]` types may share a module, `import {security} from
+"rakun-security"` resolves, and an implementer converts to its behavior. The
+shapes below still build; `UserStore` and the flat imports stay as the seam.
+
 1. **A decorator-emitted type's `self.inner.m()` lowers to the wrong type** when the
    module has two decorated types: `LedgerSec.status` becomes
    `…@@Runbook:status(element(2, Self))` → `undef` (`repro_proxy_dispatch/`). The same
@@ -3194,17 +3198,12 @@ and ships no runner (tests are `test` blocks under `botopink test`).
   then `withParam` / `withQuery` / `withHeader` / `withCookie` / `withBody`, each
   a new value (a later call under the same name replaces the earlier). Accessors
   `paramOf` / `queryOf` / `headerOf` (case-insensitive) / `cookieOf` / `bodyOf`
-  answer `""` when absent. **`toRequest()`** is what a handler takes: the
-  runtime's own `Request`, built from the fields by the core's `rkMakeRequest`
+  answer `""` when absent. `FakeRequest` **implements `Request`**
+  (`param` / `query` / `header` / `body`), so a handler declaring `Request`
+  takes the double itself; **`toRequest()`** still answers the runtime's own
+  `Request`, built from the fields by the core's `rkMakeRequest`
   (`make_request/6`, the same map `request/6` builds for a socket request; the
-  cookies arrive as one `cookie` header). It does NOT `implement Request`, and
-  its accessors are not named `param`/`header`/…: an implementer does not
-  convert to its behavior at a call site, and on erlang a behavior method call
-  lowers to another type's same-named method, so a double declaring `header/2`
-  would reroute every `req.header(…)` of a test module importing it (both rows
-  in `specs/1.0.10-beta/language-gaps.md`). Annotate a local that holds a
-  `toRequest()` result (`val r: Request = …`) or pass it straight to a function;
-  an unannotated local in a `test` block lowers `r.header(…)` to a local call.
+  cookies arrive as one `cookie` header).
 - **Assertions** (`assertions.bp`) — `expectStatus`, `expectBodyEquals`,
   `expectBodyContains`, `expectJsonField`: `true`, or `assert … , message` with
   the expected value, the actual one and the status. `expectJsonField` is a
@@ -3294,14 +3293,14 @@ one connection per command).
 ## Caching — `modules/rakun-cache/` (front 12)
 
 Depends on `rakun`, `rakun-session` (the private scope's session id and the
-Redis wire, `rkSessRedis`, reused rather than copied — no `rakun-client` edge)
-and, through it, `rakun-web`, `rakun-data`, `rakun-scheduling`,
-`rakun-actuator-api`, `rakun-actuator` (listed in the manifest: a transitive
-dependency is not loaded). Sidecar `rakun_cache.erl`: ONE ETS table for every
-cache keyed by `{name, key}` (no atom per cache name), owned by
-`rakun_cache_owner`; the names table (resolved settings), the customizers, single
-flight, background refresh, the monotonic clock with a test offset, the
-invalidation log and trace, the twin lookup and a RESP double for the tests.
+Redis wire, `rkSessRedis`, reused rather than copied — no `rakun-client` edge),
+`rakun-actuator-api`, `rakun-actuator` and `rakun-web` (a test resets the chain);
+their own dependencies follow transitively (decision 143). Sidecar
+`rakun_cache.erl`: ONE ETS table for every cache keyed by `{name, key}` (no atom
+per cache name), owned by `rakun_cache_owner`; the names table (resolved
+settings), the customizers, single flight, background refresh, the monotonic
+clock with a test offset, the invalidation log and trace and a RESP double for
+the tests.
 
 - **One primitive** (`cache.bp`) — `cacheThrough(policy, keys, load)`;
   `cacheFn(name, keys, life, tags, load)` (Next's `unstable_cache`),
@@ -3330,9 +3329,8 @@ invalidation log and trace, the twin lookup and a RESP double for the tests.
   · `lfu` · `ttl-only`), `rakun.cache.names`, `rakun.cache.redis.url`. `Remote`
   is always Redis, `Private` always ETS; `none` beats every per-cache key and
   every customizer (`registerCacheCustomizer(fn(name, settings) -> settings)`,
-  folded in registration order before the kill switch — functions, not
-  `CacheCustomizer` values: a behavior-typed call does not lower on erlang when
-  two types implement it). Redis rows are `SET rakun:cache:<key> v EX <expire>`
+  folded in registration order before the kill switch; `registerCustomizer(c)`
+  takes a `CacheCustomizer` value). Redis rows are `SET rakun:cache:<key> v EX <expire>`
   plus a set per tag and per cache; Redis has no stale window, so on it
   `revalidateTag` deletes; a Redis that does not answer runs the loader.
   JCache, Hazelcast, Infinispan, Couchbase, Caffeine, Cache2k and Mnesia are
@@ -3356,15 +3354,11 @@ invalidation log and trace, the twin lookup and a RESP double for the tests.
   name, must return `string`), `#[cacheEvict(name, true)]` clears the cache and
   `(name, false)` the rows `[m, args…]` of every `#[cacheable(name)]` method `m`
   — both AFTER the delegate returns; unannotated methods delegate. The module
-  imports `cacheMethod`, `cacheEvictAll`, `cacheEvictKeys`. **Three erlang rules**
-  (`language-gaps.md`): the implementation lives in ANOTHER module than the
-  behavior (two local implementers make a behavior-typed call a bare local
-  call); other modules reach the twin with `cachedTwin("<Name>", inner)` (an
-  emitted declaration is not importable, and an imported fn returning a
-  behavior does not unify with the importer's view of it); one `#[cached]`
-  behavior per module. `test/fixtures/twin` is the working shape:
+  imports `cacheMethod`, `cacheEvictAll`, `cacheEvictKeys`; another module
+  imports the emitted `cached<Name>` like any `pub fn`. `test/fixtures/twin` is
+  the shape: the behavior, its implementation and the twin in one module, and
   `#[configuration]` + `#[bean] … -> ProductCatalog { return
-  cachedTwin("ProductCatalog", self.real); }` injects the twin into every
+  cachedProductCatalog(self.real); }` injecting the twin into every
   `catalog: ProductCatalog` field.
 - **Endpoint and health** (`cache_endpoint.bp`) — `installCache()` refuses a bad
   configuration naming the key (`cacheConfigProblem()`), creates the listed
@@ -3372,8 +3366,10 @@ invalidation log and trace, the twin lookup and a RESP double for the tests.
   <base>/caches` and `DELETE <base>/caches/:name` (204; unknown 404) behind
   `exposed("caches")`, and the `cache` health indicator (UP listing the
   providers, DOWN naming the first that does not answer).
-- **Not reached** — the qualified import `import {cache} from "rakun-cache"`
-  (a workspace module cannot be imported as a namespace).
+- **Imports** — the qualified form `import {cache} from "rakun-cache"` and the
+  bare form both resolve (`test/fixtures/imports`); `cacheKey` alone is imported
+  from `"rakun-cache/cache"`, since `from "rakun-cache"` is ambiguous with std's
+  `hash.cacheKey`.
 
 ## Messaging — `modules/rakun-messaging/` (front 15)
 

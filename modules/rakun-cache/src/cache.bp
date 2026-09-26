@@ -45,7 +45,7 @@ import {
     rkCacheFlight, rkCacheRefresh, rkCacheDrain,
     rkCacheNow, rkCacheWide, rkCacheClockReset,
     rkCacheLogAdd, rkCacheLogged, rkCacheLogClear, rkCacheTraceLine,
-    rkCacheTwin, rkCacheTraceOn, rkCacheTraced,
+    rkCacheTraceOn, rkCacheTraced,
 } from "cache_host";
 
 // ── Step 1 — scopes, policies, keys ─────────────────────────────────────────
@@ -145,12 +145,14 @@ pub type CacheSettings(
     eviction: string,
 )
 
-// The shape a customizer has. A caller registers the function, not a value of
-// this behavior: a call through a behavior-typed value does not lower on
-// erlang when two types implement it (`language-gaps.md`), so the manager
-// holds `fn(name, settings) -> settings` values, in registration order.
+// A customizer is a `CacheCustomizer` value (an ordinary bean the application
+// registers) or a bare function; the manager folds them in registration order.
 pub behavior CacheCustomizer {
     fn customize(self: Self, name: string, settings: CacheSettings) -> CacheSettings;
+}
+
+pub fn registerCustomizer(customizer: CacheCustomizer) -> i32 {
+    return registerCacheCustomizer({ name, settings -> customizer.customize(name, settings) });
 }
 
 pub fn registerCacheCustomizer(customize: fn(name: string, settings: CacheSettings) -> CacheSettings) -> i32 {
@@ -574,15 +576,6 @@ pub fn cacheEvictKeys(name: string, keys: Array<Array<string>>) -> i32 {
         };
     };
     return n;
-}
-
-// The caching twin of `inner`, from ANY module: `val c: ProductCatalog =
-// cachedTwin("ProductCatalog", real)`. An `@emit`ted declaration cannot be
-// imported (`language-gaps.md`), so `cached<Name>(inner)` — which `#[cached]`
-// also emits — reaches only the behavior's own module.
-pub fn cachedTwin<B, I>(behaviorName: string, inner: I) -> B {
-    val twin: B = rkCacheTwin(behaviorName, inner);
-    return twin;
 }
 
 // The outcome trace: `miss|hit|revalidate|bypass|error key=<ns>:<parts> [tags]`,
