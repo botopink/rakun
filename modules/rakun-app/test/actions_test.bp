@@ -9,7 +9,7 @@
 //// listener with a raw client, because the hook runs before a body is read.
 
 import {testing.asserts} from "std";
-import {io: {fs}} from "std";
+import {io: {fs, process}} from "std";
 import {json.object, json.quote, json.decode} from "std";
 import {Request, Response, rkSetProp, rkProp, rkDispatchHttp, rkServe, toI32} from "rakun";
 import {cookies, cookieDefaults, requestPhase, phaseName} from "rakun/request_context";
@@ -398,4 +398,51 @@ test "actions: a body over the limit is refused at the limit, the connection clo
     assert out.startsWith("HTTP/1.1 413 Content Too Large|"), out;
     assert received != "";
     assert toI32(received) <= 1048576 + 8192, received;
+}
+
+test "actions: no onze. key is read anywhere in rakun" {
+    val out = process.runShell("grep -rn '\"onze\\.' ../.. --include=*.bp --include=*.erl --include=*.json | grep -v botopinkbuild | wc -l");
+    assert out.trim() == "0", out;
+}
+
+test "actions: the id from a request is compared with the constant-time compare, never with ==" {
+    val src: string = fs.readText("src/actions.bp").unwrapOr("");
+    val body = src.split("pub fn resolveAction(id: string) -> string {").at(1).unwrapOr("").split("\n}").at(0).unwrapOr("");
+    assert body.contains("hash.equalsConstantTime(");
+    assert body.contains("== id") == false && body.contains("id ==") == false;
+}
+
+fn formBody(id: string, size: i32) -> string {
+    return "__bp_action=" + id + "&title=" + Array.range(0, size).map({ i -> "a" }).join("");
+}
+
+fn rpcBody(id: string, size: i32) -> string {
+    return "{\"v\":1,\"id\":\"" + id + "\",\"args\":[\"title=" + Array.range(0, size).map({ i -> "a" }).join("") + "\"]}";
+}
+
+fn bodyOf(encoding: string, id: string, n: i32) -> string {
+    return if (encoding == "rpc") rpcBody(id, n) else formBody(id, n);
+}
+
+fn sendAs(encoding: string, origin: string, body: string) -> i32 {
+    val contentType = if (encoding == "rpc") "application/json" else "application/x-www-form-urlencoded";
+    val extra: Array<#(string, string)> = if (encoding == "rpc") [#("x-bp-action", "rpc")] else [];
+    return rkDispatchHttp("POST", "/blog", headers(origin, contentType, extra), "{}", body).status;
+}
+
+fn checksHold(encoding: string) -> bool {
+    val id = actionIdOf("createPost");
+    val _l = rkSetProp("rakun.actions.bodyLimit", "4096");
+    val cross = sendAs(encoding, "http://evil.example", bodyOf(encoding, id, 5));
+    val none = sendAs(encoding, "", bodyOf(encoding, id, 5));
+    val big = sendAs(encoding, "http://localhost:8080", bodyOf(encoding, id, 5000));
+    val fine = sendAs(encoding, "http://localhost:8080", bodyOf(encoding, id, 5));
+    val _z = rkSetProp("rakun.actions.bodyLimit", "");
+    return cross == 403 && none == 403 && big == 413 && fine == 200;
+}
+
+test "actions: both encodings meet the same Origin and size checks" {
+    val _b = boot();
+    assert checksHold("form");
+    assert checksHold("rpc");
 }
