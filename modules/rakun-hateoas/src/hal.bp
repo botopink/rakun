@@ -1,0 +1,222 @@
+//// rakun-hateoas — HAL (`application/hal+json`) for rakun (front 21).
+////
+//// SERIALIZATION IS COMPTIME, because it cannot be run time: std has no way
+//// to walk an arbitrary record, but a decorator reads `decl.fields`.
+//// `#[halResource]` on a record-shaped `type` emits
+//// `pub fn <typeName>ToHal(v: <TypeName>, links: Array<Link>) -> string` —
+//// strings quoted and escaped (std's `json.quote`), `i32` / `i64` / `f64` /
+//// `bool` bare, in declaration order, `_links` last — and REFUSES at comptime a
+//// field whose type it cannot render (a nested record, an array, an
+//// optional), naming the field and the type, emitting nothing.
+////
+//// A LINK SET renders one object keyed by `rel`: two links with one `rel`
+//// become an array in insertion order (HAL; a naive object build silently
+//// drops one); an empty `mediaType` / `title` is omitted, `templated` is
+//// written only when true. A collection is `_embedded` (first, keyed by the
+//// relation, an empty one written as `[]`) plus its own `_links` (last), so
+//// two renderings are byte-identical.
+////
+//// `linkTo(rel, pattern, params)` substitutes `:name` by name — every `:param`
+//// needs an entry and every entry a `:param`, each value percent-encoded with
+//// std's `encoding` — and validates the pattern against what is registered
+//// (the core router's paths, and the `app/` table when `rakun-app` is in the
+//// build): a pattern nobody serves raises, naming it and the nearest
+//// registered path. `halResponse` sets `application/hal+json` through front
+//// 07's header surface — no second `Response` type.
+
+import {Response, rkProp, rkRoutePaths} from "rakun";
+import {json, encoding} from "std";
+import {withHeader} from "rakun-web";
+import {table.parseTable} from "routing";
+
+// ── step 1: `Link` and the link set ─────────────────────────────────────────
+
+pub type Link(
+    rel: string,
+    href: string,
+    mediaType: string,
+    title: string,
+    templated: bool,
+)
+
+pub fn link(rel: string, href: string) -> Link {
+    return Link(rel: rel, href: href, mediaType: "", title: "", templated: false);
+}
+
+pub fn linkObject(l: Link) -> string {
+    var members: Array<#(string, string)> = [#("href", json.quote(l.href))];
+    if (l.mediaType != "") members.push(#("type", json.quote(l.mediaType)));
+    if (l.title != "") members.push(#("title", json.quote(l.title)));
+    if (l.templated) members.push(#("templated", "true"));
+    return json.object(members);
+}
+
+fn relsInOrder(links: Array<Link>) -> string[] {
+    var rels: string[] = [];
+    for (links) { l ->
+        if (rels.filter({ r -> r == l.rel }).length == 0) rels.push(l.rel);
+    };
+    return rels;
+}
+
+// The `_links` object: one key per `rel`, in first-appearance order; a `rel`
+// that appears twice is an array.
+pub fn linksObject(links: Array<Link>) -> string {
+    var members: Array<#(string, string)> = [];
+    for (relsInOrder(links)) { rel ->
+        val same: Array<Link> = links.filter({ l -> l.rel == rel });
+        val rendered: string = if (same.length == 1) linkObject(same.at(0).unwrapOr(link(rel, ""))) else json.array(same.map({ l -> linkObject(l) }));
+        members.push(#(rel, rendered));
+    };
+    return json.object(members);
+}
+
+// ── step 2: `#[halResource]` ────────────────────────────────────────────────
+
+pub fn halString(value: string) -> string {
+    return json.quote(value);
+}
+
+pub fn halInt(value: i32) -> string {
+    return value.toString();
+}
+
+pub fn halBool(value: bool) -> string {
+    if (value) return "true" else return "false";
+}
+
+#[@External.Erlang("""float_to_binary($0, [short])""")]
+pub declare fn halFloat(value: f64) -> string;
+
+// A resource's own members, then `_links` last.
+pub fn halObject(fields: Array<#(string, string)>, links: Array<Link>) -> string {
+    var members: Array<#(string, string)> = [];
+    for (fields) { f -> members.push(f); };
+    members.push(#("_links", linksObject(links)));
+    return json.object(members);
+}
+
+pub fn halResource(comptime decl: @Decl) {
+    var parts: Array<string> = [];
+    var bad = "";
+    decl.fields.forEach({ f ->
+        val render = if (f.typeName == "string") "halString(v." + f.name + ")" else if (f.typeName == "i32") "halInt(v." + f.name + ")" else if (f.typeName == "i64") "halInt(v." + f.name + ")" else if (f.typeName == "f64") "halFloat(v." + f.name + ")" else if (f.typeName == "bool") "halBool(v." + f.name + ")" else "";
+        if (render == "") {
+            if (bad == "") bad = f.name + ": " + (if (f.typeName == "") "an array or generic type" else f.typeName);
+        } else parts.push("#(\"" + f.name + "\", " + render + ")");
+    });
+    val fnName = decl.name.slice(0, 1).toLower() + decl.name.slice(1, decl.name.length);
+    if (bad == "") @emit("pub fn " + fnName + "ToHal(v: " + decl.name + ", links: Array<Link>) -> string { return halObject([" + parts.join(", ") + "], links); }");
+    if (decl.kind != DeclKind.Type) decl.fail("#[halResource] must annotate a type");
+    if (decl.variants.length > 0) decl.fail("#[halResource] must annotate a type with fields, not an enum");
+    if (bad != "") decl.fail("#[halResource] cannot render the field " + bad + " - a HAL resource renders string, i32, i64, f64 and bool fields; a nested record, an array or an optional is refused rather than rendered wrong");
+}
+
+// ── step 3: collections ─────────────────────────────────────────────────────
+
+// `items` are already-rendered resources: nothing can render an array of
+// arbitrary records at run time.
+pub fn halCollection(rel: string, items: Array<string>, links: Array<Link>) -> string {
+    val embedded: string = json.object([#(rel, json.array(items))]);
+    return json.object([#("_embedded", embedded), #("_links", linksObject(links))]);
+}
+
+// ── step 4: `linkTo` ────────────────────────────────────────────────────────
+
+#[@External.Erlang("""(fun() -> case code:ensure_loaded(rakun_file_router) of {module, _} -> rakun_file_router:table(); _ -> <<>> end end)()""")]
+declare fn appTableWire() -> string;
+
+// Every path something serves: the core router's patterns, and the `app/`
+// table's with `[name]` spelled `:name`.
+pub fn registeredPaths() -> string[] {
+    val core: string[] = rkRoutePaths().split(", ").map({ r -> r.split(" ").at(1) ?? "" }).filter({ p -> p != "" });
+    val app: string[] = parseTable(appTableWire()).map({ e -> bracketToColon(e.pattern) });
+    var out: string[] = [];
+    for (core) { p -> out.push(p); };
+    for (app) { p -> out.push(p); };
+    return out;
+}
+
+fn bracketToColon(pattern: string) -> string {
+    return pattern.split("/").map({ s -> if (s.startsWith("[") && s.endsWith("]")) ":" + s.slice(1, s.length - 1) else s }).join("/");
+}
+
+fn commonPrefix(a: string, b: string) -> i32 {
+    var n = 0;
+    var going = true;
+    for (Array.range(0, if (a.length < b.length) a.length else b.length)) { i ->
+        if (going && (a.slice(i, i + 1) == b.slice(i, i + 1))) n = n + 1 else going = false;
+    };
+    return n;
+}
+
+pub fn nearestPath(pattern: string) -> string {
+    var best = "";
+    var bestN = -1;
+    for (registeredPaths()) { p ->
+        val n: i32 = commonPrefix(pattern, p);
+        if (n > bestN) {
+            best = p;
+            bestN = n;
+        };
+    };
+    return best;
+}
+
+pub fn unknownPatternProblem(pattern: string) -> string {
+    val near: string = nearestPath(pattern);
+    val hint: string = if (near == "") "no route is registered" else "the nearest registered path is `" + near + "`";
+    return "rakun-hateoas: no route is registered at `" + pattern + "` - " + hint;
+}
+
+pub fn missingParamProblem(pattern: string, name: string) -> string {
+    return "rakun-hateoas: `" + pattern + "` needs `:" + name + "` and no entry gives it";
+}
+
+pub fn unusedParamProblem(pattern: string, name: string) -> string {
+    return "rakun-hateoas: the entry `" + name + "` matches no `:" + name + "` in `" + pattern + "`";
+}
+
+fn paramNames(pattern: string) -> string[] {
+    return pattern.split("/").filter({ s -> s.startsWith(":") }).map({ s -> s.slice(1, s.length) });
+}
+
+fn valueOf(params: Array<#(string, string)>, name: string) -> string {
+    return params.filter({ p -> p._0 == name }).map({ p -> p._1 }).at(0) ?? "";
+}
+
+pub fn linkTo(rel: string, pattern: string, params: Array<#(string, string)>) -> Link {
+    if (registeredPaths().filter({ p -> p == pattern }).length == 0) @panic(unknownPatternProblem(pattern));
+    val names: string[] = paramNames(pattern);
+    for (names) { n ->
+        if (params.filter({ p -> p._0 == n }).length == 0) @panic(missingParamProblem(pattern, n));
+    };
+    for (params) { p ->
+        if (names.filter({ n -> n == p._0 }).length == 0) @panic(unusedParamProblem(pattern, p._0));
+    };
+    val href: string = pattern.split("/").map({ s -> if (s.startsWith(":")) encoding.percentEncode(valueOf(params, s.slice(1, s.length))) else s }).join("/");
+    return link(rel, href);
+}
+
+// ── step 5: the response helper and negotiation ─────────────────────────────
+
+pub fn halMediaType() -> string {
+    return "application/hal+json";
+}
+
+pub fn halAsDefault() -> bool {
+    return rkProp("rakun.hateoas.use-hal-as-default-json-media-type") != "false";
+}
+
+pub fn halResponse(body: string) -> Response {
+    return halResponseFor("", body);
+}
+
+// The media type a request gets: `application/hal+json` when it asks for it,
+// and — while `rakun.hateoas.use-hal-as-default-json-media-type` is true, the
+// default — when it asks for plain JSON too; the body is the same either way.
+pub fn halResponseFor(accept: string, body: string) -> Response {
+    val askedHal: bool = accept.contains(halMediaType());
+    val media: string = if (askedHal || halAsDefault()) halMediaType() else "application/json";
+    return withHeader(Response.ok(body), "Content-Type", media);
+}

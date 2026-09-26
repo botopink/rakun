@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### rakun-hateoas: HAL resources (botopink front 21)
+
+- `modules/rakun-hateoas/src/hal.bp`: `Link` / `link`, the link set,
+  `#[halResource]` (comptime `<typeName>ToHal`, unsupported fields refused),
+  `halCollection`, `linkTo` over the route table, `halResponse` /
+  `halResponseFor`. `modules/rakun-hateoas` 0 → **14 / 0**.
+
 ### Structured logging (botopink front 17)
 
 - `modules/rakun-logging`: one `Logger` type with five levels over OTP `logger`

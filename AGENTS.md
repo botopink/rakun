@@ -2766,6 +2766,28 @@ Measured: `rakun-logging` 54 passed / 0 failed / 0 compile failures
 (`format_test.bp` 13, `level_test.bp` 5, `group_test.bp` 6, `correlation_test.bp` 6,
 `digest_test.bp` 5, `file_test.bp` 11, `endpoint_test.bp` 8).
 
+## HAL — `modules/rakun-hateoas/` (front 21)
+
+`src/hal.bp`, no host cell. `Link(rel, href, mediaType, title, templated)`
+(`mediaType`, not `type`), `link(rel, href)`, `linksObject` (one key per `rel`
+in first-appearance order; a repeated `rel` is an array; empty `mediaType` /
+`title` omitted, `templated` only when true; std's `json` writes and escapes).
+`#[halResource]` on a record-shaped `type` emits
+`<typeName>ToHal(v, links) -> string` over `halObject` (fields in declaration
+order, `_links` last) and refuses AT COMPTIME a field it cannot render (a
+nested record, an array, an optional), naming the field and its type and
+emitting nothing; a module using it imports `halObject`, `halString`, `halInt`,
+`halBool`, `halFloat` and `Link`. `halCollection(rel, renderedItems, links)`:
+`_embedded` first (an empty one is `[]`), `_links` last. `linkTo(rel, pattern,
+params)` validates the pattern against the core router's paths and, when
+`rakun-app` is in the build, its table (`[name]` read as `:name`), naming the
+nearest registered path on a miss; every `:param` needs an entry and every
+entry a `:param`; values are `encoding.percentEncode`d. `halResponse` /
+`halResponseFor(accept, body)` set the content type through rakun-web's
+`withHeader`: `application/hal+json`, or `application/json` when
+`rakun.hateoas.use-hal-as-default-json-media-type=false` and the client did not
+ask for HAL. Depends on `rakun` and `rakun-web`.
+
 ## Validation — the bundled `validation` library (front 14, moved by decision 116 rule 5)
 
 Front 14's member `modules/rakun-validation` is gone: its seven modules are the
