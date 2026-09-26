@@ -1,0 +1,219 @@
+//// rakun-app — locale routing (front 64).
+
+import {testing.asserts} from "std";
+import {io: {fs, env}} from "std";
+import {Response, rkSetProp, beginRequest, endRequest, RequestScope, RequestPhase, rkReqPutSlot} from "rakun";
+import {resetChain, runChain, rkChainSetTerminal, headerValue} from "rakun-web";
+import {resetCaches} from "rakun-cache/cache";
+import {
+    LocaleSet, LocaleQ, Alternate, registerLocales, clearLocales, locales, isSupported, normalizeTag,
+    qPerMille, parseAcceptLanguage, negotiate, localeOfPath, stripLocale, withLocale, installLocaleFilter,
+    localeOf, setLocaleCookie, registerDictionaryLoader, dictionaryBlob, declaredLocaleFiles, dictionaryProblem,
+    alternatesFor, htmlLang, excludes,
+} from "i18n";
+import {encoding} from "std";
+
+fn set3() -> LocaleSet {
+    return LocaleSet(locales: ["en", "pt", "pt-BR"], defaultLocale: "en");
+}
+
+fn fresh() -> i32 {
+    val _c = clearLocales();
+    return registerLocales(set3());
+}
+
+// ── step 1 ──────────────────────────────────────────────────────────────────
+
+test "i18n: a default outside the set, an empty set and an underscore tag are refused" {
+    val _c = clearLocales();
+    try asserts.throwsWith({ -> registerLocales(LocaleSet(locales: ["en", "pt"], defaultLocale: "fr")) }, "`fr` is not in the set [en, pt]");
+    try asserts.throwsWith({ -> registerLocales(LocaleSet(locales: [], defaultLocale: "en")) }, "the locale set is empty");
+    try asserts.throwsWith({ -> registerLocales(LocaleSet(locales: ["en_US"], defaultLocale: "en_US")) }, "`en_US` separates with `_`");
+}
+
+test "i18n: tags normalise, and isSupported compares normalised tags" {
+    assert normalizeTag("pt-br") == "pt-BR" && normalizeTag("PT-BR") == "pt-BR" && normalizeTag("Pt-Br") == "pt-BR";
+    assert isSupported(set3(), "PT-br");
+}
+
+test "i18n: registering twice is refused" {
+    val _f = fresh();
+    try asserts.throwsWith({ -> registerLocales(set3()) }, "already registered");
+}
+
+// ── step 2 ──────────────────────────────────────────────────────────────────
+
+fn shape(xs: LocaleQ[]) -> string {
+    return xs.map({ x -> x.tag + "=" + x.q.toString() }).join(",");
+}
+
+test "i18n: Accept-Language parses into per-mille q, highest first" {
+    assert shape(parseAcceptLanguage("pt-BR,pt;q=0.9,en;q=0.8")) == "pt-BR=1000,pt=900,en=800";
+    assert shape(parseAcceptLanguage("en;q=0.5,fr")) == "fr=1000,en=500";
+    assert parseAcceptLanguage("").length == 0;
+}
+
+test "i18n: q=0 is never selected, a malformed q is 0, and a 500-entry header parses" {
+    assert negotiate(set3(), "pt;q=0,fr", "") == "en";
+    assert qPerMille("abc") == 0 && qPerMille("") == 0 && qPerMille("1.2.3") == 0 && qPerMille("0.125") == 125 && qPerMille("1") == 1000;
+    val big = Array.range(0, 500).map({ i -> "x" + i.toString() + ";q=0.5" }).join(",");
+    assert parseAcceptLanguage(big).length == 500;
+}
+
+test "i18n: negotiation prefers a supported cookie, ignores an unsupported one, falls to the default" {
+    assert negotiate(set3(), "en", "pt") == "pt";
+    assert negotiate(set3(), "pt-BR", "klingon") == "pt-BR";
+    assert negotiate(set3(), "fr,de", "") == "en";
+}
+
+test "i18n: pt-PT widens to a declared pt, pt never narrows to pt-BR" {
+    assert negotiate(set3(), "pt-PT", "") == "pt";
+    val onlyBr = LocaleSet(locales: ["en", "pt-BR"], defaultLocale: "en");
+    assert negotiate(onlyBr, "pt", "") == "en";
+}
+
+// ── step 3 ──────────────────────────────────────────────────────────────────
+
+test "i18n: localeOfPath, stripLocale and withLocale" {
+    val s = set3();
+    assert (localeOfPath(s, "/pt/about") ?? "none") == "pt";
+    assert localeOfPath(s, "/klingon/about") == null && localeOfPath(s, "/about") == null;
+    assert (localeOfPath(s, "/pt") ?? "none") == "pt";
+    assert stripLocale(s, "/pt/about") == "/about" && stripLocale(s, "/about") == "/about";
+    assert withLocale(s, "pt", "/about") == "/pt/about" && withLocale(s, "pt", "/") == "/pt";
+    assert withLocale(s, "pt", "/pt/about") == "/pt/about";
+}
+
+test "i18n: withLocale percent-encodes each segment, and the path round-trips" {
+    val s = set3();
+    val prefixed = withLocale(s, "pt", "/a b/ção");
+    assert prefixed == "/pt/a%20b/" + encoding.percentEncode("ção"), prefixed;
+    val back = stripLocale(s, prefixed).split("/").filter({ x -> x != "" }).map({ x -> encoding.percentDecode(x).unwrapOr("?") }).join("/");
+    assert back == "a b/ção";
+}
+
+// ── step 4 ──────────────────────────────────────────────────────────────────
+
+fn chain() -> i32 {
+    val _r = resetChain();
+    val _i = installLocaleFilter(set3());
+    return rkChainSetTerminal({ method, path, headersWire, queryWire, body -> Response.ok("page " + path + " lang=" + localeOf()) });
+}
+
+fn get(target: string, headersWire: string) -> Response {
+    return getQ(target, headersWire, "");
+}
+
+fn getQ(target: string, headersWire: string, queryWire: string) -> Response {
+    val _o = beginRequest(RequestScope(id: "i18n", phase: RequestPhase.Handler, method: "GET", path: target, query: "", headersWire: headersWire, strict: false));
+    val res = runChain("GET", target, headersWire, queryWire, "");
+    val _e = endRequest();
+    return res;
+}
+
+test "i18n: an unprefixed path redirects 307 to the negotiated locale, the query kept" {
+    val _f = fresh();
+    val _c = chain();
+    val res = getQ("/about", "accept-language\tpt", "x\t1\ny\t ");
+    assert res.status == 307;
+    assert headerValue("Location") == "/pt/about?x=1&y=%20", headerValue("Location");
+}
+
+test "i18n: a prefixed path passes and localeOf answers its locale" {
+    val _f = fresh();
+    val _c = chain();
+    val res = get("/pt/about", "");
+    assert res.status == 200;
+    assert res.body == "page /pt/about lang=pt", res.body;
+}
+
+test "i18n: /api, /sitemap.xml, /robots.txt and an appended prefix are not redirected" {
+    val _f = fresh();
+    val _c = chain();
+    val _x = rkSetProp("rakun.i18n.exclude", "/_assets");
+    assert get("/api/posts", "accept-language\tpt").status == 200;
+    assert get("/sitemap.xml", "accept-language\tpt").status == 200;
+    assert get("/robots.txt", "accept-language\tpt").status == 200;
+    assert get("/_assets/app.js", "accept-language\tpt").status == 200;
+    val _z = rkSetProp("rakun.i18n.exclude", "");
+    val src: string = fs.readText("src/i18n.bp").unwrapOr("");
+    assert src.contains("_onze") == false && src.contains("onze") == false;
+}
+
+test "i18n: localeOf and htmlLang raise outside a request" {
+    val _f = fresh();
+    try asserts.throws({ -> localeOf().length() });
+    try asserts.throws({ -> htmlLang().length() });
+}
+
+test "i18n: setLocaleCookie from an action is what the next negotiation prefers; from a render it raises" {
+    val _f = fresh();
+    val _o = beginRequest(RequestScope(id: "act", phase: RequestPhase.Action, method: "POST", path: "/x", query: "", headersWire: "", strict: false));
+    val _s = setLocaleCookie("pt-br");
+    val blob = endRequest();
+    assert blob.contains("RAKUN_LOCALE=pt-BR"), blob;
+    assert negotiate(set3(), "en", "pt-BR") == "pt-BR";
+    val _r = beginRequest(RequestScope(id: "render", phase: RequestPhase.Render, method: "GET", path: "/x", query: "", headersWire: "", strict: false));
+    val raised = asserts.throws({ -> setLocaleCookie("pt") });
+    val _e = endRequest();
+    assert raised.isOk();
+}
+
+// ── step 5 ──────────────────────────────────────────────────────────────────
+
+test "i18n: dictionaryBlob reads once through front 12 and refuses an undeclared locale" {
+    val _f = fresh();
+    val _r = resetCaches();
+    val _l = registerDictionaryLoader({ locale -> countedLoad(locale) });
+    val _k = rkSetProp("i18n.loads", "0");
+    assert dictionaryBlob("pt") == "{\"lang\":\"pt\"}";
+    assert dictionaryBlob("PT") == "{\"lang\":\"pt\"}";
+    assert rkPropI("i18n.loads") == 1;
+    try asserts.throwsWith({ -> dictionaryBlob("fr").length() }, "`fr` is not a declared locale [en, pt, pt-BR]");
+}
+
+fn countedLoad(locale: string) -> string {
+    val _b = rkSetProp("i18n.loads", (rkPropI("i18n.loads") + 1).toString());
+    return "{\"lang\":\"" + locale + "\"}";
+}
+
+#[@External.Erlang("rakun_runtime", "prop_int")]
+declare fn rkPropI(key: string) -> i32;
+
+test "i18n: the dictionary check finds every file and names what is missing or undeclared" {
+    val root = (env.read("BOTOPINK_TEST_TMPDIR") ?? "") + "/rakun-app-i18n";
+    val _m = fs.mkdir(root);
+    val _a = fs.mkdir(root + "/app");
+    val _d = fs.mkdir(root + "/app/dictionaries");
+    val _e = fs.writeText(root + "/app/dictionaries/en.bp", "");
+    val _p = fs.writeText(root + "/app/dictionaries/pt.bp", "");
+    val files = declaredLocaleFiles(root);
+    assert files.length == 2, files.join(",");
+    assert dictionaryProblem(set3(), files) == "rakun i18n: the locale `pt-BR` has no dictionary file";
+    assert dictionaryProblem(LocaleSet(locales: ["en"], defaultLocale: "en"), files).contains("names an undeclared locale");
+    assert dictionaryProblem(LocaleSet(locales: ["en", "pt"], defaultLocale: "en"), files) == "";
+}
+
+// ── step 6 ──────────────────────────────────────────────────────────────────
+
+fn alts(xs: Alternate[]) -> string {
+    return xs.map({ a -> a.hreflang + "=" + a.href }).join(" ");
+}
+
+test "i18n: alternates are one per locale plus x-default, the same from either path" {
+    val s = set3();
+    val _o = rkSetProp("rakun.i18n.origin", "");
+    assert alts(alternatesFor(s, "/pt/about")) == "en=/en/about pt=/pt/about pt-BR=/pt-BR/about x-default=/en/about";
+    assert alts(alternatesFor(s, "/about")) == alts(alternatesFor(s, "/pt/about"));
+    val _a = rkSetProp("rakun.i18n.origin", "https://site.test");
+    assert alts(alternatesFor(s, "/about")).startsWith("en=https://site.test/en/about");
+    val _z = rkSetProp("rakun.i18n.origin", "");
+}
+
+test "i18n: htmlLang answers the request's locale" {
+    val _f = fresh();
+    val _o = beginRequest(RequestScope(id: "h", phase: RequestPhase.Render, method: "GET", path: "/pt-BR/x", query: "", headersWire: "", strict: false));
+    val lang = htmlLang();
+    val _e = endRequest();
+    assert lang == "pt-BR";
+}

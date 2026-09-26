@@ -1718,6 +1718,37 @@ removed); a slot belongs to the NEAREST layout above its shortest entry.
   missing header is hard. `interceptProblem` refuses a claimed pattern no page
   serves and two interceptions from one origin claiming one target.
 
+## Locale routing — `modules/rakun-app/src/i18n.bp` (front 64)
+
+In rakun-app (the cut's home for i18n negotiation), over rakun-web's chain and
+rakun-cache. The locale set and the dictionary loader are two `persistent_term`
+cells written inline; the route table is unchanged (`[locale]` is an ordinary
+dynamic segment).
+
+- **Set** — `registerLocales(LocaleSet(locales, defaultLocale))`: normalised
+  (`normalizeTag`: `pt-br` → `pt-BR`), closed, registered once; a default outside
+  it, an empty set, a malformed tag or `_` refuse the boot. `isSupported`,
+  `locales()`.
+- **Negotiation** — `parseAcceptLanguage` (q in per-mille, highest first, a
+  malformed q 0, any length), `negotiate(set, accept, cookie)`: a supported
+  cookie, else the highest non-zero supported tag (`pt-PT` widens to `pt`, `pt`
+  never narrows), else the default.
+- **Paths** — `localeOfPath`, `stripLocale`, `withLocale` (each segment
+  percent-encoded once; no double prefix).
+- **Filter** — `installLocaleFilter(set)` at −450: a path under
+  `/api` · `/sitemap.xml` · `/robots.txt` or a `rakun.i18n.exclude` prefix passes;
+  a locale-prefixed one passes and is noted for `localeOf()`; any other redirects
+  307 to `withLocale(negotiated, path)` with the query rebuilt from the chain's
+  pairs. `localeOf()` / `htmlLang()` raise outside a request (front 62);
+  `setLocaleCookie` (cookie `rakun.i18n.cookie`, default `RAKUN_LOCALE`) raises in
+  a render.
+- **Dictionaries** — the typed form is the app's records; `dictionaryBlob(locale)`
+  (open sets) reads through `registerDictionaryLoader`'s function into the
+  framework cache `rakun.i18n` (60 s); `declaredLocaleFiles(appDir)` +
+  `dictionaryProblem(set, files)` are the build check.
+- **Alternates** — `alternatesFor(set, pathname)`: one `Alternate(hreflang, href)`
+  per locale plus `x-default`, absolute under `rakun.i18n.origin`.
+
 ## Navigation signals — `modules/rakun-app/src/navigation.bp` (front 63)
 
 `notFound()`, `redirect(loc)` (307), `permanentRedirect(loc)` (308) and
