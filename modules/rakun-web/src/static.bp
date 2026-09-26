@@ -1,0 +1,633 @@
+//// rakun-web — the static-file server (front 82): ONE entry in front 07's chain.
+////
+//// A request whose path matches a registered root's pattern is answered here
+//// and the chain stops; anything else falls through untouched. A root is a
+//// PREFIX, not a route — nothing is added to front 04's route table.
+////
+//// BYTES NEVER ENTER BOTOPINK. This module decides the root, the status, every
+//// header and the byte range, and hands the host (`rakun_static.erl`) a PATH:
+//// the body goes from disk to the socket through `file:sendfile/5` (64 KiB
+//// `pread`s over TLS). No value in this module ever holds a file body — the
+//// ETag is a hash the host computes by streaming the file.
+////
+//// THE RESOLUTION ORDER, and why it is this order:
+////
+////    1. pattern match   the first root, in registration order, whose pattern
+////                       admits the path — none → next entry, nothing changed
+////    2. decode          one percent-decode; malformed, NUL or still-encoded
+////                       (`%252e`) → 400
+////    3. reject          any `..`, `.` or empty segment, a backslash, a control
+////                       character → 404, BEFORE any filesystem call
+////    4. join+canonical  root ++ relative, every symlink resolved, then the
+////                       containment check against the canonical root → 404
+////    5. directory       append the root's index file, re-run 4 → 404 when
+////                       there is none (there is no directory listing, and no
+////                       key that adds one)
+////    6. stat            a regular file, its size and mtime — missing → 404
+////    7. fingerprint     `name.<6 hex>.ext` must match the content → 404
+////    8. encoding        `Accept-Encoding` vs `.br` / `.gz` variants
+////    9. conditional     If-None-Match, then If-Modified-Since → 304
+////   10. range           If-Range, Range → 206 / 416
+////   11. headers + send  Content-Type, Cache-Control, ETag, Vary → the host
+////
+//// 3 before 4 means a traversal never becomes a filesystem operation; 4 before
+//// 6 means a symlink out of the root is caught by the containment check rather
+//// than by a later check that does not exist. Every containment failure is 404,
+//// never 403: "exists but refused" tells a prober the path exists.
+////
+//// Encoding (8) runs BEFORE the conditional (9), one step earlier than the
+//// README's list: the ETag is the content hash of the representation actually
+//// sent, so a `.br` body and the plain body carry different strong validators
+//// (RFC 9110 § 8.8.3) and the variant must be chosen before a validator is
+//// compared.
+////
+//// OVERLAPPING ROOTS resolve in registration order: roots are tried in the order
+//// they were registered, the first that resolves an existing file serves it,
+//// and a root that resolves nothing passes the request to the next matching
+//// root. A refusal (400 for the decode, 404 for a bad segment) is final at the
+//// first matching root. A path some root matched but no root resolves is 404
+//// from this entry — it does not fall through to the router.
+////
+//// WHAT AN OUTER ENTRY SEES. The head is written when this entry answers, so a
+//// header an OUTER entry (a lower order) sets before `chain.next` is on the
+//// wire, and one it sets after `chain.next` returns is not (front 07's
+//// `X-Request-Id` is set on the way out and is therefore absent from a static
+//// response). Entries INSIDE this one (compression, negotiation, server-id)
+//// never run for a static request.
+
+import {Response} from "rakun";
+import {rkProp, toI32} from "rakun";
+import {hash} from "std";
+import {WebRequest, Chain, withHeader, registerFilter} from "filter";
+import {qualityOf} from "compression";
+
+// ── the root ────────────────────────────────────────────────────────────────
+
+pub type StaticRoot(
+    pattern: string,
+    directory: string,
+    indexFile: string,
+    cacheSeconds: i32,
+    immutable: bool,
+    useLastModified: bool,
+    precompressed: bool,
+)
+
+// ── the host cells ──────────────────────────────────────────────────────────
+
+#[@External.Erlang("rakun_static", "root_add")]
+declare fn rkStaticRootAdd(root: StaticRoot) -> i32;
+
+#[@External.Erlang("rakun_static", "root_count")]
+pub declare fn rkStaticRootCount() -> i32;
+
+#[@External.Erlang("rakun_static", "root_at")]
+declare fn rkStaticRootAt(index: i32) -> StaticRoot;
+
+#[@External.Erlang("rakun_static", "root_reset")]
+declare fn rkStaticRootReset() -> i32;
+
+#[@External.Erlang("rakun_static", "decode_ok")]
+declare fn rkStaticDecodeOk(raw: string) -> bool;
+
+#[@External.Erlang("rakun_static", "decode")]
+declare fn rkStaticDecode(raw: string) -> string;
+
+#[@External.Erlang("rakun_static", "plain_ok")]
+declare fn rkStaticPlainOk(path: string) -> bool;
+
+// `"<canonical>\t<size>\t<mtime>\t<indexUsed>"`, or `""` for every failure.
+#[@External.Erlang("rakun_static", "locate")]
+declare fn rkStaticLocate(root: string, relative: string, indexFile: string) -> string;
+
+// `"<canonical>\t<size>"`, or `""` when the variant is absent, escapes the
+// root, or is older than `minMtime`.
+#[@External.Erlang("rakun_static", "variant")]
+declare fn rkStaticVariant(root: string, path: string, minMtime: i32) -> string;
+
+// SHA-256 of the file's bytes, lowercase hex — streamed by the host.
+#[@External.Erlang("rakun_static", "hash_file")]
+pub declare fn rkStaticHashFile(path: string) -> string;
+
+#[@External.Erlang("rakun_static", "http_date")]
+pub declare fn rkStaticHttpDate(seconds: i32) -> string;
+
+#[@External.Erlang("rakun_static", "parse_http_date")]
+pub declare fn rkStaticParseHttpDate(value: string) -> i32;
+
+// The head and `length` bytes of `path` from `offset`, written to the
+// connection's socket; `withBody` is false for HEAD. The README spells
+// `rkSendFile(path, offset, length)`; the status and the HEAD switch are two
+// more arguments because the host writes the head too.
+#[@External.Erlang("rakun_static", "send_file")]
+pub declare fn rkSendFile(status: i32, path: string, offset: i32, length: i32, withBody: bool) -> i32;
+
+// A head with no body; `contentLength < 0` writes no `Content-Length`.
+#[@External.Erlang("rakun_static", "send_head")]
+declare fn rkSendHead(status: i32, contentLength: i32) -> i32;
+
+// Every filesystem call the host has made — the counter a traversal test reads.
+#[@External.Erlang("rakun_static", "fs_calls")]
+pub declare fn rkStaticFsCalls() -> i32;
+
+// ── configuration ───────────────────────────────────────────────────────────
+
+// The chain order: after the application's entries and metrics (+100), before
+// compression (+200) — a static answer carries its own pre-compressed variant
+// and is never re-compressed.
+pub fn orderStatic() -> i32 {
+    return 150;
+}
+
+// Overrides every root's `cacheSeconds` when set. Front 80's dev profile sets
+// it to 0, so nothing is cached while developing.
+pub fn cachePeriodKey() -> string {
+    return "rakun.web.resources.cache.period";
+}
+
+// `Last-Modified` for the default roots; off unless set to `true` — after a
+// reproducible build normalises timestamps every file has the same mtime and
+// the validator carries no information (front 81).
+pub fn useLastModifiedKey() -> string {
+    return "rakun.web.static.use-last-modified";
+}
+
+// The directory the default roots are relative to (`.` when unset).
+pub fn baseDirKey() -> string {
+    return "rakun.web.static.base-dir";
+}
+
+pub fn fingerprintMaxAge() -> i32 {
+    return 31536000;
+}
+
+// ── registration ────────────────────────────────────────────────────────────
+
+pub fn staticRootProblem(pattern: string, why: string) -> string {
+    return "rakun-web: static root `" + pattern + "` " + why;
+}
+
+fn rootProblem(r: StaticRoot) -> string {
+    if (r.pattern.startsWith("/") == false) return staticRootProblem(r.pattern, "must start with a slash");
+    if (r.pattern.endsWith("/**") == false) return staticRootProblem(r.pattern, "must end with /** - a static root is a prefix");
+    if (r.directory.trim() == "") return staticRootProblem(r.pattern, "has no directory");
+    if (r.cacheSeconds < 0) return staticRootProblem(r.pattern, "has a negative cacheSeconds");
+    if (r.immutable && (r.cacheSeconds == 0)) return staticRootProblem(r.pattern, "is immutable with cacheSeconds 0 - an immutable asset needs a lifetime");
+    if (r.indexFile.contains("/") || (r.indexFile == ".") || (r.indexFile == "..")) return staticRootProblem(r.pattern, "has an index file that is not a plain file name");
+    return "";
+}
+
+// Refuses a malformed root at registration, never at the first request.
+// Answers the number of registered roots.
+pub fn registerStaticRoot(r: StaticRoot) -> i32 {
+    val problem: string = rootProblem(r);
+    if (problem != "") @panic(problem);
+    return rkStaticRootAdd(r);
+}
+
+pub fn resetStaticRoots() -> i32 {
+    return rkStaticRootReset();
+}
+
+pub fn staticRootCount() -> i32 {
+    return rkStaticRootCount();
+}
+
+// `/static/**` → `<base>/static`, `/public/**` → `<base>/public`, both with
+// `index.html`, revalidated every time (`no-cache`), no pre-compressed variants.
+pub fn defaultStaticRoots(base: string) -> StaticRoot[] {
+    val dir: string = if (base == "") "." else base;
+    val lastModified: bool = rkProp(useLastModifiedKey()) == "true";
+    return [
+        StaticRoot(pattern: "/static/**", directory: dir + "/static", indexFile: "index.html", cacheSeconds: 0, immutable: false, useLastModified: lastModified, precompressed: false),
+        StaticRoot(pattern: "/public/**", directory: dir + "/public", indexFile: "index.html", cacheSeconds: 0, immutable: false, useLastModified: lastModified, precompressed: false),
+    ];
+}
+
+pub fn registerDefaultStaticRoots() -> i32 {
+    var n = 0;
+    for (defaultStaticRoots(rkProp(baseDirKey()))) { r -> n = registerStaticRoot(r); };
+    return n;
+}
+
+// The one chain entry. Explicit — an application (or onze, front 69) calls it
+// once at boot; `bootWeb()` does not install it.
+pub fn installStatic() -> i32 {
+    return registerFilter("static", orderStatic(), { req, chain -> staticEntry(req, chain) });
+}
+
+// ── content types ───────────────────────────────────────────────────────────
+//
+// By extension, case-insensitively. Text types carry `; charset=utf-8`, binary
+// ones do not. An unknown extension is `application/octet-stream`, never a
+// guess from the bytes.
+
+pub fn extensionOf(path: string) -> string {
+    val name: string = baseName(path);
+    val pieces: string[] = name.split(".");
+    if (pieces.length < 2) return "";
+    return (pieces.at(pieces.length - 1) ?? "").toLower();
+}
+
+pub fn contentTypeOf(path: string) -> string {
+    val ext: string = extensionOf(path);
+    if (ext == "html") return "text/html; charset=utf-8";
+    if (ext == "htm") return "text/html; charset=utf-8";
+    if (ext == "css") return "text/css; charset=utf-8";
+    if (ext == "js") return "text/javascript; charset=utf-8";
+    if (ext == "mjs") return "text/javascript; charset=utf-8";
+    if (ext == "txt") return "text/plain; charset=utf-8";
+    if (ext == "json") return "application/json";
+    if (ext == "map") return "application/json";
+    if (ext == "xml") return "application/xml";
+    if (ext == "svg") return "image/svg+xml";
+    if (ext == "png") return "image/png";
+    if (ext == "jpg") return "image/jpeg";
+    if (ext == "jpeg") return "image/jpeg";
+    if (ext == "gif") return "image/gif";
+    if (ext == "webp") return "image/webp";
+    if (ext == "avif") return "image/avif";
+    if (ext == "ico") return "image/x-icon";
+    if (ext == "woff") return "font/woff";
+    if (ext == "woff2") return "font/woff2";
+    if (ext == "wasm") return "application/wasm";
+    if (ext == "pdf") return "application/pdf";
+    return "application/octet-stream";
+}
+
+pub fn baseName(path: string) -> string {
+    val pieces: string[] = path.split("/");
+    return pieces.at(pieces.length - 1) ?? "";
+}
+
+// ── fingerprints ────────────────────────────────────────────────────────────
+//
+// A fingerprinted name is `<stem>.<6 lowercase hex>.<ext>`: the first six hex
+// digits of the SHA-256 of the content (std's `hash.sha256`). The name IS the
+// version, so such a file is `immutable`, and one whose content no longer
+// matches its name is 404 — never a stale file under a name that promises
+// otherwise.
+
+fn isHex(s: string) -> bool {
+    var ok = true;
+    for (s.split("")) { c -> if ("0123456789abcdef".indexOf(c) < 0) ok = false; };
+    return ok;
+}
+
+pub fn fingerprintOfName(name: string) -> string {
+    val pieces: string[] = name.split(".");
+    if (pieces.length < 3) return "";
+    val fp: string = pieces.at(pieces.length - 2) ?? "";
+    if (fp.length() != 6) return "";
+    if (isHex(fp) == false) return "";
+    return fp;
+}
+
+pub fn isFingerprinted(name: string) -> bool {
+    return fingerprintOfName(name) != "";
+}
+
+// `app.css` + `7c9804` → `app.7c9804.css`; a name with no extension gains the
+// fingerprint as its last piece.
+pub fn fingerprintName(name: string, fp: string) -> string {
+    val pieces: string[] = name.split(".");
+    if (pieces.length < 2) return name + "." + fp;
+    val ext: string = pieces.at(pieces.length - 1) ?? "";
+    var stemPieces: string[] = [];
+    var i = 0;
+    for (pieces) { p ->
+        if (i < pieces.length - 1) stemPieces.push(p);
+        i = i + 1;
+    };
+    val stem: string = stemPieces.join(".");
+    return stem + "." + fp + "." + ext;
+}
+
+// The six hex digits for text the application already holds (an `emilia`
+// stylesheet, a bundle it generated) — std's `hash.sha256`.
+pub fn fingerprintText(text: string) -> string {
+    return hash.sha256(text).slice(0, 6);
+}
+
+// The fingerprinted NAME of the file at `path` (`dir/app.css` →
+// `app.7c9804.css`), hashed by the host so the bytes stay on disk. `""` when
+// the file cannot be read.
+pub fn fingerprint(path: string) -> string {
+    val digest: string = rkStaticHashFile(path);
+    if (digest == "") return "";
+    return fingerprintName(baseName(path), digest.slice(0, 6));
+}
+
+// ── cache policy ────────────────────────────────────────────────────────────
+
+fn maxAgeFor(root: StaticRoot, name: string) -> i32 {
+    val period: string = rkProp(cachePeriodKey());
+    if (period != "") return toI32(period);
+    if (root.immutable) return root.cacheSeconds;
+    if (isFingerprinted(name)) return fingerprintMaxAge();
+    return root.cacheSeconds;
+}
+
+pub fn cacheHeader(maxAge: i32, immutable: bool) -> string {
+    if (maxAge <= 0) return "no-cache";
+    if (immutable) return "public, max-age=" + maxAge.toString() + ", immutable";
+    return "public, max-age=" + maxAge.toString();
+}
+
+pub fn cacheControlFor(root: StaticRoot, name: string) -> string {
+    return cacheHeader(maxAgeFor(root, name), root.immutable || isFingerprinted(name));
+}
+
+// ── containment, the botopink half ──────────────────────────────────────────
+
+pub fn patternPrefix(pattern: string) -> string {
+    return pattern.slice(0, pattern.length() - 3);
+}
+
+pub fn patternAdmits(pattern: string, path: string) -> bool {
+    val prefix: string = patternPrefix(pattern);
+    return path.startsWith(prefix + "/");
+}
+
+fn relativeOf(pattern: string, path: string) -> string {
+    val prefix: string = patternPrefix(pattern);
+    return path.slice(prefix.length() + 1, path.length());
+}
+
+fn badSegment(seg: string) -> bool {
+    if ((seg == "") || (seg == ".") || (seg == "..")) return true;
+    if (seg.contains("\\")) return true;
+    if (seg.contains("\t") || seg.contains("\n") || seg.contains("\r")) return true;
+    return false;
+}
+
+// Step 3: a decoded relative path any of whose segments is `..`, `.` or empty
+// (so `//etc/passwd` too) is refused before the host is asked anything. One
+// trailing slash is a directory request, not an empty segment.
+pub fn safeRelative(rel: string) -> bool {
+    val trimmed: string = stripTrailingSlash(rel);
+    if (trimmed == "") return true;
+    var ok = true;
+    for (trimmed.split("/")) { s -> if (badSegment(s)) ok = false; };
+    return ok;
+}
+
+fn stripTrailingSlash(rel: string) -> string {
+    if (rel.endsWith("/")) return rel.slice(0, rel.length() - 1);
+    return rel;
+}
+
+// ── the entry ───────────────────────────────────────────────────────────────
+
+fn anyRootAdmits(path: string, i: i32) -> bool {
+    if (i >= rkStaticRootCount()) return false;
+    val root: StaticRoot = rkStaticRootAt(i);
+    if (patternAdmits(root.pattern, path)) return true;
+    return anyRootAdmits(path, i + 1);
+}
+
+pub fn staticEntry(req: WebRequest, chain: Chain) -> Response {
+    val servable: bool = (req.method == "GET") || (req.method == "HEAD");
+    if (servable == false) return chain.next(req);
+    if (anyRootAdmits(req.target, 0) == false) return chain.next(req);
+    return serveFrom(req, 0);
+}
+
+// A target an earlier entry changed (front 65's canonicalisation, a rewrite) is
+// already decoded; decoding it again would be the second decode. It is checked
+// for what a decode would have refused (a NUL, a remaining escape) instead.
+fn decodedRelative(req: WebRequest, raw: string) -> string {
+    if (req.target != req.path) return raw;
+    return rkStaticDecode(raw);
+}
+
+fn decodable(req: WebRequest, raw: string) -> bool {
+    if (req.target != req.path) return rkStaticPlainOk(raw);
+    return rkStaticDecodeOk(raw);
+}
+
+fn serveFrom(req: WebRequest, i: i32) -> Response {
+    if (i >= rkStaticRootCount()) return Response.notFound();
+    val root: StaticRoot = rkStaticRootAt(i);
+    if (patternAdmits(root.pattern, req.target) == false) return serveFrom(req, i + 1);
+    val raw: string = relativeOf(root.pattern, req.target);
+    if (decodable(req, raw) == false) return Response.badRequest("");
+    val rel: string = decodedRelative(req, raw);
+    if (safeRelative(rel) == false) return Response.notFound();
+    val found: string = rkStaticLocate(root.directory, stripTrailingSlash(rel), root.indexFile);
+    if (found == "") return serveFrom(req, i + 1);
+    return serveFound(req, root, rel, found);
+}
+
+// What was located, parsed once.
+pub type Located(
+    path: string,
+    size: i32,
+    mtime: i32,
+    name: string,
+)
+
+fn located(root: StaticRoot, rel: string, found: string) -> Located {
+    val parts: string[] = found.split("\t");
+    val indexUsed: bool = (parts.at(3) ?? "0") == "1";
+    val requested: string = baseName(stripTrailingSlash(rel));
+    return Located(
+        path: parts.at(0) ?? "",
+        size: toI32(parts.at(1) ?? "0"),
+        mtime: toI32(parts.at(2) ?? "0"),
+        name: if (indexUsed) root.indexFile else requested,
+    );
+}
+
+fn serveFound(req: WebRequest, root: StaticRoot, rel: string, found: string) -> Response {
+    val file: Located = located(root, rel, found);
+    val fp: string = fingerprintOfName(file.name);
+    val stale: bool = if (fp == "") false else rkStaticHashFile(file.path).slice(0, 6) != fp;
+    if (stale) return Response.notFound();
+    val sent: Representation = if (root.precompressed) negotiate(req.header("accept-encoding"), root, file) else plain(file);
+    return answer(req, root, file, sent);
+}
+
+// ── step 8: pre-compressed variants ─────────────────────────────────────────
+
+pub type Representation(
+    path: string,
+    size: i32,
+    encoding: string,
+)
+
+fn plain(file: Located) -> Representation {
+    return Representation(path: file.path, size: file.size, encoding: "");
+}
+
+fn suffixOf(encoding: string) -> string {
+    if (encoding == "br") return ".br";
+    return ".gz";
+}
+
+fn variantOf(root: StaticRoot, file: Located, encoding: string) -> Representation {
+    val found: string = rkStaticVariant(root.directory, file.path + suffixOf(encoding), file.mtime);
+    if (found == "") return plain(file);
+    val parts: string[] = found.split("\t");
+    return Representation(path: parts.at(0) ?? "", size: toI32(parts.at(1) ?? "0"), encoding: encoding);
+}
+
+// The highest q above zero wins; a tie goes to `br`. A variant that is absent,
+// escapes the root or is older than the original is skipped for the next.
+pub fn encodingPreference(acceptEncoding: string) -> string[] {
+    val br: i32 = qualityOf(acceptEncoding, "br");
+    val gz: i32 = qualityOf(acceptEncoding, "gzip");
+    var out: string[] = [];
+    if ((br > 0) && (br >= gz)) out.push("br");
+    if (gz > 0) out.push("gzip");
+    if ((br > 0) && (br < gz)) out.push("br");
+    return out;
+}
+
+fn negotiate(acceptEncoding: string, root: StaticRoot, file: Located) -> Representation {
+    var chosen: Representation = plain(file);
+    for (encodingPreference(acceptEncoding)) { e ->
+        if (chosen.encoding == "") chosen = variantOf(root, file, e);
+    };
+    return chosen;
+}
+
+// ── steps 9 and 10: validators and ranges ───────────────────────────────────
+
+fn stripWeak(tag: string) -> string {
+    if (tag.startsWith("W/")) return tag.slice(2, tag.length());
+    return tag;
+}
+
+// If-None-Match uses the WEAK comparison (RFC 9110 § 13.1.2).
+pub fn etagMatches(ifNoneMatch: string, etag: string) -> bool {
+    val header: string = ifNoneMatch.trim();
+    if (header == "*") return true;
+    var hit = false;
+    for (header.split(",")) { c -> if (stripWeak(c.trim()) == etag) hit = true; };
+    return hit;
+}
+
+fn modifiedSinceHolds(ifModifiedSince: string, mtime: i32) -> bool {
+    if (ifModifiedSince == "") return false;
+    val since: i32 = rkStaticParseHttpDate(ifModifiedSince);
+    return (since >= 0) && (since >= mtime);
+}
+
+// The ETag decides when both validators are present: If-Modified-Since is read
+// only when there is no If-None-Match (RFC 9110 § 13.2.2).
+pub fn notModified(req: WebRequest, etag: string, lastModifiedOn: bool, mtime: i32) -> bool {
+    val inm: string = req.header("if-none-match");
+    if (inm != "") return etagMatches(inm, etag);
+    if (lastModifiedOn == false) return false;
+    return modifiedSinceHolds(req.header("if-modified-since"), mtime);
+}
+
+// If-Range: a STRONG match on the ETag, or — with Last-Modified on — the exact
+// date. Anything else (a stale ETag, a weak one) means the whole file.
+fn ifRangeHolds(ifRange: string, etag: string, lastModifiedOn: bool, mtime: i32) -> bool {
+    val v: string = ifRange.trim();
+    if (v == "") return true;
+    if (v.startsWith("\"") || v.startsWith("W/")) return v == etag;
+    if (lastModifiedOn == false) return false;
+    return rkStaticParseHttpDate(v) == mtime;
+}
+
+fn isDigits(s: string) -> bool {
+    if (s == "") return false;
+    var ok = true;
+    for (s.split("")) { c -> if ("0123456789".indexOf(c) < 0) ok = false; };
+    return ok;
+}
+
+fn minI32(a: i32, b: i32) -> i32 {
+    if (a < b) return a;
+    return b;
+}
+
+fn maxI32(a: i32, b: i32) -> i32 {
+    if (a > b) return a;
+    return b;
+}
+
+// A `Range` header against a size: `"<first>-<last>"` for a satisfiable single
+// range, `"unsatisfiable"` for 416, `""` to ignore it and send the whole file.
+// Multipart ranges are NOT implemented: `bytes=0-1,3-4` is answered with the
+// whole file (200), which RFC 9110 § 14.2 permits, rather than with a broken
+// multipart body.
+pub fn parseRange(header: string, size: i32) -> string {
+    val h: string = header.trim();
+    if (h.toLower().startsWith("bytes=") == false) return "";
+    val spec: string = h.slice(6, h.length()).trim();
+    if (spec.contains(",")) return "";
+    val ends: string[] = spec.split("-");
+    if (ends.length != 2) return "";
+    val a: string = (ends.at(0) ?? "").trim();
+    val b: string = (ends.at(1) ?? "").trim();
+    if (a == "") return suffixRange(b, size);
+    if (isDigits(a) == false) return "";
+    if ((b != "") && (isDigits(b) == false)) return "";
+    val first: i32 = toI32(a);
+    val last: i32 = if (b == "") size - 1 else toI32(b);
+    if (last < first) return "";
+    if (first >= size) return "unsatisfiable";
+    return first.toString() + "-" + minI32(last, size - 1).toString();
+}
+
+fn suffixRange(b: string, size: i32) -> string {
+    if (isDigits(b) == false) return "";
+    val n: i32 = toI32(b);
+    if ((n == 0) || (size == 0)) return "unsatisfiable";
+    return maxI32(0, size - n).toString() + "-" + (size - 1).toString();
+}
+
+// ── step 11: the answer ─────────────────────────────────────────────────────
+
+fn validators(root: StaticRoot, file: Located, etag: string, lastModifiedOn: bool) -> i32 {
+    val _e = withHeader(Response.ok(""), "ETag", etag);
+    val _c = withHeader(Response.ok(""), "Cache-Control", cacheControlFor(root, file.name));
+    val _l = if (lastModifiedOn) withHeader(Response.ok(""), "Last-Modified", rkStaticHttpDate(file.mtime)) else Response.ok("");
+    val _v = if (root.precompressed) withHeader(Response.ok(""), "Vary", "Accept-Encoding") else Response.ok("");
+    return 0;
+}
+
+fn answer(req: WebRequest, root: StaticRoot, file: Located, sent: Representation) -> Response {
+    val etag: string = "\"" + rkStaticHashFile(sent.path) + "\"";
+    val lastModifiedOn: bool = root.useLastModified;
+    val _v = validators(root, file, etag, lastModifiedOn);
+    if (notModified(req, etag, lastModifiedOn, file.mtime)) return notModifiedAnswer();
+    val rangeHeader: string = req.header("range");
+    val ranged: bool = (rangeHeader != "") && ifRangeHolds(req.header("if-range"), etag, lastModifiedOn, file.mtime);
+    val range: string = if (ranged) parseRange(rangeHeader, sent.size) else "";
+    val _a = withHeader(Response.ok(""), "Accept-Ranges", "bytes");
+    if (range == "unsatisfiable") return unsatisfiable(sent.size);
+    val _t = withHeader(Response.ok(""), "Content-Type", contentTypeOf(file.name));
+    val _x = if (sent.encoding != "") withHeader(Response.ok(""), "Content-Encoding", sent.encoding) else Response.ok("");
+    if (range == "") return sendWhole(req, sent);
+    return sendRange(req, sent, range);
+}
+
+fn notModifiedAnswer() -> Response {
+    val _h = rkSendHead(304, -1);
+    return Response(status: 304, body: "");
+}
+
+fn unsatisfiable(size: i32) -> Response {
+    val _r = withHeader(Response.ok(""), "Content-Range", "bytes */" + size.toString());
+    val _h = rkSendHead(416, 0);
+    return Response(status: 416, body: "");
+}
+
+fn sendWhole(req: WebRequest, sent: Representation) -> Response {
+    val _s = rkSendFile(200, sent.path, 0, sent.size, req.method == "GET");
+    return Response(status: 200, body: "");
+}
+
+fn sendRange(req: WebRequest, sent: Representation, range: string) -> Response {
+    val ends: string[] = range.split("-");
+    val first: i32 = toI32(ends.at(0) ?? "0");
+    val last: i32 = toI32(ends.at(1) ?? "0");
+    val _r = withHeader(Response.ok(""), "Content-Range", "bytes " + range + "/" + sent.size.toString());
+    val _s = rkSendFile(206, sent.path, first, last - first + 1, req.method == "GET");
+    return Response(status: 206, body: "");
+}

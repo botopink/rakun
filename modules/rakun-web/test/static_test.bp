@@ -1,0 +1,401 @@
+//// rakun-web — the static-file server (front 82), in-process through the
+//// chain and over a real socket for the bytes.
+////
+//// Fixtures are written under `.botopinkbuild/tmp/` when the file starts — a
+//// text file, a fingerprinted file, `.br` / `.gz` variants, a symlink inside
+//// the root, one pointing out of it and a 200 MB sparse file. Nothing is
+//// checked in: a checked-in symlink escaping its directory is a landmine.
+
+import {io: {fs}} from "std";
+import {Response, rkSetProp, rkServe, rkDispatchHttp, toI32} from "rakun";
+import {resetChain, runChain, rkChainSetTerminal, rkChainSetRunner, headerValue, orderCompression, orderMetrics} from "filter";
+import {
+    StaticRoot,
+    registerStaticRoot,
+    resetStaticRoots,
+    installStatic,
+    contentTypeOf,
+    fingerprint,
+    fingerprintText,
+    cacheHeader,
+    rkStaticFsCalls,
+    rkStaticHashFile,
+    orderStatic,
+    defaultStaticRoots,
+} from "static";
+
+// ── host helpers ────────────────────────────────────────────────────────────
+
+#[@External.Erlang("""(fun() -> {ok, __C} = file:get_cwd(), iolist_to_binary([__C, "/.botopinkbuild/tmp/static-", integer_to_binary(erlang:unique_integer([positive]))]) end)()""")]
+declare fn freshDir() -> string;
+
+#[@External.Erlang("""(fun(__D) -> ok = filelib:ensure_dir(<<__D/binary, "/x">>), 0 end)($0)""")]
+declare fn mkdirs(dir: string) -> i32;
+
+#[@External.Erlang("""(fun(__T, __L) -> case file:make_symlink(__T, __L) of ok -> 0; _ -> -1 end end)($0, $1)""")]
+declare fn symlink(target: string, link: string) -> i32;
+
+#[@External.Erlang("""(fun(__P, __Ago) -> ok = file:change_time(__P, calendar:system_time_to_local_time(os:system_time(second) - __Ago, second)), 0 end)($0, $1)""")]
+declare fn ageFile(path: string, secondsAgo: i32) -> i32;
+
+#[@External.Erlang("""(fun(__P, __N) -> {ok, __F} = file:open(__P, [write, raw, binary]), {ok, _} = file:position(__F, __N - 1), ok = file:write(__F, <<0>>), ok = file:close(__F), 0 end)($0, $1)""")]
+declare fn sparseFile(path: string, bytes: i32) -> i32;
+
+#[@External.Erlang("""(fun() -> erlang:garbage_collect(), erlang:memory(total) end)()""")]
+declare fn memoryTotal() -> i32;
+
+// One exchange over a socket, the body counted and kept only when small:
+// `status|content-length|body-bytes|etag|content-range|content-encoding|vary|cache-control|accept-ranges|body`.
+#[@External.Erlang("""(fun(__Port, __Req) -> {ok, __S} = gen_tcp:connect("127.0.0.1", __Port, [binary, {active, false}]), ok = gen_tcp:send(__S, __Req), __Get = fun(__Hd, __N) -> __Hits = [string:trim(__V) || __L <- binary:split(__Hd, <<"\r\n">>, [global]), [__K, __V] <- [binary:split(__L, <<":">>)], string:lowercase(__K) =:= __N], case __Hits of [__X | _] -> __X; [] -> <<>> end end, __Head = fun __Head(__Acc) -> case binary:split(__Acc, <<"\r\n\r\n">>) of [__H, __B] -> {__H, __B}; _ -> {ok, __M} = gen_tcp:recv(__S, 0, 5000), __Head(<<__Acc/binary, __M/binary>>) end end, {__H, __B0} = __Head(<<>>), __Len = binary_to_integer(case __Get(__H, <<"content-length">>) of <<>> -> <<"0">>; __CL -> __CL end), __Body = fun __Body(__Got, __Keep) -> case __Got >= __Len of true -> {__Got, __Keep}; false -> case gen_tcp:recv(__S, 0, 5000) of {ok, __M} -> __Body(__Got + byte_size(__M), case __Got < 4096 of true -> <<__Keep/binary, __M/binary>>; false -> __Keep end); _ -> {__Got, __Keep} end end end, {__N, __Kept} = __Body(byte_size(__B0), __B0), gen_tcp:close(__S), [_, __St | _] = binary:split(hd(binary:split(__H, <<"\r\n">>)), <<" ">>, [global]), __Shown = case __N =< 4096 of true -> __Kept; false -> <<>> end, iolist_to_binary([__St, "|", __Get(__H, <<"content-length">>), "|", integer_to_binary(__N), "|", __Get(__H, <<"etag">>), "|", __Get(__H, <<"content-range">>), "|", __Get(__H, <<"content-encoding">>), "|", __Get(__H, <<"vary">>), "|", __Get(__H, <<"cache-control">>), "|", __Get(__H, <<"accept-ranges">>), "|", __Shown]) end)($0, $1)""")]
+declare fn wire(port: i32, request: string) -> string;
+
+// ── fixtures ────────────────────────────────────────────────────────────────
+
+fn write(path: string, text: string) -> i32 {
+    val _w = fs.writeText(path, text);
+    return 0;
+}
+
+// `<dir>/site` is the root; `<dir>/secret.txt` sits beside it.
+fn fixtures() -> string {
+    val dir: string = freshDir();
+    val site: string = dir + "/site";
+    val _m = mkdirs(site + "/docs");
+    val _e = mkdirs(site + "/empty");
+    val _a = write(site + "/app.css", "body { color: red; }\n");
+    val _b = write(site + "/app.js", "console.log(1);\n");
+    val _n = write(site + "/docs/index.html", "<h1>docs</h1>");
+    val _t = write(site + "/hundred.txt", "0123456789".repeat(30));
+    val _s = write(dir + "/secret.txt", "top secret");
+    val _l1 = symlink(dir + "/secret.txt", site + "/escape.txt");
+    val _l2 = symlink(site + "/app.css", site + "/alias.css");
+    val fp: string = fingerprint(site + "/app.css");
+    val _f = write(site + "/" + fp, "body { color: red; }\n");
+    val _st = write(site + "/lie.abcdef.css", "not what the name promises");
+    val _c = write(site + "/zip.css", "plain zip");
+    val _cb = write(site + "/zip.css.br", "BROTLI");
+    val _cg = write(site + "/zip.css.gz", "GZIP");
+    val _g = write(site + "/gzonly.css", "plain gz");
+    val _gg = write(site + "/gzonly.css.gz", "GZ-ONLY");
+    val _o = write(site + "/old.css", "fresh original");
+    val _ob = write(site + "/old.css.br", "STALE BR");
+    val _oa = ageFile(site + "/old.css.br", 3600);
+    return dir;
+}
+
+fn root(site: string, immutable: bool, cacheSeconds: i32, lastModified: bool, precompressed: bool) -> StaticRoot {
+    return StaticRoot(pattern: "/assets/**", directory: site, indexFile: "index.html", cacheSeconds: cacheSeconds, immutable: immutable, useLastModified: lastModified, precompressed: precompressed);
+}
+
+// The chain with the static entry and a terminal that says it ran.
+fn boot(r: StaticRoot) -> i32 {
+    val _r = resetChain();
+    val _s = resetStaticRoots();
+    val _p = rkSetProp("rakun.web.resources.cache.period", "");
+    val _g = registerStaticRoot(r);
+    val _i = installStatic();
+    return rkChainSetTerminal({ method, path, hw, qw, body -> Response.ok("router") });
+}
+
+fn get(path: string, headersWire: string) -> Response {
+    return runChain("GET", path, headersWire, "", "");
+}
+
+// ── step 1 ──────────────────────────────────────────────────────────────────
+
+test "static: a path no root matches falls through to the router unchanged" {
+    val dir = fixtures();
+    val _b = boot(root(dir + "/site", false, 0, false, false));
+    assert get("/api/users", "").body == "router";
+    assert get("/assetsx/app.css", "").body == "router";
+    assert orderMetrics() < orderStatic() && orderStatic() < orderCompression();
+}
+
+test "static: overlapping roots resolve in registration order" {
+    val dir = fixtures();
+    val _m = mkdirs(dir + "/other");
+    val _w = write(dir + "/other/app.css", "second root");
+    val _x = write(dir + "/other/only.css", "only in the second");
+    val _b = boot(StaticRoot(pattern: "/assets/**", directory: dir + "/site", indexFile: "", cacheSeconds: 0, immutable: false, useLastModified: false, precompressed: false));
+    val _g = registerStaticRoot(StaticRoot(pattern: "/assets/**", directory: dir + "/other", indexFile: "", cacheSeconds: 0, immutable: false, useLastModified: false, precompressed: false));
+    val first = get("/assets/app.css", "");
+    assert first.status == 200;
+    assert headerValue("ETag") == "\"" + rkStaticHashFile(dir + "/site/app.css") + "\"";
+    val second = get("/assets/only.css", "");
+    assert second.status == 200;
+    assert headerValue("ETag") == "\"" + rkStaticHashFile(dir + "/other/only.css") + "\"";
+}
+
+test "static: contentTypeOf covers the list, charset only on text" {
+    assert contentTypeOf("a.html") == "text/html; charset=utf-8";
+    assert contentTypeOf("a.css") == "text/css; charset=utf-8";
+    assert contentTypeOf("a.js") == "text/javascript; charset=utf-8";
+    assert contentTypeOf("a.mjs") == "text/javascript; charset=utf-8";
+    assert contentTypeOf("a.json") == "application/json";
+    assert contentTypeOf("a.svg") == "image/svg+xml";
+    assert contentTypeOf("a.png") == "image/png";
+    assert contentTypeOf("a.jpeg") == "image/jpeg";
+    assert contentTypeOf("a.webp") == "image/webp";
+    assert contentTypeOf("a.avif") == "image/avif";
+    assert contentTypeOf("a.woff2") == "font/woff2";
+    assert contentTypeOf("a.wasm") == "application/wasm";
+    assert contentTypeOf("a.txt") == "text/plain; charset=utf-8";
+    assert contentTypeOf("a.xml") == "application/xml";
+    assert contentTypeOf("a.ico") == "image/x-icon";
+    assert contentTypeOf("a.map") == "application/json";
+    assert contentTypeOf("A.PNG") == "image/png";
+    assert contentTypeOf("a.png").contains("charset") == false;
+}
+
+test "static: an unknown extension is application/octet-stream" {
+    assert contentTypeOf("a.qqq") == "application/octet-stream";
+    assert contentTypeOf("Makefile") == "application/octet-stream";
+}
+
+test "static: a directory is its index file, and without one it is 404 - there is no listing" {
+    val dir = fixtures();
+    val _b = boot(root(dir + "/site", false, 0, false, false));
+    assert get("/assets/docs/", "").status == 200;
+    assert headerValue("Content-Type") == "text/html; charset=utf-8";
+    val empty = get("/assets/empty/", "");
+    assert empty.status == 404;
+    assert empty.body != "router";
+}
+
+// ── step 2 ──────────────────────────────────────────────────────────────────
+
+test "static: a traversal answers 404 without touching the filesystem" {
+    val dir = fixtures();
+    val _b = boot(root(dir + "/site", false, 0, false, false));
+    val before = rkStaticFsCalls();
+    assert get("/assets/../../etc/passwd", "").status == 404;
+    assert get("/assets/%2e%2e%2fsecret.txt", "").status == 404;
+    assert get("/assets//etc/passwd", "").status == 404;
+    assert get("/assets/docs/../../secret.txt", "").status == 404;
+    assert rkStaticFsCalls() == before;
+}
+
+test "static: a doubly-encoded dot and a NUL byte answer 400" {
+    val dir = fixtures();
+    val _b = boot(root(dir + "/site", false, 0, false, false));
+    assert get("/assets/%252e%252e/secret.txt", "").status == 400;
+    assert get("/assets/app%00.css", "").status == 400;
+}
+
+test "static: a symlink out of the root is 404 and one inside it is served" {
+    val dir = fixtures();
+    val _b = boot(root(dir + "/site", false, 0, false, false));
+    assert get("/assets/escape.txt", "").status == 404;
+    assert get("/assets/alias.css", "").status == 200;
+}
+
+test "static: no containment failure answers 403, and missing looks like refused" {
+    val dir = fixtures();
+    val _b = boot(root(dir + "/site", false, 0, false, false));
+    val refused = get("/assets/escape.txt", "");
+    val missing = get("/assets/nothing.txt", "");
+    assert refused.status == 404 && missing.status == 404;
+    assert refused.body == missing.body;
+    val src: string = fs.readText("src/static.bp").unwrapOr("");
+    assert src.contains("withStatus(403") == false && src.contains("status: 403") == false;
+}
+
+// ── step 3 ──────────────────────────────────────────────────────────────────
+
+test "static: a first request is 200 with an ETag, and If-None-Match answers 304" {
+    val dir = fixtures();
+    val _b = boot(root(dir + "/site", false, 60, false, false));
+    assert get("/assets/app.css", "").status == 200;
+    val etag: string = headerValue("ETag");
+    val cache: string = headerValue("Cache-Control");
+    assert etag.startsWith("\"") && etag.length() == 66;
+    val again = get("/assets/app.css", "if-none-match\t" + etag);
+    assert again.status == 304;
+    assert again.body == "";
+    assert headerValue("ETag") == etag;
+    assert headerValue("Cache-Control") == cache;
+    assert headerValue("Content-Length") == "";
+}
+
+test "static: a changed file answers 200 with a different ETag" {
+    val dir = fixtures();
+    val _b = boot(root(dir + "/site", false, 0, false, false));
+    val _a = get("/assets/app.js", "");
+    val first: string = headerValue("ETag");
+    val _w = write(dir + "/site/app.js", "console.log(2);\n");
+    val changed = get("/assets/app.js", "if-none-match\t" + first);
+    assert changed.status == 200;
+    assert headerValue("ETag") != first;
+}
+
+test "static: Last-Modified is emitted and honoured only with useLastModified" {
+    val dir = fixtures();
+    val _b = boot(root(dir + "/site", false, 0, true, false));
+    val _a = get("/assets/app.css", "");
+    val lm: string = headerValue("Last-Modified");
+    assert lm != "";
+    assert get("/assets/app.css", "if-modified-since\t" + lm).status == 304;
+    val _c = boot(root(dir + "/site", false, 0, false, false));
+    val _d = get("/assets/app.css", "");
+    assert headerValue("Last-Modified") == "";
+    assert get("/assets/app.css", "if-modified-since\t" + lm).status == 200;
+}
+
+test "static: when both validators disagree the ETag decides" {
+    val dir = fixtures();
+    val _b = boot(root(dir + "/site", false, 0, true, false));
+    val _a = get("/assets/app.css", "");
+    val lm: string = headerValue("Last-Modified");
+    assert get("/assets/app.css", "if-none-match\t\"stale\"\nif-modified-since\t" + lm).status == 200;
+}
+
+// ── step 5 ──────────────────────────────────────────────────────────────────
+
+test "static: immutable roots are public immutable, zero-cache ones no-cache" {
+    assert cacheHeader(31536000, true) == "public, max-age=31536000, immutable";
+    assert cacheHeader(0, false) == "no-cache";
+    val dir = fixtures();
+    val _b = boot(root(dir + "/site", true, 600, false, false));
+    val _a = get("/assets/app.css", "");
+    assert headerValue("Cache-Control") == "public, max-age=600, immutable";
+    val _c = boot(root(dir + "/site", false, 0, false, false));
+    val _d = get("/assets/app.css", "");
+    assert headerValue("Cache-Control") == "no-cache";
+}
+
+test "static: a fingerprint is stable for identical content and moves with one byte" {
+    assert fingerprintText("body { color: red; }\n") == fingerprintText("body { color: red; }\n");
+    assert fingerprintText("body { color: red; }\n") != fingerprintText("body { color: red; }\r");
+    val dir = fixtures();
+    assert fingerprint(dir + "/site/app.css") == "app." + fingerprintText("body { color: red; }\n") + ".css";
+}
+
+test "static: a fingerprinted name whose content moved answers 404, the matching one is immutable" {
+    val dir = fixtures();
+    val _b = boot(root(dir + "/site", false, 0, false, false));
+    assert get("/assets/lie.abcdef.css", "").status == 404;
+    val fp: string = fingerprint(dir + "/site/app.css");
+    assert get("/assets/" + fp, "").status == 200;
+    assert headerValue("Cache-Control") == "public, max-age=31536000, immutable";
+}
+
+test "static: the dev cache period sets every root to no-cache" {
+    val dir = fixtures();
+    val _b = boot(root(dir + "/site", true, 600, false, false));
+    val _p = rkSetProp("rakun.web.resources.cache.period", "0");
+    val _a = get("/assets/app.css", "");
+    assert headerValue("Cache-Control") == "no-cache";
+    val _q = rkSetProp("rakun.web.resources.cache.period", "");
+}
+
+// ── step 6 ──────────────────────────────────────────────────────────────────
+
+test "static: br is served with Content-Encoding and the original content type" {
+    val dir = fixtures();
+    val _b = boot(root(dir + "/site", false, 0, false, true));
+    assert get("/assets/zip.css", "accept-encoding\tbr").status == 200;
+    assert headerValue("Content-Encoding") == "br";
+    assert headerValue("Content-Type") == "text/css; charset=utf-8";
+    assert headerValue("Vary") == "Accept-Encoding";
+}
+
+test "static: with only .gz present, br, gzip gets the .gz" {
+    val dir = fixtures();
+    val _b = boot(root(dir + "/site", false, 0, false, true));
+    val _a = get("/assets/gzonly.css", "accept-encoding\tbr, gzip");
+    assert headerValue("Content-Encoding") == "gzip";
+}
+
+test "static: with no variant the plain file goes out, still with Vary" {
+    val dir = fixtures();
+    val _b = boot(root(dir + "/site", false, 0, false, true));
+    val _a = get("/assets/app.css", "accept-encoding\tbr, gzip");
+    assert headerValue("Content-Encoding") == "";
+    assert headerValue("Vary") == "Accept-Encoding";
+}
+
+test "static: a variant older than its original is ignored" {
+    val dir = fixtures();
+    val _b = boot(root(dir + "/site", false, 0, false, true));
+    val _a = get("/assets/old.css", "accept-encoding\tbr");
+    assert headerValue("Content-Encoding") == "";
+    assert headerValue("ETag") == "\"" + rkStaticHashFile(dir + "/site/old.css") + "\"";
+}
+
+test "static: br;q=0 does not select the .br variant" {
+    val dir = fixtures();
+    val _b = boot(root(dir + "/site", false, 0, false, true));
+    val _a = get("/assets/zip.css", "accept-encoding\tbr;q=0");
+    assert headerValue("Content-Encoding") == "";
+    val _c = get("/assets/zip.css", "accept-encoding\tbr;q=0, gzip");
+    assert headerValue("Content-Encoding") == "gzip";
+}
+
+// ── step 4, over a socket ───────────────────────────────────────────────────
+
+fn serve(r: StaticRoot) -> i32 {
+    val _b = boot(r);
+    val _k = rkSetProp("rakun.main.keep-alive", "false");
+    val _r = rkChainSetRunner({ method, path, headersWire, queryWire, body -> runChain(method, path, headersWire, queryWire, body) });
+    return rkServe(0, { m, p, h, q, b -> rkDispatchHttp(m, p, h, q, b) });
+}
+
+fn request(path: string, extra: string) -> string {
+    return "GET " + path + " HTTP/1.1\r\nHost: x\r\n" + extra + "\r\n";
+}
+
+fn field(answer: string, i: i32) -> string {
+    return answer.split("|").at(i) ?? "";
+}
+
+test "static: the whole file, then the three range forms, over the socket" {
+    val dir = fixtures();
+    val port = serve(root(dir + "/site", false, 0, false, false));
+    val whole: string = wire(port, request("/assets/hundred.txt", ""));
+    assert field(whole, 0) == "200";
+    assert field(whole, 2) == "300";
+    assert field(whole, 8) == "bytes";
+    val head: string = wire(port, request("/assets/hundred.txt", "Range: bytes=0-99\r\n"));
+    assert field(head, 0) == "206";
+    assert field(head, 4) == "bytes 0-99/300";
+    assert field(head, 2) == "100";
+    assert field(head, 9) == "0123456789".repeat(10);
+    val tail: string = wire(port, request("/assets/hundred.txt", "Range: bytes=100-\r\n"));
+    assert field(tail, 4) == "bytes 100-299/300";
+    assert field(tail, 2) == "200";
+    val last: string = wire(port, request("/assets/hundred.txt", "Range: bytes=-100\r\n"));
+    assert field(last, 4) == "bytes 200-299/300";
+    assert field(last, 2) == "100";
+}
+
+test "static: an unsatisfiable range is 416, a multi-range is the whole file, a stale If-Range is 200" {
+    val dir = fixtures();
+    val port = serve(root(dir + "/site", false, 0, false, false));
+    val bad: string = wire(port, request("/assets/hundred.txt", "Range: bytes=500-600\r\n"));
+    assert field(bad, 0) == "416";
+    assert field(bad, 4) == "bytes */300";
+    val multi: string = wire(port, request("/assets/hundred.txt", "Range: bytes=0-9,20-29\r\n"));
+    assert field(multi, 0) == "200";
+    assert field(multi, 2) == "300";
+    val stale: string = wire(port, request("/assets/hundred.txt", "Range: bytes=0-9\r\nIf-Range: \"stale\"\r\n"));
+    assert field(stale, 0) == "200";
+    assert field(stale, 2) == "300";
+}
+
+test "static: a 200 MB file streams without a proportional allocation" {
+    val dir = fixtures();
+    val _s = sparseFile(dir + "/site/big.bin", 209715200);
+    val port = serve(root(dir + "/site", false, 0, false, false));
+    val _warm: string = wire(port, request("/assets/hundred.txt", ""));
+    val before: i32 = memoryTotal();
+    val big: string = wire(port, request("/assets/big.bin", ""));
+    val after: i32 = memoryTotal();
+    assert field(big, 0) == "200";
+    assert field(big, 2) == "209715200";
+    assert after - before < 4194304, (after - before).toString();
+}
+
+test "static: the default roots are /static/** and /public/** with index.html" {
+    val roots: StaticRoot[] = defaultStaticRoots("base");
+    assert roots.map({ r -> r.pattern + " " + r.directory + " " + r.indexFile }).join(",") == "/static/** base/static index.html,/public/** base/public index.html";
+}

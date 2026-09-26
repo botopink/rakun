@@ -3170,6 +3170,39 @@ one connection per command).
   the same `exposed("sessions")` check, and the `session` health indicator (DOWN
   naming the arm and the probe's reason).
 
+## Static files — `modules/rakun-web/src/static.bp` (front 82)
+
+One chain entry, `static` at +150 (after metrics, before compression), installed
+by an explicit `installStatic()`; roots by `registerStaticRoot(StaticRoot(pattern,
+directory, indexFile, cacheSeconds, immutable, useLastModified, precompressed))`
+(`/x/**` prefixes; `defaultStaticRoots(base)` gives `/static/**` and `/public/**`
+with `index.html`). The sidecar `rakun_static.erl` holds the root table (owned by
+`rakun_static_owner`), the decode, `locate/3` (a hand-rolled realpath and the
+containment check), the streamed SHA-256, and the wire: `send_file/5` writes the
+head and then `file:sendfile/5` (64 KiB `pread`s over TLS) and marks the request
+streamed. **No botopink value holds a file body.**
+
+Resolution order (the docblock of `static.bp` carries the full table): pattern
+match → one percent-decode (malformed, NUL or still-encoded `%252e` → 400) →
+segment rejection (`..`, `.`, empty, backslash, control → 404) → join and
+canonicalise, containment against the canonical root → index file → `stat` →
+fingerprint check (`name.<6 hex>.ext` must match the content, else 404) →
+encoding (`.br`/`.gz` by q-value; a variant older than the original is ignored;
+`Vary: Accept-Encoding` on every answer of a negotiating root) → conditional
+(`If-None-Match` decides over `If-Modified-Since`; 304 without `Content-Length`)
+→ range (206 / 416 `bytes */<size>`; a multi-range answers the whole file;
+`If-Range` stale → 200). **Segment rejection precedes every filesystem call** —
+the `rkStaticFsCalls()` counter is what the traversal tests assert — and
+containment precedes `stat` so a symlink out of the root is caught there. Every
+containment failure is 404, never 403. Overlapping roots resolve in registration
+order; a path some root admits but none resolves is 404 from this entry.
+`Cache-Control`: `public, max-age=N, immutable` for immutable roots and
+fingerprinted names (a year), `no-cache` for 0; `rakun.web.resources.cache.period`
+overrides every root (front 80's dev profile sets 0). `Last-Modified` only with
+`useLastModified` (default off: a reproducible build flattens mtimes). Over the
+socket a test must install `rkChainSetRunner(runChain)`, as `static_test.bp`
+does; the 200 MB streaming test asserts `erlang:memory(total)` moves < 4 MB.
+
 ## Validation — the bundled `validation` library (front 14, moved by decision 116 rule 5)
 
 Front 14's member `modules/rakun-validation` is gone: its seven modules are the
