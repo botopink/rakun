@@ -5,8 +5,8 @@
 //// it: that module would not compile and the runner skips it. So each cell
 //// WRITES a one-file project depending on this member by path, runs the
 //// compiler on it and asserts the output — front 08's `sql_build_test.bp`
-//// shape. The projects live under `.botopinkbuild/tmp/rakun-security-fixtures/`
-//// (git-ignored). Every transitive workspace dependency is listed directly,
+//// shape. The projects live under `$BOTOPINK_TEST_TMPDIR/rakun-security-fixtures/`
+//// (the run's own). Every transitive workspace dependency is listed directly,
 //// in dependency order: a transitive dependency is not loaded.
 ////
 //// The compiler is `$BOTOPINK_BIN`, else `botopink` on `PATH`, else the
@@ -14,10 +14,17 @@
 //// none of them the cells FAIL saying so — they never pass vacuously.
 
 import {testing.asserts} from "std";
-import {io: {fs, process}} from "std";
+import {io: {fs, process, env}} from "std";
 
+// This run's own scratch directory, `""` outside `botopink test`. `botopink
+// test` names it in `BOTOPINK_TEST_TMPDIR` — unique to the run and the target,
+// removed when the run ends. Never a path under the member's own directory:
+// the commonJS and the erlang cell of this member run side by side with that
+// directory as their cwd, and each `rm -rf`s a fixture before writing it, so
+// one deleted the other's project between its write and its compile.
 fn fixtureRoot() -> string {
-    return process.cwd() + "/.botopinkbuild/tmp/rakun-security-fixtures";
+    val tmp = env.read("BOTOPINK_TEST_TMPDIR").unwrapOr("");
+    return if (tmp == "") "" else tmp + "/rakun-security-fixtures";
 }
 
 fn compilerCommand() -> string {
@@ -29,7 +36,11 @@ fn dep(name: string, dir: string) -> string {
 }
 
 fn compileFixture(name: string, source: string, command: string) -> string {
-    val dir = fixtureRoot() + "/" + name;
+    val root = fixtureRoot();
+    return if (root == "") "BOTOPINK_TEST_TMPDIR is not set: run this suite under `botopink test`" else compileFixtureIn(root + "/" + name, name, source, command);
+}
+
+fn compileFixtureIn(dir: string, name: string, source: string, command: string) -> string {
     val here = process.cwd();
     val _m = process.runShell("rm -rf '" + dir + "' && mkdir -p '" + dir + "/src'");
     val deps: string[] = [

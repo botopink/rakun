@@ -12,7 +12,7 @@ import {rkSetProp, rkProp};
 import {rkRegisterRoute, rkRouteCount, rkDispatchHttp, rkServe};
 import {rkSetReplyHeader, rkReplyHeaders, rkBoot};
 import {toI32};
-import {async, io: {net, fs, process}, io.net.Socket} from "std";
+import {async, io: {net, fs, process, env}, io.net.Socket} from "std";
 
 // A socket handle for the `unwrapOr` fallback of a refused connect.
 #[@External.Erlang("""undefined""")]
@@ -265,9 +265,16 @@ test "rakun server: killing a connection process mid-request leaves another in-f
     assert bodyOf(get(port, "/srv/hello")) == "hello";
 }
 
+// A file in this run's own scratch directory (`BOTOPINK_TEST_TMPDIR`, unique to
+// the run and the target, removed when it ends) — not the member's directory,
+// which the commonJS and the erlang cell of this member share as their cwd.
+// Outside `botopink test` the directory does not exist and the cells fail.
+fn scratch(leaf: string) -> string {
+    return env.read("BOTOPINK_TEST_TMPDIR").unwrapOr("/BOTOPINK_TEST_TMPDIR-is-not-set") + "/" + leaf;
+}
+
 test "rakun server: the port file holds the BOUND port" {
-    val dir = process.cwd();
-    val file = dir + "/.rakun-port-file-test";
+    val file = scratch(".rakun-port-file-test");
     val _p = rkSetProp("rakun.main.port-file", file);
     val port = start();
     val _u = rkSetProp("rakun.main.port-file", "");
@@ -277,7 +284,7 @@ test "rakun server: the port file holds the BOUND port" {
 }
 
 test "rakun server: rkBoot writes the pid file and a clean return removes it" {
-    val file = process.cwd() + "/.rakun-pid-file-test";
+    val file = scratch(".rakun-pid-file-test");
     val _b = rkBoot("{\"rakun.main.pid-file\":\"" + file + "\",\"rakun.main.banner-mode\":\"off\"}");
     val pid = fs.readText(file).unwrapOr("");
     assert pid == process.pid().toString();

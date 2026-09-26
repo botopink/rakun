@@ -5,7 +5,7 @@
 //// not compile. So each cell here WRITES a one-file project that depends on
 //// this member by path, runs the compiler on it and asserts the refusal text
 //// and its location in the compiler's output. The projects live under
-//// `.botopinkbuild/tmp/rakun-data-fixtures/` (git-ignored), not under `test/`:
+//// `$BOTOPINK_TEST_TMPDIR/rakun-data-fixtures/` (the run's own), not under `test/`:
 //// the runner compiles every `.bp` below `test/`.
 ////
 //// The compiler is `$BOTOPINK_BIN`, else `botopink` on `PATH`, else the
@@ -13,10 +13,17 @@
 //// none of them the cells FAIL saying so — they never pass vacuously.
 
 import {testing.asserts} from "std";
-import {io: {fs, process}} from "std";
+import {io: {fs, process, env}} from "std";
 
+// This run's own scratch directory, `""` outside `botopink test`. `botopink
+// test` names it in `BOTOPINK_TEST_TMPDIR` — unique to the run and the target,
+// removed when the run ends. Never a path under the member's own directory:
+// the commonJS and the erlang cell of this member run side by side with that
+// directory as their cwd, and each `rm -rf`s a fixture before writing it, so
+// one deleted the other's project between its write and its compile.
 fn fixtureRoot() -> string {
-    return process.cwd() + "/.botopinkbuild/tmp/rakun-data-fixtures";
+    val tmp = env.read("BOTOPINK_TEST_TMPDIR").unwrapOr("");
+    return if (tmp == "") "" else tmp + "/rakun-data-fixtures";
 }
 
 fn compilerCommand() -> string {
@@ -32,7 +39,11 @@ fn buildFixture(name: string, source: string) -> string {
 // The same, through `botopink test`: the one command that also runs `erlc`,
 // which is where a duplicate function definition is refused.
 fn compileFixture(name: string, source: string, command: string) -> string {
-    val dir = fixtureRoot() + "/" + name;
+    val root = fixtureRoot();
+    return if (root == "") "BOTOPINK_TEST_TMPDIR is not set: run this suite under `botopink test`" else compileFixtureIn(root + "/" + name, name, source, command);
+}
+
+fn compileFixtureIn(dir: string, name: string, source: string, command: string) -> string {
     val here = process.cwd();
     val _m = process.runShell("rm -rf '" + dir + "' && mkdir -p '" + dir + "/src'");
     val manifest = "{\n  \"name\": \"" + name + "\",\n  \"version\": \"0.0.1\",\n  \"src\": \"src/\",\n  \"entry\": \"root.bp\",\n  \"target\": \"erlang\",\n  \"targets\": [\"erlang\"],\n  \"dependencies\": {\n    \"rakun\": { \"path\": \"" + here + "/../rakun\" },\n    \"rakun-actuator-api\": { \"path\": \"" + here + "/../rakun-actuator-api\" },\n    \"rakun-data\": { \"path\": \"" + here + "\" }\n  }\n}\n";

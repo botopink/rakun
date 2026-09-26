@@ -382,6 +382,16 @@ on the warm path.
   filter chain, CORS, compression, error handling and API versioning all enter
   here — and front 10's security filter and front 11's request metrics enter
   through front 07's chain, not through a second hook.
+- A test writes files ONLY under `BOTOPINK_TEST_TMPDIR` — the run's own scratch
+  directory, which `botopink test` creates, names absolute, and removes with the
+  run. Never under the member's directory (`process.cwd()`, `.botopinkbuild/tmp/`):
+  the gate runs a member's commonJS and erlang cells side by side with that
+  directory as cwd. The fixture builds (`rakun-data`, `rakun-security`,
+  `rakun-client`, `rakun-scheduling`), the pid/port files of
+  `erlang_runtime_server_test.bp`, `ssl_bundle_test.bp`'s PEM files and
+  `rakun-web`'s static roots all live there; with them under the member,
+  `rakun-data·commonJS` measured 6, `build`, 1 failed on three consecutive gates.
+  Outside `botopink test` the variable is unset and those cells fail.
 
 ### The server half — cells with no node twin
 
@@ -2615,7 +2625,7 @@ depends on this member (its Redis transport), so the cache edge is a runtime slo
 
 `builder_test.bp` (14), `request_test.bp` (15), `ssrf_test.bp` (11), `cache_test.bp`
 (9), `exchange_test.bp` (6), `exchange_build_test.bp` (7, fixture projects under
-`.botopinkbuild/tmp/rakun-client-fixtures/`), `health_test.bp` (4), `tls_test.bp` (4,
+`$BOTOPINK_TEST_TMPDIR/rakun-client-fixtures/`), `health_test.bp` (4), `tls_test.bp` (4,
 throwaway CA from `openssl`). The stub server is the core's listener, `rkServe(0, …)`
 with `rakun.main.keep-alive=false` and a per-file dispatcher on 127.0.0.1 (re-admitted
 with `rakun.http.clients.allow=127.0.0.0/8`); no external network. The mixed-DNS case
