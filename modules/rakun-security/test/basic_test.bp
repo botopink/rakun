@@ -1,0 +1,184 @@
+//// rakun-security — `Authorization: Basic` (front 10 step 4), the in-memory
+//// and SQL user stores (step 5) and the failure shape (step 8).
+////
+//// The in-memory users are written to `rakun.security.users[<i>].*` by each
+//// cell and cleared by `clearUsers()` before it returns: test files share one
+//// node and its property table.
+
+import {testing.asserts} from "std";
+import {Response, rkSetProp} from "rakun";
+import {resetChain, runChain, rkChainSetTerminal, headerValue, problemLog} from "rakun-web";
+import {dataSourceBoot, defaultDataSourceName, sqlTemplate, SqlTemplate, Row, Rows, Param, param, __rkMake_SqlTemplate} from "rakun-data";
+import {Authentication, anonymous, currentAuthentication} from "principal";
+import {SecurityPolicy, PathRule} from "policy";
+import {encodePassword, rkSecEncodeCount, rkSecEncodeReset} from "password";
+import {UserDetails, UserStore, configuredUsers, inMemoryStore, loadUser} from "users";
+import {SqlUserDetailsService, sqlUserStore, userSchema, __rkQuery_loadByUsername} from "users_sql";
+import {BasicCredentials, parseBasic, verifyBasic, verifyUser, basicHeader} from "basic";
+import {installSecurityWith, challengeHeader, unauthorizedDetail} from "security_filter";
+
+fn setUser(i: i32, name: string, password: string, authorities: string, enabled: string) -> i32 {
+    val base: string = "rakun.security.users[" + i.toString() + "].";
+    val _u = rkSetProp(base + "username", name);
+    val _p = rkSetProp(base + "password", encodePassword(password));
+    val _a = rkSetProp(base + "authorities", authorities);
+    return rkSetProp(base + "enabled", enabled);
+}
+
+fn clearUsers() -> i32 {
+    val _a = rkSetProp("rakun.security.users[0].username", "");
+    val _b = rkSetProp("rakun.security.users[1].username", "");
+    return rkSetProp("rakun.security.users[2].username", "");
+}
+
+fn users() -> i32 {
+    val _a = setUser(0, "ana", "pa:ss:word", "ROLE_USER, ROLE_AUDIT", "");
+    val _b = setUser(1, "bob", "hunter2", "ROLE_USER", "false");
+    return 0;
+}
+
+fn chain() -> i32 {
+    val _r = resetChain();
+    val _p = installSecurityWith(SecurityPolicy(rules: [], defaultRequirement: "authenticated"));
+    return rkChainSetTerminal({ method, path, headersWire, queryWire, body ->
+        val a: Authentication = currentAuthentication();
+        Response.ok(a.principal.name + " " + a.method + " " + a.principal.authorities.join(","));
+    });
+}
+
+fn basicWire(name: string, password: string) -> string {
+    return "authorization\t" + basicHeader(name, password);
+}
+
+fn whyOf(r: @Result<Authentication, string>) -> string {
+    return case r {
+        Ok(a) -> "ok " + a.principal.name;
+        Error(e) -> e;
+    };
+}
+
+// ── step 4 ──────────────────────────────────────────────────────────────────
+
+test "basic: a known user with the right password authenticates" {
+    val _u = users();
+    val _c = chain();
+    val res: Response = runChain("GET", "/orders", basicWire("ana", "pa:ss:word"), "", "");
+    val _x = clearUsers();
+    assert res.status == 200, res.body;
+    assert res.body == "ana basic ROLE_USER,ROLE_AUDIT", res.body;
+}
+
+test "basic: a password containing a colon round-trips - the split takes the first colon only" {
+    val c = parseBasic(basicHeader("ana", "pa:ss:word"));
+    val creds: BasicCredentials = c.unwrapOr(BasicCredentials(username: "", password: ""));
+    assert creds.username == "ana";
+    assert creds.password == "pa:ss:word";
+    assert parseBasic("Basic bm9jb2xvbg==").isError();
+    assert parseBasic("Basic !!!").isError();
+    assert parseBasic("Bearer abc").isError();
+}
+
+test "basic: a wrong password and an unknown user produce the identical response and one derivation each" {
+    val _u = users();
+    val _c = chain();
+    val _r = rkSecEncodeReset();
+    val wrong: Response = runChain("GET", "/orders", basicWire("ana", "nope"), "", "");
+    val wrongHeader: string = headerValue("WWW-Authenticate");
+    val afterWrong: i32 = rkSecEncodeCount();
+    val stranger: Response = runChain("GET", "/orders", basicWire("nobody", "nope"), "", "");
+    val strangerHeader: string = headerValue("WWW-Authenticate");
+    val afterStranger: i32 = rkSecEncodeCount();
+    val _x = clearUsers();
+    assert wrong.status == 401;
+    assert stranger.status == 401;
+    assert wrong.body == stranger.body;
+    assert wrongHeader == strangerHeader;
+    assert afterWrong == 1, afterWrong.toString();
+    assert afterStranger - afterWrong == 1, (afterStranger - afterWrong).toString();
+}
+
+test "basic: the 401 carries WWW-Authenticate and a problem detail, never the credentials" {
+    val _u = users();
+    val _c = chain();
+    val res: Response = runChain("GET", "/orders", basicWire("ana", "pa:ss:wrong"), "", "");
+    val challenge: string = headerValue("WWW-Authenticate");
+    val contentType: string = headerValue("Content-Type");
+    val _x = clearUsers();
+    assert res.status == 401;
+    assert challenge == challengeHeader();
+    assert challenge == "Bearer realm=\"rakun\", Basic realm=\"rakun\"", challenge;
+    assert contentType == "application/problem+json";
+    try asserts.contains(res.body, "\"status\":401");
+    try asserts.contains(res.body, unauthorizedDetail());
+    try asserts.notContains(res.body, "pa:ss:wrong");
+    try asserts.notContains(res.body, "ana");
+    try asserts.notContains(problemLog(), "pa:ss");
+}
+
+test "basic: a request with no credentials gets the same 401 as bad ones" {
+    val _u = users();
+    val _c = chain();
+    val none: Response = runChain("GET", "/orders", "", "", "");
+    val bad: Response = runChain("GET", "/orders", basicWire("ana", "x"), "", "");
+    val other: Response = runChain("GET", "/orders", "authorization\tDigest abc", "", "");
+    val _x = clearUsers();
+    assert none.status == 401;
+    assert none.body == bad.body;
+    assert other.status == 401;
+    assert other.body == bad.body;
+}
+
+// ── step 5 ──────────────────────────────────────────────────────────────────
+
+test "users: the in-memory arm parses the configured user list" {
+    val _u = users();
+    val list: UserDetails[] = configuredUsers();
+    val store: UserStore = inMemoryStore();
+    val ana: UserDetails = loadUser(store, "ana") ?? UserDetails(username: "", passwordHash: "", authorities: [], enabled: false);
+    val missing: ?UserDetails = loadUser(store, "carol");
+    val _x = clearUsers();
+    assert list.length == 2;
+    assert list.map({ u -> u.username }).join(",") == "ana,bob";
+    assert ana.authorities.join(",") == "ROLE_USER,ROLE_AUDIT";
+    assert ana.enabled;
+    assert ana.passwordHash.startsWith("{pbkdf2}310000$");
+    assert list.at(1).unwrapOr(ana).enabled == false;
+    var found = false;
+    if (missing) { _ -> found = true; };
+    assert found == false;
+}
+
+test "users: a disabled user is rejected with the same 401 as a wrong password" {
+    val _u = users();
+    val _c = chain();
+    val _r = rkSecEncodeReset();
+    val disabled: Response = runChain("GET", "/orders", basicWire("bob", "hunter2"), "", "");
+    val afterDisabled: i32 = rkSecEncodeCount();
+    val wrong: Response = runChain("GET", "/orders", basicWire("ana", "hunter2"), "", "");
+    val _x = clearUsers();
+    assert disabled.status == 401;
+    assert disabled.body == wrong.body;
+    assert afterDisabled == 1;
+}
+
+test "users: the SQL arm loads a user through a front 08 #[query] statement" {
+    val _url = rkSetProp("rakun.datasource.url", "ets:memory");
+    val _b = dataSourceBoot();
+    val sql: SqlTemplate = sqlTemplate(defaultDataSourceName());
+    for (userSchema()) { ddl -> val _d = sql.update(ddl, []); };
+    val _i = sql.update("INSERT INTO users (username, password, enabled) VALUES (:u, :p, :e)", [param("u", "dora"), param("p", encodePassword("s3cret")), param("e", "true")]);
+    val _j = sql.update("INSERT INTO users (username, password, enabled) VALUES (:u, :p, :e)", [param("u", "eve"), param("p", encodePassword("s3cret")), param("e", "false")]);
+    val _k = sql.update("INSERT INTO authorities (username, authority) VALUES (:u, :a)", [param("u", "dora"), param("a", "ROLE_USER")]);
+    val _l = sql.update("INSERT INTO authorities (username, authority) VALUES (:u, :a)", [param("u", "dora"), param("a", "ROLE_ADMIN")]);
+    val arm = SqlUserDetailsService(sql: __rkMake_SqlTemplate());
+    val dora: UserDetails = arm.loadByUsername("dora") ?? UserDetails(username: "", passwordHash: "", authorities: [], enabled: false);
+    assert dora.username == "dora";
+    assert dora.enabled;
+    assert dora.authorities.join(",") == "ROLE_USER,ROLE_ADMIN", dora.authorities.join(",");
+    assert __rkQuery_loadByUsername() == "SELECT username, password, enabled FROM users WHERE username = :username";
+    val store: UserStore = sqlUserStore(__rkMake_SqlTemplate());
+    assert whyOf(verifyUser(store, "dora", "s3cret")) == "ok dora";
+    assert whyOf(verifyUser(store, "dora", "wrong")) == "bad credentials";
+    assert whyOf(verifyUser(store, "eve", "s3cret")) == "bad credentials";
+    assert whyOf(verifyUser(store, "nobody", "s3cret")) == "bad credentials";
+}

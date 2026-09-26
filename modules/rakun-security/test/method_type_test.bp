@@ -1,0 +1,61 @@
+//// rakun-security — a TYPE-level requirement under `#[methodSecurity]`
+//// (front 10 step 6). In its own file: with two `#[methodSecurity]` types in one
+//// module, a proxy's `self.inner.<m>()` lowers to the LAST such type's
+//// function (`error:undef [{…@@Runbook,status,[{…@@Ledger}]}]`) — a compiler
+//// defect recorded in the front's report, not a property of this module.
+
+import {testing.asserts} from "std";
+import {service, managed, rkScan, rkSingleton, rkEnter, rkDone, rkRegisterBean} from "rakun";
+import {Authentication, anonymous, authenticatedAs, withAuthentication} from "principal";
+import {methodSecurity, secured, permitAll, rkRequireAuthority} from "method_security";
+
+// A type-level requirement, inherited by the unmarked method and overridden
+// by the marked ones.
+#[service]
+#[methodSecurity]
+#[secured("ROLE_OPS")]
+#[managed]
+pub type Runbook {
+    pub fn restart(self: Self) -> string {
+        return "restarted";
+    }
+
+    #[permitAll]
+    pub fn read(self: Self) -> string {
+        return "steps";
+    }
+
+    #[secured("ROLE_ADMIN")]
+    pub fn wipe(self: Self) -> string {
+        return "wiped";
+    }
+}
+
+fn ana() -> Authentication {
+    return authenticatedAs("ana", ["ROLE_USER"], "jwt");
+}
+
+fn ops() -> Authentication {
+    return authenticatedAs("ops", ["ROLE_OPS"], "jwt");
+}
+
+test "method type: an unmarked method inherits the type's #[secured] requirement" {
+    try asserts.throwsWith({ ->
+        val _r = withAuthentication(ana(), { -> __rkMake_RunbookSec().restart() });
+        0;
+    }, "rakun.security.forbidden");
+    try asserts.throwsWith({ ->
+        val _r = withAuthentication(anonymous(), { -> __rkMake_RunbookSec().restart() });
+        0;
+    }, "rakun.security.unauthorized");
+    assert withAuthentication(ops(), { -> __rkMake_RunbookSec().restart() }) == "restarted";
+}
+
+test "method type: a method's own marker overrides the type's" {
+    assert withAuthentication(anonymous(), { -> __rkMake_RunbookSec().read() }) == "steps";
+    try asserts.throwsWith({ ->
+        val _w = withAuthentication(ops(), { -> __rkMake_RunbookSec().wipe() });
+        0;
+    }, "rakun.security.forbidden");
+    assert withAuthentication(authenticatedAs("root", ["ROLE_ADMIN"], "jwt"), { -> __rkMake_RunbookSec().wipe() }) == "wiped";
+}

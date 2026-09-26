@@ -2895,6 +2895,172 @@ Measured: `modules/rakun-scheduling` 0 → **67 / 0** (0 compile failures) —
 `registry_test` 8, `schedule_test` 7 (the seven test-snap.md scenarios, rendered
 exactly as the snapshots). Suite ~35 s, most of it `build_test`'s fixture builds.
 
+## Security — `modules/rakun-security/` (front 10)
+
+`modules/rakun-security/` is the member fronts 10 and 79 share. Front 10 owns the
+manifest, `src/root.bp`, every `src/*.bp` and `src/sidecars/rakun_security.erl`;
+front 79 appends `pub mod oauth2;` / `oidc` / `saml2` / `ldap` (and their files to
+the manifest's `files`) and reorders nothing. The member depends on `rakun`,
+`rakun-actuator-api`, `rakun-web` and `rakun-data` (all `{ "workspace": true }`;
+`rakun-actuator-api` is listed because rakun-data needs it and a transitive
+dependency is not loaded). `modules/rakun` and `modules/rakun-web` are untouched.
+
+**Measured 2026-09-26:** `botopink test` in `modules/rakun-security/` (erlang, the
+only target) is **73 passed / 0 failed / 0 compile failures**; the run includes a
+consumer fixture that builds the front's example against the package and runs its
+8 tests.
+
+| File | What |
+|---|---|
+| `src/principal.bp` | `Principal`, `Authentication` (NO credentials field), `anonymous`, `authenticatedAs`, the context cells (`rkSecWithin`, `rkSecWire`), `currentAuthentication` (raises outside a request), `withAuthentication`, the decision note |
+| `src/policy.bp` | `PathRule`, `SecurityPolicy`, `CompiledPolicy`, `Decision`, `compilePolicy` / `compileOrFail`, `decide`, `admits`, `requiredAuthority`, `providedPolicy` |
+| `src/jwt.bp` | `JwtConfig` (`rakun.security.jwt.*`), `verifyJwtAt` / `verifyJwt`, `signatureMatches`, `signJwt`, the `testToken*` fixtures |
+| `src/password.bp` | `PasswordEncoder`, `Pbkdf2PasswordEncoder`, `encodePassword`, `matchesStored` (the delegating check), `needsUpgrade`, `dummyVerify`, `encoderProblem`, the derivation counter |
+| `src/users.bp` | `UserDetails`, `UserDetailsService`, `InMemoryUserDetailsService`, `configuredUsers`, `usersProblem`, `UserStore` (the container seam), `userDetailsService()` |
+| `src/users_sql.bp` | `SqlUserDetailsService` (two `#[query]` statements), `sqlUserStore`, `userSchema` |
+| `src/basic.bp` | `parseBasic`, `verifyUser`, `verifyBasic`, `basicHeader` |
+| `src/csrf.bp` | the double-submit rule: `challenged`, `tokenMatches`, `csrfPasses`, `issueTokenCookie` |
+| `src/method_security.bp` | `#[methodSecurity]` (emits `<Type>Sec`), `#[secured]`, `#[permitAll]`, `#[preAuthorize]` (always fails), `rkRequireAuthority` |
+| `src/security_filter.bp` | the chain entry `securityEntry`, the failure shape, `securityBoot`, `installSecurity()` / `installSecurityWith(policy)` |
+| `src/security.bp` | the facade: `current`, `principal`, `testToken*`, `probe`, `withAuth`, `tryOutsideRequest` |
+| `src/sidecars/rakun_security.erl` | the context (`within/2`: process dictionary, restored in `after`), PBKDF2 + salt, the derivation counter, the security-tag guard, `attempt/1` |
+
+### Installing it
+
+A library module's body never runs on erlang, so nothing self-registers. The
+application calls, after rakun-web's `bootWeb()`:
+
+```bp
+val _s = installSecurity();   // boot checks, policy compiled once, advices, entry at -300
+```
+
+`installSecurity()` runs `securityBoot()` (encoder, in-memory users, JWT
+configuration — every refusal raises naming the key), compiles the `#[provides]`d
+`SecurityPolicy` (or the default) through rakun-web's `matcher`, registers the two
+advices (`rakun.security.unauthorized` → 401, `rakun.security.forbidden` → 403) with
+front 07's error entry, and registers the entry at `orderSecurity()` (−300): after
+the request id, before URL rules, CORS, API versioning, the problem boundary and
+every application filter.
+
+### The policy order rule
+
+Rules match in DECLARATION ORDER and the FIRST match wins — `/api/public/:path*`
+before `/api/:path*`, or the public subtree is not public. `defaultRequirement` is
+`authenticated`; `permitAll` there fails at boot and no property relaxes it.
+Requirements: `permitAll`, `authenticated`, `hasRole:<R>` (authority `ROLE_<R>`),
+`hasAuthority:<A>`; anything else fails at boot naming the rule. The pattern grammar
+is front 65's (`:name`, `:name*`, a raw `(regex)`, literals escaped) — compiled once,
+matched with `regex.runCompiled`.
+
+Per request: decide the path → authenticate (`Bearer` → JWT, `Basic` → user store,
+any other scheme → invalid) → credentials PRESENT AND INVALID answer 401 whatever the
+path requires → CSRF → anonymous and not admitted 401, authenticated and not
+admitted 403 naming the REQUIRED authority → the rest of the chain runs inside
+`rkSecWithin` with a guard that turns a method-security raise into the same 401/403.
+
+### The stored-hash format
+
+`{pbkdf2}<iterations>$<salt>$<hash>` — PBKDF2-HMAC-SHA256 over
+`crypto:pbkdf2_hmac/5`, 310 000 iterations, 16-byte salt from
+`crypto:strong_rand_bytes/1`, 32-byte key; salt and hash base64url without padding
+(text, because there is no byte type). `matchesStored` picks the encoder by the
+prefix and verifies with the STORED iteration count; `needsUpgrade` says when to
+re-encode. An unknown or missing prefix RAISES naming it. It is the only encoder:
+bcrypt / scrypt / Argon2 are NIFs a run-time-compiled sidecar cannot load, so
+`rakun.security.password.encoder=bcrypt` (or `scrypt`, `argon2`) fails at boot
+naming the NIF, and any other value fails naming it. `matches` is constant-time; the
+unknown-user path runs `dummyVerify` so every Basic failure costs one derivation —
+asserted by counting derivations (`rkSecEncodeCount`), not by a clock.
+
+### Keys (all `rakun.security.*`, decision 115 rule 4)
+
+`rakun.security.jwt.secret` (≥ 32 characters, or boot fails; unset: every bearer
+token is rejected), `.jwt.algorithm` (only `HS256`; anything else fails at boot —
+RS256/JWKS are front 79's), `.jwt.clock-skew` (`30` / `30s`, default 30),
+`.jwt.issuer`, `.jwt.audience`, `.jwt.authorities-claim` (default `roles`; an array
+or a space-separated string), `.jwt.authority-prefix` (default none);
+`rakun.security.users[<i>].username|password|authorities|enabled` (the in-memory
+arm; `password` is a `{…}` hash — a plain one fails at boot; a `production` or `prod`
+profile active fails at boot); `rakun.security.password.encoder`;
+`rakun.security.csrf.session-cookie` (default `SESSION`); `rakun.security.realm`
+(default `rakun`).
+
+### Decisions, and why
+
+- **JWT**: `alg` is checked against the CONFIGURED algorithm before the signature is
+  looked at (alg confusion refused by construction); the signature is compared with
+  std's `hash.equalsConstantTime`; `exp` is REQUIRED (a token without expiry lives
+  forever — restrictive default); `nbf`/`iat` in the future beyond the skew are
+  refused. `verifyJwtAt` never raises: one part, four parts, non-base64, non-UTF-8,
+  non-JSON are all `Error`, and the entry turns every `Error` into ONE 401 body.
+- **Failure shape**: every body is front 07's RFC 9457 problem detail (`instance` =
+  the request path). 401 carries `WWW-Authenticate: Bearer realm="rakun", Basic
+  realm="rakun"`, one body for every reason. 403 names the required authority, never
+  the caller's. Reasons from `verifyJwt`/`verifyBasic` are dropped unread.
+- **Context**: process dictionary installed for the rest of the chain and restored in
+  an `after`; reading it outside a request raises (no anonymous default, no
+  predicate). `withAuthentication(auth, work)` is the explicit way in for a job.
+- **Method security**: `#[methodSecurity]` emits `<Type>Sec(inner: <Type>)` + 
+  `__rkMake_<Type>Sec()`, `#[transactional]`'s shape; the application site imports
+  `methodSecurity`, `secured`, `permitAll`, `rkRequireAuthority` and the core's
+  `rkSingleton`. A method's marker wins over the type's (`#[secured]` / `#[permitAll]`
+  on the type); unmarked everywhere is `authenticated`. `#[permitAll]` still reads the
+  context, so ANY proxy method outside a request raises. `#[preAuthorize]` fails the
+  build naming the supported forms; `#[secured]` with an expression fails too;
+  reflection-lossy parameters fail as for `<Type>Tx`.
+- **CSRF**: double-submit (`XSRF-TOKEN` cookie, `SameSite=Strict`, readable by
+  script; `X-CSRF-Token` header), required on every method but GET/HEAD/OPTIONS/TRACE
+  when the request carries AMBIENT credentials: the session cookie OR Basic
+  credentials (a browser resends cached Basic credentials). Bearer with no session
+  cookie is exempt; bearer WITH the cookie is challenged. The token cookie is issued
+  when the session cookie is present and no token cookie is.
+
+### Deviations from the README, each with its reason
+
+- **`UserStore`, not a `UserDetailsService` bean.** Measured: a value typed as an
+  implementing type does not convert to the behavior's type (`type mismatch: expected
+  UserDetailsService, got InMemoryUserDetailsService`; only a record literal returned
+  directly does), so the container cannot hold a behavior value. The seam is
+  `UserStore(name, load: fn(username) -> ?UserDetails)`; an application
+  `#[provides] fn … -> UserStore { return userStore("x", { n -> Mine().loadByUsername(n) }) }`
+  and it wins. The SQL arm is selected the same way (`sqlUserStore(__rkMake_SqlTemplate())`),
+  not by a property.
+- **`security.current()` is `current()`.** A module of a path/workspace dependency is
+  not importable as a namespace (`unbound variable 'security'`; the same form against
+  the bundled `routing` builds). A consumer imports flat from
+  `"rakun-security/security"` (the module name is needed: `jwt` exports the same
+  fixture names).
+- **The test-snap helper `assertSecurity` does not exist**; `test/security_test.bp`
+  renders the spec's lines and asserts them as one string. Two lines differ from the
+  spec on purpose: the decision rendered is the LAST one taken, so `DELETE
+  /api/admin/audit [root]` reads `granted secured ROLE_ADMIN` (the proxy decided
+  after the path rule), and the CSRF "matching token" request carries
+  `XSRF-TOKEN=csrf-0001` in its cookie as well as the header — double-submit
+  compares the two.
+- **Re-encode on login is not performed**: the stores are read-only (no
+  `UserDetailsPasswordService`); `needsUpgrade(stored)` is provided for a store that
+  can write.
+- The test plan's files are all there plus `security_test.bp` (the spec's shared
+  source end to end through the router), `method_type_test.bp` (a type-level
+  requirement — its own file because of finding 1), `users_test.bp` (sorts last: its
+  `#[provides] UserStore` is node-wide) and `build_test.bp` (the comptime refusals and
+  the consumer example, front 08's fixture shape).
+
+### Compiler findings (minimal repros under `~/.cache/bp-rakun/front-10/`)
+
+1. **A decorator-emitted type's `self.inner.m()` lowers to the wrong type** when the
+   module has two decorated types: `LedgerSec.status` becomes
+   `…@@Runbook:status(element(2, Self))` → `undef` (`repro_proxy_dispatch/`). The same
+   proxies written by hand lower correctly. `#[transactional]` emits the same shape
+   (not measured here). Workaround: one `#[methodSecurity]` type per module.
+2. **A path/workspace dependency's module is not importable as a namespace**
+   (`repro_namespace_import/`).
+3. **An implementing-type value does not convert to its behavior's type**
+   (`repro_behavior_value/`).
+4. Gotchas met: `unknown` is a reserved word (`val unknown = …` does not parse); in a
+   consumer fixture a property set with `rkSetProp` in one test cell was not visible
+   in the next, so each cell sets what it reads.
+
 ## Validation — the bundled `validation` library (front 14, moved by decision 116 rule 5)
 
 Front 14's member `modules/rakun-validation` is gone: its seven modules are the

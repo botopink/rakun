@@ -1,0 +1,221 @@
+//// rakun-security — the chain entry: one filter, one policy, one context.
+//// Front 10 steps 1, 7 and 8.
+////
+//// The entry registers at `orderSecurity()` (−300 in front 07's band): after
+//// the request id and BEFORE the URL rules, CORS, API versioning, the
+//// problem-detail boundary and every application filter — nothing that could
+//// leak information runs ahead of the decision. It is registered by an
+//// explicit call, `installSecurity()`, because a library module's body never
+//// runs on erlang (a decorator self-registration there would never execute).
+////
+//// PER REQUEST, IN THIS ORDER:
+////
+////   1. the policy decides the path's requirement (first rule wins, `default`
+////      when none matched);
+////   2. `Authorization` is read: `Bearer` → HS256 JWT, `Basic` → the user store,
+////      anything else presented → invalid. Credentials that are PRESENT AND
+////      INVALID answer 401 whatever the path requires — a caller that sent a
+////      forged token is told so, not silently treated as anonymous;
+////   3. CSRF (`csrf.bp`) — 403 when a challenged request has no matching token;
+////   4. the requirement: anonymous and not admitted → 401, authenticated and
+////      not admitted → 403 naming the REQUIRED authority;
+////   5. the rest of the chain runs with the context installed, and a method
+////      security refusal raised inside it becomes the same 401/403.
+////
+//// WHAT FAILURE LOOKS LIKE. Every body is an RFC 9457 problem detail through
+//// front 07's `problemResponse`, so it has the same shape as every other
+//// failure. A 401 carries `WWW-Authenticate` and ONE body for every reason —
+//// no credentials, an unknown user, a wrong password, a disabled user, an
+//// expired, forged or malformed token are byte-identical. A 403 names the
+//// required authority and never the caller's. No body, header or log line
+//// carries a password or a token: the reasons `verifyJwt`/`verifyBasic` give
+//// are dropped here, unread.
+
+import {Response} from "rakun";
+import {
+    WebRequest,
+    Chain,
+    withHeader,
+    registerFilter,
+    orderSecurity,
+    problemFor,
+    problemResponse,
+    ProblemDetail,
+    registerAdvice,
+    adviceTags,
+    Matcher,
+} from "rakun-web";
+import {regex.Regex} from "std";
+import {Authentication, anonymous, withAuthentication, rkSecNoteDecision, realm} from "principal";
+import {SecurityPolicy, CompiledPolicy, CompiledRule, Decision, providedPolicy, compileOrFail, decide, admits, requiredAuthority} from "policy";
+import {verifyJwt, jwtConfig, jwtConfigProblem} from "jwt";
+import {encoderProblem} from "password";
+import {usersProblem, userDetailsService} from "users";
+import {verifyBasic} from "basic";
+import {csrfPasses, issueTokenCookie} from "csrf";
+import {unauthorizedTag, forbiddenTag} from "method_security";
+
+// ── host cells ──────────────────────────────────────────────────────────────
+
+#[@External.Erlang("rakun_security", "guard")]
+pub declare fn rkSecGuard(work: fn() -> Response, onDenied: fn(tag: string, detail: string) -> Response) -> Response;
+
+#[@External.Erlang("rakun_security", "slot_put")]
+pub declare fn rkSecSlotPut(key: string, value: string) -> i32;
+
+#[@External.Erlang("rakun_security", "slot")]
+pub declare fn rkSecSlot(key: string) -> string;
+
+// ── authentication ──────────────────────────────────────────────────────────
+
+// `presented`: the request carried an `Authorization` header. `valid`: it
+// verified (always true when nothing was presented).
+pub type AuthOutcome(auth: Authentication, presented: bool, valid: bool)
+
+fn outcomeOf(r: @Result<Authentication, string>) -> AuthOutcome {
+    if (r.isError()) return AuthOutcome(auth: anonymous(), presented: true, valid: false);
+    return AuthOutcome(auth: r.unwrapOr(anonymous()), presented: true, valid: true);
+}
+
+pub fn authenticate(req: WebRequest) -> AuthOutcome {
+    val header: string = req.header("authorization").trim();
+    if (header == "") return AuthOutcome(auth: anonymous(), presented: false, valid: true);
+    val lower: string = header.toLower();
+    if (lower.startsWith("bearer ")) return outcomeOf(verifyJwt(header.slice(7, header.length()).trim()));
+    if (lower.startsWith("basic ")) return outcomeOf(verifyBasic(userDetailsService(), header));
+    return AuthOutcome(auth: anonymous(), presented: true, valid: false);
+}
+
+// ── the failure shape ───────────────────────────────────────────────────────
+
+pub fn challengeHeader() -> string {
+    return "Bearer realm=\"" + realm() + "\", Basic realm=\"" + realm() + "\"";
+}
+
+pub fn unauthorizedDetail() -> string {
+    return "Full authentication is required to access this resource";
+}
+
+pub fn forbiddenDetail(authority: string) -> string {
+    return "Access requires the authority " + authority;
+}
+
+pub fn csrfDetail() -> string {
+    return "A valid CSRF token is required for this request";
+}
+
+fn instance() -> string {
+    return rkSecSlot("path");
+}
+
+pub fn unauthorizedProblem() -> ProblemDetail {
+    val _w = withHeader(Response(status: 401, body: ""), "WWW-Authenticate", challengeHeader());
+    return problemFor(401, unauthorizedDetail(), instance());
+}
+
+pub fn forbiddenProblem(authority: string) -> ProblemDetail {
+    return problemFor(403, forbiddenDetail(authority), instance());
+}
+
+pub fn unauthorizedResponse() -> Response {
+    return problemResponse(unauthorizedProblem());
+}
+
+pub fn forbiddenResponse(authority: string) -> Response {
+    return problemResponse(forbiddenProblem(authority));
+}
+
+pub fn csrfResponse() -> Response {
+    return problemResponse(problemFor(403, csrfDetail(), instance()));
+}
+
+// A method security refusal raised inside the handler.
+pub fn deniedResponse(tag: string, detail: string) -> Response {
+    if (tag == forbiddenTag()) return forbiddenResponse(detail);
+    return unauthorizedResponse();
+}
+
+// ── the entry ───────────────────────────────────────────────────────────────
+
+fn rendered(d: Decision) -> string {
+    return d.pattern + " " + d.requirement;
+}
+
+// Early returns stay at the top level of the body: a `return` in an `if`
+// nested in another `if` is dropped on erlang (a recorded compiler defect).
+pub fn securityEntry(p: CompiledPolicy, req: WebRequest, chain: Chain) -> Response {
+    val _p = rkSecSlotPut("path", req.path);
+    val d: Decision = decide(p, req.path);
+    val outcome: AuthOutcome = authenticate(req);
+    val who: string = if (outcome.valid && outcome.auth.authenticated) outcome.auth.principal.name else "-";
+    val _w = rkSecSlotPut("principal", who);
+    if (outcome.valid == false) {
+        val _i = rkSecNoteDecision("denied " + rendered(d));
+        return unauthorizedResponse();
+    };
+    val auth: Authentication = outcome.auth;
+    if (csrfPasses(req, auth.method) == false) {
+        val _c = rkSecNoteDecision("denied csrf");
+        return csrfResponse();
+    };
+    val allowed: bool = admits(d.requirement, auth);
+    val needsLogin: bool = (allowed == false) && (auth.authenticated == false);
+    if (needsLogin) {
+        val _a = rkSecNoteDecision("denied " + rendered(d));
+        return unauthorizedResponse();
+    };
+    if (allowed == false) {
+        val _f = rkSecNoteDecision("denied " + rendered(d));
+        return forbiddenResponse(requiredAuthority(d.requirement));
+    };
+    val _g = rkSecNoteDecision("granted " + rendered(d));
+    val _t = issueTokenCookie(req);
+    return withAuthentication(auth, { ->
+        rkSecGuard({ -> chain.next(req) }, { tag, detail -> deniedResponse(tag, detail) });
+    });
+}
+
+// What the last request through this process was decided as, for a test or a
+// log line: `<principal> <decision>`, the principal `-` when none verified.
+// Neither half ever carries a credential.
+pub fn lastPrincipal() -> string {
+    return rkSecSlot("principal");
+}
+
+// ── boot ────────────────────────────────────────────────────────────────────
+
+// Every configuration refusal, in one place, run before the entry registers.
+pub fn securityBoot() -> i32 {
+    val encoder: string = encoderProblem();
+    if (encoder != "") @panic(encoder);
+    val users: string = usersProblem();
+    if (users != "") @panic(users);
+    val jwt: string = jwtConfigProblem(jwtConfig());
+    if (jwt != "") @panic(jwt);
+    return 0;
+}
+
+// Front 07's error entry (−100) runs INSIDE this one and would turn a method
+// security raise into a 500 before the guard above saw it, so the two tags are
+// also registered as advices there. Registered once: `registerAdvice` refuses a
+// second registration of a tag.
+pub fn registerSecurityAdvice() -> i32 {
+    val tags: string[] = adviceTags();
+    val _u = if (tags.indexOf(unauthorizedTag()) < 0) registerAdvice(unauthorizedTag(), "rakun-security", { detail -> unauthorizedProblem() }) else 0;
+    val _f = if (tags.indexOf(forbiddenTag()) < 0) registerAdvice(forbiddenTag(), "rakun-security", { detail -> forbiddenProblem(detail) }) else 0;
+    return 0;
+}
+
+// The one call an application makes: the boot checks, the provided policy
+// (or the authenticated-everywhere default) compiled once, the advices, and
+// the entry at −300.
+pub fn installSecurity() -> i32 {
+    return installSecurityWith(providedPolicy());
+}
+
+pub fn installSecurityWith(policy: SecurityPolicy) -> i32 {
+    val _b = securityBoot();
+    val compiled: CompiledPolicy = compileOrFail(policy);
+    val _a = registerSecurityAdvice();
+    return registerFilter("security", orderSecurity(), { req, chain -> securityEntry(compiled, req, chain) });
+}

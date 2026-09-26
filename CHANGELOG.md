@@ -2,6 +2,39 @@
 
 ## Unreleased
 
+### Security: policy, JWT, Basic, PBKDF2, method security, CSRF (botopink front 10)
+
+- `modules/rakun-security` gets its first code (front 10 owns the manifest, `src/root.bp`,
+  `src/*.bp` and `src/sidecars/rakun_security.erl`; depends on `rakun`,
+  `rakun-actuator-api`, `rakun-web`, `rakun-data`). 73 tests green on erlang.
+- `installSecurity()` registers the security entry at `orderSecurity()` (−300), before
+  URL rules, CORS, API versioning and the problem boundary, after running the boot
+  checks and compiling the `#[provides]`d `SecurityPolicy` once.
+- `SecurityPolicy` / `PathRule`: declaration order, first match wins; patterns through
+  rakun-web's `matcher` (front 65); `defaultRequirement` is `authenticated` and
+  `permitAll` there fails at boot; requirements `permitAll`, `authenticated`,
+  `hasRole:<R>`, `hasAuthority:<A>`.
+- Security context (`Principal`, `Authentication`, no credentials field) in the request
+  process, restored after the chain; reading it outside a request raises.
+- HS256 JWT (`rakun.security.jwt.*`): configured `alg` checked before the signature,
+  constant-time signature compare, `exp` required, `nbf`/`iat` with a clock skew,
+  `iss`/`aud` when configured, authorities claim + prefix; every rejection is one
+  401 body.
+- Basic authentication (first-colon split) over a `UserStore`: in-memory arm
+  (`rakun.security.users[i].*`, refused under a production profile), SQL arm over
+  front 08's `#[query]`, or the application's own `#[provides] UserStore`.
+- PBKDF2-HMAC-SHA256 is the only encoder: `{pbkdf2}310000$<salt>$<hash>`, fresh salt,
+  constant-time `matches`, dummy derivation for unknown users; an unknown prefix
+  raises; `bcrypt`/`scrypt`/`argon2` fail at boot naming the missing NIF.
+- `#[methodSecurity]` emits a `<Type>Sec` proxy; `#[secured("A,B")]` (any of),
+  `#[permitAll]`, type-level requirement inherited, unmarked = authenticated;
+  `#[preAuthorize]` fails the build naming the supported forms.
+- CSRF double-submit (`XSRF-TOKEN` / `X-CSRF-Token`) on state-changing requests with a
+  session cookie or Basic credentials; bearer-only requests exempt; GET/HEAD never
+  challenged.
+- Failures are RFC 9457 problem details: 401 with `WWW-Authenticate`, 403 naming the
+  required authority only.
+
 ### rakun-scheduling: in-VM scheduling (botopink front 16)
 
 - `modules/rakun-scheduling`: `#[scheduler]` with `#[scheduled("<six-field cron>")]`,

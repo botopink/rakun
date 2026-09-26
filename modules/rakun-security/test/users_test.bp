@@ -1,0 +1,58 @@
+//// rakun-security — an application's own user store wins (front 10 step 5).
+////
+//// The `#[provides]` below registers a `UserStore` bean when this module
+//// loads, and the bean registry is node-wide, so this file sorts LAST: every
+//// file before it sees the in-memory arm.
+
+import {testing.asserts} from "std";
+import {Response, provides, rkSingleton, rkRegisterBean, rkSetProp} from "rakun";
+import {resetChain, runChain, rkChainSetTerminal} from "rakun-web";
+import {currentAuthentication} from "principal";
+import {SecurityPolicy} from "policy";
+import {encodePassword} from "password";
+import {UserDetails, UserDetailsService, UserStore, userStore, userDetailsService, loadUser} from "users";
+import {basicHeader} from "basic";
+import {installSecurityWith} from "security_filter";
+
+// The application's own implementation of the behavior.
+pub type AccountDirectory(hash: string) implement UserDetailsService {
+    pub fn loadByUsername(self: Self, username: string) -> ?UserDetails {
+        val none: ?UserDetails = null;
+        if (username != "zed") return none;
+        return UserDetails(username: "zed", passwordHash: self.hash, authorities: ["ROLE_DIRECTORY"], enabled: true);
+    }
+}
+
+fn directory() -> AccountDirectory {
+    return rkSingleton("AccountDirectory", { -> AccountDirectory(hash: encodePassword("zed-pw")) });
+}
+
+#[provides]
+pub fn accounts() -> UserStore {
+    return userStore("accounts", { name -> directory().loadByUsername(name) });
+}
+
+test "users: an application can #[provides] its own implementation and it wins" {
+    val _u = rkSetProp("rakun.security.users[0].username", "ana");
+    val _p = rkSetProp("rakun.security.users[0].password", encodePassword("pw"));
+    val store: UserStore = userDetailsService();
+    assert store.name == "accounts";
+    var zed = false;
+    if (loadUser(store, "zed")) { _ -> zed = true; };
+    var ana = false;
+    if (loadUser(store, "ana")) { _ -> ana = true; };
+    assert zed;
+    assert ana == false;
+    val _r = resetChain();
+    val _i = installSecurityWith(SecurityPolicy(rules: [], defaultRequirement: "authenticated"));
+    val _t = rkChainSetTerminal({ method, path, headersWire, queryWire, body ->
+        Response.ok(currentAuthentication().principal.name + " " + currentAuthentication().principal.authorities.join(","));
+    });
+    val viaApp: Response = runChain("GET", "/x", "authorization\t" + basicHeader("zed", "zed-pw"), "", "");
+    val viaMemory: Response = runChain("GET", "/x", "authorization\t" + basicHeader("ana", "pw"), "", "");
+    val _x = rkSetProp("rakun.security.users[0].username", "");
+    val _e = resetChain();
+    assert viaApp.status == 200;
+    assert viaApp.body == "zed ROLE_DIRECTORY";
+    assert viaMemory.status == 401;
+}

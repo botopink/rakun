@@ -1,0 +1,147 @@
+//// rakun-security — the policy: which requirement a path carries. Front 10
+//// step 2.
+////
+//// RULES MATCH IN DECLARATION ORDER AND THE FIRST MATCH WINS — the rule
+//// Spring's `authorizeHttpRequests` uses, and the one that makes
+//// `/api/public/:path*` before `/api/:path*` do what anyone reading it expects.
+////
+//// THE DEFAULT IS `authenticated` AND CANNOT BE WEAKENED. A path nobody wrote a
+//// rule for is protected. `defaultRequirement: "permitAll"` is refused at boot
+//// (`compilePolicy`), and there is no property that relaxes it: making a path
+//// public is an explicit `permitAll` rule a reviewer can see in a diff.
+////
+//// THE PATTERN GRAMMAR IS FRONT 65'S. Every pattern is compiled by
+//// `rakun-web`'s `matcher` (exact paths, `:name`, `:name*`, a raw `(regex)`),
+//// the same matcher the URL rules use; this module compiles nothing of its own.
+//// Compiled once, at `installSecurity`, never per request.
+////
+//// REQUIREMENTS: `permitAll`, `authenticated`, `hasRole:<ROLE>` (the authority
+//// `ROLE_<ROLE>`) and `hasAuthority:<AUTHORITY>`. Anything else is refused at
+//// boot naming the rule — an unreadable requirement is never read as a
+//// permissive one.
+
+import {rkResolve, rkHasBean} from "rakun";
+import {regex, regex.Regex} from "std";
+import {Matcher, matcher} from "rakun-web";
+import {Authentication, hasAuthority} from "principal";
+
+pub type PathRule(pattern: string, requirement: string)
+
+pub type SecurityPolicy(
+    rules: PathRule[],
+    defaultRequirement: string,
+)
+
+pub type CompiledRule(pattern: string, requirement: string, m: Matcher)
+
+pub type CompiledPolicy(
+    rules: CompiledRule[],
+    defaultRequirement: string,
+)
+
+// What a request was measured against: the rule's pattern (`default` when no
+// rule matched) and its requirement.
+pub type Decision(pattern: string, requirement: string)
+
+// With no `SecurityPolicy` provided, every path requires authentication.
+pub fn defaultPolicy() -> SecurityPolicy {
+    return SecurityPolicy(rules: [], defaultRequirement: "authenticated");
+}
+
+// The provided policy, or the default. Resolved by type name: there is no
+// `@typeName<T>()` (front 06's recorded gap).
+pub fn providedPolicy() -> SecurityPolicy {
+    if (rkHasBean("SecurityPolicy") == false) return defaultPolicy();
+    val found: ?SecurityPolicy = rkResolve("SecurityPolicy");
+    return found.unwrapOr(defaultPolicy());
+}
+
+// ── requirements ────────────────────────────────────────────────────────────
+
+pub fn isKnownRequirement(r: string) -> bool {
+    if (r == "permitAll") return true;
+    if (r == "authenticated") return true;
+    if (r.startsWith("hasRole:")) return r.length() > 8;
+    if (r.startsWith("hasAuthority:")) return r.length() > 13;
+    return false;
+}
+
+// The authority a requirement names, `""` for `permitAll` / `authenticated`.
+pub fn requiredAuthority(r: string) -> string {
+    if (r.startsWith("hasRole:")) return "ROLE_" + r.slice(8, r.length());
+    if (r.startsWith("hasAuthority:")) return r.slice(13, r.length());
+    return "";
+}
+
+pub fn admits(r: string, auth: Authentication) -> bool {
+    if (r == "permitAll") return true;
+    if (auth.authenticated == false) return false;
+    if (r == "authenticated") return true;
+    val needed: string = requiredAuthority(r);
+    if (needed == "") return false;
+    return hasAuthority(auth, needed);
+}
+
+// ── compiling ───────────────────────────────────────────────────────────────
+
+pub fn permissiveDefaultProblem() -> string {
+    return "rakun-security: a SecurityPolicy whose defaultRequirement is permitAll "
+        + "is refused - a path nobody wrote a rule for is protected, and there is "
+        + "no way to make it public by default. Write an explicit permitAll rule "
+        + "for each public path instead.";
+}
+
+pub fn unknownRequirementProblem(where: string, r: string) -> string {
+    return "rakun-security: " + where + " has the requirement `" + r + "`, which is "
+        + "not one of permitAll, authenticated, hasRole:<ROLE>, hasAuthority:<AUTHORITY>";
+}
+
+fn compileRule(rule: PathRule) -> @Result<CompiledRule, string> {
+    if (isKnownRequirement(rule.requirement) == false) {
+        throw unknownRequirementProblem("the rule for `" + rule.pattern + "`", rule.requirement);
+    };
+    val m = try matcher(rule.pattern);
+    return CompiledRule(pattern: rule.pattern, requirement: rule.requirement, m: m);
+}
+
+pub fn compilePolicy(p: SecurityPolicy) -> @Result<CompiledPolicy, string> {
+    if (p.defaultRequirement == "permitAll") throw permissiveDefaultProblem();
+    if (isKnownRequirement(p.defaultRequirement) == false) {
+        throw unknownRequirementProblem("the defaultRequirement", p.defaultRequirement);
+    };
+    // A `while`, not a `for` lambda: `try` inside a lambda does not propagate.
+    var out: CompiledRule[] = [];
+    var i = 0;
+    while (i < p.rules.length) {
+        val rule: PathRule = p.rules.at(i).unwrapOr(PathRule(pattern: "", requirement: ""));
+        val c = try compileRule(rule);
+        out.push(c);
+        i = i + 1;
+    };
+    return CompiledPolicy(rules: out, defaultRequirement: p.defaultRequirement);
+}
+
+// The boot form: a refusal is a raise naming the rule, not an `Error` someone
+// can ignore.
+pub fn compileOrFail(p: SecurityPolicy) -> CompiledPolicy {
+    val r = compilePolicy(p);
+    if (r.isError()) {
+        val assert Error(e) = r;
+        @panic(e);
+    };
+    return r.unwrapOr(CompiledPolicy(rules: [], defaultRequirement: "authenticated"));
+}
+
+// ── deciding ────────────────────────────────────────────────────────────────
+
+pub fn decide(p: CompiledPolicy, path: string) -> Decision {
+    var hit = Decision(pattern: "default", requirement: p.defaultRequirement);
+    var found = false;
+    for (p.rules) { rule ->
+        if ((found == false) && regex.runCompiled(rule.m.compiled, path)) {
+            hit = Decision(pattern: rule.pattern, requirement: rule.requirement);
+            found = true;
+        };
+    };
+    return hit;
+}

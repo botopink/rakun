@@ -1,0 +1,254 @@
+//// rakun-security — what fails the BUILD (front 10 step 6), and the front's
+//// example as a CONSUMER builds and runs it.
+////
+//// A comptime refusal cannot be asserted from inside the module that carries
+//// it: that module would not compile and the runner skips it. So each cell
+//// WRITES a one-file project depending on this member by path, runs the
+//// compiler on it and asserts the output — front 08's `sql_build_test.bp`
+//// shape. The projects live under `.botopinkbuild/tmp/rakun-security-fixtures/`
+//// (git-ignored). Every transitive workspace dependency is listed directly,
+//// in dependency order: a transitive dependency is not loaded.
+////
+//// The compiler is `$BOTOPINK_BIN`, else `botopink` on `PATH`, else the
+//// meta-repository's `repository/botopink-lang/zig-out/bin/botopink`. With
+//// none of them the cells FAIL saying so — they never pass vacuously.
+
+import {testing.asserts} from "std";
+import {io: {fs, process}} from "std";
+
+fn fixtureRoot() -> string {
+    return process.cwd() + "/.botopinkbuild/tmp/rakun-security-fixtures";
+}
+
+fn compilerCommand() -> string {
+    return "B=\"$BOTOPINK_BIN\"; [ -n \"$B\" ] || B=\"$(command -v botopink)\"; [ -n \"$B\" ] || B=../../../botopink-lang/zig-out/bin/botopink; [ -x \"$B\" ] || { echo \"no botopink compiler: set BOTOPINK_BIN\"; exit 0; }; B=\"$(cd \"$(dirname \"$B\")\" && pwd)/$(basename \"$B\")\"; ";
+}
+
+fn dep(name: string, dir: string) -> string {
+    return "    \"" + name + "\": { \"path\": \"" + dir + "\" }";
+}
+
+fn compileFixture(name: string, source: string, command: string) -> string {
+    val dir = fixtureRoot() + "/" + name;
+    val here = process.cwd();
+    val _m = process.runShell("rm -rf '" + dir + "' && mkdir -p '" + dir + "/src'");
+    val deps: string[] = [
+        dep("rakun", here + "/../rakun"),
+        dep("rakun-actuator-api", here + "/../rakun-actuator-api"),
+        dep("rakun-web", here + "/../rakun-web"),
+        dep("rakun-data", here + "/../rakun-data"),
+        dep("rakun-security", here),
+    ];
+    val manifest = "{\n  \"name\": \"" + name + "\",\n  \"version\": \"0.0.1\",\n  \"src\": \"src/\",\n  \"entry\": \"root.bp\",\n  \"target\": \"erlang\",\n  \"targets\": [\"erlang\"],\n  \"dependencies\": {\n" + deps.join(",\n") + "\n  }\n}\n";
+    val _j = fs.writeText(dir + "/botopink.json", manifest);
+    val _s = fs.writeText(dir + "/src/root.bp", source);
+    return process.runShell(compilerCommand() + "cd '" + dir + "' && \"$B\" " + command + " 2>&1 < /dev/null; echo \"exit=$?\"");
+}
+
+fn buildFixture(name: string, source: string) -> string {
+    return compileFixture(name, source, "build --target erlang --out out");
+}
+
+fn header() -> string {
+    return "import {rkSingleton, rkScan, rkEnter, rkDone, rkRegisterBean, service, managed} from \"rakun\";\nimport {methodSecurity, secured, permitAll, preAuthorize, rkRequireAuthority} from \"rakun-security\";\n\n";
+}
+
+fn securedType(marker: string) -> string {
+    return header() + "#[service]\n#[methodSecurity]\n#[managed]\npub type FixService {\n    " + marker + "\n    pub fn one(self: Self) -> i32 {\n        return 1;\n    }\n}\n";
+}
+
+// ── the refusals ────────────────────────────────────────────────────────────
+
+test "build: a well-formed #[methodSecurity] type builds" {
+    val out = buildFixture("ok", securedType("#[secured(\"ROLE_A,ROLE_B\")]"));
+    try asserts.contains(out, "exit=0");
+}
+
+test "build: #[preAuthorize] fails at comptime saying expression security is not ported and naming the supported forms" {
+    val out = buildFixture("preauthorize", securedType("#[preAuthorize(\"hasRole('ADMIN') or #userId == authentication.principal\")]"));
+    try asserts.contains(out, "#[preAuthorize] is not ported: expression-based security needs an expression language");
+    try asserts.contains(out, "Supported forms: #[secured(\"ROLE\")], #[secured(\"ROLE_A,ROLE_B\")] (any of) and #[permitAll]");
+    try asserts.contains(out, "src/root.bp:");
+    try asserts.notContains(out, "exit=0");
+}
+
+test "build: #[methodSecurity] on an enum-shaped type fails at comptime" {
+    val src = header() + "#[methodSecurity]\npub type FixColor {\n    Red,\n    Green,\n}\n";
+    val out = buildFixture("enum", src);
+    try asserts.contains(out, "#[methodSecurity] must annotate a type with fields or methods, not an enum");
+    try asserts.notContains(out, "exit=0");
+}
+
+test "build: #[secured] with an expression instead of authority names fails at comptime" {
+    val out = buildFixture("expression", securedType("#[secured(\"hasRole('ADMIN')\")]"));
+    try asserts.contains(out, "#[secured] takes authority names, comma-separated");
+    try asserts.notContains(out, "exit=0");
+}
+
+test "build: a parameter whose type reflection loses is refused naming it" {
+    val src = header() + "#[service]\n#[methodSecurity]\n#[managed]\npub type FixLossy {\n    pub fn many(self: Self, ids: i32[]) -> i32 {\n        return 1;\n    }\n}\n";
+    val out = buildFixture("lossy", src);
+    try asserts.contains(out, "#[methodSecurity] cannot forward FixLossy.many parameter 'ids'");
+    try asserts.notContains(out, "exit=0");
+}
+
+// ── the example, as a consumer ──────────────────────────────────────────────
+
+fn exampleSource() -> string {
+    return """import {testing.asserts} from "std";
+import {Request, Response, rkSetProp} from "rakun";
+import {service, restController, route, getMapping, deleteMapping} from "rakun";
+import {rkScan, rkSingleton, rkEnter, rkDone, rkRegisterRoute, rkRegisterBean} from "rakun";
+import {managed, provides} from "rakun";
+import {bootWeb, resetChain, chainOrdering} from "rakun-web";
+import {SecurityPolicy, PathRule, Authentication, Principal} from "rakun-security";
+import {methodSecurity, secured, permitAll, rkRequireAuthority, installSecurity} from "rakun-security";
+// `import {security} from "rakun-security"` + `current()` does not
+// resolve (a path dependency's module is not importable as a namespace - a
+// compiler finding), so the facade is imported flat.
+import {current, testToken, testTokenAlgNone, testTokenTampered, probe, withAuth, tryOutsideRequest} from "rakun-security/security";
+
+#[provides]
+pub fn apiSecurityPolicy() -> SecurityPolicy {
+    return SecurityPolicy(
+        rules: [
+            PathRule(pattern: "/api/public/:path*", requirement: "permitAll"),
+            PathRule(pattern: "/api/admin/:path*", requirement: "hasRole:ADMIN"),
+            PathRule(pattern: "/api/:path*", requirement: "authenticated"),
+        ],
+        defaultRequirement: "authenticated",
+    );
+}
+
+#[service]
+#[managed]
+pub type AuditRepository {
+    pub fn purgeOlderThan(self: Self, days: i32) -> i32 {
+        return days;
+    }
+
+    pub fn depthOf(self: Self) -> i32 {
+        return 42;
+    }
+}
+
+#[service]
+#[methodSecurity]
+#[managed]
+pub type AdminService(
+    audit: AuditRepository,
+) {
+    #[secured("ROLE_ADMIN")]
+    pub fn purge(self: Self, olderThanDays: i32) -> i32 {
+        return self.audit.purgeOlderThan(olderThanDays);
+    }
+
+    #[secured("ROLE_ADMIN,ROLE_OPERATOR")]
+    pub fn depth(self: Self) -> i32 {
+        return self.audit.depthOf();
+    }
+
+    #[permitAll]
+    pub fn status(self: Self) -> string {
+        return "ok";
+    }
+}
+
+#[restController]
+#[route("/api")]
+#[managed]
+pub type OrdersApi(
+    admin: AdminServiceSec,
+) {
+    #[getMapping("/public/health")]
+    pub fn publicHealth(self: Self, req: Request) -> Response {
+        return Response.ok(self.admin.status());
+    }
+
+    #[getMapping("/orders/mine")]
+    pub fn mine(self: Self, req: Request) -> Response {
+        val auth = current();
+        return Response.ok(auth.principal.name + " " + auth.principal.authorities.join(","));
+    }
+
+    #[deleteMapping("/admin/audit")]
+    pub fn purge(self: Self, req: Request) -> Response {
+        return Response.ok("purged " + self.admin.purge(30).toString());
+    }
+}
+
+// The property table is per test here, so every cell sets the secret; the
+// chain (a host registry) is installed once, by the first cell.
+fn secret() -> i32 {
+    return rkSetProp("rakun.security.jwt.secret", "an-example-secret-of-at-least-32-chars");
+}
+
+test "example: boot" {
+    val _s = secret();
+    val _w = bootWeb();
+    val _i = installSecurity();
+    assert chainOrdering().startsWith("request-id>security>cors"), chainOrdering();
+}
+
+test "example: a path with no rule is protected" {
+    val _k = secret();
+    assert probe("GET", "/internal/metrics", "").status == 401;
+}
+
+test "example: the public subtree stays public" {
+    val _k = secret();
+    val res = probe("GET", "/api/public/health", "");
+    assert res.status == 200;
+    assert res.body == "ok";
+}
+
+test "example: a valid token authenticates and its claims become the authorities" {
+    val _k = secret();
+    val res = probe("GET", "/api/orders/mine", testToken("ana", ["ROLE_USER"], 3600));
+    assert res.status == 200;
+    assert res.body == "ana ROLE_USER", res.body;
+}
+
+test "example: alg none, expired and tampered fail identically" {
+    val _k = secret();
+    val none = probe("GET", "/api/orders/mine", testTokenAlgNone("ana"));
+    val expired = probe("GET", "/api/orders/mine", testToken("ana", ["ROLE_USER"], -60));
+    val tampered = probe("GET", "/api/orders/mine", testTokenTampered("ana"));
+    assert none.status == 401;
+    assert expired.status == 401;
+    assert expired.body == tampered.body;
+    assert none.body == tampered.body;
+}
+
+test "example: the proxy refuses an authenticated non-admin with 403 naming the required authority" {
+    val _k = secret();
+    val res = probe("DELETE", "/api/admin/audit", testToken("ana", ["ROLE_USER"], 3600));
+    assert res.status == 403;
+    assert res.body.contains("ROLE_ADMIN");
+    assert res.body.contains("ROLE_USER") == false;
+    val root = probe("DELETE", "/api/admin/audit", testToken("root", ["ROLE_ADMIN"], 3600));
+    assert root.body == "purged 30", root.body;
+}
+
+test "example: either authority in a comma list admits the caller" {
+    val _k = secret();
+    val token = testToken("ops", ["ROLE_OPERATOR"], 3600);
+    val svc = __rkMake_AdminServiceSec();
+    assert withAuth(token, { -> svc.depth() }) == 42;
+}
+
+test "example: a secured method called outside a request is a hard failure" {
+    val _k = secret();
+    val svc = __rkMake_AdminServiceSec();
+    val out = tryOutsideRequest({ -> svc.purge(30) });
+    assert out.isError();
+    val _r = resetChain();
+}
+""";
+}
+
+test "build: the front's example builds and its tests pass as a consumer of the package" {
+    val out = compileFixture("example", exampleSource(), "test --target erlang");
+    try asserts.contains(out, "8 passed, 0 failed");
+    try asserts.contains(out, "exit=0");
+}

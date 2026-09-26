@@ -1,0 +1,161 @@
+//// rakun-security — where a username becomes a stored hash and authorities.
+//// Front 10 step 5.
+////
+//// `UserDetailsService` is a behavior with three arms, each reached through
+//// the container's `UserStore` seam (below):
+////
+////   * an application's own, `#[provides]`-ed as a `UserStore` wrapping its
+////     implementation — it WINS whenever it exists (`userDetailsService`);
+////   * the in-memory arm, read from `rakun.security.users[<i>].username`,
+////     `.password` (a stored `{pbkdf2}` hash, never a plain password),
+////     `.authorities` (comma-separated) and `.enabled` (default true). Only under
+////     a non-production profile: users in a property file with `production` or
+////     `prod` active is a BOOT FAILURE, because a password in a configuration
+////     file is a password in a repository;
+////   * the SQL arm (`users_sql.bp`), front 08's `SqlTemplate` behind two
+////     `#[query]` statements.
+////
+//// The arms live in separate modules on purpose: a behavior method called on a
+//// behavior-typed receiver lowers to ANOTHER type's same-named method when a
+//// type in the same module declares `<name>/<arity>` (a recorded compiler
+//// defect), so no module here declares two `loadByUsername`s.
+
+import {rkProp, rkResolve, rkHasBean} from "rakun";
+import {isActive} from "rakun";
+
+pub type UserDetails(
+    username: string,
+    passwordHash: string,
+    authorities: string[],
+    enabled: bool,
+)
+
+pub behavior UserDetailsService {
+    fn loadByUsername(self: Self, username: string) -> ?UserDetails;
+}
+
+pub type InMemoryUserDetailsService(users: UserDetails[]) implement UserDetailsService {
+    pub fn loadByUsername(self: Self, username: string) -> ?UserDetails {
+        val hit: UserDetails[] = self.users.filter({ u -> u.username == username });
+        if (hit.length == 0) return null;
+        return hit.at(0);
+    }
+}
+
+// ── the in-memory arm's configuration ───────────────────────────────────────
+
+fn userKey(i: i32, field: string) -> string {
+    return "rakun.security.users[" + i.toString() + "]." + field;
+}
+
+fn splitList(raw: string) -> string[] {
+    var out: string[] = [];
+    for (raw.split(",")) { piece ->
+        val t: string = piece.trim();
+        if (t != "") out.push(t);
+    };
+    return out;
+}
+
+// The configured users, in index order; the list ends at the first index with
+// no username.
+pub fn configuredUsers() -> UserDetails[] {
+    var out: UserDetails[] = [];
+    var i = 0;
+    var more = true;
+    while (more) {
+        val name: string = rkProp(userKey(i, "username"));
+        if (name == "") {
+            more = false;
+        } else {
+            val enabledRaw: string = rkProp(userKey(i, "enabled")).trim().toLower();
+            out.push(UserDetails(
+                username: name,
+                passwordHash: rkProp(userKey(i, "password")),
+                authorities: splitList(rkProp(userKey(i, "authorities"))),
+                enabled: enabledRaw != "false",
+            ));
+            i = i + 1;
+        };
+    };
+    return out;
+}
+
+pub fn productionProfileActive() -> bool {
+    return isActive("production") || isActive("prod");
+}
+
+pub fn usersInProductionProblem() -> string {
+    return "rakun-security: rakun.security.users is configured while a production "
+        + "profile is active - a password in a configuration file is a password in "
+        + "a repository. Provide a UserDetailsService (the SQL arm or your own) instead.";
+}
+
+pub fn plainPasswordProblem(username: string) -> string {
+    return "rakun-security: rakun.security.users entry " + username + " has a password "
+        + "with no {id} prefix - the property holds an encoded hash ({pbkdf2}...), "
+        + "never the password itself";
+}
+
+// `""` when the in-memory configuration is acceptable.
+pub fn usersProblem() -> string {
+    val users: UserDetails[] = configuredUsers();
+    if (users.length == 0) return "";
+    if (productionProfileActive()) return usersInProductionProblem();
+    val plain: UserDetails[] = users.filter({ u -> u.passwordHash.startsWith("{") == false });
+    if (plain.length > 0) return plainPasswordProblem(plain.at(0).unwrapOr(UserDetails(username: "", passwordHash: "", authorities: [], enabled: false)).username);
+    return "";
+}
+
+pub fn inMemoryUsers() -> InMemoryUserDetailsService {
+    return InMemoryUserDetailsService(users: configuredUsers());
+}
+
+// ── the seam: `UserStore` ───────────────────────────────────────────────────
+//
+// MEASURED: a value typed as an implementing type does not convert to the
+// behavior's type (`type mismatch: expected UserDetailsService, got
+// InMemoryUserDetailsService`) — only a record literal returned directly
+// does — so an implementation obtained from a call, a field or the container
+// cannot be held as a `UserDetailsService`, and the container cannot hand one
+// out. The container therefore holds a `UserStore` — the lookup
+// as a FUNCTION VALUE, which is what a behavior value would have been — and an
+// application wraps its own implementation in one:
+//
+//     #[provides]
+//     pub fn accounts() -> UserStore {
+//         return userStore("accounts", { name -> AccountDirectory().loadByUsername(name) });
+//     }
+//
+// `UserDetailsService` stays the shape every arm implements.
+
+pub type UserStore(
+    name: string,
+    load: fn(username: string) -> ?UserDetails,
+)
+
+pub fn userStore(name: string, load: fn(username: string) -> ?UserDetails) -> UserStore {
+    return UserStore(name: name, load: load);
+}
+
+pub fn loadUser(store: UserStore, username: string) -> ?UserDetails {
+    val f = store.load;
+    return f(username);
+}
+
+pub fn inMemoryStore() -> UserStore {
+    val arm: InMemoryUserDetailsService = inMemoryUsers();
+    return userStore("memory", { name -> arm.loadByUsername(name) });
+}
+
+// ── choosing the arm ────────────────────────────────────────────────────────
+//
+// An application's `#[provides] fn …() -> UserStore` wins; otherwise the
+// in-memory arm (empty when nothing is configured, so every Basic login
+// answers 401).
+
+pub fn userDetailsService() -> UserStore {
+    if (rkHasBean("UserStore") == false) return inMemoryStore();
+    val provided: ?UserStore = rkResolve("UserStore");
+    return provided ?? inMemoryStore();
+}

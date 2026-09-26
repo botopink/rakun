@@ -1,0 +1,222 @@
+//// rakun-security — the whole path, end to end: the shared source of
+//// `specs/1.0.10-beta/03-rakun/test-snap.md` § 10, served by front 04's
+//// router through front 07's chain with this front's entry at −300.
+////
+//// The snapshot helper the spec names (`assertSecurity`) does not exist, so
+//// each cell renders the spec's lines — `<VERB> <path> [<principal>] ->
+//// <status> <decision>` — and asserts them as ONE string, which catches a
+//// reordering or a changed decision the same way the snapshot would.
+////
+//// Requests go through `rkDispatchHttp`, so every one crosses the real route
+//// table, the real `#[restController]` handlers and the real `<Type>Sec`
+//// proxy. The chain runner is node-wide; the last cell resets the chain so the
+//// files that run after this one see the router alone.
+
+import {testing.asserts, json} from "std";
+import {Request, Response, service, managed, provides, restController, route, getMapping, postMapping, deleteMapping} from "rakun";
+import {rkScan, rkSingleton, rkEnter, rkDone, rkRegisterRoute, rkRegisterBean, rkDispatchHttp, rkSetProp} from "rakun";
+import {resetChain, runChain, rkChainSetRunner, registerFilter, orderCors, orderProblem, chainOrdering, errorEntry} from "rakun-web";
+import {SecurityPolicy, PathRule} from "policy";
+import {methodSecurity, secured, permitAll, rkRequireAuthority} from "method_security";
+import {current, testToken, testTokenTampered, testTokenAlgNone} from "security";
+import {installSecurity, lastPrincipal} from "security_filter";
+import {rkSecDecision} from "principal";
+
+#[provides]
+pub fn apiSecurityPolicy() -> SecurityPolicy {
+    return SecurityPolicy(
+        rules: [
+            PathRule(pattern: "/api/public/:path*", requirement: "permitAll"),
+            PathRule(pattern: "/api/admin/:path*", requirement: "hasRole:ADMIN"),
+            PathRule(pattern: "/api/:path*", requirement: "authenticated"),
+        ],
+        defaultRequirement: "authenticated",
+    );
+}
+
+#[service]
+#[methodSecurity]
+#[managed]
+pub type AdminService {
+    #[secured("ROLE_ADMIN")]
+    pub fn purge(self: Self, olderThanDays: i32) -> i32 {
+        return olderThanDays;
+    }
+
+    #[secured("ROLE_ADMIN,ROLE_OPERATOR")]
+    pub fn depth(self: Self) -> i32 {
+        return 42;
+    }
+
+    #[permitAll]
+    pub fn status(self: Self) -> string {
+        return "ok";
+    }
+}
+
+#[restController]
+#[route("/api")]
+#[managed]
+pub type OrdersApi(
+    admin: AdminServiceSec,
+) {
+    #[getMapping("/public/health")]
+    pub fn publicHealth(self: Self, req: Request) -> Response {
+        return Response.ok(self.admin.status());
+    }
+
+    #[postMapping("/public/ping")]
+    pub fn ping(self: Self, req: Request) -> Response {
+        return Response.ok("pong");
+    }
+
+    #[getMapping("/orders/mine")]
+    pub fn mine(self: Self, req: Request) -> Response {
+        val auth = current();
+        return Response.json(auth.principal.name);
+    }
+
+    #[getMapping("/ops/depth")]
+    pub fn depth(self: Self, req: Request) -> Response {
+        return Response.ok(self.admin.depth().toString());
+    }
+
+    #[deleteMapping("/admin/audit")]
+    pub fn purge(self: Self, req: Request) -> Response {
+        return Response.ok(self.admin.purge(30).toString());
+    }
+}
+
+// ── the harness ─────────────────────────────────────────────────────────────
+
+fn secret() -> string {
+    return "front-10-test-secret-0123456789abcdef";
+}
+
+fn boot() -> i32 {
+    val _r = resetChain();
+    val _s = rkSetProp("rakun.security.jwt.secret", secret());
+    val _i = installSecurity();
+    return rkChainSetRunner({ method, path, headersWire, queryWire, body ->
+        runChain(method, path, headersWire, queryWire, body);
+    });
+}
+
+fn headersJson(pairs: #(string, string)[]) -> string {
+    return json.object(pairs.map({ p -> #(p.0, json.quote(p.1)) }));
+}
+
+// One request, rendered the way the spec's snapshot renders it.
+fn call(method: string, path: string, pairs: #(string, string)[]) -> string {
+    val res: Response = rkDispatchHttp(method, path, headersJson(pairs), "{}", "");
+    return method + " " + path + " [" + lastPrincipal() + "] -> " + res.status.toString() + " " + rkSecDecision();
+}
+
+fn bearer(token: string) -> #(string, string)[] {
+    return [#("Authorization", "Bearer " + token)];
+}
+
+// ── the cells ───────────────────────────────────────────────────────────────
+
+test "security: the entry sits at -300, before CORS and the error boundary" {
+    val _b = boot();
+    val _c = registerFilter("cors", orderCors(), { req, chain -> chain.next(req) });
+    val _e = registerFilter("problem", orderProblem(), { req, chain -> errorEntry(req, chain) });
+    assert chainOrdering() == "security>cors>problem", chainOrdering();
+}
+
+test "security: a path with no rule is protected" {
+    val _b = boot();
+    val lines = [call("GET", "/internal/metrics", [])];
+    assert lines.join("\n") == "GET /internal/metrics [-] -> 401 denied default authenticated", lines.join("\n");
+}
+
+test "security: declaration order decides and the public subtree stays public" {
+    val _b = boot();
+    val lines = [
+        call("GET", "/api/public/health", []),
+        call("GET", "/api/orders/mine", []),
+    ];
+    // The public call's LAST decision is the method-security one:
+    // `publicHealth` calls `status()`, which is `#[permitAll]`.
+    assert lines.join("\n") == "GET /api/public/health [-] -> 200 granted permitAll\nGET /api/orders/mine [-] -> 401 denied /api/:path* authenticated", lines.join("\n");
+}
+
+test "security: a valid hs256 token authenticates and its claims become the principal" {
+    val _b = boot();
+    val ana = testToken("ana", ["ROLE_USER"], 3600);
+    val res: Response = rkDispatchHttp("GET", "/api/orders/mine", headersJson(bearer(ana)), "{}", "");
+    assert res.status == 200;
+    assert res.body.contains("ana"), res.body;
+    assert call("GET", "/api/orders/mine", bearer(ana)) == "GET /api/orders/mine [ana] -> 200 granted /api/:path* authenticated";
+}
+
+test "security: expired tampered and alg none tokens are rejected identically" {
+    val _b = boot();
+    val expired = testToken("ana", ["ROLE_USER"], -60);
+    val tampered = testTokenTampered("ana");
+    val none = testTokenAlgNone("ana");
+    val lines = [
+        call("GET", "/api/orders/mine", bearer(expired)),
+        call("GET", "/api/orders/mine", bearer(tampered)),
+        call("GET", "/api/orders/mine", bearer(none)),
+        call("GET", "/api/orders/mine", bearer("not.a.jwt.at.all")),
+    ];
+    val one = "GET /api/orders/mine [-] -> 401 denied /api/:path* authenticated";
+    assert lines.join("\n") == [one, one, one, one].join("\n"), lines.join("\n");
+    val bodies = [expired, tampered, none, "not.a.jwt.at.all"].map({ t ->
+        rkDispatchHttp("GET", "/api/orders/mine", headersJson(bearer(t)), "{}", "").body;
+    });
+    val first: string = rkDispatchHttp("GET", "/api/orders/mine", "{}", "{}", "").body;
+    assert first != "";
+    assert bodies.filter({ b -> b != first }).length == 0, bodies.join("\n");
+}
+
+test "security: hasRole admits an admin and refuses a user with 403" {
+    val _b = boot();
+    val ana = testToken("ana", ["ROLE_USER"], 3600);
+    val root = testToken("root", ["ROLE_ADMIN"], 3600);
+    val lines = [
+        call("DELETE", "/api/admin/audit", bearer(ana)),
+        call("DELETE", "/api/admin/audit", bearer(root)),
+        call("DELETE", "/api/admin/audit", []),
+    ];
+    // root passes the path rule and then the proxy's #[secured("ROLE_ADMIN")],
+    // whose decision is the last one noted.
+    assert lines.join("\n") == "DELETE /api/admin/audit [ana] -> 403 denied /api/admin/:path* hasRole:ADMIN\nDELETE /api/admin/audit [root] -> 200 granted secured ROLE_ADMIN\nDELETE /api/admin/audit [-] -> 401 denied /api/admin/:path* hasRole:ADMIN", lines.join("\n");
+}
+
+test "security: the method security proxy refuses a non-admin naming the required authority and a comma list admits either" {
+    val _b = boot();
+    val ana = testToken("ana", ["ROLE_USER"], 3600);
+    val ops = testToken("ops", ["ROLE_OPERATOR"], 3600);
+    val adm = testToken("adm", ["ROLE_ADMIN"], 3600);
+    val lines = [
+        call("GET", "/api/ops/depth", bearer(ana)),
+        call("GET", "/api/ops/depth", bearer(ops)),
+        call("GET", "/api/ops/depth", bearer(adm)),
+        call("GET", "/api/public/health", []),
+    ];
+    assert lines.join("\n") == "GET /api/ops/depth [ana] -> 403 denied secured ROLE_ADMIN,ROLE_OPERATOR\nGET /api/ops/depth [ops] -> 200 granted secured ROLE_ADMIN,ROLE_OPERATOR\nGET /api/ops/depth [adm] -> 200 granted secured ROLE_ADMIN,ROLE_OPERATOR\nGET /api/public/health [-] -> 200 granted permitAll", lines.join("\n");
+    val refused: Response = rkDispatchHttp("GET", "/api/ops/depth", headersJson(bearer(ana)), "{}", "");
+    try asserts.contains(refused.body, "Access requires the authority ROLE_ADMIN,ROLE_OPERATOR");
+    try asserts.notContains(refused.body, "ROLE_USER");
+}
+
+test "security: csrf challenges a cookie post without a token exempts a bearer post and never challenges get" {
+    val _b = boot();
+    val ana = testToken("ana", ["ROLE_USER"], 3600);
+    val lines = [
+        call("POST", "/api/public/ping", [#("Cookie", "SESSION=sess-0001")]),
+        call("POST", "/api/public/ping", [#("Cookie", "SESSION=sess-0001; XSRF-TOKEN=csrf-0001"), #("X-CSRF-Token", "csrf-0001")]),
+        call("POST", "/api/public/ping", bearer(ana)),
+        call("GET", "/api/public/health", [#("Cookie", "SESSION=sess-0001")]),
+    ];
+    assert lines.join("\n") == "POST /api/public/ping [-] -> 403 denied csrf\nPOST /api/public/ping [-] -> 200 granted /api/public/:path* permitAll\nPOST /api/public/ping [ana] -> 200 granted /api/public/:path* permitAll\nGET /api/public/health [-] -> 200 granted permitAll", lines.join("\n");
+}
+
+test "security: reset the chain so later files see the router alone" {
+    val _r = resetChain();
+    val res: Response = rkDispatchHttp("GET", "/internal/metrics", "{}", "{}", "");
+    assert res.status == 404;
+}

@@ -1,0 +1,61 @@
+//// rakun-security — the SQL `UserDetailsService` arm, over front 08's
+//// `SqlTemplate` and `#[query]`. Front 10 step 5.
+////
+//// The schema is Spring's `JdbcUserDetailsManager` one, two tables:
+////
+////     users(username, password, enabled)       -- password is a {pbkdf2} hash
+////     authorities(username, authority)
+////
+//// and the two statements are `#[query]` declarations — the repository shape
+//// front 08 decided once — so they are registered, checked at comptime and
+//// never concatenated. `enabled` reads through `Row.bool` (`true`/`t`/`1`,
+//// `false`/`f`/`0`; anything else raises naming the column).
+////
+//// The arm runs on whichever datasource the template names; the application
+//// boots it (`dataSourceBoot()`), this module never does.
+
+import {rkRegisterQuery, query, SqlTemplate, Row, Rows, Param, param} from "rakun-data";
+import {UserDetails, UserDetailsService, UserStore, userStore} from "users";
+
+pub type SqlUserDetailsService(sql: SqlTemplate) implement UserDetailsService {
+    #[query("SELECT username, password, enabled FROM users WHERE username = :username")]
+    pub fn loadByUsername(self: Self, username: string) -> ?UserDetails {
+        val row: ?Row = self.sql.single(__rkQuery_loadByUsername(), [param("username", username)]);
+        val none: ?UserDetails = null;
+        var out = none;
+        if (row) { r ->
+            out = UserDetails(
+                username: r.get("username"),
+                passwordHash: r.get("password"),
+                authorities: self.authoritiesOf(username),
+                enabled: r.bool("enabled"),
+            );
+        };
+        return out;
+    }
+
+    #[query("SELECT authority FROM authorities WHERE username = :username")]
+    pub fn authoritiesOf(self: Self, username: string) -> string[] {
+        val rows: Rows = self.sql.query(__rkQuery_authoritiesOf(), [param("username", username)]);
+        return rows.column("authority");
+    }
+}
+
+// The arm as the container's seam. `#[provides]` it from the application:
+//
+//     #[provides]
+//     pub fn accounts() -> UserStore {
+//         return sqlUserStore(__rkMake_SqlTemplate());
+//     }
+pub fn sqlUserStore(sql: SqlTemplate) -> UserStore {
+    val arm: SqlUserDetailsService = SqlUserDetailsService(sql: sql);
+    return userStore("sql", { name -> arm.loadByUsername(name) });
+}
+
+// The DDL the arm reads, for a test or a first migration.
+pub fn userSchema() -> string[] {
+    return [
+        "CREATE TABLE IF NOT EXISTS users (username text, password text, enabled text)",
+        "CREATE TABLE IF NOT EXISTS authorities (username text, authority text)",
+    ];
+}

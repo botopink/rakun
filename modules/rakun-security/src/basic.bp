@@ -1,0 +1,65 @@
+//// rakun-security — `Authorization: Basic` (RFC 7617). Front 10 step 4.
+////
+//// The credentials are base64 (std's `encoding`), split on the FIRST `:` only
+//// — a colon is legal in a password — and the username is looked up through
+//// the `UserStore` (`users.bp`).
+////
+//// EVERY FAILURE IS THE SAME FAILURE, IN THE SAME TIME. A malformed header, an
+//// unknown user, a disabled user and a wrong password all answer `Error` and
+//// the entry turns every `Error` into one 401. The unknown-user path runs
+//// `dummyVerify` and the disabled-user path still verifies the password, so
+//// each costs exactly one PBKDF2 derivation, the same as a wrong password —
+//// asserted by counting derivations (`rkSecEncodeCount`), not by a clock.
+
+import {encoding} from "std";
+import {Authentication, authenticatedAs, isWireSafe} from "principal";
+import {matchesStored, dummyVerify} from "password";
+import {UserDetails, UserStore, loadUser} from "users";
+
+pub type BasicCredentials(username: string, password: string)
+
+// `Basic <base64>` → the pair, split on the first colon.
+pub fn parseBasic(header: string) -> @Result<BasicCredentials, string> {
+    val space: i32 = header.indexOf(" ");
+    if (space < 0) throw "not a Basic credential";
+    val scheme: string = header.slice(0, space).toLower();
+    if (scheme != "basic") throw "not a Basic credential";
+    val encoded: string = header.slice(space + 1, header.length()).trim();
+    val decoded = encoding.base64Decode(encoded);
+    if (decoded.isError()) throw "the Basic credential is not base64";
+    val text: string = decoded.unwrapOr("");
+    val colon: i32 = text.indexOf(":");
+    if (colon < 0) throw "the Basic credential carries no colon";
+    return BasicCredentials(
+        username: text.slice(0, colon),
+        password: text.slice(colon + 1, text.length()),
+    );
+}
+
+fn missing() -> UserDetails {
+    return UserDetails(username: "", passwordHash: "", authorities: [], enabled: false);
+}
+
+// The password check, one derivation on every path.
+pub fn verifyUser(store: UserStore, username: string, password: string) -> @Result<Authentication, string> {
+    val found: ?UserDetails = loadUser(store, username);
+    var known = false;
+    if (found) { _ -> known = true; };
+    val user: UserDetails = found ?? missing();
+    val ok: bool = if (known) matchesStored(password, user.passwordHash) else dummyVerify(password);
+    if (ok == false) throw "bad credentials";
+    if (user.enabled == false) throw "bad credentials";
+    val safe: bool = isWireSafe(user.username) && (user.authorities.filter({ a -> isWireSafe(a) == false }).length == 0);
+    if (safe == false) throw "bad credentials";
+    return authenticatedAs(user.username, user.authorities, "basic");
+}
+
+pub fn verifyBasic(store: UserStore, header: string) -> @Result<Authentication, string> {
+    val creds = try parseBasic(header);
+    return try verifyUser(store, creds.username, creds.password);
+}
+
+// A header value for a client or a test: `Basic base64(user:password)`.
+pub fn basicHeader(username: string, password: string) -> string {
+    return "Basic " + encoding.base64Encode(username + ":" + password);
+}

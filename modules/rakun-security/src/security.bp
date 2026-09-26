@@ -1,0 +1,66 @@
+//// rakun-security — the facade a handler and a test reach for: `current()`,
+//// the `testToken*` fixtures, and three test helpers the front's example uses
+//// (`probe`, `withAuth`, `tryOutsideRequest`).
+////
+//// The spec spells them `security.current()` after
+//// `import {security} from "rakun-security"`. MEASURED: a module of a path or
+//// workspace dependency is not importable as a namespace (`unbound variable
+//// 'security'`; the same form against the bundled `routing` builds), so a
+//// consumer imports the functions flat, naming this module because `jwt`
+//// exports the same fixture names:
+////
+////     import {current, testToken} from "rakun-security/security";
+
+import {Response, rkDispatchHttp} from "rakun";
+import {json} from "std";
+import {Authentication, Principal, anonymous, currentAuthentication, withAuthentication} from "principal";
+import {verifyJwt, testToken as mint, testTokenTampered as tampered, testTokenAlgNone as algNone} from "jwt";
+
+#[@External.Erlang("rakun_security", "attempt")]
+pub declare fn rkSecAttempt<T>(work: fn() -> T) -> @Result<T, string>;
+
+// The authentication of the request being served; a hard failure outside one.
+pub fn current() -> Authentication {
+    return currentAuthentication();
+}
+
+pub fn principal() -> Principal {
+    return currentAuthentication().principal;
+}
+
+pub fn testToken(sub: string, roles: string[], ttlSeconds: i32) -> string {
+    return mint(sub, roles, ttlSeconds);
+}
+
+pub fn testTokenTampered(sub: string) -> string {
+    return tampered(sub);
+}
+
+pub fn testTokenAlgNone(sub: string) -> string {
+    return algNone(sub);
+}
+
+// One request through the router and the installed chain (front 04's
+// `dispatch_http`), with `token` as a bearer credential (`""`: none).
+pub fn probe(method: string, path: string, token: string) -> Response {
+    val headers: string = if (token == "") "{}" else json.object([#("Authorization", json.quote("Bearer " + token))]);
+    return rkDispatchHttp(method, path, headers, "{}", "");
+}
+
+pub fn invalidTokenProblem() -> string {
+    return "rakun-security: withAuth was handed a token that does not verify";
+}
+
+// `work` under the authentication `token` verifies to — the way a job, or a
+// test, calls secured code outside a request. A token that does not verify is
+// a raise, never an anonymous run.
+pub fn withAuth<T>(token: string, work: fn() -> T) -> T {
+    val r = verifyJwt(token);
+    if (r.isError()) @panic(invalidTokenProblem());
+    return withAuthentication(r.unwrapOr(anonymous()), work);
+}
+
+// `work` as a `@Result`: its value, or the text of what it raised.
+pub fn tryOutsideRequest<T>(work: fn() -> T) -> @Result<T, string> {
+    return rkSecAttempt(work);
+}

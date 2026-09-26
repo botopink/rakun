@@ -1,0 +1,122 @@
+//// rakun-security — who the caller is: `Principal`, `Authentication`, and the
+//// security context of the request being served. Front 10 step 1.
+////
+//// THERE IS NO `credentials` FIELD. A password or a raw token is read once,
+//// verified and dropped; it never enters the context, so it cannot reach a log
+//// line, an actuator endpoint or an error body by accident.
+////
+//// THE CONTEXT IS THE REQUEST'S PROCESS. The security entry installs it for the
+//// duration of the rest of the chain (`rkSecWithin`, a host `try … after`), so a
+//// handler that raises cannot leave it behind for the next request on the same
+//// keep-alive connection, and two concurrent requests — two processes — never
+//// observe each other's. Reading it outside a request is a HARD FAILURE
+//// (`contracts.md` §5): no anonymous default, no `currentOr`, no predicate to
+//// branch around it.
+
+import {rkProp} from "rakun";
+
+// ── the host cells ──────────────────────────────────────────────────────────
+
+#[@External.Erlang("rakun_security", "within")]
+pub declare fn rkSecWithin<T>(wire: string, work: fn() -> T) -> T;
+
+#[@External.Erlang("rakun_security", "wire")]
+pub declare fn rkSecWire() -> string;
+
+#[@External.Erlang("rakun_security", "note_decision")]
+pub declare fn rkSecNoteDecision(line: string) -> i32;
+
+#[@External.Erlang("rakun_security", "decision")]
+pub declare fn rkSecDecision() -> string;
+
+// ── the records ─────────────────────────────────────────────────────────────
+
+pub type Principal(
+    name: string,
+    authorities: string[],
+)
+
+pub type Authentication(
+    principal: Principal,
+    method: string,
+    authenticated: bool,
+)
+
+pub fn anonymous() -> Authentication {
+    return Authentication(
+        principal: Principal(name: "anonymous", authorities: []),
+        method: "anonymous",
+        authenticated: false,
+    );
+}
+
+pub fn authenticatedAs(name: string, authorities: string[], method: string) -> Authentication {
+    return Authentication(
+        principal: Principal(name: name, authorities: authorities),
+        method: method,
+        authenticated: true,
+    );
+}
+
+pub fn hasAuthority(auth: Authentication, authority: string) -> bool {
+    if (auth.authenticated == false) return false;
+    return auth.principal.authorities.indexOf(authority) >= 0;
+}
+
+// ── the wire ────────────────────────────────────────────────────────────────
+//
+// `method \t 1|0 \t name \t a,b,c`. A name or an authority carrying a tab, a
+// newline or a comma cannot be written, and the authentication arms refuse such
+// a subject before it gets here (`isWireSafe`).
+
+pub fn isWireSafe(text: string) -> bool {
+    if (text.contains("\t")) return false;
+    if (text.contains("\n")) return false;
+    if (text.contains("\r")) return false;
+    return text.contains(",") == false;
+}
+
+pub fn toWire(auth: Authentication) -> string {
+    val flag: string = if (auth.authenticated) "1" else "0";
+    return auth.method + "\t" + flag + "\t" + auth.principal.name + "\t" + auth.principal.authorities.join(",");
+}
+
+fn fieldAt(parts: string[], i: i32) -> string {
+    return parts.at(i).unwrapOr("");
+}
+
+pub fn fromWire(wire: string) -> Authentication {
+    val parts: string[] = wire.split("\t");
+    val list: string = fieldAt(parts, 3);
+    val authorities: string[] = if (list == "") [] else list.split(",");
+    return Authentication(
+        principal: Principal(name: fieldAt(parts, 2), authorities: authorities),
+        method: fieldAt(parts, 0),
+        authenticated: fieldAt(parts, 1) == "1",
+    );
+}
+
+// ── reading it ──────────────────────────────────────────────────────────────
+
+pub fn outsideRequestProblem() -> string {
+    return "rakun-security: the security context was read outside a request - "
+        + "there is no anonymous default outside one; a library that must work "
+        + "both inside and outside a request takes the principal as a parameter";
+}
+
+pub fn currentAuthentication() -> Authentication {
+    val wire: string = rkSecWire();
+    if (wire == "") @panic(outsideRequestProblem());
+    return fromWire(wire);
+}
+
+// Runs `work` with `auth` as the context, restoring whatever was there before.
+pub fn withAuthentication<T>(auth: Authentication, work: fn() -> T) -> T {
+    return rkSecWithin(toWire(auth), work);
+}
+
+// The realm the `WWW-Authenticate` challenge names.
+pub fn realm() -> string {
+    val configured: string = rkProp("rakun.security.realm");
+    if (configured != "") return configured else return "rakun";
+}

@@ -1,0 +1,152 @@
+//// rakun-security — method security (front 10 step 6): the `<Type>Sec` proxy
+//// `#[methodSecurity]` emits, called directly under an established
+//// authentication and through the chain. The comptime refusals are
+//// `build_test.bp`'s.
+
+import {testing.asserts} from "std";
+import {Response, service, managed, rkScan, rkSingleton, rkEnter, rkDone, rkRegisterBean, rkSetProp} from "rakun";
+import {resetChain, runChain, rkChainSetTerminal, registerFilter, orderProblem, errorEntry, headerValue} from "rakun-web";
+import {Authentication, anonymous, authenticatedAs, withAuthentication, rkSecDecision} from "principal";
+import {SecurityPolicy, PathRule} from "policy";
+import {methodSecurity, secured, permitAll, rkRequireAuthority, holdsAnyOf} from "method_security";
+import {installSecurityWith} from "security_filter";
+import {testToken} from "jwt";
+
+#[service]
+#[methodSecurity]
+#[managed]
+pub type Ledger {
+    #[secured("ROLE_ADMIN")]
+    pub fn purge(self: Self, olderThanDays: i32) -> i32 {
+        return olderThanDays;
+    }
+
+    #[secured("ROLE_ADMIN,ROLE_OPERATOR")]
+    pub fn depth(self: Self) -> i32 {
+        return 42;
+    }
+
+    #[permitAll]
+    pub fn status(self: Self) -> string {
+        return "ok";
+    }
+
+    // No marker, on a type with none: `authenticated`.
+    pub fn balance(self: Self, account: string) -> string {
+        return account + ":100";
+    }
+
+    pub fn touch(self: Self) {
+        val _n = rkSetProp("test.ledger.touched", "yes");
+    }
+}
+
+fn ana() -> Authentication {
+    return authenticatedAs("ana", ["ROLE_USER"], "jwt");
+}
+
+fn ops() -> Authentication {
+    return authenticatedAs("ops", ["ROLE_OPERATOR", "ROLE_OPS"], "jwt");
+}
+
+fn root() -> Authentication {
+    return authenticatedAs("root", ["ROLE_ADMIN"], "jwt");
+}
+
+fn purgeAs(a: Authentication) -> i32 {
+    return withAuthentication(a, { -> __rkMake_LedgerSec().purge(7) });
+}
+
+fn depthAs(a: Authentication) -> i32 {
+    return withAuthentication(a, { -> __rkMake_LedgerSec().depth() });
+}
+
+test "method: #[methodSecurity] emits <Type>Sec with one forwarding method per method" {
+    val sec: LedgerSec = __rkMake_LedgerSec();
+    val v: string = withAuthentication(root(), { ->
+        sec.purge(3).toString() + " " + sec.depth().toString() + " " + sec.status() + " " + sec.balance("acc");
+    });
+    assert v == "3 42 ok acc:100", v;
+    val _t = withAuthentication(root(), { -> sec.touch(); 0; });
+    assert __rkMake_LedgerSec().inner.status() == "ok";
+}
+
+test "method: #[secured(ROLE_ADMIN)] refuses a caller without the authority" {
+    try asserts.throwsWith({ -> purgeAs(ana()); }, "rakun.security.forbidden");
+    assert rkSecDecision() == "denied secured ROLE_ADMIN";
+    assert purgeAs(root()) == 7;
+    assert rkSecDecision() == "granted secured ROLE_ADMIN";
+}
+
+test "method: #[secured(ROLE_A,ROLE_B)] admits a caller holding either" {
+    assert depthAs(ops()) == 42;
+    assert depthAs(root()) == 42;
+    try asserts.throwsWith({ -> depthAs(ana()); }, "rakun.security.forbidden");
+    assert holdsAnyOf(ops(), "ROLE_ADMIN, ROLE_OPERATOR");
+}
+
+test "method: #[permitAll] admits an anonymous caller" {
+    val s: string = withAuthentication(anonymous(), { -> __rkMake_LedgerSec().status() });
+    assert s == "ok";
+    assert rkSecDecision() == "granted permitAll";
+}
+
+test "method: an unmarked method inherits the type's requirement, and an unmarked type requires authentication" {
+    // Ledger carries no type-level marker: `balance` needs an authenticated caller.
+    try asserts.throwsWith({ ->
+        val _b = withAuthentication(anonymous(), { -> __rkMake_LedgerSec().balance("x") });
+        0;
+    }, "rakun.security.unauthorized");
+    assert withAuthentication(ana(), { -> __rkMake_LedgerSec().balance("x") }) == "x:100";
+}
+
+test "method: calling a secured method outside a request is a hard failure, not an implicit allow" {
+    try asserts.throwsWith({ ->
+        val _p = __rkMake_LedgerSec().purge(1);
+        0;
+    }, "the security context was read outside a request");
+    // Even #[permitAll] reads the context: there is no request to permit.
+    try asserts.throwsWith({ ->
+        val _s = __rkMake_LedgerSec().status();
+        0;
+    }, "outside a request");
+}
+
+// ── through the chain ───────────────────────────────────────────────────────
+
+fn secret() -> string {
+    return "front-10-test-secret-0123456789abcdef";
+}
+
+fn chainCalling(withErrorEntry: bool) -> i32 {
+    val _r = resetChain();
+    val _s = rkSetProp("rakun.security.jwt.secret", secret());
+    val _p = installSecurityWith(SecurityPolicy(rules: [PathRule(pattern: "/public/:rest*", requirement: "permitAll")], defaultRequirement: "authenticated"));
+    val _e = if (withErrorEntry) registerFilter("problem", orderProblem(), { req, chain -> errorEntry(req, chain) }) else 0;
+    return rkChainSetTerminal({ method, path, headersWire, queryWire, body ->
+        Response.ok(__rkMake_LedgerSec().purge(9).toString());
+    });
+}
+
+test "method: a refusal inside the handler answers 403 naming the required authority, with or without the error entry" {
+    val _a = chainCalling(false);
+    val userToken: string = testToken("ana", ["ROLE_USER"], 3600);
+    val adminToken: string = testToken("root", ["ROLE_ADMIN"], 3600);
+    val bare: Response = runChain("DELETE", "/audit", "authorization\tBearer " + userToken, "", "");
+    assert bare.status == 403, bare.body;
+    try asserts.contains(bare.body, "Access requires the authority ROLE_ADMIN");
+    try asserts.notContains(bare.body, "ROLE_USER");
+    val _b = chainCalling(true);
+    val boundary: Response = runChain("DELETE", "/audit", "authorization\tBearer " + userToken, "", "");
+    assert boundary.status == 403, boundary.body;
+    assert boundary.body == bare.body, boundary.body;
+    assert headerValue("Content-Type") == "application/problem+json";
+    val granted: Response = runChain("DELETE", "/audit", "authorization\tBearer " + adminToken, "", "");
+    assert granted.status == 200;
+    assert granted.body == "9";
+    // An anonymous caller on a public path reaching a secured method: 401.
+    val anon: Response = runChain("DELETE", "/public/audit", "", "", "");
+    assert anon.status == 401, anon.body;
+    assert headerValue("WWW-Authenticate").startsWith("Bearer realm=");
+    val _r = resetChain();
+}

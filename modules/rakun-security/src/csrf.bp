@@ -1,0 +1,95 @@
+//// rakun-security — CSRF, the double-submit token. Front 10 step 7.
+////
+//// A random value travels in a cookie (`XSRF-TOKEN`, readable by the page's
+//// script, `SameSite=Strict`) and the SAME value is required in the
+//// `X-CSRF-Token` header of every state-changing request that carries
+//// AMBIENT credentials — the ones a browser attaches on its own:
+////
+////   * a session cookie (`rakun.security.csrf.session-cookie`, default
+////     `SESSION`; front 18 owns the session, this front only reads its cookie);
+////   * Basic credentials, which a browser caches and resends.
+////
+//// A request authenticated only by a bearer token and carrying no session
+//// cookie is EXEMPT: a browser never attaches a bearer token by itself, so a
+//// cross-site form cannot forge one and the check would buy nothing. A bearer
+//// request that ALSO carries the session cookie is challenged — the cookie is
+//// ambient whatever else is present.
+////
+//// Challenged methods: everything but `GET`, `HEAD`, `OPTIONS` and `TRACE`,
+//// which are never challenged. The compare is std's `hash.equalsConstantTime`.
+//// When a request carries the session cookie but no token cookie, the entry
+//// issues one on the response (`issueTokenCookie`).
+////
+//// The `Origin`/`Host` check on server actions is front 24's and the
+//// action-id HMAC is front 01's; neither is duplicated here.
+
+import {rkProp} from "rakun";
+import {hash, io.random} from "std";
+import {WebRequest, writeCookies} from "rakun-web";
+
+pub fn tokenCookieName() -> string {
+    return "XSRF-TOKEN";
+}
+
+pub fn tokenHeaderName() -> string {
+    return "X-CSRF-Token";
+}
+
+pub fn sessionCookieName() -> string {
+    val configured: string = rkProp("rakun.security.csrf.session-cookie");
+    if (configured != "") return configured else return "SESSION";
+}
+
+// The value of cookie `name` in a `Cookie:` header, `""` when absent.
+pub fn cookieValue(cookieHeader: string, name: string) -> string {
+    var found = "";
+    for (cookieHeader.split(";")) { pair ->
+        val t: string = pair.trim();
+        val eq: i32 = t.indexOf("=");
+        if ((found == "") && (eq > 0) && (t.slice(0, eq) == name)) found = t.slice(eq + 1, t.length());
+    };
+    return found;
+}
+
+pub fn isSafeMethod(method: string) -> bool {
+    val m: string = method.toUpper();
+    return (m == "GET") || (m == "HEAD") || (m == "OPTIONS") || (m == "TRACE");
+}
+
+pub fn carriesSession(req: WebRequest) -> bool {
+    return cookieValue(req.header("cookie"), sessionCookieName()) != "";
+}
+
+// Whether this request must present the token. `authMethod` is the
+// authentication's `method` (`jwt`, `basic`, `anonymous`).
+pub fn challenged(req: WebRequest, authMethod: string) -> bool {
+    if (isSafeMethod(req.method)) return false;
+    if (carriesSession(req)) return true;
+    return authMethod == "basic";
+}
+
+// THE compare. Both sides must be present; equal in constant time.
+pub fn tokenMatches(cookieToken: string, headerToken: string) -> bool {
+    if (cookieToken == "") return false;
+    if (headerToken == "") return false;
+    return hash.equalsConstantTime(cookieToken, headerToken);
+}
+
+// `true` when the request may proceed as far as CSRF is concerned.
+pub fn csrfPasses(req: WebRequest, authMethod: string) -> bool {
+    if (challenged(req, authMethod) == false) return true;
+    val cookieToken: string = cookieValue(req.header("cookie"), tokenCookieName());
+    return tokenMatches(cookieToken, req.header("x-csrf-token"));
+}
+
+pub fn freshToken() -> string {
+    return random.secureToken(32);
+}
+
+// Queues `Set-Cookie: XSRF-TOKEN=…` when the request carries the session
+// cookie and no token cookie yet. Answers the number of cookies queued.
+pub fn issueTokenCookie(req: WebRequest) -> i32 {
+    if (carriesSession(req) == false) return 0;
+    if (cookieValue(req.header("cookie"), tokenCookieName()) != "") return 0;
+    return writeCookies(tokenCookieName() + "=" + freshToken() + "; Path=/; Secure; SameSite=Strict");
+}
