@@ -1,0 +1,203 @@
+//// rakun-actuator — the HTTP exchange recorder (front 87 steps 5-7).
+////
+//// OFF UNTIL SWITCHED ON: `rakun.management.httpexchanges.recording.enabled`
+//// (false) — with it off, `installExchangeRecording()` adds no chain entry at
+//// all. On, the entry `httpexchanges` sits outermost (order -500, before
+//// request-id at -400), reads the clock before and after `chain.next`, and
+//// appends one `HttpExchange` to an ETS ring of
+//// `rakun.management.httpexchanges.capacity` (100; 0 refuses). A request
+//// that raises through the chain is recorded with status 500 and re-raised
+//// (with front 07's problem filter installed the raise never reaches it, and
+//// the problem's own status is recorded).
+////
+//// ALWAYS: method, URI, status, time taken. `…recording.include` (a CSV of
+//// Spring's names, default-deny) adds `request-headers`, `response-headers`,
+//// `cookie-headers`, `authorization-header`, `principal`, `remote-address`,
+//// `session-id`. `request-headers` never carries `authorization` or
+//// `cookie`, and `response-headers` never `set-cookie`, whatever the list
+//// says: the credential is `authorization-header`'s own switch and cookies
+//// are `cookie-headers`'. An unknown name refuses the boot listing the valid
+//// ones.
+
+import {rkProp, toI32, Request, Response} from "rakun";
+import {json} from "std";
+import {WebRequest, Chain, registerFilter, headerLines, cookieLines, chainNames} from "rakun-web";
+import {EndpointResponse, rkRegisterEndpoint} from "rakun-actuator-api";
+import {sanitizeEntries} from "management";
+
+pub type HttpExchange(
+    atMs: i64,
+    method: string,
+    uri: string,
+    status: i32,
+    tookMs: i32,
+    fields: Array<#(string, string)>,
+)
+
+pub fn includeNames() -> string[] {
+    return ["request-headers", "response-headers", "cookie-headers", "authorization-header", "principal", "remote-address", "session-id"];
+}
+
+pub fn unknownIncludes(names: Array<string>) -> Array<string> {
+    return names.filter({ n -> includeNames().indexOf(n) < 0 });
+}
+
+fn has(include: Array<string>, name: string) -> bool {
+    return include.indexOf(name) >= 0;
+}
+
+// The projection: which of the request's facts an exchange keeps. Pure.
+pub fn exchangeFields(
+    include: Array<string>,
+    headers: Array<#(string, string)>,
+    principal: string,
+    remoteAddress: string,
+    sessionId: string,
+) -> Array<#(string, string)> {
+    var out: Array<#(string, string)> = [];
+    for (headers) { h ->
+        val name = h._0.toLower();
+        val isAuth = name == "authorization";
+        val isCookie = name == "cookie";
+        val keep = if (isAuth) has(include, "authorization-header") else if (isCookie) has(include, "cookie-headers") else has(include, "request-headers");
+        if (keep) out.push(#("request.header." + name, h._1));
+    };
+    if (has(include, "principal") && principal != "") out.push(#("principal", principal));
+    if (has(include, "remote-address") && remoteAddress != "") out.push(#("remote-address", remoteAddress));
+    if (has(include, "session-id") && sessionId != "") out.push(#("session-id", sessionId));
+    return out;
+}
+
+// Response headers under the same rules: `set-cookie` only with `cookie-headers`.
+pub fn responseFields(include: Array<string>, headers: Array<#(string, string)>) -> Array<#(string, string)> {
+    var out: Array<#(string, string)> = [];
+    for (headers) { h ->
+        val name = h._0.toLower();
+        val keep = if (name == "set-cookie") has(include, "cookie-headers") else has(include, "response-headers");
+        if (keep) out.push(#("response.header." + name, h._1));
+    };
+    return out;
+}
+
+// ── configuration ───────────────────────────────────────────────────────────
+
+pub fn recordingEnabled() -> bool {
+    return rkProp("rakun.management.httpexchanges.recording.enabled").trim() == "true";
+}
+
+pub fn recordingIncludes() -> Array<string> {
+    return rkProp("rakun.management.httpexchanges.recording.include").split(",").map({ s -> s.trim() }).filter({ s -> s != "" });
+}
+
+pub fn exchangeCapacity() -> i32 {
+    val raw = rkProp("rakun.management.httpexchanges.capacity").trim();
+    return if (raw == "") 100 else toI32(raw);
+}
+
+pub fn recordingProblem() -> string {
+    val bad = unknownIncludes(recordingIncludes());
+    if (bad.length > 0) return "rakun-actuator: rakun.management.httpexchanges.recording.include names " + bad.join(", ") + " - the valid values are " + includeNames().join(", ");
+    if (exchangeCapacity() < 1) return "rakun-actuator: rakun.management.httpexchanges.capacity is " + exchangeCapacity().toString() + " - a repository that records nothing is refused; the capacity is at least 1";
+    return "";
+}
+
+// ── the ring ────────────────────────────────────────────────────────────────
+
+#[@External.Erlang("""(fun() -> case ets:whereis(rakun_http_exchanges) of undefined -> __Me = self(), spawn(fun() -> ets:new(rakun_http_exchanges, [named_table, public, ordered_set]), __Me ! rakun_hx_ready, receive stop -> ok end end), receive rakun_hx_ready -> ok after 2000 -> ok end, 0; _ -> 0 end end)()""")]
+declare fn ringEnsure() -> i32;
+#[@External.Erlang("""(fun(__Cap, __E) -> ets:insert(rakun_http_exchanges, {erlang:unique_integer([monotonic]), __E}), case ets:info(rakun_http_exchanges, size) > __Cap of true -> ets:delete(rakun_http_exchanges, ets:first(rakun_http_exchanges)); false -> true end, 0 end)($0, $1)""")]
+declare fn ringPut(capacity: i32, e: HttpExchange) -> i32;
+#[@External.Erlang("""(fun() -> case ets:whereis(rakun_http_exchanges) of undefined -> []; _ -> lists:reverse([__E || {_, __E} <- ets:tab2list(rakun_http_exchanges)]) end end)()""")]
+pub declare fn exchangesNewestFirst() -> Array<HttpExchange>;
+#[@External.Erlang("""(fun() -> case ets:whereis(rakun_http_exchanges) of undefined -> 0; _ -> ets:delete_all_objects(rakun_http_exchanges), 0 end end)()""")]
+pub declare fn clearExchanges() -> i32;
+#[@External.Erlang("""erlang:system_time(millisecond)""")]
+declare fn nowMs() -> i64;
+#[@External.Erlang("""erlang:monotonic_time(millisecond)""")]
+declare fn monoMs() -> i32;
+#[@External.Erlang("""(fun(__F) -> try {ok, __F()} catch __C:__R:__S -> {error, {__C, __R, __S}} end end)($0)""")]
+declare fn attempt(run: fn() -> Response) -> @Result<Response, string>;
+#[@External.Erlang("""(fun(__E) -> {__C, __R, __S} = __E, erlang:raise(__C, __R, __S) end)($0)""")]
+declare fn reraise(e: string) -> Response;
+#[@External.Erlang("""(fun() -> case get(rakun_conn_socket) of undefined -> <<>>; __S -> case (case get(rakun_transport) of ssl -> ssl:peername(__S); _ -> inet:peername(__S) end) of {ok, {__A, _}} -> list_to_binary(inet:ntoa(__A)); _ -> <<>> end end end)()""")]
+declare fn remoteAddress() -> string;
+#[@External.Erlang("""(fun() -> __M = list_to_atom("rakun_" ++ "security"), case erlang:function_exported(__M, slot, 1) of true -> case erlang:apply(__M, slot, [<<"principal">>]) of <<"-">> -> <<>>; __P -> __P end; false -> <<>> end end)()""")]
+declare fn securityPrincipal() -> string;
+
+fn pairsOf(wire: string, sep: string) -> Array<#(string, string)> {
+    return wire.split("\n").filter({ l -> l.contains(sep) }).map({ l ->
+        val at = l.indexOf(sep);
+        #(l.slice(0, at).trim(), l.slice(at + sep.length(), l.length()).trim())
+    });
+}
+
+fn sessionIdOf(cookies: string) -> string {
+    val name = rkProp("rakun.session.cookie.name").trim();
+    val cookie = if (name == "") "SESSION" else name;
+    val hit = cookies.split(";").map({ c -> c.trim() }).filter({ c -> c.startsWith(cookie + "=") }).map({ c -> c.slice(cookie.length() + 1, c.length()) });
+    return hit.at(0) ?? "";
+}
+
+fn record(req: WebRequest, status: i32, started: i32, at: i64) -> i32 {
+    val include = recordingIncludes();
+    val reqHeaders = pairsOf(req.headersWire, "\t");
+    var resHeaders = pairsOf(headerLines().join("\n"), ":");
+    for (cookieLines()) { c -> resHeaders.push(#("Set-Cookie", c)); };
+    val fields = exchangeFields(include, reqHeaders, securityPrincipal(), remoteAddress(), sessionIdOf(req.header("cookie")));
+    val all: Array<#(string, string)> = [];
+    var out = all;
+    for (fields) { f -> out.push(f); };
+    for (responseFields(include, resHeaders)) { f -> out.push(f); };
+    val uri = if (req.queryWire == "") req.path else req.target;
+    return ringPut(exchangeCapacity(), HttpExchange(atMs: at, method: req.method, uri: uri, status: status, tookMs: monoMs() - started, fields: out));
+}
+
+pub fn exchangeEntry(req: WebRequest, chain: Chain) -> Response {
+    val at = nowMs();
+    val started = monoMs();
+    val r = attempt({ -> chain.next(req) });
+    if (r.isOk()) {
+        val res = r.unwrapOr(Response(status: 0, body: ""));
+        val _r = record(req, if (res.status == 0) 404 else res.status, started, at);
+        return res;
+    };
+    val _e = record(req, 500, started, at);
+    val raised = case r { Ok(v) -> ""; Error(e) -> e; };
+    return reraise(raised);
+}
+
+pub fn exchangeEntryName() -> string {
+    return "httpexchanges";
+}
+
+// At boot: refuses a bad include list or capacity; installs the entry only
+// when recording is enabled. Answers 1 when installed.
+pub fn installExchangeRecording() -> i32 {
+    val problem = recordingProblem();
+    if (problem != "") @panic(problem);
+    if (recordingEnabled() == false) return 0;
+    val _r = ringEnsure();
+    if (chainNames().indexOf(exchangeEntryName()) >= 0) return 1;
+    val _f = registerFilter(exchangeEntryName(), -500, { req, chain -> exchangeEntry(req, chain) });
+    return 1;
+}
+
+// ── the endpoint ────────────────────────────────────────────────────────────
+
+fn exchangeJson(e: HttpExchange) -> string {
+    val fields = json.array(e.fields.map({ p -> json.object([#("key", json.quote(p._0)), #("value", json.quote(p._1))]) }));
+    return json.object([#("timestamp", e.atMs.toString()), #("method", json.quote(e.method)), #("uri", json.quote(e.uri)), #("status", e.status.toString()), #("timeTaken", e.tookMs.toString()), #("fields", fields)]);
+}
+
+pub fn exchangesJson() -> string {
+    return sanitizeEntries("httpexchanges", json.object([#("capacity", exchangeCapacity().toString()), #("exchanges", json.array(exchangesNewestFirst().map({ e -> exchangeJson(e) })))]));
+}
+
+pub fn exchangesRead(req: Request) -> EndpointResponse {
+    return EndpointResponse(status: 200, contentType: "application/json", body: exchangesJson());
+}
+
+pub fn mountExchanges() -> i32 {
+    val _i = installExchangeRecording();
+    return rkRegisterEndpoint("httpexchanges", "rakun-actuator", "read", { req -> exchangesRead(req) });
+}

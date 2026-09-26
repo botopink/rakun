@@ -2690,6 +2690,41 @@ Dev-profile only (`dev` or `development` resolved). Sidecar
   The attached shell is a REPL inside the node: `dbg`, `recon_trace` (when
   present) and `rakun_metrics:snapshot()` run there.
 
+## Audit and HTTP exchanges — `modules/rakun-actuator/src/{audit,exchanges}/` (front 87)
+
+**Audit.** `AuditEvent(atMs, principal, kind, data: pairs)`; kinds keep
+Spring's names. `AuditRepository` has two arms. `memoryAuditRepository(capacity)`
+is an ETS ring, one table per repository, owned by a keeper process (a dead
+recorder loses nothing), dropping the oldest and counting it — **in-memory
+audit is not audit**: it dies with the node; it is the default because a
+default that needs a database does not work. `sqlAuditRepository(table)` runs
+through the executor the application installs (`installAuditSql(query,
+update)`, normally over front 08's SqlTemplate — rakun-data depends on this
+module, so it cannot be imported here); it never creates its table
+(`auditSchemaSql(table)` is the front 77 migration), pushes principal, kind and
+instant into the WHERE, reports `dropped()` 0 because the table is unbounded —
+retention is the caller's decision, e.g. a front 16 `#[scheduled]` DELETE on
+`at_ms` — and logs and counts a failed write (`auditWriteFailures()`) instead
+of raising it: an unavailable audit database must not take the application
+down, at the price of an unrecorded event the counter shows. `installAudit`
+makes a repository active and installs rakun-actuator-api's sink, so front
+10's `rkAudit(kind, principal, data)` (a no-op with no sink) lands here — the
+arrow runs security → actuator-api, never security → actuator.
+`mountAudit()` (capacity `rakun.management.auditevents.capacity`, 1000; 0
+refuses) registers `auditevents` (`?principal=&after=&type=`; `repository`,
+`capacity`, `dropped`, `events`; data through `sanitizeEntries`).
+
+**HTTP exchanges.** Off unless `rakun.management.httpexchanges.recording.
+enabled=true`; then `installExchangeRecording()` adds the chain entry
+`httpexchanges` at -500 (outermost) recording method, URI, status and time
+taken into a ring of `…httpexchanges.capacity` (100; 0 refuses), a raise as
+500 (then re-raised). `…recording.include` adds `request-headers` (never
+`authorization`/`cookie`), `response-headers` (never `set-cookie`),
+`cookie-headers`, `authorization-header`, `principal` (front 10's slot),
+`remote-address`, `session-id`; an unknown name refuses the boot.
+`mountExchanges()` registers `httpexchanges` (newest first, with the capacity,
+through `sanitizeEntries`).
+
 ## Actuator access and probes — `modules/rakun-actuator/src/management.bp` (front 76)
 
 `installManagement()` — after `mountActuator()` and after every module has

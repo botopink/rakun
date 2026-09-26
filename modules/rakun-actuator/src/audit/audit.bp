@@ -1,0 +1,257 @@
+//// rakun-actuator — audit events (front 87 steps 1-4, 6 and 7).
+////
+//// An `AuditEvent` is an instant, a principal, a kind and `data` PAIRS (not a
+//// JSON blob: a filter reads a key without decoding the ring). Kinds keep
+//// Spring's spelling (`AUTHENTICATION_SUCCESS`, `AUTHENTICATION_FAILURE`,
+//// `AUTHORIZATION_FAILURE`, `LOGOUT`); an application adds its own. `find(p,
+//// afterMs, kind)`: `""` / `0` mean "any"; `afterMs` is exclusive; newest last.
+////
+//// TWO ARMS, one behavior:
+////   `memoryAuditRepository(capacity)` — an ETS ring (its own table per
+////   repository, owned by a keeper process, so a crashing recorder loses no
+////   history); when full it drops the OLDEST and counts it (`dropped()`).
+////   IN-MEMORY AUDIT IS NOT AUDIT: it is gone with the node. It is the default
+////   because a default that needs a database does not work.
+////   `sqlAuditRepository(table)` — statements through the executor the
+////   application installs (`installAuditSql`, usually over front 08's
+////   SqlTemplate; rakun-data depends on this module, so it cannot be named
+////   here). It never creates its table: `auditSchemaSql(table)` is the front
+////   77 migration. `find` pushes the principal, kind and instant into the
+////   WHERE. `dropped()` is 0 — the table is not bounded, its retention is the
+////   caller's (a front 16 `#[scheduled]` prune of `at_ms`). A failed write is
+////   logged at error and counted (`auditWriteFailures()`), never raised into
+////   the request: an unavailable audit database must not take the application
+////   down — the price is an event that is not recorded, which the counter and
+////   the log make visible.
+////
+//// `installAudit(repo)` makes `repo` the active one and installs the
+//// actuator-api sink, so `rkAudit(...)` from front 10 lands here; `audit(...)`
+//// is the same call from inside the application. `mountAudit()` reads
+//// `rakun.management.auditevents.capacity` (1000; 0 refuses) and registers
+//// the `auditevents` endpoint.
+
+import {rkProp, toI32, Request} from "rakun";
+import {json} from "std";
+import {EndpointResponse, rkRegisterEndpoint} from "rakun-actuator-api";
+import {rkAuditInstallSink, rkAuditClearSink} from "rakun-actuator-api/audit_seam";
+import {sanitizeEntries} from "management";
+
+pub type AuditEvent(
+    atMs: i64,
+    principal: string,
+    kind: string,
+    data: Array<#(string, string)>,
+)
+
+pub behavior AuditRepository {
+    fn record(self: Self, event: AuditEvent) -> i32;
+    fn find(self: Self, principal: string, afterMs: i64, kind: string) -> Array<AuditEvent>;
+    fn dropped(self: Self) -> i32;
+    fn arm(self: Self) -> string;
+    fn capacity(self: Self) -> i32;
+}
+
+#[@External.Erlang("""erlang:system_time(millisecond)""")]
+pub declare fn auditNowMs() -> i64;
+#[@External.Erlang("""(fun(__X) -> __X end)($0)""")]
+declare fn wide(n: i32) -> i64;
+
+// ── the ring ────────────────────────────────────────────────────────────────
+
+#[@External.Erlang("""(fun(__Cap) -> __Name = list_to_atom("rakun_audit_" ++ integer_to_list(erlang:unique_integer([positive, monotonic]))), __Me = self(), __P = spawn(fun() -> ets:new(__Name, [named_table, public, ordered_set]), ets:insert(__Name, {dropped, 0}), __Me ! {rakun_audit_ready, __Name}, receive stop -> ok end end), receive {rakun_audit_ready, __Name} -> ok after 2000 -> ok end, persistent_term:put({rakun_audit_keeper, __Name}, __P), atom_to_binary(__Name) end)($0)""")]
+declare fn ringNew(capacity: i32) -> string;
+#[@External.Erlang("""(fun(__T, __Cap, __E) -> __N = binary_to_existing_atom(__T), ets:insert(__N, {{e, erlang:unique_integer([monotonic])}, __E}), __Size = ets:info(__N, size) - 1, case __Size > __Cap of true -> ets:delete(__N, ets:next(__N, dropped)), ets:update_counter(__N, dropped, 1), 0; false -> 0 end end)($0, $1, $2)""")]
+declare fn ringPut(table: string, capacity: i32, event: AuditEvent) -> i32;
+#[@External.Erlang("""(fun(__T) -> [__E || {{e, _}, __E} <- ets:tab2list(binary_to_existing_atom(__T))] end)($0)""")]
+declare fn ringAll(table: string) -> Array<AuditEvent>;
+#[@External.Erlang("""(fun(__T) -> case ets:lookup(binary_to_existing_atom(__T), dropped) of [{dropped, __N}] -> __N; _ -> 0 end end)($0)""")]
+declare fn ringDropped(table: string) -> i32;
+#[@External.Erlang("""(fun(__T) -> case persistent_term:get({rakun_audit_keeper, binary_to_existing_atom(__T)}, undefined) of undefined -> <<>>; __P -> list_to_binary(pid_to_list(__P)) end end)($0)""")]
+pub declare fn auditTableOwner(table: string) -> string;
+
+fn matches(e: AuditEvent, principal: string, afterMs: i64, kind: string) -> bool {
+    return (principal == "" || e.principal == principal) && (kind == "" || e.kind == kind) && e.atMs > afterMs;
+}
+
+pub type MemoryAuditRepository(table: string, size: i32) implement AuditRepository {
+    pub fn record(self: Self, event: AuditEvent) -> i32 {
+        return ringPut(self.table, self.size, event);
+    }
+
+    pub fn find(self: Self, principal: string, afterMs: i64, kind: string) -> Array<AuditEvent> {
+        return ringAll(self.table).filter({ e -> matches(e, principal, afterMs, kind) });
+    }
+
+    pub fn dropped(self: Self) -> i32 {
+        return ringDropped(self.table);
+    }
+
+    pub fn arm(self: Self) -> string {
+        return "memory";
+    }
+
+    pub fn capacity(self: Self) -> i32 {
+        return self.size;
+    }
+}
+
+pub fn capacityProblem(key: string, capacity: i32) -> string {
+    if (capacity < 1) return "rakun-actuator: " + key + " is " + capacity.toString() + " - a repository that records nothing is refused; the capacity is at least 1";
+    return "";
+}
+
+pub fn memoryAuditRepository(capacity: i32) -> MemoryAuditRepository {
+    val problem = capacityProblem("the audit capacity", capacity);
+    if (problem != "") @panic(problem);
+    return MemoryAuditRepository(table: ringNew(capacity), size: capacity);
+}
+
+// ── the SQL arm ─────────────────────────────────────────────────────────────
+
+#[@External.Erlang("""(fun(__Q, __U) -> persistent_term:put(rakun_audit_sql, {__Q, __U}), 0 end)($0, $1)""")]
+pub declare fn installAuditSql(query: fn(sql: string, params: Array<#(string, string)>) -> Array<Array<string>>, update: fn(sql: string, params: Array<#(string, string)>) -> i32) -> i32;
+#[@External.Erlang("""(fun(__S, __P) -> case persistent_term:get(rakun_audit_sql, undefined) of undefined -> erlang:error({panic, <<"rakun-actuator: the SQL audit repository has no executor - installAuditSql(query, update) over front 08's SqlTemplate">>}); {__Q, _} -> __Q(__S, __P) end end)($0, $1)""")]
+declare fn sqlQuery(sql: string, params: Array<#(string, string)>) -> Array<Array<string>>;
+#[@External.Erlang("""(fun(__S, __P) -> case persistent_term:get(rakun_audit_sql, undefined) of undefined -> erlang:error({panic, <<"rakun-actuator: the SQL audit repository has no executor">>}); {_, __U} -> try {ok, __U(__S, __P)} catch _:{panic, __R} when is_binary(__R) -> {error, __R}; _:__R -> {error, iolist_to_binary(io_lib:format("~p", [__R]))} end end end)($0, $1)""")]
+declare fn sqlUpdate(sql: string, params: Array<#(string, string)>) -> @Result<i32, string>;
+#[@External.Erlang("""(fun(__T) -> logger:error("~ts", [__T]), persistent_term:put(rakun_audit_failures, persistent_term:get(rakun_audit_failures, 0) + 1), 0 end)($0)""")]
+declare fn noteFailure(line: string) -> i32;
+#[@External.Erlang("""persistent_term:get(rakun_audit_failures, 0)""")]
+pub declare fn auditWriteFailures() -> i32;
+#[@External.Erlang("""(fun(__Ps) -> unicode:characters_to_binary(uri_string:compose_query([{unicode:characters_to_list(__K), unicode:characters_to_list(__V)} || {__K, __V} <- __Ps], [{encoding, utf8}])) end)($0)""")]
+declare fn encodePairs(pairs: Array<#(string, string)>) -> string;
+#[@External.Erlang("""(fun(__D) -> case __D of <<>> -> []; _ -> case uri_string:dissect_query(__D) of __L when is_list(__L) -> [{unicode:characters_to_binary(__K), case __V of true -> <<>>; _ -> unicode:characters_to_binary(__V) end} || {__K, __V} <- __L]; _ -> [] end end end)($0)""")]
+declare fn decodePairs(data: string) -> Array<#(string, string)>;
+#[@External.Erlang("""(fun(__S) -> try binary_to_integer(__S) catch _:_ -> 0 end end)($0)""")]
+declare fn toI64(s: string) -> i64;
+
+// The table the front 77 migration creates.
+pub fn auditSchemaSql(table: string) -> string {
+    return "CREATE TABLE " + table + " (at_ms integer, principal text, kind text, data text)";
+}
+
+fn eventOf(row: Array<string>) -> AuditEvent {
+    return AuditEvent(atMs: toI64(row.at(0) ?? "0"), principal: row.at(1) ?? "", kind: row.at(2) ?? "", data: decodePairs(row.at(3) ?? ""));
+}
+
+// The SELECT `find` issues: every filter it was given is a predicate.
+pub fn auditFindSql(table: string, principal: string, afterMs: i64, kind: string) -> string {
+    var preds: string[] = ["at_ms > :after"];
+    if (principal != "") preds.push("principal = :principal");
+    if (kind != "") preds.push("kind = :kind");
+    return "SELECT at_ms, principal, kind, data FROM " + table + " WHERE " + preds.join(" AND ") + " ORDER BY at_ms";
+}
+
+pub type SqlAuditRepository(table: string) implement AuditRepository {
+    pub fn record(self: Self, event: AuditEvent) -> i32 {
+        val r = sqlUpdate("INSERT INTO " + self.table + " (at_ms, principal, kind, data) VALUES (:at, :principal, :kind, :data)", [#("at", event.atMs.toString()), #("principal", event.principal), #("kind", event.kind), #("data", encodePairs(event.data))]);
+        if (r.isOk()) return r.unwrapOr(0);
+        val reason = case r { Ok(v) -> ""; Error(e) -> e; };
+        return noteFailure("rakun-actuator: the audit event " + event.kind + " for `" + event.principal + "` was not recorded - " + reason);
+    }
+
+    pub fn find(self: Self, principal: string, afterMs: i64, kind: string) -> Array<AuditEvent> {
+        return sqlQuery(auditFindSql(self.table, principal, afterMs, kind), [#("after", afterMs.toString()), #("principal", principal), #("kind", kind)]).map({ row -> eventOf(row) });
+    }
+
+    pub fn dropped(self: Self) -> i32 {
+        return 0;
+    }
+
+    pub fn arm(self: Self) -> string {
+        return "sql";
+    }
+
+    pub fn capacity(self: Self) -> i32 {
+        return 0;
+    }
+}
+
+pub fn sqlAuditRepository(table: string) -> SqlAuditRepository {
+    return SqlAuditRepository(table: table);
+}
+
+// ── the active repository ───────────────────────────────────────────────────
+
+#[@External.Erlang("""(fun(__R) -> persistent_term:put(rakun_audit_repo, __R), 0 end)($0)""")]
+declare fn storeRepo<R>(repo: R) -> i32;
+#[@External.Erlang("""persistent_term:get(rakun_audit_repo, undefined)""")]
+declare fn loadRepo<R>() -> ?R;
+
+pub fn installAudit<R>(repo: R) -> i32 {
+    val _s = storeRepo(repo);
+    return rkAuditInstallSink({ kind, principal, data -> audit(kind, principal, data) });
+}
+
+#[@External.Erlang("""(fun() -> persistent_term:erase(rakun_audit_repo), 0 end)()""")]
+declare fn forgetRepo() -> i32;
+
+// Uninstalls the active repository and the sink.
+pub fn clearAudit() -> i32 {
+    val _f = forgetRepo();
+    return rkAuditClearSink();
+}
+
+fn recordActive(event: AuditEvent) -> i32 {
+    val mem: ?MemoryAuditRepository = activeMemory();
+    if (mem != null) return (mem ?? MemoryAuditRepository(table: "", size: 0)).record(event);
+    val sql: ?SqlAuditRepository = activeSql();
+    if (sql != null) return (sql ?? SqlAuditRepository(table: "")).record(event);
+    return 0;
+}
+
+#[@External.Erlang("""(fun() -> case persistent_term:get(rakun_audit_repo, undefined) of __R when is_tuple(__R) -> case lists:suffix("MemoryAuditRepository", atom_to_list(element(1, __R))) of true -> __R; false -> undefined end; _ -> undefined end end)()""")]
+declare fn activeMemory() -> ?MemoryAuditRepository;
+#[@External.Erlang("""(fun() -> case persistent_term:get(rakun_audit_repo, undefined) of __R when is_tuple(__R) -> case lists:suffix("SqlAuditRepository", atom_to_list(element(1, __R))) of true -> __R; false -> undefined end; _ -> undefined end end)()""")]
+declare fn activeSql() -> ?SqlAuditRepository;
+
+// Records an event on the active repository, now; 0 when none is installed.
+pub fn audit(kind: string, principal: string, data: Array<#(string, string)>) -> i32 {
+    return recordActive(AuditEvent(atMs: auditNowMs(), principal: principal, kind: kind, data: data));
+}
+
+pub fn activeAuditFind(principal: string, afterMs: i64, kind: string) -> Array<AuditEvent> {
+    val mem: ?MemoryAuditRepository = activeMemory();
+    if (mem != null) return (mem ?? MemoryAuditRepository(table: "", size: 0)).find(principal, afterMs, kind);
+    val sql: ?SqlAuditRepository = activeSql();
+    if (sql != null) return (sql ?? SqlAuditRepository(table: "")).find(principal, afterMs, kind);
+    return [];
+}
+
+// ── the endpoint ────────────────────────────────────────────────────────────
+
+fn eventJson(e: AuditEvent) -> string {
+    val data = json.array(e.data.map({ p -> json.object([#("key", json.quote(p._0)), #("value", json.quote(p._1))]) }));
+    return json.object([#("timestamp", e.atMs.toString()), #("principal", json.quote(e.principal)), #("type", json.quote(e.kind)), #("data", data)]);
+}
+
+pub fn auditEventsJson(principal: string, afterMs: i64, kind: string) -> string {
+    val mem: ?MemoryAuditRepository = activeMemory();
+    val sql: ?SqlAuditRepository = activeSql();
+    val armName = if (mem != null) "memory" else if (sql != null) "sql" else "none";
+    val dropped = if (mem != null) (mem ?? MemoryAuditRepository(table: "", size: 0)).dropped() else 0;
+    val cap = if (mem != null) (mem ?? MemoryAuditRepository(table: "", size: 0)).capacity() else 0;
+    val events = activeAuditFind(principal, afterMs, kind).map({ e -> eventJson(e) });
+    return sanitizeEntries("auditevents", json.object([#("repository", json.quote(armName)), #("capacity", cap.toString()), #("dropped", dropped.toString()), #("events", json.array(events))]));
+}
+
+pub fn auditEventsRead(req: Request) -> EndpointResponse {
+    val after = req.query("after");
+    return EndpointResponse(status: 200, contentType: "application/json", body: auditEventsJson(req.query("principal"), toI64(if (after == "") "0" else after), req.query("type")));
+}
+
+pub fn auditCapacity() -> i32 {
+    val raw = rkProp("rakun.management.auditevents.capacity").trim();
+    return if (raw == "") 1000 else toI32(raw);
+}
+
+// At boot: a memory repository of the configured capacity unless one is
+// installed, and the endpoint.
+pub fn mountAudit() -> i32 {
+    val problem = capacityProblem("rakun.management.auditevents.capacity", auditCapacity());
+    if (problem != "") @panic(problem);
+    if (activeMemory() == null && activeSql() == null) {
+        val _i = installAudit(memoryAuditRepository(auditCapacity()));
+    };
+    return rkRegisterEndpoint("auditevents", "rakun-actuator", "read", { req -> auditEventsRead(req) });
+}

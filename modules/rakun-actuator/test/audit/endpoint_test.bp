@@ -1,0 +1,80 @@
+//// rakun-actuator — the `auditevents` endpoint, the audit seam and retention
+//// (front 87 steps 4, 6 and 7).
+
+import {testing.asserts} from "std";
+import {Response, rkDispatchHttp, rkSetProp} from "rakun";
+import {endpointIds} from "rakun-actuator-api";
+import {rkAudit} from "rakun-actuator-api/audit_seam";
+import {mountActuator} from "actuator";
+import {installExposure, clearExposure} from "endpoint_host";
+import {AuditEvent, memoryAuditRepository, installAudit, clearAudit, audit, mountAudit, auditEventsJson, activeAuditFind} from "audit/audit";
+
+#[@External.Erlang("""(fun(__X) -> __X end)($0)""")]
+declare fn wide(n: i32) -> i64;
+
+fn get(path: string, queryJson: string) -> Response {
+    return rkDispatchHttp("GET", path, "{}", queryJson, "");
+}
+
+test "audit seam: without an installed repository rkAudit is a no-op" {
+    val _c = clearAudit();
+    assert rkAudit("AUTHENTICATION_SUCCESS", "ana", []) == 0 && activeAuditFind("", wide(0), "").length == 0;
+}
+
+test "audit seam: an installed repository receives rkAudit's events" {
+    val repo = memoryAuditRepository(10);
+    val _i = installAudit(repo);
+    val _a = rkAudit("AUTHENTICATION_FAILURE", "mallory", [#("remoteAddress", "10.1.1.1")]);
+    val _b = audit("ORDER_EXPORTED", "ana", [#("order", "42")]);
+    val found = repo.find("", wide(0), "").map({ e -> e.principal + "/" + e.kind }).join(",");
+    val _c = clearAudit();
+    assert found == "mallory/AUTHENTICATION_FAILURE,ana/ORDER_EXPORTED", found;
+}
+
+test "auditevents: registered, absent unless exposed, read-only, rendering dropped with events and filters" {
+    val _c = clearAudit();
+    val _a = mountActuator();
+    val _m = mountAudit();
+    val hidden = get("/actuator/auditevents", "{}").status;
+    val _x = installExposure({ id -> id == "auditevents" || id == "health" });
+    val _e1 = audit("AUTHENTICATION_SUCCESS", "ana", []);
+    val _e2 = audit("AUTHENTICATION_FAILURE", "bob", []);
+    val all = get("/actuator/auditevents", "{}");
+    val bob = get("/actuator/auditevents", "{\"principal\":\"bob\"}");
+    val kind = get("/actuator/auditevents", "{\"type\":\"AUTHENTICATION_SUCCESS\"}");
+    val post = rkDispatchHttp("POST", "/actuator/auditevents", "{}", "{}", "");
+    val del = rkDispatchHttp("DELETE", "/actuator/auditevents", "{}", "{}", "");
+    val _y = clearExposure();
+    val _z = clearAudit();
+    assert endpointIds().indexOf("auditevents") >= 0 && hidden == 404, hidden.toString();
+    assert all.status == 200 && all.body.contains("\"dropped\":0") && all.body.contains("\"repository\":\"memory\"") && all.body.contains("\"capacity\":1000"), all.body;
+    assert bob.body.contains("\"principal\":\"bob\"") && bob.body.contains("\"principal\":\"ana\"") == false, bob.body;
+    assert kind.body.contains("AUTHENTICATION_SUCCESS") && kind.body.contains("AUTHENTICATION_FAILURE") == false, kind.body;
+    assert post.status >= 400 && del.status >= 400;
+}
+
+test "auditevents: a data value under a secret-named key is masked by front 76's sanitizer" {
+    val _c = clearAudit();
+    val _i = installAudit(memoryAuditRepository(10));
+    val _v = rkSetProp("rakun.management.endpoint.auditevents.show-values", "always");
+    val _e = audit("TOKEN_ISSUED", "ana", [#("apiToken", "s3cr3t"), #("client", "cli")]);
+    val body = auditEventsJson("", wide(0), "");
+    val _u = rkSetProp("rakun.management.endpoint.auditevents.show-values", "");
+    val _z = clearAudit();
+    assert body.contains("s3cr3t") == false && body.contains("{\"key\":\"apiToken\",\"value\":\"******\"}") && body.contains("{\"key\":\"client\",\"value\":\"cli\"}"), body;
+}
+
+test "audit retention: the capacity key takes effect at boot and is reported; 0 refuses" {
+    val _c = clearAudit();
+    val _k = rkSetProp("rakun.management.auditevents.capacity", "2");
+    val _m = mountAudit();
+    val _a = audit("A", "x", []);
+    val _b = audit("B", "x", []);
+    val _d = audit("C", "x", []);
+    val body = auditEventsJson("", wide(0), "");
+    val _z = clearAudit();
+    val _zero = rkSetProp("rakun.management.auditevents.capacity", "0");
+    try asserts.throwsWith({ -> mountAudit() }, "rakun.management.auditevents.capacity is 0 - a repository that records nothing is refused");
+    val _u = rkSetProp("rakun.management.auditevents.capacity", "");
+    assert body.contains("\"capacity\":2") && body.contains("\"dropped\":1"), body;
+}

@@ -51,7 +51,8 @@ import {SecurityPolicy, CompiledPolicy, CompiledRule, Decision, providedPolicy, 
 import {verifyJwt, jwtConfig, jwtConfigProblem} from "jwt";
 import {encoderProblem} from "password";
 import {usersProblem, userDetailsService} from "users";
-import {verifyBasic} from "basic";
+import {verifyBasic, parseBasic, BasicCredentials} from "basic";
+import {rkAudit} from "rakun-actuator-api/audit_seam";
 import {csrfPasses, issueTokenCookie} from "csrf";
 import {unauthorizedTag, forbiddenTag} from "method_security";
 
@@ -159,6 +160,40 @@ fn rendered(d: Decision) -> string {
     return d.pattern + " " + d.requirement;
 }
 
+// ── audit events (front 87) ─────────────────────────────────────────────────
+// Emitted through the actuator-api seam, a no-op unless rakun-actuator's audit
+// repository is installed; this module never imports the actuator. No event
+// carries a credential: the failure names the ATTEMPTED principal only.
+
+#[@External.Erlang("""(fun() -> case get(rakun_conn_socket) of undefined -> <<>>; __S -> case (case get(rakun_transport) of ssl -> ssl:peername(__S); _ -> inet:peername(__S) end) of {ok, {__A, _}} -> list_to_binary(inet:ntoa(__A)); _ -> <<>> end end end)()""")]
+declare fn peerAddress() -> string;
+
+fn attemptedPrincipal(req: WebRequest) -> string {
+    val header: string = req.header("authorization").trim();
+    if (header.toLower().startsWith("basic ") == false) return "";
+    val creds = parseBasic(header);
+    val none = BasicCredentials(username: "", password: "");
+    return creds.unwrapOr(none).username;
+}
+
+fn schemeOf(req: WebRequest) -> string {
+    val h: string = req.header("authorization").trim();
+    val at = h.indexOf(" ");
+    return if (at < 0) h else h.slice(0, at);
+}
+
+fn auditAuthentication(req: WebRequest, outcome: AuthOutcome) -> i32 {
+    if (outcome.presented == false) return 0;
+    if (outcome.valid && outcome.auth.authenticated) return rkAudit("AUTHENTICATION_SUCCESS", outcome.auth.principal.name, [#("remoteAddress", peerAddress()), #("type", schemeOf(req))]);
+    if (outcome.valid == false) return rkAudit("AUTHENTICATION_FAILURE", attemptedPrincipal(req), [#("remoteAddress", peerAddress()), #("type", schemeOf(req))]);
+    return 0;
+}
+
+fn auditDenied(req: WebRequest, auth: Authentication, required: string) -> i32 {
+    val who = if (auth.authenticated) auth.principal.name else "anonymousUser";
+    return rkAudit("AUTHORIZATION_FAILURE", who, [#("path", req.path), #("requiredAuthority", required), #("remoteAddress", peerAddress())]);
+}
+
 // Early returns stay at the top level of the body: a `return` in an `if`
 // nested in another `if` is dropped on erlang (a recorded compiler defect).
 pub fn securityEntry(p: CompiledPolicy, req: WebRequest, chain: Chain) -> Response {
@@ -167,6 +202,7 @@ pub fn securityEntry(p: CompiledPolicy, req: WebRequest, chain: Chain) -> Respon
     val outcome: AuthOutcome = authenticate(req);
     val who: string = if (outcome.valid && outcome.auth.authenticated) outcome.auth.principal.name else "-";
     val _w = rkSecSlotPut("principal", who);
+    val _au = auditAuthentication(req, outcome);
     if (outcome.valid == false) {
         val _i = rkSecNoteDecision("denied " + rendered(d));
         val bearer = bearerVerifierInstalled() && req.header("authorization").trim().toLower().startsWith("bearer ");
@@ -181,10 +217,12 @@ pub fn securityEntry(p: CompiledPolicy, req: WebRequest, chain: Chain) -> Respon
     val needsLogin: bool = (allowed == false) && (auth.authenticated == false);
     if (needsLogin) {
         val _a = rkSecNoteDecision("denied " + rendered(d));
+        val _ad = auditDenied(req, auth, requiredAuthority(d.requirement));
         return unauthorizedResponse();
     };
     if (allowed == false) {
         val _f = rkSecNoteDecision("denied " + rendered(d));
+        val _fd = auditDenied(req, auth, requiredAuthority(d.requirement));
         return forbiddenResponse(requiredAuthority(d.requirement));
     };
     val _g = rkSecNoteDecision("granted " + rendered(d));

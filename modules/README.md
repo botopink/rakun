@@ -26,7 +26,7 @@ refusal is the core's `config_check.bp`.
 |---|---|---|---|---|---|
 | [rakun](./rakun/) (core) | root · http · runtime · decorators · bootstrap · rakun.d · … | erlang | `spring-boot-starter` | 04 · 05 · 06 · 62 · 72 · 73 · 74 | real code, 374 tests |
 | [rakun-app](./rakun-app/) | root · file_router · ssr · navigation · route_handler · actions · static_host · segment_config · static_gen · route_slots · route_intercept · i18n · metadata_routes | erlang | (Next.js `app/` router, server half) | 22 · 23 · 24 · 25 · 60 · 61 · 63 · 64 · 66 | real code, 204 tests |
-| [rakun-actuator-api](./rakun-actuator-api/) | root · contract · registration · span | erlang | `spring-boot-actuator` (the API half) | 11 (Step 0) | real code, 10 tests |
+| [rakun-actuator-api](./rakun-actuator-api/) | root · contract · registration · span · audit_seam | erlang | `spring-boot-actuator` (the API half) | 11 (Step 0) · 87 (the audit seam) | real code, 10 tests |
 | [rakun-actuator](./rakun-actuator/) | root · endpoint_host · health · info · registry_endpoints · instrumentation · management · actuator | erlang | `-actuator` (host) | 11 · 76 · 87 | real code, 77 tests |
 | [rakun-cache](./rakun-cache/) | root · cache_host · cache · cached · cache_endpoint | erlang | `-cache` | 12 | real code, 55 tests |
 | [rakun-client](./rakun-client/) | root · address · settings · response · cache · transport · health · client · request · exchange | erlang | `RestClient` / `WebClient` | 13 | real code, 70 tests |
@@ -39,7 +39,7 @@ refusal is the core's `config_check.bp`.
 | [rakun-messaging](./rakun-messaging/) | root · messaging_host · message · registry · markers · messaging_health · container · templates · reliability (policy · dispatch · transaction) | erlang | `-amqp` / `-kafka` / `-activemq` / `-artemis` | 15 · 86 · 90 | real code (in-process broker), 65 tests |
 | [rakun-release](./rakun-release/) | root · release · sbom | erlang | packaging (`spring-boot-maven-plugin`, buildpacks) | 81 | real code, 12 tests |
 | [rakun-scheduling](./rakun-scheduling/) | root · cron · registry · markers · executor · endpoint · jobstore (store · scheduler · markers · endpoint) | erlang | `@Scheduled` / `-quartz` | 16 · 84 | real code, 100 tests |
-| [rakun-security](./rakun-security/) | root · principal · policy · jwt · password · users · users_sql · basic · csrf · method_security · security_filter · security · oauth2_host · oauth2 · saml2 · ldap_host · ldap | erlang | `-security`, `-oauth2-client`, `-saml2` | 10 · 79 | real code, 96 tests |
+| [rakun-security](./rakun-security/) | root · principal · policy · jwt · password · users · users_sql · basic · csrf · method_security · security_filter · security · oauth2_host · oauth2 · saml2 · ldap_host · ldap | erlang | `-security`, `-oauth2-client`, `-saml2` | 10 · 79 · 87 (audit events) | real code, 100 tests |
 | [rakun-session](./rakun-session/) | root · host · session · signing · session_config · session_cookie · store_ets · store_sql · store_redis · session_filter · session_endpoint | erlang | `spring-session-jdbc` / `-data-redis` | 18 | real code, 36 tests |
 | [rakun-test](./rakun-test/) | root | erlang | `-test` | 19 | FakeRequest (implements Request) + toRequest, expect* assertions, MockMvc, resetSingletons/resetContext/contextSnapshot; 27 tests |
 | [rakun-websocket](./rakun-websocket/) | root · ws_host · ws · endpoint | erlang | `-websocket` | 20 | real code, 27 tests (no JavaScript) |
