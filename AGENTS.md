@@ -2582,6 +2582,38 @@ hashes, module facts).
   path dependencies with a SHA-256 of their tree; `registerSbomEndpoint(file)`
   serves it at `sbom`.
 
+## Mail — `modules/rakun-mail/` (front 85)
+
+**Transport decision, front 04's cowboy seam again.** The SMTP client is
+written in `src/sidecars/rakun_mail.erl` over `gen_tcp` and OTP `ssl` (both in
+the standard distribution): a sidecar loads with no code path beyond the
+output directory, so `gen_smtp_client` would compile and be `undef` wherever
+it is not installed. `rakun.mail.transport=gen_smtp` names the adapter
+`rakun_mail_gen_smtp` and refuses the boot when it is not loadable — no
+fallback.
+
+- `mail.bp`: `Mail` (`sender`, not `from` — a keyword cannot name a field),
+  `Attachment` (a path, read by the host), `MailServer` / `TlsMode` from
+  `rakun.mail.{host, port, username, password, tls, ssl.bundle,
+  connection-timeout, timeout, write-timeout}`. `composeMessage` (MIME shape
+  from content; QP text, base64 attachments, RFC 2047, a checked boundary,
+  plain generated from HTML), `deliverNow` (synchronous: `""` or
+  `permanent|retryable\t<reason>`), `send` (composes, queues, opens no
+  socket). `configureMail()` validates (transport, the health timeout shorter
+  than every send timeout) and hands the queue its server and policy
+  (`queue.concurrency` 2, `retry.max-attempts` 3, `retry.backoff-ms` 1000
+  doubled). Dead letters: `mailDeadLetters()`.
+- The durable path is front 83's outbox: `publishMailAfterCommit(ds, m)` and
+  the relay publisher `mailRelayPublisher()` (delivers directly, not through
+  the queue). No second durable queue here.
+- `mailHealth()` / `mountMail()`: EHLO (+ STARTTLS) and QUIT, never a send,
+  within `rakun.mail.health.timeout-ms` (1000); details host, port, tls.
+- The DATA body is written in 64 KiB chunks: the driver queues one write
+  whole, so only chunked writes can meet `send_timeout`.
+- Tests run against `rakun_mail_fixture.erl` (`fixture.bp`): an SMTP server on
+  an ephemeral port that records commands and DATA bytes, with STARTTLS,
+  implicit TLS, AUTH, `fail=<VERB>:<code>`, `silent`, `slow-data`.
+
 ## Distributed transactions — `modules/rakun-tx/` (front 83)
 
 **Boundary with front 08: one resource is front 08, more than one is here.**

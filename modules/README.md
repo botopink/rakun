@@ -34,6 +34,7 @@ refusal is the core's `config_check.bp`.
 | [rakun-devtools](./rakun-devtools/) | root · devtools · db_console | erlang | `spring-boot-devtools` | 80 | real code, 21 tests |
 | [rakun-hateoas](./rakun-hateoas/) | root · hal | erlang | `-hateoas` | 21 | real code, 14 tests |
 | [rakun-logging](./rakun-logging/) | root · cells · levels · formats · correlation · logging · digest · setup · endpoints | erlang | `-logging` | 17 | real code, 54 tests |
+| [rakun-mail](./rakun-mail/) | root · mail · fixture | erlang | `-mail` | 85 | real code, 32 tests |
 | [rakun-metrics](./rakun-metrics/) | root · registry · bus · vm · tracing · export · endpoints · install | erlang | Micrometer + `-actuator` (prometheus) + tracing | 75 | real code, 41 tests |
 | [rakun-messaging](./rakun-messaging/) | root · messaging_host · message · registry · markers · messaging_health · container · templates | erlang | `-amqp` / `-kafka` / `-activemq` / `-artemis` | 15 · 86 · 90 | real code (in-process broker), 38 tests |
 | [rakun-release](./rakun-release/) | root · release · sbom | erlang | packaging (`spring-boot-maven-plugin`, buildpacks) | 81 | real code, 12 tests |

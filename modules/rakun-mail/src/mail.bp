@@ -1,0 +1,230 @@
+//// rakun-mail — composing and sending mail (front 85).
+////
+//// `send(m)` COMPOSES the message in the caller (a pure transform, plus a host
+//// read of each attachment file) and hands it to the in-VM queue; it never
+//// opens a socket, so a slow or dead SMTP server slows delivery and nothing
+//// else. The queue's sender runs at most `rakun.mail.queue.concurrency`
+//// deliveries at once; a retryable failure (4xx, a timeout, a refused
+//// connection) is retried `rakun.mail.retry.max-attempts` times with
+//// `rakun.mail.retry.backoff-ms` doubled per attempt, and a permanent one (5xx)
+//// or the last retryable one goes to the dead-letter store with its reason.
+//// The in-VM queue is lost with the node: a mail that must not be sent unless
+//// a transaction commits, or must survive the node, goes through front 83's
+//// outbox (`publishMailAfterCommit`), and the outbox relay delivers it with
+//// `mailRelayPublisher()` — directly, never through this queue.
+////
+//// THE MIME SHAPE follows what the mail carries: text only is one
+//// `text/plain; charset=utf-8` part; text + html is `multipart/alternative`
+//// (plain first); inline images add `multipart/related` around the HTML; any
+//// attachment wraps it all in `multipart/mixed`. A mail with HTML and no text
+//// gets a plain part generated from the HTML. Text parts are quoted-printable
+//// (lines of at most 76), attachments base64; a subject or display name with a
+//// non-ASCII byte, or longer than 78, is RFC 2047; `bcc` is envelope-only.
+//// The HTML is a string the caller rendered and escaped (decision 113): it is
+//// encoded, never re-escaped or re-parsed.
+////
+//// THE TRANSPORT is `rakun_mail.erl`'s client over gen_tcp / OTP ssl: EHLO,
+//// STARTTLS, AUTH PLAIN (LOGIN when PLAIN is not offered), MAIL, RCPT, DATA,
+//// QUIT. `rakun.mail.tls=starttls` refuses a server that does not advertise
+//// STARTTLS — no key allows the clear-text downgrade; `implicit` is TLS from
+//// the first byte. TLS material comes from front 74's bundle
+//// `rakun.mail.ssl.bundle`, else the host's trust store with a hostname check.
+
+import {rkProp, toI32} from "rakun";
+import {Health, rkRegisterHealthIndicator} from "rakun-actuator-api";
+import {OutboxMessage, publishAfterCommitOn} from "rakun-tx";
+
+pub type TlsMode {
+    None,
+    StartTls,
+    Implicit,
+}
+
+pub type MailServer(
+    host: string,
+    port: i32,
+    username: string,
+    password: string,
+    tlsMode: TlsMode,
+    bundle: string,
+    connectTimeoutMs: i32,
+    readTimeoutMs: i32,
+    writeTimeoutMs: i32,
+)
+
+pub type Attachment(filename: string, contentType: string, path: string, inline: bool, cid: string)
+
+pub type Mail(
+    sender: string,
+    to: string[],
+    cc: string[],
+    bcc: string[],
+    replyTo: string,
+    subject: string,
+    text: string,
+    html: string,
+    attachments: Attachment[],
+    headers: Array<#(string, string)>,
+)
+
+#[@External.Erlang("rakun_mail", "compose")]
+declare fn rkMailCompose(m: Mail, domain: string) -> string;
+#[@External.Erlang("rakun_mail", "envelope_rcpts")]
+declare fn rkMailRcpts(m: Mail) -> string[];
+#[@External.Erlang("rakun_mail", "address_of")]
+pub declare fn addressOf(address: string) -> string;
+#[@External.Erlang("""(fun(__S, __F, __R, __M) -> case rakun_mail:send(__S, {rakun_mail:address_of(__F), __R, __M}) of ok -> <<>>; __E -> __E end end)($0, $1, $2, $3)""")]
+declare fn rkMailSend(server: MailServer, sender: string, rcpts: string[], message: string) -> string;
+#[@External.Erlang("rakun_mail", "probe")]
+declare fn rkMailProbe(server: MailServer, timeoutMs: i32) -> string;
+#[@External.Erlang("rakun_mail", "transport_problem")]
+declare fn rkMailTransportProblem(transport: string) -> string;
+#[@External.Erlang("""rakun_mail:configure($0, {$1, $2, $3})""")]
+declare fn rkMailConfigure(server: MailServer, concurrency: i32, attempts: i32, backoffMs: i32) -> i32;
+#[@External.Erlang("rakun_mail", "enqueue")]
+declare fn rkMailEnqueue(id: string, sender: string, rcpts: string[], message: string) -> string;
+#[@External.Erlang("rakun_mail", "queue_stats")]
+pub declare fn mailQueueStats() -> string;
+#[@External.Erlang("rakun_mail", "dead_letters")]
+pub declare fn mailDeadLetters() -> string[];
+#[@External.Erlang("rakun_mail", "reset_queue")]
+pub declare fn resetMailQueue() -> i32;
+#[@External.Erlang("rakun_mail", "pending")]
+pub declare fn mailPending() -> i32;
+#[@External.Erlang("rakun_mail", "log_lines")]
+pub declare fn mailLog() -> string[];
+#[@External.Erlang("rakun_mail", "pack")]
+declare fn rkMailPack(sender: string, rcpts: string[], message: string) -> string;
+#[@External.Erlang("rakun_mail", "deliver_packed")]
+declare fn rkMailDeliverPacked(server: MailServer, payload: string) -> string;
+#[@External.Erlang("""(fun() -> <<"m-", (integer_to_binary(erlang:unique_integer([positive, monotonic])))/binary>> end)()""")]
+declare fn freshId() -> string;
+
+// ── configuration ───────────────────────────────────────────────────────────
+
+fn prop(key: string, fallback: string) -> string {
+    val raw = rkProp("rakun.mail." + key).trim();
+    return if (raw == "") fallback else raw;
+}
+
+fn intProp(key: string, fallback: i32) -> i32 {
+    return toI32(prop(key, fallback.toString()));
+}
+
+pub fn tlsModeOf(name: string) -> TlsMode {
+    val n = name.toLower();
+    if (n == "starttls") return TlsMode.StartTls;
+    if (n == "implicit") return TlsMode.Implicit;
+    if (n == "none" || n == "") return TlsMode.None;
+    @panic("rakun mail: rakun.mail.tls is `" + name + "` - none, starttls or implicit");
+}
+
+pub fn tlsModeName(m: TlsMode) -> string {
+    return case m { None -> "none"; StartTls -> "starttls"; Implicit -> "implicit"; };
+}
+
+// `rakun.mail.{host, port, username, password, tls, ssl.bundle,
+// connection-timeout, timeout, write-timeout}` — the three timeouts are
+// Spring's `mail.smtp.connectiontimeout`, `mail.smtp.timeout` and
+// `mail.smtp.writetimeout`.
+pub fn mailServer() -> MailServer {
+    return MailServer(
+        host: prop("host", "localhost"),
+        port: intProp("port", 25),
+        username: prop("username", ""),
+        password: rkProp("rakun.mail.password"),
+        tlsMode: tlsModeOf(prop("tls", "none")),
+        bundle: prop("ssl.bundle", ""),
+        connectTimeoutMs: intProp("connection-timeout", 5000),
+        readTimeoutMs: intProp("timeout", 5000),
+        writeTimeoutMs: intProp("write-timeout", 5000),
+    );
+}
+
+pub fn healthTimeoutMs() -> i32 {
+    return intProp("health.timeout-ms", 1000);
+}
+
+// Every reason the configuration cannot run, "" when it can.
+pub fn mailConfigProblem() -> string {
+    val t = rkMailTransportProblem(prop("transport", "smtp"));
+    if (t != "") return t;
+    val s = mailServer();
+    val shortest = [s.connectTimeoutMs, s.readTimeoutMs, s.writeTimeoutMs].fold(s.connectTimeoutMs, { acc, x -> if (x < acc) x else acc });
+    if (healthTimeoutMs() >= shortest) return "rakun mail: rakun.mail.health.timeout-ms (" + healthTimeoutMs().toString() + ") must be shorter than every send timeout (the shortest is " + shortest.toString() + " ms) - a hanging server must not hang /actuator/health";
+    return "";
+}
+
+// At boot: validates, then hands the queue its server and policy.
+pub fn configureMail() -> i32 {
+    val problem = mailConfigProblem();
+    if (problem != "") @panic(problem);
+    return rkMailConfigure(mailServer(), intProp("queue.concurrency", 2), intProp("retry.max-attempts", 3), intProp("retry.backoff-ms", 1000));
+}
+
+// ── composition ─────────────────────────────────────────────────────────────
+
+pub fn composeMessage(m: Mail) -> string {
+    if (m.sender.trim() == "") @panic("rakun mail: a mail needs a sender address (the From header)");
+    if (m.to.length + m.cc.length + m.bcc.length == 0) @panic("rakun mail: a mail needs at least one recipient");
+    return rkMailCompose(m, prop("message-id-domain", "rakun.local"));
+}
+
+pub fn envelopeRecipients(m: Mail) -> string[] {
+    return rkMailRcpts(m);
+}
+
+// ── sending ─────────────────────────────────────────────────────────────────
+
+// Composes and delivers `m` now, on this process: "" or `<kind>\t<reason>`
+// (`permanent` or `retryable`).
+pub fn deliverNow(server: MailServer, m: Mail) -> string {
+    return rkMailSend(server, m.sender, envelopeRecipients(m), composeMessage(m));
+}
+
+// Composes `m` and queues it; answers its id. Opens no socket.
+pub fn send(m: Mail) -> string {
+    return rkMailEnqueue(freshId(), m.sender, envelopeRecipients(m), composeMessage(m));
+}
+
+// ── front 83's outbox ───────────────────────────────────────────────────────
+
+pub fn mailTopic() -> string {
+    return "rakun.mail";
+}
+
+// Enrols `m` in the caller's transaction on `ds`: composed now, sent by the
+// outbox relay after the commit, and never if it rolls back.
+pub fn publishMailAfterCommit(ds: string, m: Mail) -> i32 {
+    return publishAfterCommitOn(ds, OutboxMessage(aggregate: "mail", topic: mailTopic(), key: m.sender, payload: rkMailPack(m.sender, envelopeRecipients(m), composeMessage(m)), headers: []));
+}
+
+// The relay's publisher for mail rows: delivers the packed message directly
+// ("" or the failure, which the outbox retries) — not through the queue, so a
+// row is sent once per relay pass.
+pub fn mailRelayPublisher() -> fn(topic: string, key: string, payload: string) -> string {
+    return { topic, key, payload -> relayOne(topic, payload) };
+}
+
+fn relayOne(topic: string, payload: string) -> string {
+    if (topic != mailTopic()) return "rakun mail: the mail publisher received topic `" + topic + "`";
+    return rkMailDeliverPacked(mailServer(), payload);
+}
+
+// ── health ──────────────────────────────────────────────────────────────────
+
+// Connects, EHLOs (and STARTTLSes when configured), quits: never sends. The
+// detail carries host, port and TLS mode — never a credential.
+pub fn mailHealth() -> Health {
+    val s = mailServer();
+    val r = rkMailProbe(s, healthTimeoutMs());
+    val parts = r.split("\t");
+    val common = "\"host\":\"" + s.host + "\",\"port\":" + s.port.toString() + ",\"tls\":\"" + tlsModeName(s.tlsMode) + "\"";
+    if ((parts.at(0) ?? "") == "UP") return Health(status: "UP", details: "{" + common + ",\"tlsNegotiated\":" + (parts.at(1) ?? "false") + "}");
+    val reason = parts.slice(2, parts.length).join(" ");
+    return Health(status: "DOWN", details: "{" + common + ",\"error\":\"" + reason.replaceAll("\\", "\\\\").replaceAll("\"", "\\\"") + "\"}");
+}
+
+pub fn mountMail() -> i32 {
+    return rkRegisterHealthIndicator("mail", "rakun-mail", { -> mailHealth() });
+}
