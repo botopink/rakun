@@ -36,7 +36,8 @@ The repository is a **workspace** (decision 75 of 1.0.10-beta): the root `botopi
 members and is never a package — no `src`, `files`, `entry` or `dependencies`; `botopink build/test`
 there is the located refusal `botopink.json is a workspace, not a package — run this command inside
 one of its members: …`. Every `modules/*/` and `examples/*/` holding a `botopink.json` is a member,
-named by its own manifest. The **core is the member `modules/rakun/`**; `from "rakun"` resolves to it.
+named by its own manifest, and so is every `starters/*/` (front 73: a manifest and a docblock-only
+root, no code). The **core is the member `modules/rakun/`**; `from "rakun"` resolves to it.
 
 ```text
 rakun/
@@ -44,7 +45,7 @@ rakun/
 ├── docs.md            ← what this lib provides + Spring mapping + loading notes
 ├── botopink.json      ← WORKSPACE: name rakun · version · targets [erlang] (decision 117
 │                        rule 9 — every member declares [erlang] too) · workspaces
-│                        ["modules/*", "examples/*"]. Nothing importable from it.
+│                        ["modules/*", "starters/*", "examples/*"]. Nothing importable from it.
 ├── modules/
 │   ├── README.md      ← the member table (14 today, 13 planned with their fronts), the
 │   │                    module ↔ Spring starter map, how to add a member
@@ -233,6 +234,11 @@ rakun/
 │                        `specs/1.0.10-beta/03-rakun/modules.md` § Targets · dependencies
 │                        { "rakun": { "workspace": true } }) + a two-comment `src/root.bp`;
 │                        contents land per front
+├── starters/          ← front 73: eight `rakun-starter*` members — a curated dependency set
+│                        each (in-repo `{ "workspace": true }`, `onze` by `path`), `files`
+│                        [root.bp], a docblock-only root; README.md is the table, the
+│                        third-party `<project>-rakun-starter` rule and the subdirectory
+│                        limitation. Linted by `modules/rakun/test/starter_manifest_test.bp`
 ├── examples/
 │   ├── rakun/         ← member `rakun-example` (an application: entry main.bp, target erlang,
 │   │                    depends on `rakun` via { "workspace": true }); the sixty-second app
@@ -1952,6 +1958,25 @@ normalises BOTH on-disk shapes (`["rakun"]` and `{"rakun": {…}}`) exactly as
 REFUSAL, not a `false`: "this module is not a dependency" and "I could not find
 out" are different answers, and a condition that silently takes the second for
 the first turns every `#[conditionalOnModule]` in the build off without saying so.
+
+The question is asked of the RESOLVED set (front 73): `resolvedModuleListIn(file)`
+walks the manifest's dependencies breadth first, following `{ "path": … }`
+(relative to the declaring manifest) and `{ "workspace": true }` (a member of the
+nearest ancestor whose manifest declares `"workspaces"`); a `git` entry or a bare
+name counts and is not followed. `moduleList()` is that set for the working
+directory's manifest, so declaring `rakun-starter-data-sql` makes
+`#[conditionalOnModule("rakun-data")]` true and the starter's own name counts
+too. `moduleVerdict(rec, resolved)` is the `M` branch; a refusal observes
+`resolved dependencies: a,b,…`.
+
+### The version set — `modules/rakun/src/version_set.bp` (front 73)
+
+`rakunVersion()`, `moduleVersions()` (one row per `modules/*` and `starters/*`
+member), `versionOf(name)` (`""` when unpinned) and
+`versionSetProblems(manifests)`. `test/version_set_test.bp` reads every manifest
+and fails on a disagreeing version, a directory with no row, or a row with no
+directory — a new member adds its row in the same commit. The actuator's `info`
+reports it under `rakun` (`rakunInfo`).
 
 The module atom may not be `autoconfig`: rakun emits `rakun/autoconfig`, and
 `shipErlSidecars` skips a qualifier matching a module this build emitted —

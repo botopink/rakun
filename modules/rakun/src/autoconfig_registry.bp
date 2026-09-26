@@ -32,7 +32,7 @@
 ////
 //// Reached via `from "rakun"`; see ../AGENTS.md § The auto-configuration pass.
 
-import {io.fs} from "std";
+import {io.fs, path} from "std";
 
 // ── the table ───────────────────────────────────────────────────────────────
 //
@@ -271,8 +271,9 @@ pub fn manifestDependencies(text: string) -> string[] {
 
 // ── the module question ─────────────────────────────────────────────────────
 //
-// `moduleList()` is the application's own declared dependencies, read from the
-// `botopink.json` of the working directory. A manifest that cannot be read is
+// `moduleListIn(file)` is a manifest's own declared dependencies;
+// `moduleList()` is the resolved set of the working directory's
+// `botopink.json` (below). A manifest that cannot be read is
 // a REFUSAL, not a `false`: "this module is not a dependency" and "I could not
 // find out" are different answers, and a condition that silently takes the
 // second for the first turns every `#[conditionalOnModule]` in the build off
@@ -290,12 +291,159 @@ pub fn moduleListIn(path: string) -> string[] {
     return manifestDependencies(text);
 }
 
+// ── the resolved set (front 73) ─────────────────────────────────────────────
+//
+// A condition asks about the RESOLVED dependency set, transitive entries
+// included, so an application declaring `rakun-starter-data-sql` has
+// `rakun-data` — the starter is a manifest, not code. A dependency is followed
+// through its manifest when its source says where that is: `{ "path": … }`
+// relative to the declaring manifest, or `{ "workspace": true }` — a member of
+// the nearest ancestor whose manifest declares `"workspaces"`. A `git`
+// dependency or a bare name is counted and not followed (its manifest is not
+// on disk until the resolver materialises it).
+
+#[@External.Erlang("""(fun() -> {ok, __D} = file:get_cwd(), unicode:characters_to_binary(__D) end)()""")]
+declare fn rkCwd() -> string;
+
+fn absolute(p: string) -> string {
+    return if (path.isAbsolute(p)) path.resolve([p]) else path.resolve([rkCwd(), p]);
+}
+
+fn readOr(file: string) -> string {
+    return fs.readText(file).unwrapOr("");
+}
+
+// The source a manifest's text gives dependency `name`: `path:<p>`,
+// `workspace`, or `""` (git, a bare name, the array form).
+pub fn dependencySource(text: string, name: string) -> string {
+    val at = text.indexOf("\"dependencies\"");
+    if (at < 0) return "";
+    val tail = text.slice(at, text.length());
+    val key = tail.indexOf("\"" + name + "\"");
+    if (key < 0) return "";
+    val rest = tail.slice(key + name.length() + 2, tail.length());
+    val close = rest.indexOf("}");
+    val spec = if (close < 0) rest else rest.slice(0, close);
+    if (spec.startsWith(",") || nextSolid(spec, 0) != ":") return "";
+    if (spec.contains("\"workspace\"")) return "workspace";
+    val pi = spec.indexOf("\"path\"");
+    if (pi < 0) return "";
+    val after = spec.slice(pi + 6, spec.length());
+    val q = after.indexOf("\"");
+    if (q < 0) return "";
+    return "path:" + quotedAt(after, q);
+}
+
+// A manifest's `"name"`, or `""`.
+pub fn manifestPackageName(text: string) -> string {
+    val at = text.indexOf("\"name\"");
+    if (at < 0) return "";
+    val after = text.slice(at + 6, text.length());
+    val q = after.indexOf("\"");
+    if (q < 0) return "";
+    return quotedAt(after, q);
+}
+
+// The directory of the nearest ancestor of `dir` (itself excluded) whose
+// manifest declares `"workspaces"`, or `""`.
+fn workspaceRootAbove(dir: string) -> string {
+    var d = path.dirname(dir);
+    var found = "";
+    var run = true;
+    while (run) {
+        val text = readOr(d + "/" + manifestName());
+        if (text.contains("\"workspaces\"")) {
+            found = d;
+            run = false;
+        } else if (d == "/" || d == "." || d == "") run = false else d = path.dirname(d);
+    };
+    return found;
+}
+
+fn workspacePatterns(text: string) -> string[] {
+    val at = text.indexOf("\"workspaces\"");
+    val none: string[] = [];
+    if (at < 0) return none;
+    val open = openerAfter(text, at + 12);
+    if (open < 0) return none;
+    val seed: string[] = [];
+    var st = DepScan(out: seed, i: open + 1, depth: 0, run: true);
+    while (st.run) {
+        st = scanStep(text, false, st);
+    };
+    return st.out;
+}
+
+// The directories one workspace pattern names: `modules/*` lists `modules`,
+// anything else is one directory.
+fn patternDirs(root: string, pattern: string) -> string[] {
+    if (pattern.endsWith("/*") == false) return [root + "/" + pattern];
+    val base = root + "/" + pattern.slice(0, pattern.length() - 2);
+    val names: string[] = fs.list(base).unwrapOr([]);
+    return names.map({ n -> base + "/" + n });
+}
+
+// The manifest of workspace member `name` under the workspace above `dir`.
+fn workspaceMember(dir: string, name: string) -> string {
+    val root = workspaceRootAbove(dir);
+    if (root == "") return "";
+    var hit = "";
+    for (workspacePatterns(readOr(root + "/" + manifestName()))) { pat ->
+        for (patternDirs(root, pat)) { d ->
+            val file = d + "/" + manifestName();
+            if (hit == "" && manifestPackageName(readOr(file)) == name) hit = file;
+        };
+    };
+    return hit;
+}
+
+// The manifest file a dependency resolves to, or `""` when it is not followed.
+pub fn dependencyManifest(fromManifest: string, text: string, name: string) -> string {
+    val src = dependencySource(text, name);
+    val dir = path.dirname(absolute(fromManifest));
+    if (src.startsWith("path:")) return path.resolve([dir, src.slice(5, src.length()), manifestName()]);
+    if (src == "workspace") return workspaceMember(dir, name);
+    return "";
+}
+
+pub type Resolution(
+    names: string[],
+    queue: string[],
+    i: i32,
+)
+
+fn visit(r: Resolution, file: string) -> Resolution {
+    val text = readOr(file);
+    var names = r.names;
+    var queue = r.queue;
+    for (manifestDependencies(text)) { d ->
+        if (names.filter({ n -> n == d }).length == 0) {
+            names.push(d);
+            val next = dependencyManifest(file, text, d);
+            if (next != "") queue.push(next);
+        };
+    };
+    return Resolution(names: names, queue: queue, i: r.i + 1);
+}
+
+// Every dependency name the manifest at `manifestPath` reaches — its own in
+// declaration order, then each dependency's, breadth first, each once. A
+// manifest that cannot be read is the same refusal `moduleListIn` raises.
+pub fn resolvedModuleListIn(manifestPath: string) -> string[] {
+    val first = absolute(manifestPath);
+    val _check = moduleListIn(manifestPath);
+    val none: string[] = [];
+    var r = Resolution(names: none, queue: [first], i: 0);
+    while (r.i < r.queue.length) {
+        r = visit(r, r.queue.at(r.i).unwrapOr(""));
+    };
+    return r.names;
+}
+
 pub fn moduleList() -> string[] {
-    return moduleListIn(manifestName());
+    return resolvedModuleListIn(manifestName());
 }
 
 pub fn rkModulePresent(name: string) -> bool {
-    var found = false;
-    for (moduleList()) { m -> if (m == name) found = true; };
-    return found;
+    return moduleList().filter({ m -> m == name }).length > 0;
 }
