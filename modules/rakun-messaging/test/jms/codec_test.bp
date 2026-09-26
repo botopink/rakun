@@ -1,0 +1,65 @@
+//// rakun-messaging — the STOMP 1.2 frame codec (front 90 step 2) and arm
+//// selection (step 1), pure.
+
+import {testing.asserts} from "std";
+import {rkSetProp} from "rakun";
+import {rkJmsEncode, rkJmsDecode, rkJmsEscape, rkJmsUnescape} from "jms_host";
+import {Destination, armFor, redactedUrl, jmsConfigProblem, destinationPath} from "jms/jms";
+
+fn roundTrip(cmd: string, headers: Array<#(string, string)>, body: string) -> bool {
+    val back = rkJmsDecode(rkJmsEncode(cmd, headers, body));
+    return back._0 == cmd && back._2 == body && headers.filter({ h -> back._1.filter({ b -> b._0 == h._0 && b._1 == h._1 }).length == 0 }).length == 0;
+}
+
+test "codec: each of the ten frames round-trips" {
+    val frames = [
+        #("CONNECT", [#("accept-version", "1.2"), #("host", "b")], ""),
+        #("CONNECTED", [#("version", "1.2")], ""),
+        #("SEND", [#("destination", "/queue/a")], "hello"),
+        #("SUBSCRIBE", [#("id", "0"), #("destination", "/queue/a"), #("ack", "client")], ""),
+        #("UNSUBSCRIBE", [#("id", "0")], ""),
+        #("ACK", [#("id", "12")], ""),
+        #("NACK", [#("id", "12")], ""),
+        #("MESSAGE", [#("subscription", "0"), #("message-id", "7"), #("destination", "/queue/a")], "body"),
+        #("RECEIPT", [#("receipt-id", "r1")], ""),
+        #("ERROR", [#("message", "bad")], "details"),
+    ];
+    val failed = frames.filter({ f -> roundTrip(f._0, f._1, f._2) == false }).map({ f -> f._0 });
+    assert failed.length == 0 && roundTrip("DISCONNECT", [#("receipt", "77")], ""), failed.join(",");
+}
+
+test "codec: content-length reads by length (a NUL inside the body), otherwise to the NUL" {
+    val nul = "a\u{0}b";
+    val sized = rkJmsDecode(rkJmsEncode("SEND", [#("destination", "/queue/x")], nul));
+    val bare = rkJmsDecode("SEND\ndestination:/queue/x\n\nplain\u{0}");
+    assert sized._2 == nul && bare._2 == "plain";
+}
+
+test "codec: header values escape and unescape CR, LF, colon and backslash" {
+    val v = "a:b\\c\nd\re";
+    assert rkJmsEscape(v) == "a\\cb\\\\c\\nd\\re" && rkJmsUnescape(rkJmsEscape(v)) == v && roundTrip("SEND", [#("x-note", v)], "");
+}
+
+test "arms: the URL scheme picks the arm, and an unknown scheme is refused naming both" {
+    assert armFor("amqp://host:5672") == "amqp10" && armFor("stomp://host:61613") == "stomp" && armFor("stomp+ssl://h:1") == "stomp";
+    val _u = rkSetProp("rakun.jms.url", "mqtt://host:1883");
+    val p = jmsConfigProblem();
+    val _v = rkSetProp("rakun.jms.url", "amqp://host:5672");
+    val amqp = jmsConfigProblem();
+    val _w = rkSetProp("rakun.jms.url", "");
+    assert p.contains("unsupported scheme - amqp:// (amqps://) or stomp:// (stomp+ssl://)") && amqp.contains("needs amqp10_client"), p;
+}
+
+test "arms: stomp+ssl names a front 74 bundle that must exist" {
+    val _u = rkSetProp("rakun.jms.url", "stomp+ssl://broker:61614");
+    val _b = rkSetProp("rakun.jms.ssl.bundle", "nosuch");
+    val p = jmsConfigProblem();
+    val _x = rkSetProp("rakun.jms.url", "");
+    val _y = rkSetProp("rakun.jms.ssl.bundle", "");
+    assert p.contains("needs rakun.jms.ssl.bundle naming a registered front 74 bundle - `nosuch` is not one"), p;
+}
+
+test "credentials: a URL is logged only redacted" {
+    assert redactedUrl("stomp://admin:s3cret@broker:61613") == "stomp://***@broker:61613" && redactedUrl("stomp://broker:61613") == "stomp://broker:61613";
+    assert destinationPath(Destination.Queue(name: "orders")) == "/queue/orders" && destinationPath(Destination.Topic(name: "prices")) == "/topic/prices";
+}

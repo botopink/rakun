@@ -4064,6 +4064,23 @@ containers, the arms' state, the published log and the startup log.
   exchange topology and audit 87 · transactional publish 83. Non-text payloads
   wait on a byte type.
 
+### JMS brokers — `src/jms/` and `jms_host.bp` (front 90)
+
+ActiveMQ Classic / Artemis over STOMP 1.2: `src/sidecars/rakun_jms.erl` (the
+frame codec with STOMP escaping and content-length, a client with heart-beats,
+reconnect with backoff and re-subscription, handlers run in their own process
+so they may send on the connection, request/reply over a temporary queue and a
+correlation id). `amqp://` needs `amqp10_client` (not loadable by a sidecar)
+and refuses the boot. `rakun.jms.{url, user, password, ssl.bundle, client-id,
+heart-beat-ms}`; the URL is logged redacted. `jmsListen(name, Destination,
+ack, selector, durable, handler: Delivery -> Outcome)` subscribes and registers
+the listener in front 15's registry under broker `jms` (its container
+disabled; `rakun.messaging.jms.transport` is set to memory so the boot check
+passes); `Reject` dead-letters with front 86's envelope, `Retry` NACKs.
+Selectors are the broker's — no client-side fallback. Durable subscriptions
+need `client-id`. `jms` health indicator. Tests run against
+`rakun_jms_fixture.erl`, an in-process STOMP broker.
+
 ### Reliability — `src/reliability/` (front 86)
 
 `reliableListener(name, broker, destination, group, handler)` registers a

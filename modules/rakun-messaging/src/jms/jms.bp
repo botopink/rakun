@@ -1,0 +1,199 @@
+//// rakun-messaging — JMS brokers (front 90): ActiveMQ Classic / Artemis
+//// reached over STOMP 1.2.
+////
+//// ARMS by URL scheme: `stomp://` / `stomp+ssl://` is this front's STOMP
+//// client (`rakun_jms.erl`: the frame codec, heart-beats, reconnect with
+//// backoff and re-subscription); `amqp://` / `amqps://` is AMQP 1.0, which
+//// needs `amqp10_client` — an OTP application a sidecar cannot load (the
+//// toolchain row) — so it REFUSES the boot rather than half-working. Any
+//// other scheme refuses naming the supported ones. `stomp+ssl://` takes its
+//// TLS from front 74's bundle `rakun.jms.ssl.bundle`, which must exist.
+//// Credentials are `rakun.jms.user` / `rakun.jms.password`; a URL is logged
+//// only redacted (`redactedUrl`).
+////
+//// DESTINATIONS: `Queue(name)` → `/queue/<name>` (one consumer per message),
+//// `Topic(name)` → `/topic/<name>` (a copy per subscription). A DURABLE
+//// topic subscription needs `rakun.jms.client-id`; without it the boot is
+//// refused. SELECTORS are the broker's (`selector` header); one the broker
+//// rejects fails the subscription — there is no client-side filtering
+//// fallback, because a queue consumer that received, filtered out and acked a
+//// message consumed one meant for another consumer.
+////
+//// LISTENERS (`jmsListen`) register in front 15's registry under the broker
+//// `jms` (container disabled: the STOMP subscription, not an in-process
+//// container, feeds it) and answer front 86's `Outcome`: `Done` acks,
+//// `Reject` publishes front 86's `DeadLetter` to `<destination>.dlq` then
+//// acks, `Retry` NACKs (the broker redelivers; the in-process attempt header
+//// is not carried by STOMP redelivery). `jmsRequest` is request/reply over a
+//// temporary queue and a correlation id, bounded by a timeout. REFUSED:
+//// the embedded broker, JNDI, and non-text bodies (no byte type).
+
+import {rkProp, rkSetProp} from "rakun";
+import {Message} from "message";
+import {rkRegisterListenerAs} from "registry";
+import {rkMsgWide} from "messaging_host";
+import {Health, rkRegisterHealthIndicator} from "rakun-actuator-api";
+import {Outcome, DeadLetter, deadLetterJson} from "reliability/policy";
+import {Delivery} from "reliability/dispatch";
+import {rkJmsConnect, rkJmsSend, rkJmsSubscribe, rkJmsUnsubscribe, rkJmsClose, rkJmsAlive, rkJmsRequest} from "jms_host";
+
+pub type Destination {
+    Queue(name: string),
+    Topic(name: string),
+}
+
+pub fn destinationPath(d: Destination) -> string {
+    return case d {
+        Queue(name) -> "/queue/" + name;
+        Topic(name) -> "/topic/" + name;
+    };
+}
+
+fn destinationName(d: Destination) -> string {
+    return case d {
+        Queue(name) -> name;
+        Topic(name) -> name;
+    };
+}
+
+pub fn armFor(url: string) -> string {
+    val u = url.toLower();
+    if (u.startsWith("amqp://") || u.startsWith("amqps://")) return "amqp10";
+    if (u.startsWith("stomp://") || u.startsWith("stomp+ssl://")) return "stomp";
+    @panic("rakun jms: rakun.jms.url `" + redactedUrl(url) + "` has an unsupported scheme - amqp:// (amqps://) or stomp:// (stomp+ssl://)");
+}
+
+// The URL with any `user:password@` replaced by `***@`.
+pub fn redactedUrl(url: string) -> string {
+    val scheme = url.indexOf("://");
+    if (scheme < 0) return url;
+    val rest = url.slice(scheme + 3, url.length());
+    val at = rest.indexOf("@");
+    if (at < 0) return url;
+    return url.slice(0, scheme + 3) + "***@" + rest.slice(at + 1, rest.length());
+}
+
+fn hostPort(url: string) -> #(string, i32) {
+    val rest0 = url.slice(url.indexOf("://") + 3, url.length());
+    val at = rest0.indexOf("@");
+    val rest = if (at < 0) rest0 else rest0.slice(at + 1, rest0.length());
+    val slash = rest.indexOf("/");
+    val hp = if (slash < 0) rest else rest.slice(0, slash);
+    val colon = hp.indexOf(":");
+    if (colon < 0) return #(hp, 61613);
+    return #(hp.slice(0, colon), toInt(hp.slice(colon + 1, hp.length())));
+}
+
+#[@External.Erlang("""(fun(__S) -> try binary_to_integer(__S) catch _:_ -> 0 end end)($0)""")]
+declare fn toInt(s: string) -> i32;
+#[@External.Erlang("""(fun(__N) -> rakun_ssl:get(__N, <<"client">>) =/= <<>> orelse rakun_ssl:get(__N, <<"listener">>) =/= <<>> end)($0)""")]
+declare fn bundleRegistered(name: string) -> bool;
+#[@External.Erlang("""(fun(__T) -> logger:notice("~ts", [__T]), persistent_term:put(rakun_jms_log, persistent_term:get(rakun_jms_log, []) ++ [__T]), 0 end)($0)""")]
+declare fn note(line: string) -> i32;
+#[@External.Erlang("""persistent_term:get(rakun_jms_log, [])""")]
+pub declare fn jmsLog() -> string[];
+#[@External.Erlang("""(fun(__C) -> persistent_term:put(rakun_jms_conn, __C), 0 end)($0)""")]
+declare fn storeConn(conn: string) -> i32;
+#[@External.Erlang("""persistent_term:get(rakun_jms_conn, <<>>)""")]
+pub declare fn jmsConnection() -> string;
+
+// "" or why the configuration cannot boot.
+pub fn jmsConfigProblem() -> string {
+    val url = rkProp("rakun.jms.url").trim();
+    if (url == "") return "rakun jms: rakun.jms.url is not set";
+    val u = url.toLower();
+    val known = u.startsWith("amqp://") || u.startsWith("amqps://") || u.startsWith("stomp://") || u.startsWith("stomp+ssl://");
+    if (known == false) return "rakun jms: rakun.jms.url `" + redactedUrl(url) + "` has an unsupported scheme - amqp:// (amqps://) or stomp:// (stomp+ssl://)";
+    if (armFor(url) == "amqp10") return "rakun jms: the AMQP 1.0 arm needs amqp10_client, an OTP application a sidecar cannot load - use a stomp:// URL (ActiveMQ and Artemis both speak STOMP)";
+    val bundle = rkProp("rakun.jms.ssl.bundle").trim();
+    if (u.startsWith("stomp+ssl://") && (bundle == "" || bundleRegistered(bundle) == false)) return "rakun jms: stomp+ssl:// needs rakun.jms.ssl.bundle naming a registered front 74 bundle" + (if (bundle == "") "" else " - `" + bundle + "` is not one");
+    if (rkProp("rakun.jms.embedded").trim() == "true") return "rakun jms: an embedded broker is refused - run the broker as its own service";
+    return "";
+}
+
+pub fn startJms() -> i32 {
+    val problem = jmsConfigProblem();
+    if (problem != "") @panic(problem);
+    val url = rkProp("rakun.jms.url").trim();
+    val hp = hostPort(url);
+    val beat = toInt(rkProp("rakun.jms.heart-beat-ms").trim());
+    val bundle = if (url.toLower().startsWith("stomp+ssl://")) rkProp("rakun.jms.ssl.bundle").trim() else "";
+    val c = rkJmsConnect(hp._0, hp._1, rkProp("rakun.jms.user").trim(), rkProp("rakun.jms.password"), beat, bundle);
+    if (c.startsWith("error:")) @panic("rakun jms: cannot connect to " + redactedUrl(url) + " - " + c.slice(6, c.length()));
+    val _l = note("rakun jms: connected to " + redactedUrl(url));
+    val _h = rkRegisterHealthIndicator("jms", "rakun-messaging", { -> jmsHealth() });
+    return storeConn(c);
+}
+
+pub fn stopJms() -> i32 {
+    val c = jmsConnection();
+    if (c == "") return 0;
+    val _c = rkJmsClose(c);
+    return storeConn("");
+}
+
+// ── sending ─────────────────────────────────────────────────────────────────
+
+pub fn jmsSend(destination: Destination, body: string) -> i32 {
+    if (destinationName(destination).trim() == "") @panic("rakun jms: a send needs a destination name");
+    val err = rkJmsSend(jmsConnection(), destinationPath(destination), body, []);
+    if (err != "") @panic("rakun jms: the send to " + destinationPath(destination) + " failed - " + err);
+    return 0;
+}
+
+pub fn jmsRequest(destination: Destination, body: string, timeoutMs: i32) -> @Result<string, string> {
+    return rkJmsRequest(jmsConnection(), destinationPath(destination), body, timeoutMs);
+}
+
+// ── listening ───────────────────────────────────────────────────────────────
+
+fn deliveryFor(path: string, body: string, headers: Array<#(string, string)>) -> Delivery {
+    val corr = headers.filter({ h -> h._0 == "correlation-id" }).map({ h -> h._1 }).at(0) ?? "";
+    val msg = Message(broker: "jms", destination: path, key: corr, payload: body, headersJson: "{}", offset: rkMsgWide(-1));
+    return Delivery(message: msg, headers: headers, body: body);
+}
+
+fn handle(path: string, body: string, headers: Array<#(string, string)>, handler: fn(d: Delivery) -> Outcome) -> bool {
+    val outcome = handler(deliveryFor(path, body, headers));
+    return case outcome {
+        Done -> true;
+        Retry(reason) -> false;
+        Reject(reason) -> deadLetter(path, body, reason);
+    };
+}
+
+fn deadLetter(path: string, body: string, reason: string) -> bool {
+    val letter = deadLetterJson(DeadLetter(destination: path, body: body, reason: reason, attempt: 1, firstSeenMs: 0));
+    return rkJmsSend(jmsConnection(), path + ".dlq", letter, []) == "";
+}
+
+// Subscribes `name` to `destination` and registers it in front 15's registry
+// (broker `jms`). `ack` is auto | client | client-individual; `durable` names
+// a durable topic subscription; `selector` is handed to the broker.
+pub fn jmsListen(name: string, destination: Destination, ack: string, selector: string, durable: string, handler: fn(d: Delivery) -> Outcome) -> i32 {
+    val path = destinationPath(destination);
+    if (durable != "" && rkProp("rakun.jms.client-id").trim() == "") @panic("rakun jms: the durable subscription `" + durable + "` of " + name + " needs rakun.jms.client-id - without a stable client id it would silently be a non-durable one");
+    val _t = if (rkProp("rakun.messaging.jms.transport").trim() == "") rkSetProp("rakun.messaging.jms.transport", "memory") else 0;
+    val _e = rkSetProp("rakun.messaging.listener." + name + ".enabled", "false");
+    val _r = rkRegisterListenerAs(name, "jms", path, selector, name, { msg -> 0 });
+    var extra: Array<#(string, string)> = [];
+    if (selector != "") extra.push(#("selector", selector));
+    if (durable != "") extra.push(#("activemq.subscriptionName", durable));
+    val err = rkJmsSubscribe(jmsConnection(), name, path, if (ack == "") "client-individual" else ack, extra, { body, headers -> handle(path, body, headers, handler) });
+    if (err != "") @panic("rakun jms: the broker refused the subscription " + name + " to " + path + " - " + err + (if (selector != "") " (the selector is the broker's: client-side filtering is not a fallback)" else ""));
+    return 0;
+}
+
+pub fn jmsUnlisten(name: string) -> i32 {
+    return rkJmsUnsubscribe(jmsConnection(), name);
+}
+
+// ── health ──────────────────────────────────────────────────────────────────
+
+// Checks the connection process, sending no application message.
+pub fn jmsHealth() -> Health {
+    val c = jmsConnection();
+    val url = redactedUrl(rkProp("rakun.jms.url").trim());
+    if (c != "" && rkJmsAlive(c)) return Health(status: "UP", details: "{\"url\":\"" + url + "\"}");
+    return Health(status: "DOWN", details: "{\"url\":\"" + url + "\",\"error\":\"" + (if (c == "") "not connected" else "the STOMP connection closed") + "\"}");
+}
