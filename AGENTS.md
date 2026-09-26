@@ -81,15 +81,6 @@ rakun/
 │   │   │   │                    acceptor takes
 │   │   │   ├── decorators.bp  ← the markers AS comptime decorator fns: placement rules +
 │   │   │   │                    the DI/router/scope/bean wiring they `@emit`
-│   │   │   ├── file_router.bp ← the FILE-CONVENTION route table (§ The file-convention
-│   │   │   │                    route table): the registry, the `app/` scan and the four
-│   │   │   │                    markers, over the bundled `routing` library's segment
-│   │   │   │                    grammar, `kind|pattern|slot|verb` wire and matcher. `decorators.bp` is frozen, so the markers
-│   │   │   │                    live here, as `#[configurationProperties]` does
-│   │   │   ├── file_router.mjs ← the App-Router REGISTRY, node half: an append-only
-│   │   │   │                    list of (wire line, render fn). Knows no grammar
-│   │   │   ├── sidecars/rakun_file_router.erl ← the same registry on the BEAM, in
-│   │   │   │                    ETS behind a dedicated owner process
 │   │   │   ├── request_context.bp ← THE REQUEST CONTEXT (§ The request context):
 │   │   │   │                    the frame, its epoch, the five phases and the
 │   │   │   │                    refusal texts. Every accessor raises outside a
@@ -117,17 +108,6 @@ rakun/
 │   │   │   │                    generators. Knows no record grammar
 │   │   │   ├── sidecars/rakun_context.erl ← the same four on the BEAM, in ETS
 │   │   │   │                    behind a dedicated owner process
-│   │   │   ├── ssr.bp         ← THE SSR PIPELINE (§ The SSR pipeline): the escaping
-│   │   │   │                    walker, the composition order, `RenderHooks`, the
-│   │   │   │                    payload, the document and the chunk protocol.
-│   │   │   │                    Generic in `El` throughout — rakun declares no
-│   │   │   │                    dependency on jhonstart and gains none here
-│   │   │   ├── ssr.mjs        ← the pipeline's node half: the installed hooks, the
-│   │   │   │                    gather over thunks, two ordinals — and `__onzeFill`,
-│   │   │   │                    the browser function a fill chunk calls
-│   │   │   ├── sidecars/rakun_ssr.erl ← the same cells on the BEAM, in the serving
-│   │   │   │                    process's dictionary; `all/1` spawns one monitored
-│   │   │   │                    child per thunk, because `@Task` is eager there
 │   │   │   ├── autoconfig_registry.bp ← THE AUTO-CONFIGURATION SEAM (§ The
 │   │   │   │                    auto-configuration pass): the host cells behind the
 │   │   │   │                    registration table, plus the `botopink.json`
@@ -152,22 +132,10 @@ rakun/
 │   │       ├── scopes_test.bp ← singleton scope (diamond) · `#[value]` · `#[bean]` (F2-scopes)
 │   │       ├── server_test.bp ← the live HTTP dispatch pipeline (`rkDispatchHttp`): path
 │   │       │                     param · query/header/body · 200/404 (F5)
-│   │       ├── file_router_test.bp ← the registry cells, the host table against
-│   │       │                     the matcher, the page context (the grammar, wire and
-│   │       │                     matcher tests moved to `libs/routing/test/`). The SAME
-│   │       │                     assertions on both rows
-│   │       ├── file_router_markers_test.bp ← the four markers at module level and
-│   │       │                     the accessors they emit; no `rkAppReset()`, because
-│   │       │                     a module-load registration cannot be snapshotted in
-│   │       │                     its own module
 │   │       ├── request_context_test.bp ← the frame lifecycle and the epoch
 │   │       │                     discipline, the keep-alive case FIRST
 │   │       ├── request_memo_test.bp ← hit/miss counts, per-request lifetime,
 │   │       │                     preload single-flight, non-poisoning
-│   │       ├── file_router_scan_test.bp ← the scan over real fixture trees under
-│   │       │                     `test/fixtures/{routing,conflict-both,conflict-roots,
-│   │       │                     middleware}`: the conflicts, the `_` skip, `app` vs
-│   │       │                     `src/app`, the root `middleware.bp`
 │   │       ├── overlapping_routes_test.bp ← two controllers sharing a path prefix both
 │   │       │                     register; dispatch matches the FULL path; a leaf (no-dep)
 │   │       │                     #[service] resolves through the DI chain
@@ -177,10 +145,6 @@ rakun/
 │   │       │                     rows
 │   │       ├── events_test.bp ← listener dispatch, ordering, the boot sequence
 │   │       │                     asserted as a WHOLE, and the failure path
-│   │       ├── ssr_test.bp    ← the SSR pipeline: the rendered page, the escaping
-│   │       │                     walker, the composition order, the payload round
-│   │       │                     trip, the chunk protocol and the two entry points.
-│   │       │                     Every cell runs on BOTH rows
 │   │       ├── conditions_test.bp ← front 72's COMPTIME half: the exact blob each
 │   │       │                     annotation set produces, read straight back out of
 │   │       │                     the host table, and the evaluator letter by letter
@@ -194,6 +158,51 @@ rakun/
 │   │                    (front 14's `rakun-validation` member moved to the bundled library
 │   │                    `validation`, decision 116 rule 5; its `boot.bp` is
 │   │                    `modules/rakun/src/config_check.bp` — § Validation)
+│   ├── rakun-app/     ← THE SERVER HALF OF THE `app/` ROUTER (front 95 relocated fronts 22 and
+│   │   │                23 out of the core — `specs/1.0.10-beta/03-rakun/modules.md` § The cut):
+│   │   │                files [root.bp, file_router.bp, ssr.bp], no `targets` (inherits the
+│   │   │                workspace's), depends on `rakun` by `{ "workspace": true }`; imports the
+│   │   │                core `from "rakun"` (the request context `from "rakun/request_context"`,
+│   │   │                because std's `encoding` also declares `percentDecode`)
+│   │   ├── src/
+│   │   │   ├── root.bp        ← `pub mod file_router; pub mod ssr;`
+│   │   │   ├── file_router.bp ← the FILE-CONVENTION route table (§ The file-convention
+│   │   │   │                    route table): the registry, the `app/` scan and the four
+│   │   │   │                    markers, over the bundled `routing` library's segment
+│   │   │   │                    grammar, `kind|pattern|slot|verb` wire and matcher. `decorators.bp` is frozen, so the markers
+│   │   │   │                    live here, as `#[configurationProperties]` does
+│   │   │   ├── file_router.mjs ← the App-Router REGISTRY, node half: an append-only
+│   │   │   │                    list of (wire line, render fn). Knows no grammar
+│   │   │   ├── sidecars/rakun_file_router.erl ← the same registry on the BEAM, in
+│   │   │   │                    ETS behind a dedicated owner process
+│   │   │   ├── ssr.bp         ← THE SSR PIPELINE (§ The SSR pipeline): the escaping
+│   │   │   │                    walker, the composition order, `RenderHooks`, the
+│   │   │   │                    payload, the document and the chunk protocol.
+│   │   │   │                    Generic in `El` throughout — rakun declares no
+│   │   │   │                    dependency on jhonstart and gains none here
+│   │   │   ├── ssr.mjs        ← the pipeline's node half: the installed hooks, the
+│   │   │   │                    gather over thunks, two ordinals — and `__onzeFill`,
+│   │   │   │                    the browser function a fill chunk calls
+│   │   │   └── sidecars/rakun_ssr.erl ← the same cells on the BEAM, in the serving
+│   │   │                        process's dictionary; `all/1` spawns one monitored
+│   │   │                        child per thunk, because `@Task` is eager there
+│   │   └── test/            (+ `test/fixtures/{routing,conflict-both,conflict-roots,middleware}`)
+│   │       ├── file_router_test.bp ← the registry cells, the host table against
+│   │       │                     the matcher, the page context (the grammar, wire and
+│   │       │                     matcher tests moved to `libs/routing/test/`). The SAME
+│   │       │                     assertions on both rows
+│   │       ├── file_router_markers_test.bp ← the four markers at module level and
+│   │       │                     the accessors they emit; no `rkAppReset()`, because
+│   │       │                     a module-load registration cannot be snapshotted in
+│   │       │                     its own module
+│   │       ├── file_router_scan_test.bp ← the scan over real fixture trees under
+│   │       │                     `test/fixtures/{routing,conflict-both,conflict-roots,
+│   │       │                     middleware}`: the conflicts, the `_` skip, `app` vs
+│   │       │                     `src/app`, the root `middleware.bp`
+│   │       └── ssr_test.bp    ← the SSR pipeline: the rendered page, the escaping
+│   │                             walker, the composition order, the payload round
+│   │                             trip, the chunk protocol and the two entry points.
+│   │                             Every cell runs on BOTH rows
 │   ├── rakun-web/     ← THE FILTER CHAIN (§ The filter chain): the one ordered chain
 │   │   │                between the socket and the route handler, its two entry
 │   │   │                points, CORS and RFC 9457 problem details. target/targets
@@ -230,9 +239,13 @@ rakun/
 │   │       │                     that reaches the body and the reason that does not
 │   │       └── decorators_test.bp ← the five markers and what they emit; NOTHING
 │   │                             here resets a table
-│   └── rakun-<area>/  ← the eleven remaining scaffolds (actuator · cache · client ·
+│   ├── rakun-test/    ← the `<lib>-test` member (front 95, `specs/1.0.10-beta/02-packaging/README.md`
+│   │                    § 5): files [root.bp], an EMPTY `pub` surface and one inline `test` proving
+│   │                    the core resolves from it; front 19 fills it (request doubles, MockMvc,
+│   │                    the `assert<Subject>(loc, …)` helpers). Re-exports nothing from std
+│   └── rakun-<area>/  ← the ten remaining scaffolds (actuator · cache · client ·
 │                        data · hateoas · logging · messaging · scheduling · security ·
-│                        session · test): `botopink.json` (files [root.bp] · targets per
+│                        session): `botopink.json` (files [root.bp] · targets per
 │                        `specs/1.0.10-beta/03-rakun/modules.md` § Targets · dependencies
 │                        { "rakun": { "workspace": true } }) + a two-comment `src/root.bp`;
 │                        contents land per front
@@ -280,6 +293,11 @@ order and reordering nothing: `conditions` imports `autoconfig_registry`,
 to `#[conditionalOnBean]`), which is why the four sit after it rather than beside
 `runtime`.
 
+Front 22's `file_router` and front 23's `ssr` were in this tree until front 95
+relocated them to the `rakun-app` member (`03-rakun/modules.md` § The cut): nothing
+in the core imported either, so the two `pub mod` lines and the two `files` entries
+left and nothing else in the core moved.
+
 Front 74 appended `pub mod ssl_bundle;` and the matching `files` entry, last and
 reordering nothing: it imports `runtime` (the property table) and `config` (the
 typed readers and `rkValue`), and nothing inside rakun imports it — fronts 04,
@@ -309,7 +327,7 @@ a red on that axis would move into the gate rather than be fixed by the widening
 module, so the LAST line is the last module's count and never the run's total):
 inside `modules/rakun`, `botopink test` is **388 / 0** and `botopink test
 --target erlang` is **386 passing / 2 failing**; `modules/rakun-web` is 104 / 0
-and `modules/rakun-validation` 54 / 0 on both rows (measured before the member moved to the bundled `validation` library on 2026-09-26; after the move and the grammar's move to `routing`, `modules/rakun` is **369 / 0** on commonJS and **367 / 2** on erlang — the 26 routing tests left, the 7 of `config_check_test.bp` arrived — and `modules/rakun-web` stays 104 / 0 on both). Front 72 measured 346 / 0 and
+and `modules/rakun-validation` 54 / 0 on both rows (measured before the member moved to the bundled `validation` library on 2026-09-26; after the move and the grammar's move to `routing`, `modules/rakun` is **369 / 0** on commonJS and **367 / 2** on erlang — the 26 routing tests left, the 7 of `config_check_test.bp` arrived — and `modules/rakun-web` stays 104 / 0 on both). Front 95 then relocated fronts 22 and 23 into `modules/rakun-app` (measured 2026-09-26, compiler `248d0896`): `file_router_test.bp`, `file_router_markers_test.bp`, `file_router_scan_test.bp` and `ssr_test.bp` left with their modules, so `modules/rakun` is **310 / 0** on commonJS and **308 / 2** on erlang (the same two reds) and `modules/rakun-app` is **59 / 0** on both rows. Front 72 measured 346 / 0 and
 344 / 2 on `2e6bb4ac`, having added 44 cells and moved neither red; its baseline
 was 302 / 0 and 300 / 2, and front 06 measured 267/267 and 265/2 on the same two
 reds — the numbers grew with the suite, not with the failures. The two are front 04's own
@@ -505,7 +523,7 @@ HTTP on the BEAM until the `build` path ships and loads the sidecar too.
 
 ## The file-convention route table
 
-`modules/rakun/src/file_router.bp` is the second routing model, beside — not
+`modules/rakun-app/src/file_router.bp` is the second routing model, beside — not
 instead of — `#[restController]` + `#[getMapping]`. A URL comes from where a
 file sits: `layout.bp` wraps everything below it, `page.bp` makes the route
 public, `(group)` is transparent to the URL, `@slot` renders into a named prop
@@ -2021,7 +2039,7 @@ everywhere, and the string is the smaller cost.
 
 ## The SSR pipeline
 
-`modules/rakun/src/ssr.bp` is where a URL becomes bytes. Front 22 finds the
+`modules/rakun-app/src/ssr.bp` is where a URL becomes bytes. Front 22 finds the
 page and the layout chain, front 62 opens the request scope, front 06 resolves
 what the render asks the container for — and this file composes, escapes,
 renders, wraps the result in a document, writes the payload the browser
