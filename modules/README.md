@@ -42,6 +42,7 @@ refusal is the core's `config_check.bp`.
 | [rakun-scheduling](./rakun-scheduling/) | root · cron · registry · markers · executor · endpoint · jobstore (store · scheduler · markers · endpoint) | erlang | `@Scheduled` / `-quartz` | 16 · 84 | real code, 100 tests |
 | [rakun-security](./rakun-security/) | root · principal · policy · jwt · password · users · users_sql · basic · csrf · method_security · security_filter · security · oauth2_host · oauth2 · saml2 · ldap_host · ldap | erlang | `-security`, `-oauth2-client`, `-saml2` | 10 · 79 · 87 (audit events) | real code, 100 tests |
 | [rakun-session](./rakun-session/) | root · host · session · signing · session_config · session_cookie · store_ets · store_sql · store_redis · session_filter · session_endpoint | erlang | `spring-session-jdbc` / `-data-redis` | 18 | real code, 36 tests |
+| [rakun-stream](./rakun-stream/) | root · pipeline · state · runtime | erlang | Spring Integration / Kafka Streams | 89 | real code, 24 tests |
 | [rakun-test](./rakun-test/) | root | erlang | `-test` | 19 | FakeRequest (implements Request) + toRequest, expect* assertions, MockMvc, resetSingletons/resetContext/contextSnapshot; 27 tests |
 | [rakun-websocket](./rakun-websocket/) | root · ws_host · ws · endpoint | erlang | `-websocket` | 20 | real code, 27 tests (no JavaScript) |
 | [rakun-tx](./rakun-tx/) | root · outbox · saga · twopc | erlang | JTA (`spring-boot-starter-jta-*`), Kafka/Pulsar transactions | 83 | real code, 32 tests |

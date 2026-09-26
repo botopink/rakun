@@ -1,0 +1,257 @@
+//// rakun-stream — running a pipeline (front 89 steps 2, 3, 6 and 7).
+////
+//// `startPipeline(p, demand, stateDs)` starts one process per stage
+//// (`rakun_stream.erl`): a stage accepts an event only while it holds fewer
+//// than `demand`, so demand flows back to the source. A `Queue` / `Topic`
+//// source is a front 15 listener whose container is the pipeline's name (its
+//// `prefetch` is the container's): the handler offers the message to stage 1
+//// and blocks while stage 1 is full, so the broker message stays unsettled
+//// and the container fetches no more than its prefetch — back-pressure
+//// reaches the broker. A stage that dies is restarted alone; what it had
+//// handed downstream is kept. A step that raises is a poison event: front
+//// 86's `DeadLetter` goes to `<source destination>.dlq` with the stage name
+//// in its reason, and the pipeline carries on. `Aggregate` counts per key per
+//// tumbling window in the pipeline's state (ETS, or SQL on `stateDs`) and
+//// emits `<key>=<count>`. Sinks: `Collect(name)` (a named store a test reads),
+//// `Publish(destination)` (front 15, on `rakun.stream.<pipeline>.publish-arm`,
+//// default amqp).
+////
+//// POLLERS (`pollOnce`, `startPoller`): the cursor lives in
+//// `rakun_stream_cursor` on a datasource; the row is also the LEASE — a node
+//// takes it with a conditional UPDATE on the previous owner, so two nodes
+//// never both fetch. A pass fetches from the stored cursor, runs the stages,
+//// hands every output to the sink and writes the new cursor only after all
+//// were confirmed. `everyMs` is a fixed DELAY after a pass completes
+//// (Spring's `poller.fixed-delay`), never a fixed rate.
+
+import {rkProp} from "rakun";
+import {param, Row, Rows, sqlTemplate} from "rakun-data";
+import {rkMsgPublish} from "rakun-messaging/messaging_host";
+import {rkRegisterListenerAs} from "rakun-messaging/registry";
+import {DeadLetter, deadLetterJson} from "rakun-messaging/reliability/policy";
+import {EndpointResponse, rkRegisterEndpoint} from "rakun-actuator-api";
+import {Stage, Source, Sink, Pipeline, stageName, stageKind, stepOf, pipelineProblem, windowStart, windowKey, graphOf, runStages} from "pipeline";
+import {StateStore, etsState, sqlState, EtsState, SqlState} from "state";
+
+#[@External.Erlang("rakun_stream", "start")]
+declare fn rkStreamStart(name: string, steps: Array<#(string, fn(item: string) -> Array<string>)>, sink: fn(item: string) -> i32, demand: i32, onPoison: fn(stage: string, item: string, reason: string) -> i32) -> i32;
+#[@External.Erlang("rakun_stream", "stop")]
+pub declare fn stopPipeline(name: string) -> i32;
+#[@External.Erlang("rakun_stream", "push")]
+pub declare fn pushEvent(name: string, item: string) -> i32;
+#[@External.Erlang("rakun_stream", "stage_pids")]
+pub declare fn stagePids(name: string) -> string[];
+#[@External.Erlang("rakun_stream", "kill_stage")]
+pub declare fn killStage(name: string, index: i32) -> string;
+#[@External.Erlang("rakun_stream", "peaks")]
+pub declare fn stagePeaks(name: string) -> string[];
+#[@External.Erlang("rakun_stream", "collect")]
+declare fn collectInto(store: string, item: string) -> i32;
+#[@External.Erlang("rakun_stream", "collected")]
+pub declare fn collected(store: string) -> string[];
+#[@External.Erlang("rakun_stream", "clear_collected")]
+pub declare fn clearCollected(store: string) -> i32;
+#[@External.Erlang("""erlang:system_time(millisecond)""")]
+declare fn nowMs() -> i64;
+#[@External.Erlang("""(fun(__X) -> __X end)($0)""")]
+declare fn narrow(x: i64) -> i32;
+#[@External.Erlang("""(fun(__S) -> try binary_to_integer(__S) catch _:_ -> 0 end end)($0)""")]
+declare fn toInt(s: string) -> i32;
+#[@External.Erlang("""(fun(__Ms) -> timer:sleep(__Ms), 0 end)($0)""")]
+declare fn pause(ms: i32) -> i32;
+#[@External.Erlang("""(fun(__N, __F, __Ms) -> __P = spawn(fun() -> __G = fun __Go() -> _ = (try __F() catch _:_ -> 0 end), receive stop -> ok after __Ms -> __Go() end end, __G() end), persistent_term:put({rakun_stream_poller, __N}, __P), 0 end)($0, $1, $2)""")]
+declare fn spawnPoller(name: string, pass: fn() -> i32, delayMs: i32) -> i32;
+#[@External.Erlang("""(fun(__N) -> case persistent_term:get({rakun_stream_poller, __N}, undefined) of undefined -> 0; __P -> __P ! stop, persistent_term:erase({rakun_stream_poller, __N}), 1 end end)($0)""")]
+pub declare fn stopPoller(name: string) -> i32;
+#[@External.Erlang("""(fun(__P) -> persistent_term:put(rakun_stream_graphs, lists:keystore(element(2, __P), 1, persistent_term:get(rakun_stream_graphs, []), {element(2, __P), __P})), 0 end)($0)""")]
+declare fn rememberPipeline(p: Pipeline) -> i32;
+#[@External.Erlang("""[__P || {_, __P} <- persistent_term:get(rakun_stream_graphs, [])]""")]
+pub declare fn registeredPipelines() -> Array<Pipeline>;
+#[@External.Erlang("""(fun(__N) -> persistent_term:put(rakun_stream_graphs, lists:keydelete(__N, 1, persistent_term:get(rakun_stream_graphs, []))), 0 end)($0)""")]
+pub declare fn forgetPipeline(name: string) -> i32;
+#[@External.Erlang("""(fun(__K) -> persistent_term:put({rakun_stream_count, __K}, persistent_term:get({rakun_stream_count, __K}, 0) + 1), 0 end)($0)""")]
+declare fn bump(key: string) -> i32;
+#[@External.Erlang("""(fun(__K) -> persistent_term:get({rakun_stream_count, __K}, 0) end)($0)""")]
+pub declare fn streamCount(key: string) -> i32;
+
+// ── state ───────────────────────────────────────────────────────────────────
+
+fn stateGet(p: string, stateDs: string, key: string) -> ?string {
+    if (stateDs == "") return EtsState(pipeline: p).lookup(key);
+    return SqlState(pipeline: p, datasource: stateDs).lookup(key);
+}
+
+fn statePut(p: string, stateDs: string, key: string, value: string) -> i32 {
+    if (stateDs == "") return EtsState(pipeline: p).put(key, value);
+    return SqlState(pipeline: p, datasource: stateDs).put(key, value);
+}
+
+fn aggregateStep(p: string, stateDs: string, s: Stage, windowMs: i32, item: string) -> Array<string> {
+    val k = stepOf(s, item).at(0) ?? "";
+    val wk = windowKey(k, windowStart(nowMs(), windowMs));
+    val before: ?string = stateGet(p, stateDs, wk);
+    val n = toInt(before ?? "0") + 1;
+    val _s = statePut(p, stateDs, wk, n.toString());
+    return [k + "=" + n.toString()];
+}
+
+fn aggregating(p: string, stateDs: string, s: Stage, windowMs: i32) -> fn(item: string) -> Array<string> {
+    return { item -> aggregateStep(p, stateDs, s, windowMs, item) };
+}
+
+fn plain(s: Stage) -> fn(item: string) -> Array<string> {
+    return { item -> stepOf(s, item) };
+}
+
+fn isAggregate(s: Stage) -> bool {
+    return case s { Aggregate(name, key, windowMs) -> true; _ -> false; };
+}
+
+fn windowOf(s: Stage) -> i32 {
+    return case s { Aggregate(name, key, windowMs) -> windowMs; _ -> 0; };
+}
+
+fn runtimeStep(p: string, stateDs: string, s: Stage) -> fn(item: string) -> Array<string> {
+    if (isAggregate(s)) return aggregating(p, stateDs, s, windowOf(s));
+    return plain(s);
+}
+
+// ── sinks and poison ────────────────────────────────────────────────────────
+
+fn publishArm(p: string) -> string {
+    val a = rkProp("rakun.stream." + p + ".publish-arm").trim();
+    return if (a == "") "amqp" else a;
+}
+
+pub fn sinkWrite(p: string, sink: Sink, item: string) -> i32 {
+    return case sink {
+        Collect(name) -> collectInto(name, item);
+        Publish(destination) -> rkMsgPublish(publishArm(p), destination, "", item);
+    };
+}
+
+fn sourceDestination(s: Source) -> string {
+    return case s {
+        Queue(destination, prefetch) -> destination;
+        Topic(name, group) -> name;
+        Poll(everyMs, cursor) -> "poller";
+    };
+}
+
+fn poison(p: Pipeline, stage: string, item: string, reason: string) -> i32 {
+    val dest = sourceDestination(p.source);
+    val letter = DeadLetter(destination: dest, body: item, reason: "stage " + stage + ": " + reason, attempt: 1, firstSeenMs: narrow(nowMs()));
+    val _c = bump(p.name + ".dead-letters");
+    return rkMsgPublish(publishArm(p.name), dest + ".dlq", "", deadLetterJson(letter));
+}
+
+// ── starting ────────────────────────────────────────────────────────────────
+
+// Starts the stage processes and, for a Queue or Topic source, the listener
+// feeding them (`startMessaging()` then starts its container). Answers the
+// number of stages.
+pub fn startPipeline(p: Pipeline, demand: i32, stateDs: string) -> i32 {
+    val problem = pipelineProblem(p);
+    if (problem != "") @panic(problem);
+    if (demand < 1) @panic("rakun-stream: pipeline " + p.name + " demand must be at least 1");
+    if (stateDs == "") {
+        val _e = etsState(p.name);
+    };
+    val steps = p.stages.map({ s -> #(stageName(s), runtimeStep(p.name, stateDs, s)) });
+    val _r = rememberPipeline(p);
+    val n = rkStreamStart(p.name, steps, { item -> sinkWrite(p.name, p.sink, item) }, demand, { stage, item, reason -> poison(p, stage, item, reason) });
+    val _l = case p.source {
+        Queue(destination, prefetch) -> listen(p.name, "amqp", destination, "", prefetch);
+        Topic(name, group) -> listen(p.name, "kafka", name, group, 10);
+        Poll(everyMs, cursor) -> 0;
+    };
+    return n;
+}
+
+fn listen(name: string, broker: string, destination: string, group: string, prefetch: i32) -> i32 {
+    val _p = rkSetPrefetch(name, prefetch.toString());
+    return rkRegisterListenerAs(name, broker, destination, group, name, { msg -> pushEvent(name, msg.payload) });
+}
+
+#[@External.Erlang("""(fun(__N, __V) -> rakun_runtime:set_prop(<<"rakun.messaging.listener.", __N/binary, ".prefetch">>, __V) end)($0, $1)""")]
+declare fn rkSetPrefetch(name: string, value: string) -> i32;
+
+// ── pollers ─────────────────────────────────────────────────────────────────
+
+pub type PollBatch(items: Array<string>, next: string)
+
+pub fn cursorSchemaSql() -> string {
+    return "CREATE TABLE IF NOT EXISTS rakun_stream_cursor (name text, cursor text, owner text, lease_until integer)";
+}
+
+pub fn storedCursor(ds: string, name: string) -> string {
+    val rows: Rows = sqlTemplate(ds).query("SELECT cursor FROM rakun_stream_cursor WHERE name = :n", [param("n", name)]);
+    val r: ?Row = rows.first();
+    return if (r == null) "" else (r ?? Row(columns: ["cursor"], values: [""])).get("cursor");
+}
+
+// Takes (or keeps) the cursor row's lease for `node`; true when it holds it.
+fn takeLease(ds: string, name: string, node: string, initial: string, leaseMs: i32) -> bool {
+    val sql = sqlTemplate(ds);
+    val now = narrow(nowMs());
+    val rows: Rows = sql.query("SELECT cursor, owner, lease_until FROM rakun_stream_cursor WHERE name = :n", [param("n", name)]);
+    val r: ?Row = rows.first();
+    if (r == null) {
+        val _i = sql.update("INSERT INTO rakun_stream_cursor (name, cursor, owner, lease_until) VALUES (:n, :c, :o, :l)", [param("n", name), param("c", initial), param("o", node), param("l", (now + leaseMs).toString())]);
+        return storedOwner(ds, name) == node;
+    };
+    val row = r ?? Row(columns: [], values: []);
+    val owner = row.get("owner");
+    val until = row.int("lease_until");
+    val free = owner == node || owner == "" || until < now;
+    if (free == false) return false;
+    val got = sql.update("UPDATE rakun_stream_cursor SET owner = :me, lease_until = :l WHERE name = :n AND owner = :old AND lease_until = :u", [param("me", node), param("l", (now + leaseMs).toString()), param("n", name), param("old", owner), param("u", until.toString())]);
+    return got == 1;
+}
+
+fn storedOwner(ds: string, name: string) -> string {
+    val rows: Rows = sqlTemplate(ds).query("SELECT owner FROM rakun_stream_cursor WHERE name = :n", [param("n", name)]);
+    val r: ?Row = rows.first();
+    return if (r == null) "" else (r ?? Row(columns: ["owner"], values: [""])).get("owner");
+}
+
+// One pass for `node`: answers how many outputs reached the sink, -1 when
+// another node holds the lease, -2 when the sink refused (cursor unmoved).
+pub fn pollOnce(p: Pipeline, ds: string, node: string, fetch: fn(cursor: string) -> PollBatch) -> i32 {
+    val initial = case p.source { Poll(everyMs, cursor) -> cursor; _ -> ""; };
+    val _s = sqlTemplate(ds).update(cursorSchemaSql(), []);
+    if (takeLease(ds, p.name, node, initial, 30000) == false) return -1;
+    val batch = fetch(storedCursor(ds, p.name));
+    val outs = runStages(p.stages, batch.items);
+    var refused = false;
+    for (outs) { o -> if (refused == false && sinkWrite(p.name, p.sink, o) != 0) refused = true; };
+    if (refused) return -2;
+    val _c = sqlTemplate(ds).update("UPDATE rakun_stream_cursor SET cursor = :c WHERE name = :n AND owner = :me", [param("c", batch.next), param("n", p.name), param("me", node)]);
+    return outs.length;
+}
+
+// Passes every `everyMs` AFTER the previous one completed (a fixed delay).
+pub fn startPoller(p: Pipeline, ds: string, node: string, fetch: fn(cursor: string) -> PollBatch) -> i32 {
+    val every = case p.source { Poll(everyMs, cursor) -> everyMs; _ -> 1000; };
+    val _r = rememberPipeline(p);
+    return spawnPoller(p.name, { -> pollOnce(p, ds, node, fetch) }, every);
+}
+
+// ── the graph endpoint ──────────────────────────────────────────────────────
+
+fn quote(s: string) -> string {
+    return "\"" + s.replaceAll("\\", "\\\\").replaceAll("\"", "\\\"") + "\"";
+}
+
+pub fn integrationGraphJson() -> string {
+    val items = registeredPipelines().map({ p ->
+        val nodes = p.stages.map({ s -> "{\"name\":" + quote(stageName(s)) + ",\"kind\":\"" + stageKind(s) + "\"}" });
+        val edges = graphOf(p).map({ e -> "{\"from\":" + quote(e._0) + ",\"to\":" + quote(e._1) + "}" });
+        "{\"name\":" + quote(p.name) + ",\"stages\":[" + nodes.join(",") + "],\"edges\":[" + edges.join(",") + "]}"
+    });
+    return "{\"pipelines\":[" + items.join(",") + "]}";
+}
+
+pub fn mountStreamGraph() -> i32 {
+    return rkRegisterEndpoint("integrationgraph", "rakun-stream", "read", { req -> EndpointResponse(status: 200, contentType: "application/json", body: integrationGraphJson()) });
+}

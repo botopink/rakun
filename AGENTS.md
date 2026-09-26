@@ -2582,6 +2582,34 @@ hashes, module facts).
   path dependencies with a SHA-256 of their tree; `registerSbomEndpoint(file)`
   serves it at `sbom`.
 
+## Stream pipelines — `modules/rakun-stream/` (front 89)
+
+GenStage / Broadway's shape over front 15's arms, no Elixir library.
+`Pipeline(name, source, stages, sink)` is a value; `Stage` is `Transform`,
+`Filter`, `Split`, `Aggregate`, `Route` (Spring Integration's transformer,
+filter, splitter, aggregator, router) over string payloads.
+
+- `pipeline.bp` (pure): `runStages`, `pipelineProblem` (unique stage names),
+  `windowStart` / `windowKey` / `slidingStarts`, `graphOf`.
+- `runtime.bp` + `rakun_stream.erl`: `startPipeline(p, demand, stateDs)` —
+  one process per stage, registered `rakun_stream__<p>__<i>`, accepting an
+  event only while it holds fewer than `demand`; offers block, so demand flows
+  back to the source (a front 15 listener on the pipeline's container, whose
+  prefetch comes from `Queue(prefetch)`). A keeper restarts a dead stage alone.
+  A raising step is dead-lettered with front 86's envelope to
+  `<destination>.dlq`, reason `stage <name>: …`. `Aggregate` keeps a running
+  count per key per tumbling window in the state store (no watermark / late
+  branch). Sinks: `Collect` (`collected(name)`), `Publish` (on
+  `rakun.stream.<p>.publish-arm`, default amqp).
+- Pollers: `pollOnce` / `startPoller` keep the cursor in
+  `rakun_stream_cursor`; the row is the lease (conditional UPDATE on the old
+  owner); the cursor moves only after every output reached the sink; `everyMs`
+  is a fixed DELAY after a pass (Spring's `poller.fixed-delay`).
+- `state.bp`: `StateStore` — `EtsState` (lost on restart/rebalance, logged at
+  creation) and `SqlState` (`rakun_stream_state`, survives); keys prefixed by
+  pipeline; `lookup` answers null.
+- `mountStreamGraph()` registers `integrationgraph` (front 76 exposes it).
+
 ## CLI — `modules/rakun-cli/` (front 88)
 
 `runCli(args) -> i32` is the whole CLI (an escript's `main` calls it). Exit

@@ -1,0 +1,142 @@
+//// rakun-stream — the pipeline value, the stage vocabulary, windows and the
+//// graph (front 89 steps 1, 5 and 7). Pure: `runStages` applies a stage list
+//// to a list of strings in one process, with no broker and no supervision,
+//// and answers what the running pipeline would produce.
+////
+//// Stages (Spring Integration's names): `Transform` (transformer, 1→1),
+//// `Filter` (filter, 1→0|1), `Split` (splitter, 1→n), `Aggregate`
+//// (aggregator, n→1 per key per window: `runStages` emits `<key>=<count>` per
+//// key in first-seen order), `Route` (router, 1→1 tagged `<branch>\t<item>`).
+//// Payloads are strings (labelled tuples lose their labels through a generic
+//// stage boundary; `language-gaps.md`).
+////
+//// Windows are arithmetic: `windowStart(at, w)` truncates to the window (an
+//// event at exactly `start + w` is the next window's), `windowKey(key,
+//// start)` is the state key; a sliding window of width W and step S writes an
+//// event into the W / S windows that contain it (`slidingStarts`).
+
+pub type Stage {
+    Transform(name: string, apply: fn(item: string) -> string),
+    Filter(name: string, keep: fn(item: string) -> bool),
+    Split(name: string, explode: fn(item: string) -> Array<string>),
+    Aggregate(name: string, key: fn(item: string) -> string, windowMs: i32),
+    Route(name: string, pick: fn(item: string) -> string),
+}
+
+pub type Source {
+    Queue(destination: string, prefetch: i32),
+    Topic(name: string, group: string),
+    Poll(everyMs: i32, cursor: string),
+}
+
+pub type Sink {
+    Publish(destination: string),
+    Collect(name: string),
+}
+
+pub type Pipeline(name: string, source: Source, stages: Array<Stage>, sink: Sink)
+
+pub fn stageName(s: Stage) -> string {
+    return case s {
+        Transform(name, apply) -> name;
+        Filter(name, keep) -> name;
+        Split(name, explode) -> name;
+        Aggregate(name, key, windowMs) -> name;
+        Route(name, pick) -> name;
+    };
+}
+
+pub fn stageKind(s: Stage) -> string {
+    return case s {
+        Transform(name, apply) -> "transformer";
+        Filter(name, keep) -> "filter";
+        Split(name, explode) -> "splitter";
+        Aggregate(name, key, windowMs) -> "aggregator";
+        Route(name, pick) -> "router";
+    };
+}
+
+// One stage over one item: its outputs (Aggregate passes the key through;
+// the running pipeline counts it in its state store).
+pub fn stepOf(s: Stage, item: string) -> Array<string> {
+    return case s {
+        Transform(name, apply) -> [apply(item)];
+        Filter(name, keep) -> if (keep(item)) [item] else [];
+        Split(name, explode) -> explode(item);
+        Aggregate(name, key, windowMs) -> [key(item)];
+        Route(name, pick) -> [pick(item) + "\t" + item];
+    };
+}
+
+fn isAggregate(s: Stage) -> bool {
+    return case s { Aggregate(name, key, windowMs) -> true; _ -> false; };
+}
+
+fn countKeys(keys: Array<string>) -> Array<string> {
+    var order: Array<string> = [];
+    for (keys) { k -> if (order.indexOf(k) < 0) order.push(k); };
+    return order.map({ k -> k + "=" + keys.filter({ x -> x == k }).length.toString() });
+}
+
+pub fn runStages(stages: Array<Stage>, items: Array<string>) -> Array<string> {
+    var current = items;
+    for (stages) { s ->
+        var next: Array<string> = [];
+        for (current) { item -> for (stepOf(s, item)) { o -> next.push(o); }; };
+        current = if (isAggregate(s)) countKeys(next) else next;
+    };
+    return current;
+}
+
+// "" or the problem: stage names must be present and unique in a pipeline.
+pub fn pipelineProblem(p: Pipeline) -> string {
+    val names = p.stages.map({ s -> stageName(s) });
+    val empty = names.filter({ n -> n.trim() == "" }).length;
+    if (empty > 0) return "rakun-stream: pipeline " + p.name + " has a stage with no name - every stage is named (the graph and the dead letters name it)";
+    val dup = names.filter({ n -> names.filter({ m -> m == n }).length > 1 });
+    if (dup.length > 0) return "rakun-stream: pipeline " + p.name + " names two stages `" + (dup.at(0) ?? "") + "` - a stage name is unique within its pipeline";
+    return "";
+}
+
+// ── windows ─────────────────────────────────────────────────────────────────
+
+#[@External.Erlang("""(fun(__A, __W) -> __A - (__A rem __W) end)($0, $1)""")]
+pub declare fn windowStart(atMs: i64, windowMs: i32) -> i64;
+
+pub fn windowKey(key: string, start: i64) -> string {
+    return key + "@" + start.toString();
+}
+
+#[@External.Erlang("""(fun(__A, __W, __S) -> __Last = __A - (__A rem __S), [__X || __X <- lists:seq(__Last - __W + __S, __Last, __S), __X =< __A, __A < __X + __W] end)($0, $1, $2)""")]
+pub declare fn slidingStarts(atMs: i64, widthMs: i32, stepMs: i32) -> Array<i64>;
+
+// ── the graph ───────────────────────────────────────────────────────────────
+
+pub fn sourceName(s: Source) -> string {
+    return case s {
+        Queue(destination, prefetch) -> "queue:" + destination;
+        Topic(name, group) -> "topic:" + name;
+        Poll(everyMs, cursor) -> "poller";
+    };
+}
+
+pub fn sinkName(s: Sink) -> string {
+    return case s {
+        Publish(destination) -> "publish:" + destination;
+        Collect(name) -> "collect:" + name;
+    };
+}
+
+// `source → stage1 → … → sink`, one edge per adjacent pair, in order.
+pub fn graphOf(p: Pipeline) -> Array<#(string, string)> {
+    var nodes: Array<string> = [sourceName(p.source)];
+    for (p.stages) { s -> nodes.push(stageName(s)); };
+    nodes.push(sinkName(p.sink));
+    var edges: Array<#(string, string)> = [];
+    var i = 0;
+    while (i + 1 < nodes.length) {
+        edges.push(#(nodes.at(i) ?? "", nodes.at(i + 1) ?? ""));
+        i = i + 1;
+    };
+    return edges;
+}
