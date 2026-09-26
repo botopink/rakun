@@ -427,12 +427,28 @@ bind(_, _, _) ->
 %% first. The data sits under `params` / `query_map` / `headers` / `body_bin`,
 %% never under a method's name.
 request(Verb, Path, Params, Query, Headers, Body) ->
-    #{method => Verb, path => Path, params => Params,
+    #{method => method_variant(Verb), verb => Verb, path => Path, params => Params,
       query_map => Query, headers => Headers, body_bin => Body,
       param => fun(_Self, N) -> lookup(N, Params) end,
       query => fun(_Self, N) -> lookup(N, Query) end,
       header => fun(_Self, N) -> lookup(string:lowercase(to_binary(N)), Headers) end,
       body => fun(_Self) -> Body end}.
+
+%% `Request.method` is typed `HttpMethod` (`http.bp`), so the value carries the
+%% enum's variant — the atom the erlang backend lowers `HttpMethod.Post` to —
+%% and `req.method == HttpMethod.Post` compares as written. The verb as the
+%% router matched it stays under `verb`.
+method_variant(Verb) ->
+    case string:lowercase(to_binary(Verb)) of
+        <<"get">> -> 'rakun@http@@HttpMethod__v__get';
+        <<"post">> -> 'rakun@http@@HttpMethod__v__post';
+        <<"put">> -> 'rakun@http@@HttpMethod__v__put';
+        <<"patch">> -> 'rakun@http@@HttpMethod__v__patch';
+        <<"delete">> -> 'rakun@http@@HttpMethod__v__delete';
+        <<"head">> -> 'rakun@http@@HttpMethod__v__head';
+        <<"options">> -> 'rakun@http@@HttpMethod__v__options';
+        _ -> Verb
+    end.
 
 lookup(Name, Map) ->
     case maps:find(to_binary(Name), Map) of
