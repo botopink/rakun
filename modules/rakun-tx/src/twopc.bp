@@ -1,0 +1,94 @@
+//// rakun-tx — two-phase commit (front 83 step 5), for the cases that must be
+//// atomic across resources and can afford its blocking window: between a
+//// participant's successful prepare and the coordinator's decision reaching
+//// it, that participant holds its locks and can do nothing else. The
+//// outbox (the default) never blocks; reach for this only where the business
+//// rule forbids the outbox's eventual consistency.
+////
+//// `commitAll(ds, txid, participants)`: `begin` is logged, every participant
+//// prepares, the decision (commit only when all prepared) is written to
+//// `rakun_2pc` BEFORE any participant hears it, then each is told and retried
+//// until it acknowledges (up to `rakun.tx.2pc.max-retries`, default 50, then
+//// the transaction stays open for `recover2pc`); only then is it `done`.
+//// `recover2pc` finishes every logged decision and aborts every transaction
+//// begun without one.
+
+import {rkProp, toI32} from "rakun";
+import {param, Row, Rows, sqlTemplate} from "rakun-data";
+
+pub type Participant(
+    name: string,
+    prepare: fn(txid: string) -> bool,
+    commit: fn(txid: string) -> bool,
+    abort: fn(txid: string) -> bool,
+)
+
+#[@External.Erlang("""(fun(__Ms) -> timer:sleep(__Ms), 0 end)($0)""")]
+declare fn pause(ms: i32) -> i32;
+
+pub fn install2pc(ds: string) -> i32 {
+    return sqlTemplate(ds).update("CREATE TABLE IF NOT EXISTS rakun_2pc (txid text, decision text, done text)", []);
+}
+
+fn maxRetries() -> i32 {
+    val raw = rkProp("rakun.tx.2pc.max-retries").trim();
+    return if (raw == "") 50 else toI32(raw);
+}
+
+fn deliver(p: Participant, txid: string, decision: string) -> bool {
+    var acked = false;
+    var tries = 0;
+    while (acked == false && tries < maxRetries()) {
+        acked = if (decision == "commit") p.commit(txid) else p.abort(txid);
+        tries = tries + 1;
+        if (acked == false) {
+            val _p = pause(10);
+        };
+    };
+    return acked;
+}
+
+fn finish(ds: string, txid: string, decision: string, participants: Participant[]) -> string {
+    var all = true;
+    for (participants) { p -> if (deliver(p, txid, decision) == false) all = false; };
+    if (all) {
+        val _d = sqlTemplate(ds).update("UPDATE rakun_2pc SET done = 'yes' WHERE txid = :t", [param("t", txid)]);
+    };
+    return decision;
+}
+
+// `commit` or `abort`.
+pub fn commitAll(ds: string, txid: string, participants: Participant[]) -> string {
+    val sql = sqlTemplate(ds);
+    val _b = sql.update("INSERT INTO rakun_2pc (txid, decision, done) VALUES (:t, '', 'no')", [param("t", txid)]);
+    var ok = true;
+    for (participants) { p -> if (ok && p.prepare(txid) == false) ok = false; };
+    val decision = if (ok) "commit" else "abort";
+    val _l = sql.update("UPDATE rakun_2pc SET decision = :d WHERE txid = :t", [param("d", decision), param("t", txid)]);
+    return finish(ds, txid, decision, participants);
+}
+
+pub fn decisionOf(ds: string, txid: string) -> string {
+    val rows: Rows = sqlTemplate(ds).query("SELECT decision, done FROM rakun_2pc WHERE txid = :t", [param("t", txid)]);
+    val r = rows.first();
+    val row = r ?? Row(columns: [], values: []);
+    return if (r == null) "" else row.get("decision") + "/" + row.get("done");
+}
+
+// Finishes what a dead coordinator left: a logged decision is delivered again;
+// a transaction begun with no decision is aborted. Answers how many.
+pub fn recover2pc(ds: string, participants: Participant[]) -> i32 {
+    val sql = sqlTemplate(ds);
+    val openRows: Rows = sql.query("SELECT txid, decision FROM rakun_2pc WHERE done = 'no'", []);
+    val open = openRows.toList();
+    var n = 0;
+    for (open) { r ->
+        val decision = if (r.get("decision") == "") "abort" else r.get("decision");
+        if (r.get("decision") == "") {
+            val _l = sql.update("UPDATE rakun_2pc SET decision = 'abort' WHERE txid = :t", [param("t", r.get("txid"))]);
+        };
+        val _f = finish(ds, r.get("txid"), decision, participants);
+        n = n + 1;
+    };
+    return n;
+}

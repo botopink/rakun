@@ -2553,6 +2553,45 @@ hashes, module facts).
   path dependencies with a SHA-256 of their tree; `registerSbomEndpoint(file)`
   serves it at `sbom`.
 
+## Distributed transactions — `modules/rakun-tx/` (front 83)
+
+**Boundary with front 08: one resource is front 08, more than one is here.**
+`#[transactional]` around statements against one database stays in
+rakun-data; the moment a broker, a second database or an external service is
+involved, the mechanism is here. Tables (`rakun_outbox`, `rakun_inbox`,
+`rakun_saga`, `rakun_2pc`) are created by `installOutbox` / `installSagas` /
+`install2pc` on a datasource. Keys: `rakun.tx.datasource` (default
+`default`), `rakun.tx.outbox.max-attempts` (5), `rakun.tx.outbox.backoff-ms`
+(100, doubled per attempt), `rakun.tx.2pc.max-retries` (50),
+`rakun.tx.broker-transactions`.
+
+- **Outbox** (`outbox.bp`): `publishAfterCommit[On]` inserts into the
+  caller's transaction and refuses outside one (`rakun_sql:tx_open`); `seq`
+  increases per aggregate. `relayTick(ds, publisher)` claims one due row per
+  aggregate with a conditional UPDATE (03r-x — the portable `SKIP LOCKED`),
+  skips an aggregate with a claimed row, marks `sent`; a failed publish goes
+  back to `pending` with a backoff, `failed` past max-attempts. A relay killed
+  after publishing leaves `claimed`; `reclaimStale` makes it pending —
+  at-least-once. `pruneSent` is bounded per call.
+- **Inbox**: `consumeOnce(ds, group, id, handler)` inserts `(group, id)` and
+  runs the handler in one transaction — `duplicate` without running on a
+  redelivery; a raise rolls back both. `pruneInbox` refuses a retention not
+  longer than the broker's redelivery window.
+- **Path choice**: `publishTransactional` takes the broker path when
+  `rakun.tx.broker-transactions=true`, else the outbox; counted
+  (`rakun.tx.path.<name>`) and logged.
+- **Saga** (`saga.bp`): a `Saga` value of `SagaStep(run, compensate)` pairs
+  (a decorator cannot read a body). Every transition is persisted before the
+  next step; `resumeSagas(ds, defs)` continues each `running` saga from its
+  persisted step (the in-flight step re-runs: steps must be idempotent).
+  Compensations run in reverse, each retried `retries` times, then the saga is
+  `needs_attention` with its history.
+- **2PC** (`twopc.bp`): begin logged, all prepare, the decision logged BEFORE
+  any participant hears it, delivery retried until acknowledged, then `done`.
+  `recover2pc` delivers a logged decision again and aborts a transaction
+  without one. Between a participant's prepare and the decision reaching it,
+  the participant blocks — prefer the outbox.
+
 ## DevTools — `modules/rakun-devtools/` (front 80)
 
 Dev-profile only (`dev` or `development` resolved). Sidecar
