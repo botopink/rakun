@@ -34,8 +34,16 @@
   the wire and not leaking across keep-alive requests, the unchanged head of a
   handler that sets none, 503 over `max-connections`, the idle timeout, a slow
   connection not holding up another, the port and pid files, headless, and the
-  singleton race. `modules/rakun`: 310 / 0 → **328 / 0**; `rakun-app` 59 / 0,
-  `rakun-web` 104 / 0, `rakun-test` 1 / 0 — erlang, the only row.
+  singleton race, and a connection process killed mid-request leaving another
+  in-flight request alone. `modules/rakun`: 310 / 0 → **329 / 0**; `rakun-app`
+  59 / 0, `rakun-test` 1 / 0 — erlang, the only row.
+- **`modules/rakun-web/test/dispatch_seam_test.bp`** drives front 04's one hook
+  from the core side: a core route dispatched with `rkDispatchHttp` while a
+  runner is installed goes through `rakun_chain:run/6`, a filter can stop it,
+  and an empty chain is the identity. `rakun-web`: 104 / 0 → **107 / 0**. Its
+  handler reads a path parameter because `req.query(…)` on a `Request`, in a
+  module that also imports `WebRequest` (which declares its own `query/2`),
+  lowers to `WebRequest:query/2` on the erlang backend — a compiler defect.
 - **Owed elsewhere**: a BUILT erlang program neither ships nor loads its
   sidecars, so the three examples build but do not run (the compiler's
   `00 · 10-cli-residuals`); the compiler repository's

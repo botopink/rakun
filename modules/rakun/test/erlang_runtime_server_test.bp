@@ -22,6 +22,10 @@ declare fn noHandle() -> any;
 #[@External.Erlang("""erlang:error(<<"handler exploded">>)""")]
 declare fn explode() -> string;
 
+// Kill the calling process outright — a connection process dying mid-request.
+#[@External.Erlang("""(fun() -> exit(self(), kill), <<>> end)()""")]
+declare fn dieNow() -> string;
+
 #[@External.Erlang("rakun_request_context", "sleep")]
 declare fn sleepMs(ms: i32) -> i32;
 
@@ -51,6 +55,10 @@ fn trace(req: Request) -> Response {
     return Response.ok("traced");
 }
 
+fn die(req: Request) -> Response {
+    return Response.ok(dieNow());
+}
+
 fn slow(req: Request) -> Response {
     val _s = sleepMs(300);
     return Response.ok("slow");
@@ -69,6 +77,7 @@ fn routes() -> i32 {
         val _e = rkRegisterRoute("GET", "/srv/boom", { r -> boom(r) });
         val _f = rkRegisterRoute("GET", "/srv/trace", { r -> trace(r) });
         val _g = rkRegisterRoute("GET", "/srv/slow", { r -> slow(r) });
+        val _k = rkRegisterRoute("GET", "/srv/die", { r -> die(r) });
         return 0;
     };
 }
@@ -243,6 +252,17 @@ test "rakun server: a slow request on one connection does not hold up another" {
     assert bodyOf(get(port, "/srv/hello")) == "hello";
     assert bodyOf(readResponse(slow)) == "slow";
     val _c = net.close(slow);
+}
+
+test "rakun server: killing a connection process mid-request leaves another in-flight request alone" {
+    val port = start();
+    val slow = open(port);
+    val _s = net.send(slow, "GET /srv/slow HTTP/1.1\r\nHost: x\r\n\r\n");
+    val killed = get(port, "/srv/die");
+    assert killed == "";
+    assert bodyOf(readResponse(slow)) == "slow";
+    val _c = net.close(slow);
+    assert bodyOf(get(port, "/srv/hello")) == "hello";
 }
 
 test "rakun server: the port file holds the BOUND port" {

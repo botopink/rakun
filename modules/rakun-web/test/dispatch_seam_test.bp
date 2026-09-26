@@ -1,0 +1,62 @@
+//// rakun-web — the ONE seam front 04 leaves for the chain, driven from the
+//// core's dispatcher (front 04 step 4: "with a stub `rakun_chain:run/6`
+//// loaded, every request passes through it and the handler still answers").
+////
+//// `middleware_test.bp` runs the chain through `runChain` with a terminal of its
+//// own. This file goes the other way round: a route registered in the CORE,
+//// dispatched with the core's `rkDispatchHttp`, with a runner installed — so
+//// `dispatch_http/5` finds `rakun_chain:run/6` exported and every request goes
+//// through the chain before it reaches the route. The last test resets the
+//// chain to empty, which makes the runner the identity for the files after it.
+////
+//// The handler reads a PATH parameter, not a query: `req.query(…)` on a
+//// `Request` in a module that also imports `WebRequest` (which declares its own
+//// `query/2`) lowers to `WebRequest:query/2` on the erlang backend — a compiler
+//// defect recorded in the milestone's `language-gaps.md`, not worked around
+//// anywhere but here.
+
+import {Request, Response, rkRegisterRoute, rkDispatchHttp} from "rakun";
+import {WebRequest, Chain, runChain, registerFilter, resetChain, rkChainSetRunner} from "filter";
+
+fn hello(req: Request) -> Response {
+    return Response.ok("seam " + req.param("who"));
+}
+
+fn gate(req: WebRequest, chain: Chain) -> Response {
+    if (req.path.startsWith("/seam/blocked")) {
+        return Response.withStatus(418, "stopped by the chain");
+    } else {
+        return chain.next(req);
+    };
+}
+
+fn install() -> i32 {
+    val _r = resetChain();
+    val _f = registerFilter("seam-gate", 0, { req, chain -> gate(req, chain) });
+    return rkChainSetRunner({ method, path, headersWire, queryWire, body ->
+        runChain(method, path, headersWire, queryWire, body);
+    });
+}
+
+test "rakun-web seam: with a runner installed, a core route still answers through the chain" {
+    val _i = install();
+    val _a = rkRegisterRoute("GET", "/seam/open/:who", { r -> hello(r) });
+    val _b = rkRegisterRoute("GET", "/seam/blocked/:who", { r -> hello(r) });
+    val open = rkDispatchHttp("GET", "/seam/open/ana", "{}", "{}", "");
+    assert open.status == 200;
+    assert open.body == "seam ana";
+}
+
+test "rakun-web seam: every request passes through the chain, so a filter can stop one" {
+    val _i = install();
+    val blocked = rkDispatchHttp("GET", "/seam/blocked/ana", "{}", "{}", "");
+    assert blocked.status == 418;
+    assert blocked.body == "stopped by the chain";
+}
+
+test "rakun-web seam: an empty chain is the identity" {
+    val _r = resetChain();
+    val passed = rkDispatchHttp("GET", "/seam/blocked/bob", "{}", "{}", "");
+    assert passed.status == 200;
+    assert passed.body == "seam bob";
+}
