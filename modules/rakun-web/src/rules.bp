@@ -1,0 +1,452 @@
+//// rakun-web — URL rules (front 65): the rules that decide whether a request
+//// reaches the app at all, run as ONE entry of front 07's chain.
+////
+//// The order inside that entry is fixed and is not configurable:
+////
+////     1. canonicalize   basePath strip, trailingSlash normalize, percent-decode
+////     2. redirects      first match wins -> 307/308, done
+////     3. rewrites       first match wins -> the request continues at the new target
+////     4. (the rest of the chain, the route match, the handler)
+////     5. headers        applied to the response, after the handler
+////
+//// Redirects before rewrites is the only order that terminates; headers last so
+//// a header rule is not undone by a handler that set the same name.
+////
+//// A MATCHER IS COMPILED ONCE (`matcher`, std's `regex.compile`) and run with
+//// `regex.runCompiled` — nothing re-parses a pattern per request. Three source
+//// forms: an exact path, `:name` (one segment) / `:name*` (the rest), and a raw
+//// regex wrapped in `(` … `)` after the leading slash. Literal runs go through
+//// `regex.escapeLiteral`, so `/a.b` does not match `/axb`.
+////
+//// REGISTRATION REFUSES (`compileRules`, an `Error` naming the rule, nothing
+//// half-registered): a pattern that does not compile, a destination naming a
+//// capture its source lacks, a `|` in a source or destination (it could not
+//// cross in the redirect blob), a redirect whose source matches its own
+//// destination (a loop), an internal rewrite whose target no route answers,
+//// and an external rewrite (`http://`, `https://`, protocol-relative `//`)
+//// whose host is not on `rakun.rules.allowedOrigins` — empty by default, so
+//// external rewrites are off unless named. No flag disables a check.
+////
+//// THE BOUNDARY HALF — `PathRules`, `canonicalize`, `clientHref`,
+//// `RedirectRule` and the redirect-blob codec — is the bundled library
+//// `routing`'s (`url_rules`), imported by the browser too (decision 115).
+
+import {Response, rkProp, rkRoutePaths} from "rakun";
+import {regex, regex.Regex, encoding} from "std";
+import {
+    url_rules: {PathRules, RedirectRule, canonicalize, clientHref, writeRedirectTable},
+    table.parseTable,
+    match.matchPath,
+} from "routing";
+import {WebRequest, Chain, withHeader, retarget, registerFilter, orderUrlRules, sentinelStatus} from "filter";
+
+// ── step 1: matchers ────────────────────────────────────────────────────────
+
+pub type Matcher(
+    source: string,
+    pattern: string,
+    params: string[],
+    compiled: Regex,
+)
+
+fn segmentsOf(path: string) -> string[] {
+    return path.split("/").filter({ s -> s != "" });
+}
+
+// A `:name` / `:name*` segment's name, `""` for a literal.
+fn paramName(seg: string) -> string {
+    if (seg.startsWith(":") == false) return "";
+    val bare: string = seg.slice(1, seg.length);
+    if (bare.endsWith("*")) return bare.slice(0, bare.length - 1) else return bare;
+}
+
+fn isRest(seg: string) -> bool {
+    return seg.startsWith(":") && seg.endsWith("*");
+}
+
+// A raw regex is recognised by its opening `(` right after the slash; one that
+// does not close is then a pattern `regex.compile` refuses, not a literal.
+pub fn isRawRegex(source: string) -> bool {
+    return source.startsWith("/(");
+}
+
+// Source in, anchored regex plus capture names (declaration order) out.
+pub fn sourceToPattern(source: string) -> @Result<#(string, string[]), string> {
+    if (source.startsWith("/") == false) throw "rakun-web: a rule source starts with a slash, and `" + source + "` does not";
+    if (isRawRegex(source)) return #("^" + source + "$", []);
+    var body = "";
+    var names: string[] = [];
+    for (segmentsOf(source)) { seg ->
+        val name: string = paramName(seg);
+        if (name == "") {
+            body = body + "/" + regex.escapeLiteral(seg);
+        } else if (isRest(seg)) {
+            names.push(name);
+            body = body + "(?:/(.*))?";
+        } else {
+            names.push(name);
+            body = body + "/([^/]+)";
+        };
+    };
+    val anchored: string = if (body == "") "^/$" else "^" + body + "$";
+    return #(anchored, names);
+}
+
+pub fn matcherProblem(source: string, why: string) -> string {
+    return "rakun-web: the rule source `" + source + "` is not a pattern - " + why;
+}
+
+pub fn matcher(source: string) -> @Result<Matcher, string> {
+    val translated = sourceToPattern(source);
+    if (translated.isError()) {
+        val assert Error(e) = translated;
+        throw e;
+    };
+    val pair = translated.unwrapOr(#("", []));
+    val compiled = regex.compile(pair._0);
+    if (compiled.isError()) {
+        val assert Error(why) = compiled;
+        throw matcherProblem(source, why);
+    };
+    return Matcher(source: source, pattern: pair._0, params: pair._1, compiled: compiled.unwrapOr(Regex(handle: noHandle())));
+}
+
+#[@External.Erlang("""undefined""")]
+declare fn noHandle() -> any;
+
+pub fn matches(m: Matcher, pathname: string) -> bool {
+    return regex.runCompiled(m.compiled, pathname);
+}
+
+// The named captures, in declaration order.
+pub fn capturesOf(m: Matcher, pathname: string) -> Array<#(string, string)> {
+    val groups: string[] = regex.captures(m.pattern, pathname) ?? [];
+    var out: Array<#(string, string)> = [];
+    var i = 1;
+    for (m.params) { name ->
+        out.push(#(name, groups.at(i) ?? ""));
+        i = i + 1;
+    };
+    return out;
+}
+
+// ── step 3: redirects, and interpolation ────────────────────────────────────
+
+fn captureValue(caps: Array<#(string, string)>, name: string) -> string {
+    val hit = caps.filter({ c -> c._0 == name });
+    return hit.at(0).map({ c -> c._1 }).unwrapOr("");
+}
+
+// Each substituted value is percent-encoded segment by segment: a space is
+// `%20`, never a second path segment, while a `:rest*` capture keeps its `/`s.
+pub fn encodeValue(value: string) -> string {
+    return value.split("/").map({ s -> encoding.percentEncode(s) }).join("/");
+}
+
+pub fn interpolate(destination: string, m: Matcher, pathname: string) -> string {
+    val caps = capturesOf(m, pathname);
+    var out: string[] = [];
+    val lead: string = if (destination.startsWith("/")) "/" else "";
+    for (destination.split("/")) { seg ->
+        val name: string = paramName(seg);
+        if (name == "") out.push(seg) else out.push(encodeValue(captureValue(caps, name)));
+    };
+    val joined: string = out.join("/");
+    return joined;
+}
+
+pub fn destinationNames(destination: string) -> string[] {
+    return destination.split("/").map({ s -> paramName(s) }).filter({ n -> n != "" });
+}
+
+// ── step 4: rewrites ────────────────────────────────────────────────────────
+
+pub type RewriteRule(
+    source: string,
+    destination: string,
+)
+
+pub fn isExternal(destination: string) -> bool {
+    return destination.startsWith("http://") || destination.startsWith("https://") || destination.startsWith("//");
+}
+
+pub fn hostOfUrl(url: string) -> string {
+    val rest: string = if (url.startsWith("//")) url.slice(2, url.length) else (url.split("://").at(1) ?? "");
+    return ((rest.split("/").at(0) ?? "").split(":").at(0) ?? "").toLower();
+}
+
+pub fn allowedOrigins() -> string[] {
+    return rkProp("rakun.rules.allowedOrigins").split(",").map({ o -> hostOfUrl(normalizeOrigin(o.trim())) }).filter({ h -> h != "" });
+}
+
+fn normalizeOrigin(o: string) -> string {
+    if (isExternal(o)) return o else return "https://" + o;
+}
+
+// ── step 5: header rules and the proxy ──────────────────────────────────────
+
+pub type HeaderRule(
+    source: string,
+    name: string,
+    value: string,
+)
+
+// ── step 6: compilation and the filter ──────────────────────────────────────
+
+pub type UrlRules(
+    basePath: string,
+    trailingSlash: bool,
+    redirects: Array<RedirectRule>,
+    rewrites: Array<RewriteRule>,
+    headers: Array<HeaderRule>,
+)
+
+pub fn pathRulesOf(rules: UrlRules) -> PathRules {
+    return PathRules(basePath: rules.basePath, trailingSlash: rules.trailingSlash);
+}
+
+pub type CompiledRules(
+    basePath: string,
+    trailingSlash: bool,
+    redirects: Array<#(Matcher, RedirectRule)>,
+    rewrites: Array<#(Matcher, RewriteRule)>,
+    headers: Array<#(Matcher, HeaderRule)>,
+)
+
+pub type RuleOutcome(
+    kind: string,
+    location: string,
+    status: i32,
+    target: string,
+)
+
+pub fn continueOutcome() -> RuleOutcome {
+    return RuleOutcome(kind: "", location: "", status: 0, target: "");
+}
+
+fn pipeProblem(kind: string, source: string, destination: string) -> string {
+    return "rakun-web: the " + kind + " rule `" + source + "` -> `" + destination + "` contains a `|` - it could not cross in the redirect table";
+}
+
+fn missingCaptureProblem(source: string, destination: string, name: string) -> string {
+    return "rakun-web: the rule `" + source + "` -> `" + destination + "` names `:" + name + "`, which its source does not capture";
+}
+
+fn selfRedirectProblem(source: string, destination: string) -> string {
+    return "rakun-web: the redirect `" + source + "` -> `" + destination + "` matches its own destination - it would loop";
+}
+
+fn unknownRewriteTargetProblem(source: string, destination: string) -> string {
+    return "rakun-web: the rewrite `" + source + "` -> `" + destination + "` targets a path no route answers";
+}
+
+fn offListOriginProblem(destination: string, host: string) -> string {
+    return "rakun-web: the rewrite to `" + destination + "` names the host `" + host + "`, which is not on rakun.rules.allowedOrigins";
+}
+
+// The route table front 22 keeps, read through its host when `rakun-app` is in
+// the build (rakun-web does not depend on it), `""` otherwise.
+#[@External.Erlang("""(fun() -> case code:ensure_loaded(rakun_file_router) of {module, _} -> rakun_file_router:table(); _ -> <<>> end end)()""")]
+declare fn appTableWire() -> string;
+
+// A sample path for a destination: every `:name` becomes `x`.
+fn samplePath(destination: string) -> string {
+    return destination.split("/").map({ s -> if (paramName(s) == "") s else "x" }).join("/");
+}
+
+pub fn routeAnswers(path: string) -> bool {
+    val inApp: bool = matchPath(parseTable(appTableWire()), path) != null;
+    val inCore: bool = rkRoutePaths().split(", ").filter({ r -> (r.split(" ").at(1) ?? "") == path }).length > 0;
+    return inApp || inCore;
+}
+
+// The first problem a rule set has, or `""`.
+pub fn rulesProblem(rules: UrlRules) -> string {
+    var problem = "";
+    for (rules.redirects) { r ->
+        val p: string = redirectProblem(r);
+        if (problem == "") problem = p;
+    };
+    for (rules.rewrites) { r ->
+        val p: string = rewriteProblem(r);
+        if (problem == "") problem = p;
+    };
+    for (rules.headers) { h ->
+        val p: string = headerProblem(h);
+        if (problem == "") problem = p;
+    };
+    return problem;
+}
+
+fn compileProblem(source: string) -> string {
+    val m = matcher(source);
+    if (m.isError()) {
+        val assert Error(e) = m;
+        return e;
+    };
+    return "";
+}
+
+fn missingCapture(source: string, destination: string) -> string {
+    val params: string[] = sourceToPattern(source).map({ p -> p._1 }).unwrapOr([]);
+    var missing = "";
+    for (destinationNames(destination)) { n ->
+        if ((missing == "") && (params.filter({ p -> p == n }).length == 0)) missing = n;
+    };
+    if (missing == "") return "" else return missingCaptureProblem(source, destination, missing);
+}
+
+fn redirectProblem(r: RedirectRule) -> string {
+    if (r.source.contains("|") || r.destination.contains("|")) return pipeProblem("redirect", r.source, r.destination);
+    val c: string = compileProblem(r.source);
+    if (c != "") return c;
+    val missing: string = missingCapture(r.source, r.destination);
+    if (missing != "") return missing;
+    val m: Matcher = matcher(r.source).unwrapOr(Matcher(source: "", pattern: "", params: [], compiled: Regex(handle: noHandle())));
+    if (matches(m, r.destination) || matches(m, samplePath(r.destination))) return selfRedirectProblem(r.source, r.destination);
+    return "";
+}
+
+fn rewriteProblem(r: RewriteRule) -> string {
+    if (r.source.contains("|") || r.destination.contains("|")) return pipeProblem("rewrite", r.source, r.destination);
+    val c: string = compileProblem(r.source);
+    if (c != "") return c;
+    val missing: string = missingCapture(r.source, r.destination);
+    if (missing != "") return missing;
+    if (isExternal(r.destination)) return externalProblem(r.destination);
+    if (routeAnswers(samplePath(r.destination)) == false) return unknownRewriteTargetProblem(r.source, r.destination);
+    return "";
+}
+
+fn externalProblem(destination: string) -> string {
+    val host: string = hostOfUrl(destination);
+    if (allowedOrigins().filter({ o -> o == host }).length > 0) return "" else return offListOriginProblem(destination, host);
+}
+
+fn headerProblem(h: HeaderRule) -> string {
+    return compileProblem(h.source);
+}
+
+fn mustMatcher(source: string) -> Matcher {
+    return matcher(source).unwrapOr(Matcher(source: "", pattern: "", params: [], compiled: Regex(handle: noHandle())));
+}
+
+// Every matcher compiled once; the first bad rule an `Error` naming it, and
+// nothing half-registered.
+pub fn compileRules(rules: UrlRules) -> @Result<CompiledRules, string> {
+    val problem: string = rulesProblem(rules);
+    if (problem != "") throw problem;
+    return CompiledRules(
+        basePath: rules.basePath,
+        trailingSlash: rules.trailingSlash,
+        redirects: rules.redirects.map({ r -> #(mustMatcher(r.source), r) }),
+        rewrites: rules.rewrites.map({ r -> #(mustMatcher(r.source), r) }),
+        headers: rules.headers.map({ h -> #(mustMatcher(h.source), h) }),
+    );
+}
+
+pub fn pathRulesOfCompiled(c: CompiledRules) -> PathRules {
+    return PathRules(basePath: c.basePath, trailingSlash: c.trailingSlash);
+}
+
+pub fn redirectFor(c: CompiledRules, pathname: string) -> ?RedirectRule {
+    val hits = c.redirects.filter({ p -> matches(p._0, pathname) });
+    return hits.at(0).map({ p -> p._1 });
+}
+
+pub fn rewriteFor(c: CompiledRules, pathname: string) -> ?string {
+    val hits = c.rewrites.filter({ p -> matches(p._0, pathname) });
+    return hits.at(0).map({ p -> interpolate(p._1.destination, p._0, pathname) });
+}
+
+pub fn headersFor(c: CompiledRules, pathname: string) -> Array<#(string, string)> {
+    return c.headers.filter({ p -> matches(p._0, pathname) }).map({ p -> #(p._1.name, p._1.value) });
+}
+
+// The first four steps of the order, as data: canonicalize, then the first
+// redirect, then the first rewrite; `""` to continue at the canonical path.
+pub fn applyRules(c: CompiledRules, pathname: string) -> RuleOutcome {
+    val canonical: string = canonicalize(pathRulesOfCompiled(c), pathname);
+    val redirectHits = c.redirects.filter({ p -> matches(p._0, canonical) });
+    if (redirectHits.length > 0) {
+        val hit = redirectHits.at(0).unwrapOr(c.redirects.at(0).unwrapOr(#(mustMatcher("/"), RedirectRule(source: "", destination: "", permanent: false))));
+        val location: string = interpolate(hit._1.destination, hit._0, canonical);
+        val status: i32 = if (hit._1.permanent) 308 else 307;
+        return RuleOutcome(kind: "redirect", location: location, status: status, target: "");
+    };
+    val target: string = rewriteFor(c, canonical) ?? "";
+    if (target == "") return RuleOutcome(kind: "", location: "", status: 0, target: canonical);
+    val kind: string = if (isExternal(target)) "proxy" else "rewrite";
+    return RuleOutcome(kind: kind, location: "", status: 0, target: target);
+}
+
+// ── the proxy relay and `proxy.bp` ──────────────────────────────────────────
+
+// Relay one request to an allowed external origin: the upstream status, its
+// content type and its body; hop-by-hop headers (`Connection`,
+// `Transfer-Encoding`, `Upgrade`) are dropped in both directions. Answers
+// `status\ncontent-type\nbody`.
+#[@External.Erlang("""(fun(__Method, __Url) -> _ = application:ensure_all_started(inets), _ = application:ensure_all_started(ssl), __M = list_to_atom(string:lowercase(binary_to_list(__Method))), case httpc:request(__M, {binary_to_list(__Url), []}, [{timeout, 10000}], [{body_format, binary}]) of {ok, {{_, __S, _}, __H, __B}} -> __CT = case lists:keyfind("content-type", 1, __H) of {_, __V} -> list_to_binary(__V); false -> <<>> end, iolist_to_binary([integer_to_binary(__S), 10, __CT, 10, __B]); {error, __R} -> iolist_to_binary([<<"502">>, 10, <<"text/plain">>, 10, io_lib:format("~p", [__R])]) end end)($0, $1)""")]
+declare fn relay(method: string, url: string) -> string;
+
+pub fn proxied(method: string, url: string) -> Response {
+    val wire: string = relay(method, url);
+    val lines: string[] = wire.split("\n");
+    val status: i32 = toStatus(lines.at(0) ?? "502");
+    val ct: string = lines.at(1) ?? "";
+    val body: string = lines.slice(2, lines.length).join("\n");
+    val res: Response = Response(status: status, body: body);
+    if (ct == "") return res else return withHeader(res, "Content-Type", ct);
+}
+
+#[@External.Erlang("""binary_to_integer($0)""")]
+declare fn toStatus(s: string) -> i32;
+
+#[@External.Erlang("""(fun(__F) -> case persistent_term:get(rakun_web_proxy, undefined) of undefined -> persistent_term:put(rakun_web_proxy, __F), 0; _ -> erlang:error({panic, <<"rakun-web: a proxy is already registered - proxy.bp is one function">>}) end end)($0)""")]
+declare fn rkProxyStore(handler: fn(req: WebRequest) -> RuleOutcome) -> i32;
+
+#[@External.Erlang("""persistent_term:get(rakun_web_proxy, $0)""")]
+declare fn rkProxyOr(fallback: fn(req: WebRequest) -> RuleOutcome) -> fn(req: WebRequest) -> RuleOutcome;
+
+#[@External.Erlang("""(fun() -> _ = persistent_term:erase(rakun_web_proxy), 0 end)()""")]
+pub declare fn rkProxyClear() -> i32;
+
+// `proxy.bp`'s function (§ 20): one per application, over the same outcomes as
+// the rules; a second registration raises.
+pub fn registerProxy(handler: fn(req: WebRequest) -> RuleOutcome) -> i32 {
+    return rkProxyStore(handler);
+}
+
+fn noProxy(req: WebRequest) -> RuleOutcome {
+    return continueOutcome();
+}
+
+// ── the chain entry ─────────────────────────────────────────────────────────
+
+pub fn urlRulesEntry(c: CompiledRules, req: WebRequest, chain: Chain) -> Response {
+    val fromRules: RuleOutcome = applyRules(c, req.target);
+    val proxyFn = rkProxyOr({ r -> noProxy(r) });
+    val fromProxy: RuleOutcome = if (fromRules.kind == "") proxyFn(retarget(req, fromRules.target)) else continueOutcome();
+    val out: RuleOutcome = if (fromProxy.kind != "") fromProxy else fromRules;
+    val canonical: string = canonicalize(pathRulesOfCompiled(c), req.target);
+    if (out.kind == "redirect") {
+        val location: string = if (isExternal(out.location)) out.location else clientHref(pathRulesOfCompiled(c), out.location);
+        return withHeader(Response(status: out.status, body: ""), "Location", location);
+    };
+    val res: Response = if (out.kind == "proxy") proxied(req.method, out.target) else chain.next(retarget(req, if (out.kind == "rewrite") out.target else canonical));
+    if (res.status == sentinelStatus()) return res;
+    for (headersFor(c, canonical)) { h ->
+        val _w = withHeader(res, h._0, h._1);
+    };
+    return res;
+}
+
+// Install a compiled rule set as the chain's `url-rules` entry (order −250).
+pub fn installUrlRules(c: CompiledRules) -> i32 {
+    return registerFilter("url-rules", orderUrlRules(), { req, chain -> urlRulesEntry(c, req, chain) });
+}
+
+// The redirect table as it crosses to the browser in the payload.
+pub fn redirectTableOf(rules: UrlRules) -> string {
+    return writeRedirectTable(rules.redirects);
+}

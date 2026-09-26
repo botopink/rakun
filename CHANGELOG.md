@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### rakun-web: URL rules (botopink front 65)
+
+- `rules.bp`: `Matcher` (compiled once), `sourceToPattern`, `capturesOf`,
+  `interpolate`, `UrlRules` / `compileRules` (every refusal named),
+  `applyRules` (canonicalize → redirects → rewrites), header rules,
+  `registerProxy`, the external relay over `httpc`, and the `url-rules` chain
+  entry (`installUrlRules`, order −250).
+- `rakun-actuator/botopink.json` lists `info.bp` again (a key rename had
+  rewritten it to `rakun.info.bp`).
+- `test/rules_test.bp` (29 cells): `rakun-web` 154 / 0 → **183 / 0**.
+
 ### rakun-app: navigation signals (botopink front 63)
 
 - `navigation.bp` + `sidecars/rakun_navigation.erl`: `notFound` / `redirect` /

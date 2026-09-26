@@ -2620,6 +2620,35 @@ with `rakun.http.clients.allow=127.0.0.0/8`); no external network. The mixed-DNS
 writes two answers into OTP's host table (`inet_db`, lookup `[file, native]`) and
 restores it.
 
+## URL rules — `modules/rakun-web/src/rules.bp` (front 65)
+
+One chain entry, `url-rules`, at order −250 (`installUrlRules(compiled)`), with
+a fixed order: canonicalize (`routing`'s `url_rules`: basePath strip,
+trailing slash, one percent-decode) → the first matching redirect (307 / 308,
+`Location` under `basePath`, the chain short-circuited) → the first matching
+rewrite (internal: the chain continues at the target, the URL unchanged;
+external: relayed through OTP's `httpc` — status, content type and body, no
+hop-by-hop header) → the rest of the chain → header rules on the response
+(declaration order, the later value wins, a rule overrides the handler). A
+rewrite never feeds back into the redirect table. `registerProxy(fn)` is
+`proxy.bp`'s one function (a second raises), consulted when no rule matched.
+
+A `Matcher` is compiled once (`regex.compile`) and run with
+`regex.runCompiled`; `:name` is one segment, `:name*` the rest, a source
+starting `/(` a raw regex; literal runs go through `regex.escapeLiteral`.
+Captures are numbered groups read in declaration order (std's
+`namedCaptures` answers in NAME order). `interpolate` percent-encodes each
+substituted segment. `compileRules` refuses, naming the rule and leaving
+nothing registered: a pattern that does not compile, a destination capture the
+source lacks, a `|`, a redirect onto itself, an internal rewrite no route
+answers (the core's `rkRoutePaths` and, when `rakun-app` is in the build, its
+table through `rakun_file_router:table/0` — rakun-web does not depend on
+rakun-app), and an external rewrite whose host is not on
+`rakun.rules.allowedOrigins` (empty by default). Not yet: the relay is
+buffered, not streamed (the 50 MB heap box is open). The file is flat
+(`src/rules.bp`, `test/rules_test.bp`) rather than `src/rules/**`: a test file
+in a subdirectory cannot call into the project on erlang today.
+
 ## Validation — the bundled `validation` library (front 14, moved by decision 116 rule 5)
 
 Front 14's member `modules/rakun-validation` is gone: its seven modules are the

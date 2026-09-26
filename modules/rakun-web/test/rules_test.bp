@@ -1,0 +1,345 @@
+//// rakun-web — URL rules (front 65). Matchers and interpolation as functions;
+//// the order, the refusals and the entry through `runChain` with a terminal of
+//// this file's own; the external relay against the core's own listener.
+//// Flat in `test/` (the front names `test/rules/**`): a test file in a
+//// subdirectory cannot call into the project on erlang today.
+
+import {testing.asserts, regex.Regex} from "std";
+import {Request, Response, rkSetProp, rkRegisterRoute, rkServe, rkDispatchHttp, rkSetReplyHeader} from "rakun";
+import {url_rules: {RedirectRule, parseRedirectTable}} from "routing";
+import {WebRequest, Chain, runChain, resetChain, registerFilter, headerValue, withHeader, rkChainSetTerminal, rkTrace, rkTraceLog, rkTraceReset} from "filter";
+import {
+    Matcher,
+    matcher,
+    matches,
+    capturesOf,
+    sourceToPattern,
+    interpolate,
+    isExternal,
+    RewriteRule,
+    HeaderRule,
+    UrlRules,
+    CompiledRules,
+    RuleOutcome,
+    compileRules,
+    applyRules,
+    redirectFor,
+    headersFor,
+    installUrlRules,
+    registerProxy,
+    rkProxyClear,
+    continueOutcome,
+    redirectTableOf,
+} from "rules";
+
+fn m(source: string) -> Matcher {
+    return matcher(source).unwrapOr(matcher("/").unwrapOr(noMatcher()));
+}
+
+#[@External.Erlang("""undefined""")]
+declare fn noMatcher() -> Matcher;
+
+#[@External.Erlang("""erlang:monotonic_time(millisecond)""")]
+declare fn nowMs() -> i32;
+
+fn rules(redirects: Array<RedirectRule>, rewrites: Array<RewriteRule>, headers: Array<HeaderRule>) -> UrlRules {
+    return UrlRules(basePath: "", trailingSlash: false, redirects: redirects, rewrites: rewrites, headers: headers);
+}
+
+fn compiled(r: UrlRules) -> CompiledRules {
+    val c = compileRules(r);
+    return c.unwrapOr(CompiledRules(basePath: "", trailingSlash: false, redirects: [], rewrites: [], headers: []));
+}
+
+fn problemOf(r: UrlRules) -> string {
+    val c = compileRules(r);
+    if (c.isOk()) return "";
+    val assert Error(e) = c;
+    return e;
+}
+
+// ── step 1: matchers ────────────────────────────────────────────────────────
+
+test "rakun-web rules: an exact path matches only itself" {
+    val d = m("/dashboard");
+    assert matches(d, "/dashboard");
+    assert matches(d, "/dashboard/x") == false;
+    assert matches(d, "/dashboardx") == false;
+}
+
+test "rakun-web rules: :path* matches the rest, zero or more segments" {
+    val d = m("/dashboard/:path*");
+    assert matches(d, "/dashboard");
+    assert matches(d, "/dashboard/a");
+    assert matches(d, "/dashboard/a/b");
+}
+
+test "rakun-web rules: :slug is one segment" {
+    val b = m("/blog/:slug");
+    assert matches(b, "/blog/hello");
+    assert matches(b, "/blog/a/b") == false;
+}
+
+test "rakun-web rules: a literal dot is a dot" {
+    val d = m("/a.b");
+    assert matches(d, "/a.b");
+    assert matches(d, "/axb") == false;
+}
+
+test "rakun-web rules: the negative-lookahead matcher of the middleware example" {
+    val x = m("/((?!api|_next/static|_next/image|favicon.ico).*)");
+    assert matches(x, "/dashboard");
+    assert matches(x, "/api/posts") == false;
+    assert matches(x, "/_next/static/x") == false;
+    assert matches(x, "/favicon.ico") == false;
+}
+
+test "rakun-web rules: a pattern that does not compile is an Error naming the source" {
+    val bad = matcher("/(");
+    assert bad.isError();
+    val assert Error(e) = bad;
+    assert e.contains("`/(`");
+}
+
+test "rakun-web rules: captures come back in declaration order" {
+    val two = m("/shop/:category/:item");
+    val caps = capturesOf(two, "/shop/books/dune");
+    assert caps.map({ c -> c._0 + "=" + c._1 }).join(",") == "category=books,item=dune";
+}
+
+test "rakun-web rules: matching runs the compiled pattern - 10 000 runs well inside a budget" {
+    val d = m("/blog/:slug");
+    val before: i32 = nowMs();
+    var hits = 0;
+    for (Array.range(0, 10000)) { i ->
+        if (matches(d, "/blog/hello")) hits = hits + 1;
+    };
+    val took: i32 = nowMs() - before;
+    assert hits == 10000;
+    assert took < 1000;
+}
+
+// ── step 3: redirects ───────────────────────────────────────────────────────
+
+test "rakun-web rules: permanent is 308 and temporary 307" {
+    val c = compiled(rules([RedirectRule(source: "/old", destination: "/new", permanent: true), RedirectRule(source: "/tmp", destination: "/new", permanent: false)], [], []));
+    assert applyRules(c, "/old").status == 308;
+    assert applyRules(c, "/tmp").status == 307;
+}
+
+test "rakun-web rules: a capture carries into the destination, percent-encoded" {
+    val c = compiled(rules([RedirectRule(source: "/blog/:slug", destination: "/posts/:slug", permanent: false)], [], []));
+    assert applyRules(c, "/blog/hello").location == "/posts/hello";
+    assert interpolate("/posts/:slug", m("/blog/:slug"), "/blog/two words") == "/posts/two%20words";
+}
+
+test "rakun-web rules: a destination naming a capture its source lacks is refused naming both" {
+    val p: string = problemOf(rules([RedirectRule(source: "/a", destination: "/b/:missing", permanent: false)], [], []));
+    assert p.contains("`/a` -> `/b/:missing`");
+    assert p.contains(":missing");
+}
+
+test "rakun-web rules: the first matching redirect wins" {
+    val c = compiled(rules([
+        RedirectRule(source: "/x/:p*", destination: "/first", permanent: false),
+        RedirectRule(source: "/x/y", destination: "/second", permanent: false),
+    ], [], []));
+    assert applyRules(c, "/x/y").location == "/first";
+}
+
+test "rakun-web rules: a redirect onto itself is refused" {
+    val p: string = problemOf(rules([RedirectRule(source: "/loop/:p*", destination: "/loop/:p*", permanent: false)], [], []));
+    assert p.contains("matches its own destination");
+}
+
+test "rakun-web rules: a | in a rule is refused naming it" {
+    val p: string = problemOf(rules([RedirectRule(source: "/a|b", destination: "/c", permanent: false)], [], []));
+    assert p.contains("`/a|b` -> `/c`");
+    assert parseRedirectTable(redirectTableOf(rules([RedirectRule(source: "/o", destination: "/n", permanent: true)], [], []))).length == 1;
+}
+
+// ── step 4: rewrites ────────────────────────────────────────────────────────
+
+fn routeB(req: Request) -> Response {
+    return Response.ok("b");
+}
+
+test "rakun-web rules: an internal rewrite continues at the target and the URL stays" {
+    val _r = rkRegisterRoute("GET", "/b/x", { r -> routeB(r) });
+    val c = compiled(rules([], [RewriteRule(source: "/a/:p*", destination: "/b/:p*")], []));
+    val out: RuleOutcome = applyRules(c, "/a/x");
+    assert out.kind == "rewrite";
+    assert out.target == "/b/x";
+}
+
+test "rakun-web rules: an internal rewrite no route answers is refused naming both" {
+    val p: string = problemOf(rules([], [RewriteRule(source: "/c/:p*", destination: "/nowhere/:p*")], []));
+    assert p.contains("`/c/:p*` -> `/nowhere/:p*`");
+}
+
+test "rakun-web rules: external means http, https - and the protocol-relative //" {
+    assert isExternal("https://api.example.com/:path*");
+    assert isExternal("/api/:path*") == false;
+    assert isExternal("//api.example.com/x");
+}
+
+test "rakun-web rules: an external rewrite off rakun.rules.allowedOrigins is refused naming the host" {
+    val p: string = problemOf(rules([], [RewriteRule(source: "/ext/:p*", destination: "https://api.example.com/:p*")], []));
+    assert p.contains("`api.example.com`");
+    val _a = rkSetProp("rakun.rules.allowedOrigins", "https://api.example.com");
+    assert problemOf(rules([], [RewriteRule(source: "/ext/:p*", destination: "https://api.example.com/:p*")], [])) == "";
+    val _u = rkSetProp("rakun.rules.allowedOrigins", "");
+}
+
+fn upstream(req: Request) -> Response {
+    val _h = rkSetReplyHeader("Content-Type", "text/x-upstream");
+    return Response.withStatus(203, "from upstream");
+}
+
+test "rakun-web rules: an allowed external rewrite relays status, content type and body" {
+    val _r = rkRegisterRoute("GET", "/up/relay", { r -> upstream(r) });
+    val _k = rkSetProp("rakun.main.keep-alive", "false");
+    val port: i32 = rkServe(0, { m, p, h, q, b -> rkDispatchHttp(m, p, h, q, b) });
+    val _a = rkSetProp("rakun.rules.allowedOrigins", "127.0.0.1");
+    val c = compiled(rules([], [RewriteRule(source: "/proxy/:p*", destination: "http://127.0.0.1:" + port.toString() + "/up/:p*")], []));
+    val _u = rkSetProp("rakun.rules.allowedOrigins", "");
+    val _f = resetChain();
+    val _i = installUrlRules(c);
+    val res: Response = runChain("GET", "/proxy/relay", "", "", "");
+    val ct: string = headerValue("Content-Type");
+    val _z = resetChain();
+    assert res.status == 203;
+    assert res.body == "from upstream";
+    assert ct == "text/x-upstream";
+}
+
+test "rakun-web rules: a rewrite never feeds back into the redirect table" {
+    val _r = rkRegisterRoute("GET", "/loopa", { r -> routeB(r) });
+    val c = compiled(rules([RedirectRule(source: "/loopa", destination: "/loopb", permanent: false)], [RewriteRule(source: "/loopb", destination: "/loopa")], []));
+    val out: RuleOutcome = applyRules(c, "/loopb");
+    assert out.kind == "rewrite";
+    assert out.target == "/loopa";
+}
+
+// ── step 5: header rules and the proxy ──────────────────────────────────────
+
+fn terminalSetting(name: string, value: string) -> i32 {
+    return rkChainSetTerminal({ method, path, headersWire, queryWire, body ->
+        val _t = rkTrace("handler:" + path);
+        withHeader(Response.ok("handled " + path), name, value);
+    });
+}
+
+test "rakun-web rules: a header rule applies on its paths only" {
+    val c = compiled(rules([], [], [HeaderRule(source: "/api/:path*", name: "X-Api", value: "1")]));
+    assert headersFor(c, "/api/posts").length == 1;
+    assert headersFor(c, "/about").length == 0;
+}
+
+test "rakun-web rules: two rules both apply; for one name the later wins, and a rule overrides the handler" {
+    val c = compiled(rules([], [], [
+        HeaderRule(source: "/:p*", name: "X-A", value: "a"),
+        HeaderRule(source: "/doc/:p*", name: "Cache-Control", value: "first"),
+        HeaderRule(source: "/doc/:p*", name: "Cache-Control", value: "second"),
+    ]));
+    val _f = resetChain();
+    val _i = installUrlRules(c);
+    val _t = terminalSetting("Cache-Control", "from-handler");
+    val _r = runChain("GET", "/doc/x", "", "", "");
+    val a: string = headerValue("X-A");
+    val cc: string = headerValue("Cache-Control");
+    val _z = resetChain();
+    assert a == "a";
+    assert cc == "second";
+}
+
+fn proxyRule(req: WebRequest) -> RuleOutcome {
+    if (req.target == "/api/external") return RuleOutcome(kind: "rewrite", location: "", status: 0, target: "/b/x");
+    return continueOutcome();
+}
+
+test "rakun-web rules: registerProxy takes one function; a second raises" {
+    val _c = rkProxyClear();
+    val _a = registerProxy({ r -> proxyRule(r) });
+    try asserts.throwsWith({ ->
+        val _b = registerProxy({ r -> proxyRule(r) });
+        0;
+    }, "a proxy is already registered");
+    val _z = rkProxyClear();
+}
+
+test "rakun-web rules: the proxy.ts example - a rewrite of /api/external plus a header on everything else" {
+    val _c = rkProxyClear();
+    val _p = registerProxy({ r -> proxyRule(r) });
+    val c = compiled(rules([], [], [HeaderRule(source: "/((?!api/external).*)", name: "X-Custom", value: "on")]));
+    val _f = resetChain();
+    val _i = installUrlRules(c);
+    val _t = terminalSetting("X-Unused", "0");
+    val _tr = rkTraceReset();
+    val rewritten: Response = runChain("GET", "/api/external", "", "", "");
+    val rewrittenHeader: string = headerValue("X-Custom");
+    val other: Response = runChain("GET", "/home", "", "", "");
+    val otherHeader: string = headerValue("X-Custom");
+    val _z = resetChain();
+    val _y = rkProxyClear();
+    assert rewritten.body == "handled /b/x";
+    assert rewrittenHeader == "";
+    assert other.body == "handled /home";
+    assert otherHeader == "on";
+}
+
+// ── step 6: compilation and the entry ───────────────────────────────────────
+
+test "rakun-web rules: compileRules answers an Error naming the first bad rule" {
+    val p: string = problemOf(rules([RedirectRule(source: "/ok", destination: "/fine", permanent: false), RedirectRule(source: "/(", destination: "/x", permanent: false)], [], []));
+    assert p.contains("`/(`");
+}
+
+test "rakun-web rules: the order - basePath, then redirects before rewrites" {
+    val _r = rkRegisterRoute("GET", "/landing", { r -> routeB(r) });
+    val c = compiled(UrlRules(basePath: "/docs", trailingSlash: false, redirects: [RedirectRule(source: "/old", destination: "/new", permanent: true)], rewrites: [RewriteRule(source: "/old", destination: "/landing")], headers: []));
+    val out: RuleOutcome = applyRules(c, "/docs/old/");
+    assert out.kind == "redirect";
+    assert out.location == "/new";
+}
+
+test "rakun-web rules: the entry short-circuits the chain on a redirect, with Location under basePath" {
+    val c = compiled(UrlRules(basePath: "/docs", trailingSlash: false, redirects: [RedirectRule(source: "/old", destination: "/new", permanent: true)], rewrites: [], headers: []));
+    val _f = resetChain();
+    val _i = installUrlRules(c);
+    val _l = registerFilter("later", 0, { req, chain -> later(req, chain) });
+    val _t = terminalSetting("X-Unused", "0");
+    val _tr = rkTraceReset();
+    val res: Response = runChain("GET", "/docs/old", "", "", "");
+    val location: string = headerValue("Location");
+    val trace: string = rkTraceLog();
+    val _z = resetChain();
+    assert res.status == 308;
+    assert location == "/docs/new";
+    assert trace == "";
+}
+
+fn later(req: WebRequest, chain: Chain) -> Response {
+    val _t = rkTrace("later");
+    return chain.next(req);
+}
+
+test "rakun-web rules: no rule matched - the chain continues at the canonical path" {
+    val c = compiled(UrlRules(basePath: "/docs", trailingSlash: false, redirects: [], rewrites: [], headers: []));
+    assert applyRules(c, "/docs/guide").kind == "";
+    val _f = resetChain();
+    val _i = installUrlRules(c);
+    val _t = terminalSetting("X-Unused", "0");
+    val res: Response = runChain("GET", "/docs/guide/", "", "", "");
+    val _z = resetChain();
+    assert res.body == "handled /guide";
+}
+
+test "rakun-web rules: applyRules compiles nothing per request - 10 000 runs inside the budget" {
+    val c = compiled(rules([RedirectRule(source: "/old/:p*", destination: "/new/:p*", permanent: false)], [], [HeaderRule(source: "/:p*", name: "X", value: "1")]));
+    val before: i32 = nowMs();
+    for (Array.range(0, 10000)) { i ->
+        val _o = applyRules(c, "/elsewhere/x");
+    };
+    assert nowMs() - before < 2000;
+}
