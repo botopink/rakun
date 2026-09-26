@@ -1,0 +1,93 @@
+//// rakun-cli — plugin commands (front 88 step 6).
+////
+////   #[service]
+////   #[cliCommands]
+////   pub type Seeder(repo: OrderRepository) {
+////       #[cliCommand("seed", "load the demo orders")]
+////       pub fn seed(self: Self, args: Array<string>) -> i32 { … }
+////   }
+////
+//// `#[cliCommand(name, summary)]` refuses anything but a method and a method
+//// that does not answer i32. `#[cliCommands]` on the type checks each marked
+//// method takes `(self: Self, args: Array<string>)`, refuses two markers of one
+//// name in the type (naming both methods), and emits
+//// `rkCliRegister(name, summary, { args -> __rkMake_<T>().<fn>(args) })` — the
+//// consumer imports `rkCliRegister` beside the markers. A name registered
+//// twice across types is refused when the second registration runs, naming
+//// both. The command runs with the container wired (the component comes from
+//// its stereotype's factory) and no listener; its answer is the exit code, a
+//// raise is exit 1 with the reason printed (`runCli`).
+
+#[@External.Erlang("""(fun(__N, __S, __O, __F) -> __L = persistent_term:get(rakun_cli_plugins, []), case lists:keyfind(__N, 1, __L) of {__N, _, __Owner, _} -> erlang:error({panic, <<"rakun-cli: the command `", __N/binary, "` is declared twice - ", __Owner/binary, " and ", __O/binary>>}); false -> persistent_term:put(rakun_cli_plugins, __L ++ [{__N, __S, __O, __F}]), 1 end end)($0, $1, $2, $3)""")]
+declare fn store(name: string, summary: string, owner: string, run: fn(args: Array<string>) -> i32) -> i32;
+#[@External.Erlang("""[__N || {__N, _, _, _} <- persistent_term:get(rakun_cli_plugins, [])]""")]
+pub declare fn pluginNames() -> string[];
+#[@External.Erlang("""(fun(__N) -> case lists:keyfind(__N, 1, persistent_term:get(rakun_cli_plugins, [])) of {_, __S, _, _} -> __S; false -> <<>> end end)($0)""")]
+pub declare fn pluginSummary(name: string) -> string;
+#[@External.Erlang("""(fun(__N, __A) -> case lists:keyfind(__N, 1, persistent_term:get(rakun_cli_plugins, [])) of {_, _, _, __F} -> __F(__A); false -> 2 end end)($0, $1)""")]
+pub declare fn runPlugin(name: string, args: Array<string>) -> i32;
+#[@External.Erlang("""(fun(__N) -> persistent_term:put(rakun_cli_plugins, lists:keydelete(__N, 1, persistent_term:get(rakun_cli_plugins, []))), 0 end)($0)""")]
+pub declare fn forgetPlugin(name: string) -> i32;
+
+pub fn rkCliRegister(name: string, summary: string, owner: string, run: fn(args: Array<string>) -> i32) -> i32 {
+    return store(name, summary, owner, run);
+}
+
+pub fn cliCommand(comptime decl: @Decl, name: string, summary: string) {
+    if (decl.kind != DeclKind.Method) decl.fail("#[cliCommand] must annotate a method of a #[cliCommands] type");
+    if (decl.returnType != "i32") decl.fail("#[cliCommand(\"" + name + "\")] " + decl.name + " returns `" + decl.returnType + "` - a command answers its exit code, an i32");
+    if (summary.trim() == "") decl.fail("#[cliCommand(\"" + name + "\")] needs a summary - rakun help prints it");
+}
+
+pub fn cliCommands(comptime decl: @Decl) {
+    var stereotype = "";
+    decl.annotations.forEach({ a ->
+        val isStereo = a.name == "component" || a.name == "service" || a.name == "repository" || a.name == "controller" || a.name == "restController" || a.name == "configuration";
+        val st = if (isStereo) a.name else stereotype;
+        stereotype = st;
+    });
+    var seen: Array<string> = [];
+    var owners: Array<string> = [];
+    var problem = "";
+    var found = 0;
+    decl.methods.forEach({ m ->
+        var args = "";
+        var cmd = "";
+        var marked = false;
+        m.annotations.forEach({ a ->
+            val isCmd = a.name == "cliCommand";
+            val nextArgs = if (isCmd) a.args.join(", ") else args;
+            args = nextArgs;
+            val nextCmd = if (isCmd && a.args.length > 0) a.args.join("|") else cmd;
+            cmd = nextCmd;
+            val mk = if (isCmd) true else marked;
+            marked = mk;
+        });
+        val first = cmd.split("|").join("");
+        var count = 0;
+        var argType = "";
+        m.params.forEach({ p ->
+            val c = count + 1;
+            count = c;
+            val t = if (c == 2) p.typeName else argType;
+            argType = t;
+        });
+        val badSig = marked && (problem == "") && ((count != 2) || (argType != "Array<string>" && argType != "string[]"));
+        val withSig = if (badSig) "#[cliCommands] " + decl.name + "." + m.name + " carries #[cliCommand] and is not (self: Self, args: Array<string>) -> i32" else problem;
+        problem = withSig;
+        val key = if (marked) args.split(",").at(0).unwrapOr("").trim() else "";
+        val clash = marked && (problem == "") && (seen.indexOf(key) >= 0);
+        val clashText = if (clash) "#[cliCommands] two commands of " + decl.name + " are named " + key + " - " + decl.name + "." + owners.at(seen.indexOf(key)).unwrapOr("") + " and " + decl.name + "." + m.name else problem;
+        problem = clashText;
+        if (marked) {
+            seen.push(key);
+            owners.push(m.name);
+            found = found + 1;
+        };
+        if (marked && (problem == "")) @emit("val __rkCli_" + decl.name + "_" + m.name + " = rkCliRegister(" + args + ", \"" + decl.name + "." + m.name + "\", { args -> __rkMake_" + decl.name + "()." + m.name + "(args) });");
+    });
+    if (decl.kind != DeclKind.Type) decl.fail("#[cliCommands] must annotate a type");
+    if (stereotype == "") decl.fail("#[cliCommands] needs a stereotype on the same type (#[service], #[component], …) - the command reaches the component through its factory");
+    if (found == 0) decl.fail("#[cliCommands] on " + decl.name + " finds no method carrying #[cliCommand]");
+    if (problem != "") decl.fail(problem);
+}

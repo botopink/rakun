@@ -2582,6 +2582,36 @@ hashes, module facts).
   path dependencies with a SHA-256 of their tree; `registerSbomEndpoint(file)`
   serves it at `sbom`.
 
+## CLI — `modules/rakun-cli/` (front 88)
+
+`runCli(args) -> i32` is the whole CLI (an escript's `main` calls it). Exit
+codes: 0 done · 1 the work failed · 2 usage · 3 the project did not compile.
+The table (`builtinCommands()` + plugin rows) is data; `rakun help` renders it
+and names onze as the CLI of a full-stack project.
+
+- `new <name> [--template plain|full-stack|library]` copies
+  `templates/<variant>/` substituting `@@name@@` and `@@rakun@@` (the path of
+  `modules/rakun` the project depends on); refuses a non-empty directory;
+  `full-stack` needs onze (`rakun.cli.onze`, else `onze` on PATH).
+- `test` / `build` are front ends: `botopink test --target erlang
+  [--filter]`, and `botopink build` then rakun-release's `buildTarball`
+  (`.rakun/release/<name>-<vsn>.tar`). Every invocation is recorded
+  (`cliInvocations()`).
+- `routes`, `beans`, `config` inspect without starting: the project is copied
+  to `.rakun-cli/inspect-<n>/` with one generated test importing the entry
+  module's first `pub fn` (so the registrations run), which prints the route
+  and scan registries or the loaded configuration with each key's source
+  (command line, environment, application file); secrets are masked with
+  front 76's `sanitizePatterns()`. No listener, pool or broker starts.
+- `run [--profile] [--port] [--watch]` passes `RAKUN_PROFILES_ACTIVE` /
+  `RAKUN_SERVER_PORT` to `botopink run`; `--watch` needs rakun-devtools among
+  the project's dependencies.
+- Plugin commands: `#[cliCommand(name, summary)]` on a method of a
+  `#[cliCommands]` type (with a stereotype) — emits `rkCliRegister`; a name
+  registered twice is refused naming both.
+- Settings: `rakun.cli.{botopink, templates, rakun, onze}` or the
+  `RAKUN_CLI_*` variables.
+
 ## Mail — `modules/rakun-mail/` (front 85)
 
 **Transport decision, front 04's cowboy seam again.** The SMTP client is

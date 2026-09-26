@@ -23,6 +23,14 @@ member of this workspace, with `{ "workspace": true }`; outside it, on the git f
 import {service, restController, getMapping, postMapping, value, bean, configuration} from "rakun";
 ```
 
+## The CLI
+
+`modules/rakun-cli` (front 88) is the server CLI: `rakun new <name> [--template
+plain|full-stack|library]`, `rakun run [--profile] [--port] [--watch]`, `rakun build` (an OTP
+release), `rakun test`, and `rakun routes` / `rakun beans` / `rakun config`, which inspect a project
+without starting it; `rakun help` lists them and any `#[cliCommand]` a project adds. Exit codes: 0
+done, 1 failed, 2 usage, 3 does not compile. A full-stack project uses onze's CLI (`onze dev`).
+
 ## Layout
 
 `repository/rakun/botopink.json` is a **workspace** (`"workspaces": ["modules/*", "examples/*"]`,

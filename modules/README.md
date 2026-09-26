@@ -29,6 +29,7 @@ refusal is the core's `config_check.bp`.
 | [rakun-actuator-api](./rakun-actuator-api/) | root · contract · registration · span · audit_seam | erlang | `spring-boot-actuator` (the API half) | 11 (Step 0) · 87 (the audit seam) | real code, 10 tests |
 | [rakun-actuator](./rakun-actuator/) | root · endpoint_host · health · info · registry_endpoints · instrumentation · management · actuator | erlang | `-actuator` (host) | 11 · 76 · 87 | real code, 77 tests |
 | [rakun-cache](./rakun-cache/) | root · cache_host · cache · cached · cache_endpoint | erlang | `-cache` | 12 | real code, 55 tests |
+| [rakun-cli](./rakun-cli/) | root · args · plugins · cli (+ `templates/`) | erlang | Spring Boot CLI, `spring-boot:run` / `bootRun` | 88 | real code, 25 tests |
 | [rakun-client](./rakun-client/) | root · address · settings · response · cache · transport · health · client · request · exchange | erlang | `RestClient` / `WebClient` | 13 | real code, 70 tests |
 | [rakun-data](./rakun-data/) | root · datasource · sql · orm_host · migration_host · orm · migration | erlang | `-data-jpa` / `-data-jdbc` / `-data-mongodb` / `-data-redis` | 08 · 09 · 77 · 78 | real code, 128 tests |
 | [rakun-devtools](./rakun-devtools/) | root · devtools · db_console | erlang | `spring-boot-devtools` | 80 | real code, 21 tests |
