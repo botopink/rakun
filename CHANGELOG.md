@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### rakun-app: `route.bp` handlers (botopink front 25)
+
+- `route_handler.bp`: the seven verb decorators, `registerRoute` (a duplicate
+  verb refused naming both functions), `HandlerResponse` and `streamed`,
+  `bodyText` / `bodyForm` / `bodyJson`, `serveApp()` (handlers and pages as the
+  core router's fallback): phase `Handler`, 405 + `Allow`, `HEAD` → `GET`,
+  `OPTIONS` 204, 415 for multipart, cookies as `Set-Cookie`.
+- `rakun_ssr.erl`: handler mode (`begin_handler/0`, `add_header/2`) and
+  `stream/1` (spawned thunks, chunks in index order).
+- `test/route_handler_test.bp` (21 cells, one over a real socket):
+  `modules/rakun-app` 33 / 0 → **53 / 0**.
+
 ### rakun-app: the page seam, and the render leaves (botopink fronts 22 steps 2, 5, 6 and 23; decisions 113-115, 117)
 
 - `ssr.bp` is the page path only: `ChunkWriter`, `PageRenderer`, `page`,

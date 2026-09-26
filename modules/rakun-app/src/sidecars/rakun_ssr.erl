@@ -28,7 +28,8 @@
 %%% skip is silent.
 -module(rakun_ssr).
 
--export([begin_page/0, set_status/1, set_header/2, write/1, close/0,
+-export([begin_page/0, begin_handler/0, add_header/2, stream/1,
+         set_status/1, set_header/2, write/1, close/0,
          status/0, header/1, closed/0, started/0, streamed/0, body/0, guard/1,
          page_request/2, set_fallback/1, clear_fallback/0]).
 
@@ -38,8 +39,51 @@
 
 begin_page() ->
     put(?STATE, #{status => 200, headers => [], started => false,
-                  closed => false, buffer => []}),
+                  closed => false, buffer => [], defaults => true}),
     0.
+
+%% A route handler's response (front 25) carries its own headers: no default
+%% `Content-Type` is added (a 204 has none), and a header name may repeat.
+begin_handler() ->
+    _ = begin_page(),
+    put(?STATE, (get(?STATE))#{defaults := false}),
+    0.
+
+add_header(Name, Value) ->
+    S = state(),
+    case S of
+        #{closed := true} -> refuse(<<"setHeader">>, <<"after close">>);
+        #{started := true} -> refuse(<<"setHeader">>, <<"after the first write - the headers are already on the wire">>);
+        #{headers := Hs} ->
+            put(?STATE, S#{headers := Hs ++ [{string:lowercase(Name), Name, Value}]}),
+            ok
+    end.
+
+%% Front 25's `streamed`: every thunk is SPAWNED at once (an `@Task` is eager on
+%% the BEAM, so only an unstarted thunk can run concurrently), and each result is
+%% written as a chunk IN INDEX ORDER as soon as it and every earlier one are in.
+%% A thunk that raises ends the stream: the chunks already written stand and the
+%% response is closed; the status cannot change after the first chunk. Answers
+%% how many chunks were written.
+stream(Thunks) ->
+    Me = self(),
+    Ref = make_ref(),
+    Indexed = lists:zip(lists:seq(1, length(Thunks)), Thunks),
+    [spawn(fun() ->
+               Me ! {Ref, I, try {ok, T()} catch C:E -> {crash, C, E} end}
+           end) || {I, T} <- Indexed],
+    stream_collect(Ref, 1, length(Thunks), 0).
+
+stream_collect(_Ref, I, N, Written) when I > N ->
+    Written;
+stream_collect(Ref, I, N, Written) ->
+    receive
+        {Ref, I, {ok, Chunk}} ->
+            ok = write(Chunk),
+            stream_collect(Ref, I + 1, N, Written + 1);
+        {Ref, I, {crash, _C, _E}} ->
+            Written
+    end.
 
 state() ->
     case get(?STATE) of
@@ -114,7 +158,10 @@ start(S = #{status := Status, headers := Hs}, Framing) ->
     case socket() of
         none -> ok;
         Sock ->
-            Defaults = [{<<"content-type">>, <<"Content-Type">>, <<"text/html; charset=utf-8">>}],
+            Defaults = case maps:get(defaults, S, true) of
+                           true -> [{<<"content-type">>, <<"Content-Type">>, <<"text/html; charset=utf-8">>}];
+                           false -> []
+                       end,
             Own = [K || {K, _, _} <- Hs],
             Merged = [D || {K, _, _} = D <- Defaults, not lists:member(K, Own)] ++ Hs,
             Queued = queued_headers(Own),
@@ -155,6 +202,8 @@ reason(303) -> <<"See Other">>;
 reason(307) -> <<"Temporary Redirect">>;
 reason(308) -> <<"Permanent Redirect">>;
 reason(400) -> <<"Bad Request">>;
+reason(405) -> <<"Method Not Allowed">>;
+reason(415) -> <<"Unsupported Media Type">>;
 reason(404) -> <<"Not Found">>;
 reason(500) -> <<"Internal Server Error">>;
 reason(_) -> <<"OK">>.

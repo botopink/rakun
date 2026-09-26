@@ -1,0 +1,342 @@
+//// rakun — `route.bp` handlers (front 25): an HTTP endpoint that lives in the
+//// `app/` tree next to the pages it belongs with.
+////
+//// SEVEN VERB DECORATORS, one per `HttpMethod`, each taking the app-relative
+//// segment: `#[getRoute("api/posts")]` on a `fn(req: Request) ->
+//// @Task<HandlerResponse>` registers an `R|/api/posts||GET` record and the
+//// handler into front 22's table through `rkAppRegisterHandler`. The verb goes
+//// in the marker because nothing reflects a module's export names. A segment
+//// holds a page OR a handler (front 22's scan); one verb twice at one segment
+//// is refused at registration, naming both functions.
+////
+//// THE DISPATCH (`serveApp()`, the core router's fallback): a URL reaching an
+//// `R` record runs the handler for the request's verb, inside one front 62
+//// request scope in phase `Handler` (where `cookies().set(...)` is legal and a
+//// revalidation is allowed); a verb the segment does not register answers 405
+//// with an `Allow` listing exactly the registered ones; `HEAD` falls back to
+//// `GET` with the body dropped; `OPTIONS` with no explicit handler answers 204
+//// with `Allow` (a CORS preflight never gets here — front 07's chain answers it
+//// first). A URL reaching a `P` record is front 23's `servePage`.
+////
+//// READING THE REQUEST: `bodyText`, `bodyForm` (`application/x-www-form-urlencoded`
+//// through std's `encoding.formParse`), `bodyJson` (validated by std's
+//// `json.decode`, and answered as the RAW TEXT — not a structure). A
+//// `multipart/form-data` body is 415 before it is read: botopink has no byte
+//// type, and an upload read as UTF-8 is a corrupted upload.
+////
+//// WRITING THE RESPONSE: `HandlerResponse(status, headers, chunks, tasks)` —
+//// `json`, `text`, `created`, `noContent`, `notFound`, `badRequest`,
+//// `unsupportedMedia`, `withHeader` (a NEW value; a repeated name is emitted
+//// twice, which `Set-Cookie` needs) — and `streamed(status, tasks)`: unstarted
+//// thunks, every one spawned at once, each result written as an HTTP/1.1 chunk
+//// in index order (front 23's writer). `toResponse` joins the chunks for the
+//// frozen single-chunk transport; the streaming path never calls it.
+
+import {io.fs, json, encoding, collections.Dict} from "std";
+import {Request, Response, rkProp} from "rakun";
+import {
+    RequestPhase,
+    RequestScope,
+    beginRequest,
+    endRequest,
+    requestLive,
+    requestPhase,
+    setPhase,
+} from "rakun/request_context";
+import {rkAppRegisterHandler, rkAppHasRender, rkAppRender, rkAppRegisterSource, rkAppSources, rkAppTable, entryLine} from "file_router";
+import {servePage, chunkWriter, rkSsrBegin, rkSsrBody, rkSsrStatus, rkSsrWrite, rkSsrClose, rkSsrSetStatus, rkSsrGuard, rkSsrStarted, rkSsrClosed, rkSsrPageRequest} from "ssr";
+import {table: {RouteEntry, parseTable, writeTable}, match: {RouteMatch, matchPath}} from "routing";
+
+// ── the response ────────────────────────────────────────────────────────────
+
+pub type HandlerResponse(
+    status: i32,
+    headers: Array<#(string, string)>,
+    chunks: string[],
+    tasks: Array<fn() -> @Task<string>>,
+) {
+    pub fn json(body: string) -> HandlerResponse {
+        return HandlerResponse(status: 200, headers: [#("Content-Type", "application/json")], chunks: [body], tasks: []);
+    }
+
+    pub fn text(body: string) -> HandlerResponse {
+        return HandlerResponse(status: 200, headers: [#("Content-Type", "text/plain; charset=utf-8")], chunks: [body], tasks: []);
+    }
+
+    pub fn created(body: string) -> HandlerResponse {
+        return HandlerResponse(status: 201, headers: [#("Content-Type", "application/json")], chunks: [body], tasks: []);
+    }
+
+    pub fn noContent() -> HandlerResponse {
+        return HandlerResponse(status: 204, headers: [], chunks: [], tasks: []);
+    }
+
+    pub fn notFound() -> HandlerResponse {
+        return HandlerResponse(status: 404, headers: [], chunks: [], tasks: []);
+    }
+
+    pub fn badRequest(message: string) -> HandlerResponse {
+        return HandlerResponse(status: 400, headers: [#("Content-Type", "text/plain; charset=utf-8")], chunks: [message], tasks: []);
+    }
+
+    pub fn unsupportedMedia(message: string) -> HandlerResponse {
+        return HandlerResponse(status: 415, headers: [#("Content-Type", "text/plain; charset=utf-8")], chunks: [message], tasks: []);
+    }
+
+    // A NEW value; the original is unchanged. A repeated name is kept twice.
+    pub fn withHeader(self: Self, name: string, value: string) -> HandlerResponse {
+        var hs: Array<#(string, string)> = [];
+        for (self.headers) { h -> hs.push(h); };
+        hs.push(#(name, value));
+        return HandlerResponse(status: self.status, headers: hs, chunks: self.chunks, tasks: self.tasks);
+    }
+}
+
+// One chunk per thunk, in index order, whatever order they finish in.
+pub fn streamed(status: i32, tasks: Array<fn() -> @Task<string>>) -> HandlerResponse {
+    return HandlerResponse(status: status, headers: [], chunks: [], tasks: tasks);
+}
+
+pub fn headerValues(h: HandlerResponse, name: string) -> string[] {
+    val want: string = name.toLower();
+    return h.headers.filter({ p -> p._0.toLower() == want }).map({ p -> p._1 });
+}
+
+// The frozen single-chunk transport's shape. The streaming path never calls it.
+pub fn toResponse(h: HandlerResponse) -> Response {
+    return Response(status: h.status, body: h.chunks.join(""));
+}
+
+// ── reading the request ─────────────────────────────────────────────────────
+
+pub fn bodyText(req: Request) -> string {
+    return req.body();
+}
+
+pub fn bodyForm(req: Request) -> Dict<string, string> {
+    var d = Dict.empty();
+    for (encoding.formParse(req.body())) { pair ->
+        d = d.insert(pair._0, pair._1);
+    };
+    return d;
+}
+
+// A form field by name, `""` when absent (read in this module, where the
+// `Dict` was built — see `language-gaps.md`).
+pub fn formField(req: Request, name: string) -> string {
+    return bodyForm(req).at(name).unwrapOr("");
+}
+
+// VALIDATED, and answered as the raw text — not a structure.
+pub fn bodyJson(req: Request) -> @Result<string, string> {
+    val parsed = json.decode(req.body());
+    if (parsed.isError()) {
+        val assert Error(e) = parsed;
+        throw "the request body is not JSON: " + e;
+    };
+    return req.body();
+}
+
+pub fn isMultipart(req: Request) -> bool {
+    return req.header("content-type").toLower().startsWith("multipart/form-data");
+}
+
+// ── the verbs ───────────────────────────────────────────────────────────────
+
+pub fn routeVerbs() -> string[] {
+    return ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
+}
+
+pub fn duplicateVerbProblem(verb: string, seg: string, first: string, second: string) -> string {
+    return "rakun routing: `" + verb + "` at `" + seg + "` is registered by `" + first + "` and again by `" + second + "` - a route.bp exports each verb once";
+}
+
+fn sourceKey(verb: string, seg: string) -> string {
+    return verb + " " + seg;
+}
+
+fn firstRegistrant(key: string) -> string {
+    var found = "";
+    for (rkAppSources().split("\n")) { line ->
+        val parts: string[] = line.split("|");
+        if ((found == "") && ((parts.at(0) ?? "") == key)) found = parts.at(1) ?? "";
+    };
+    return found;
+}
+
+// What each verb decorator emits: the `R` record and the handler, refusing a
+// second registration of one verb at one segment, naming both functions.
+pub fn registerRoute<Res>(verb: string, seg: string, fnName: string, handle: fn(req: Request) -> Res) -> i32 {
+    val record: string = entryLine("R", seg, "", verb);
+    if (rkAppHasRender(record)) @panic(duplicateVerbProblem(verb, seg, firstRegistrant(sourceKey(verb, seg)), fnName));
+    val _s = rkAppRegisterSource(sourceKey(verb, seg), fnName);
+    return rkAppRegisterHandler(verb, seg, handle);
+}
+
+pub fn getRoute(comptime decl: @Decl, seg: string) {
+    @emit("val __rkHandler_GET_" + decl.name + " = registerRoute(\"GET\", \"" + seg + "\", \"" + decl.name + "\", { req -> " + decl.name + "(req) });");
+    if (decl.kind != DeclKind.Fn) decl.fail("#[getRoute] must annotate a function, fn(req: Request) -> @Task<HandlerResponse>");
+    if (decl.returnType.contains("Task") == false) decl.fail("#[getRoute] needs a handler returning @Task<HandlerResponse>, not " + decl.returnType);
+}
+
+pub fn postRoute(comptime decl: @Decl, seg: string) {
+    @emit("val __rkHandler_POST_" + decl.name + " = registerRoute(\"POST\", \"" + seg + "\", \"" + decl.name + "\", { req -> " + decl.name + "(req) });");
+    if (decl.kind != DeclKind.Fn) decl.fail("#[postRoute] must annotate a function, fn(req: Request) -> @Task<HandlerResponse>");
+    if (decl.returnType.contains("Task") == false) decl.fail("#[postRoute] needs a handler returning @Task<HandlerResponse>, not " + decl.returnType);
+}
+
+pub fn putRoute(comptime decl: @Decl, seg: string) {
+    @emit("val __rkHandler_PUT_" + decl.name + " = registerRoute(\"PUT\", \"" + seg + "\", \"" + decl.name + "\", { req -> " + decl.name + "(req) });");
+    if (decl.kind != DeclKind.Fn) decl.fail("#[putRoute] must annotate a function, fn(req: Request) -> @Task<HandlerResponse>");
+    if (decl.returnType.contains("Task") == false) decl.fail("#[putRoute] needs a handler returning @Task<HandlerResponse>, not " + decl.returnType);
+}
+
+pub fn patchRoute(comptime decl: @Decl, seg: string) {
+    @emit("val __rkHandler_PATCH_" + decl.name + " = registerRoute(\"PATCH\", \"" + seg + "\", \"" + decl.name + "\", { req -> " + decl.name + "(req) });");
+    if (decl.kind != DeclKind.Fn) decl.fail("#[patchRoute] must annotate a function, fn(req: Request) -> @Task<HandlerResponse>");
+    if (decl.returnType.contains("Task") == false) decl.fail("#[patchRoute] needs a handler returning @Task<HandlerResponse>, not " + decl.returnType);
+}
+
+pub fn deleteRoute(comptime decl: @Decl, seg: string) {
+    @emit("val __rkHandler_DELETE_" + decl.name + " = registerRoute(\"DELETE\", \"" + seg + "\", \"" + decl.name + "\", { req -> " + decl.name + "(req) });");
+    if (decl.kind != DeclKind.Fn) decl.fail("#[deleteRoute] must annotate a function, fn(req: Request) -> @Task<HandlerResponse>");
+    if (decl.returnType.contains("Task") == false) decl.fail("#[deleteRoute] needs a handler returning @Task<HandlerResponse>, not " + decl.returnType);
+}
+
+pub fn headRoute(comptime decl: @Decl, seg: string) {
+    @emit("val __rkHandler_HEAD_" + decl.name + " = registerRoute(\"HEAD\", \"" + seg + "\", \"" + decl.name + "\", { req -> " + decl.name + "(req) });");
+    if (decl.kind != DeclKind.Fn) decl.fail("#[headRoute] must annotate a function, fn(req: Request) -> @Task<HandlerResponse>");
+    if (decl.returnType.contains("Task") == false) decl.fail("#[headRoute] needs a handler returning @Task<HandlerResponse>, not " + decl.returnType);
+}
+
+pub fn optionsRoute(comptime decl: @Decl, seg: string) {
+    @emit("val __rkHandler_OPTIONS_" + decl.name + " = registerRoute(\"OPTIONS\", \"" + seg + "\", \"" + decl.name + "\", { req -> " + decl.name + "(req) });");
+    if (decl.kind != DeclKind.Fn) decl.fail("#[optionsRoute] must annotate a function, fn(req: Request) -> @Task<HandlerResponse>");
+    if (decl.returnType.contains("Task") == false) decl.fail("#[optionsRoute] needs a handler returning @Task<HandlerResponse>, not " + decl.returnType);
+}
+
+// ── the dispatch ────────────────────────────────────────────────────────────
+
+#[@External.Erlang("rakun_ssr", "begin_handler")]
+declare fn rkSsrBeginHandler() -> i32;
+
+#[@External.Erlang("rakun_ssr", "add_header")]
+declare fn rkSsrAddHeader(name: string, value: string) -> void;
+
+#[@External.Erlang("rakun_ssr", "stream")]
+declare fn rkSsrStream(tasks: Array<fn() -> @Task<string>>) -> i32;
+
+#[@External.Erlang("rakun_ssr", "set_fallback")]
+declare fn rkAppSetFallback(dispatch: fn(req: Request) -> @Task<Response>) -> i32;
+
+// The verbs registered at the pattern a request reached, in table order.
+pub fn verbsAt(pattern: string) -> string[] {
+    return parseTable(rkAppTable()).filter({ e -> (e.kind == "R") && (e.pattern == pattern) }).map({ e -> e.verb });
+}
+
+fn missingHandler() -> fn(req: Request) -> @Task<HandlerResponse> {
+    return { req -> noHandler(req) };
+}
+
+fn noHandler(req: Request) -> @Task<HandlerResponse> {
+    return HandlerResponse.notFound();
+}
+
+fn paramsOfMatch(m: RouteMatch) -> string {
+    var lines: string[] = [];
+    for (m.params.keys()) { k ->
+        lines.push(k + "\t" + m.params.at(k).unwrapOr(""));
+    };
+    return lines.join("\n");
+}
+
+fn methodOf(req: Request) -> string {
+    return rkReqVerb(req);
+}
+
+// The verb a request came with, as the string the router matched on.
+#[@External.Erlang("""(fun(__R) -> maps:get(method, __R) end)($0)""")]
+declare fn rkReqVerb(req: Request) -> string;
+
+// Write one handler response through the writer: status, headers (a repeated
+// name twice), the chunks, or the spawned thunks; `bodyless` drops the body
+// (HEAD). Answers the status.
+pub fn writeHandlerResponse(h: HandlerResponse, bodyless: bool, cookies: string) -> i32 {
+    val _s = rkSsrSetStatus(h.status);
+    for (h.headers) { p -> val _h = rkSsrAddHeader(p._0, p._1); };
+    for (cookies.split("\n")) { c -> if (c != "") { val _c = rkSsrAddHeader("Set-Cookie", c); }; };
+    val _w = if (bodyless) 0 else writeBody(h);
+    val _x = if (rkSsrClosed()) 0 else closeWriter();
+    return h.status;
+}
+
+fn writeBody(h: HandlerResponse) -> i32 {
+    if (h.tasks.length > 0) return rkSsrStream(h.tasks);
+    for (h.chunks) { c -> val _w = rkSsrWrite(c); };
+    return h.chunks.length;
+}
+
+fn closeWriter() -> i32 {
+    val _c = rkSsrClose();
+    return 0;
+}
+
+fn allowHeader(pattern: string) -> string {
+    return verbsAt(pattern).join(", ");
+}
+
+// A handler for a request that reached an `R` record at `pattern`.
+pub fn serveHandler(req: Request, m: RouteMatch) -> @Task<i32> {
+    val pattern: string = m.entry.pattern;
+    val verb: string = methodOf(req);
+    val verbs: string[] = verbsAt(pattern);
+    val has = { v -> verbs.filter({ x -> x == v }).length > 0 };
+    val explicit: bool = has(verb);
+    val headFallback: bool = (verb == "HEAD") && (explicit == false) && has("GET");
+    val chosen: string = if (headFallback) "GET" else verb;
+    val _b = rkSsrBeginHandler();
+    if ((explicit == false) && (headFallback == false)) {
+        return writeNoHandler(verb, pattern);
+    };
+    val record: string = writeTable([RouteEntry(kind: "R", pattern: pattern, slot: "", verb: chosen)]);
+    val handle: fn(req: Request) -> @Task<HandlerResponse> = rkAppRender(record, missingHandler());
+    val handlerReq: Request = rkSsrPageRequest(req, paramsOfMatch(m));
+    if (isMultipart(req)) {
+        return writeHandlerResponse(HandlerResponse.unsupportedMedia("multipart/form-data is not accepted - botopink has no byte type"), false, "");
+    };
+    val opened: bool = requestLive() == false;
+    val _o = if (opened) beginRequest(RequestScope(id: "handler", phase: RequestPhase.Handler, method: verb, path: req.path, query: "", headersWire: "", strict: false)) else 0;
+    val previous: RequestPhase = requestPhase();
+    val _p = setPhase(RequestPhase.Handler);
+    val result = rkRunHandler({ -> handle(handlerReq) });
+    val _r = setPhase(previous);
+    val cookies: string = if (opened) endRequest() else "";
+    return writeHandlerResponse(result, headFallback, cookies);
+}
+
+fn writeNoHandler(verb: string, pattern: string) -> i32 {
+    val allow: string = allowHeader(pattern);
+    val h: HandlerResponse = if (verb == "OPTIONS") HandlerResponse.noContent().withHeader("Allow", allow) else HandlerResponse(status: 405, headers: [#("Allow", allow)], chunks: [], tasks: []);
+    return writeHandlerResponse(h, false, "");
+}
+
+// Run a handler; a raise is a 500 with no reason in the body.
+#[@External.Erlang("""(fun(__F) -> try __F() catch _:_ -> {'rakun_app@route_handler@@HandlerResponse', 500, [], [], []} end end)($0)""")]
+declare fn rkRunHandler(work: fn() -> @Task<HandlerResponse>) -> HandlerResponse;
+
+// The app path — pages and handlers — as the core router's fallback.
+pub fn serveApp() -> i32 {
+    return rkAppSetFallback({ req -> appResponse(req) });
+}
+
+pub fn appResponse(req: Request) -> @Task<Response> {
+    val found = matchPath(parseTable(rkAppTable()), req.path);
+    val m: RouteMatch = found.unwrapOr(RouteMatch(entry: RouteEntry(kind: "", pattern: "", slot: "", verb: ""), params: Dict.empty(), rest: [], chain: []));
+    if (m.entry.kind == "R") {
+        val status: i32 = await serveHandler(req, m);
+        return Response(status: status, body: rkSsrBody());
+    };
+    val _p = rkSsrBegin();
+    val pageStatus: i32 = await servePage(req, chunkWriter());
+    return Response(status: pageStatus, body: rkSsrBody());
+}

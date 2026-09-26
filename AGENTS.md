@@ -1536,6 +1536,38 @@ pub fn servePage(req: Request, out: ChunkWriter) -> @Task<i32> // the status wri
 - `splitQuery` / `encodeQuery` / `queryDict` (the query codec over std's
   `encoding`, front 62's `decodeComponent`) and `buildId()` stay here.
 
+## `route.bp` handlers — `modules/rakun-app/src/route_handler.bp` (front 25)
+
+Seven verb decorators — `#[getRoute(seg)]` … `#[optionsRoute(seg)]`, exactly
+`HttpMethod`'s set — on a `fn(req: Request) -> @Task<HandlerResponse>` emit
+`registerRoute(verb, seg, fnName, { req -> fn(req) })`: an `R|pattern||VERB`
+record and the handler in front 22's table, a second registration of one verb
+at one segment refused naming both functions. On a non-function the decorator
+fails naming `function`; a return that is not a `@Task` fails naming it. The
+`page.bp`/`route.bp` exclusivity is front 22's scan.
+
+`serveApp()` installs the app path — handlers and pages — as the core router's
+fallback: an `R` record runs the handler for the request's verb inside one
+front 62 frame in phase `Handler` (`cookies().set(...)` legal; the queued
+`Set-Cookie` lines go out as headers), with the page's parameters on
+`req.param`; a verb the segment lacks is 405 with `Allow` listing exactly the
+registered verbs; `HEAD` falls back to `GET` with the body dropped; `OPTIONS`
+with no explicit handler is 204 with `Allow` (a CORS preflight is front 07's,
+answered before the fallback); `multipart/form-data` is 415 before the body is
+read; a handler that raises is 500 with no reason in the body. A `P` record is
+`servePage`.
+
+`HandlerResponse(status, headers, chunks, tasks)`: `json` / `text` / `created`
+/ `noContent` (204, no type) / `notFound` / `badRequest` / `unsupportedMedia`,
+`withHeader` (a new value; a repeated name kept twice, which `Set-Cookie`
+needs), `streamed(status, thunks)` — every thunk spawned at once
+(`rakun_ssr:stream/1`), each result written as an HTTP/1.1 chunk in index
+order, a raising thunk ending the stream with the written chunks standing —
+and `toResponse` for the single-chunk transport. The writer is front 23's, in
+handler mode (no default `Content-Type`, headers appended). `bodyText`,
+`bodyForm` (std's `encoding.formParse`, read with `formField`), `bodyJson`
+(validated by `json.decode`, answered as the RAW TEXT).
+
 ## The auto-configuration pass
 
 `modules/rakun/src/autoconfig.bp`, `conditions.bp`, `condition_report.bp` and

@@ -25,7 +25,7 @@ refusal is the core's `config_check.bp`.
 | Member | `files` | `targets` | Spring Boot 4 | Front(s) | State |
 |---|---|---|---|---|---|
 | [rakun](./rakun/) (core) | root · http · runtime · decorators · bootstrap · rakun.d · … | erlang | `spring-boot-starter` | 04 · 05 · 06 · 62 · 72 · 74 | real code, 347 tests |
-| [rakun-app](./rakun-app/) | root · file_router · ssr | erlang | (Next.js `app/` router, server half) | 22 · 23 · 24 · 25 · 60 · 61 · 63 · 64 · 66 | real code, 59 tests |
+| [rakun-app](./rakun-app/) | root · file_router · ssr · route_handler | erlang | (Next.js `app/` router, server half) | 22 · 23 · 24 · 25 · 60 · 61 · 63 · 64 · 66 | real code, 53 tests |
 | [rakun-actuator-api](./rakun-actuator-api/) | root · contract · registration · span | erlang | `spring-boot-actuator` (the API half) | 11 (Step 0) | real code, 10 tests |
 | [rakun-actuator](./rakun-actuator/) | root · endpoint_host · health · info · registry_endpoints · instrumentation · actuator | erlang | `-actuator` (host) | 11 · 76 · 87 | real code, 38 tests |
 | [rakun-cache](./rakun-cache/) | root | erlang | `-cache` | 12 | scaffold |

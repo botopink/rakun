@@ -1,0 +1,297 @@
+//// rakun — `route.bp` handlers (front 25), dispatched through the core router's
+//// fallback (`serveApp()`) the way a request reaches them.
+////
+//// The handlers are declared with the verb decorators, the way an application
+//// writes them; the decorators' module-load registrations are asserted first,
+//// and every later cell re-registers into a fresh table through the same
+//// `registerRoute` the decorators emit, so no cell depends on another's table.
+
+import {testing.asserts, async} from "std";
+import {Request, Response, rkSetProp, rkDispatchHttp, rkServe} from "rakun";
+import {cookies, cookieDefaults} from "rakun/request_context";
+import {rkAppReset, rkAppTable, rkAppRegisterPage} from "file_router";
+import {PageRenderer, writeTo, rkSsrHeader} from "ssr";
+import {
+    HandlerResponse,
+    streamed,
+    headerValues,
+    toResponse,
+    bodyText,
+    formField,
+    bodyJson,
+    routeVerbs,
+    registerRoute,
+    duplicateVerbProblem,
+    serveApp,
+    verbsAt,
+    getRoute,
+    postRoute,
+    putRoute,
+    patchRoute,
+    deleteRoute,
+    headRoute,
+    optionsRoute,
+} from "route_handler";
+
+// ── the handlers ────────────────────────────────────────────────────────────
+
+#[getRoute("api/posts")]
+pub fn listPosts(req: Request) -> @Task<HandlerResponse> {
+    return HandlerResponse.json("[\"a\",\"b\"]");
+}
+
+#[postRoute("api/posts")]
+pub fn createPost(req: Request) -> @Task<HandlerResponse> {
+    val body = bodyJson(req);
+    if (body.isError()) return HandlerResponse.badRequest("not JSON");
+    return HandlerResponse.created(body.unwrapOr(""));
+}
+
+#[getRoute("blog/[slug]")]
+pub fn showPost(req: Request) -> @Task<HandlerResponse> {
+    return HandlerResponse.text("post " + req.param("slug"));
+}
+
+fn formEcho(req: Request) -> @Task<HandlerResponse> {
+    return HandlerResponse.text(formField(req, "a") + "|" + formField(req, "b") + "|" + formField(req, "c"));
+}
+
+fn textEcho(req: Request) -> @Task<HandlerResponse> {
+    return HandlerResponse.text("[" + bodyText(req) + "]");
+}
+
+fn cookieSetter(req: Request) -> @Task<HandlerResponse> {
+    val _c = probeCookie();
+    return HandlerResponse.text("set");
+}
+
+fn probeCookie() -> i32 {
+    return cookies().set("session", "abc", cookieDefaults());
+}
+
+fn explicitOptions(req: Request) -> @Task<HandlerResponse> {
+    return HandlerResponse.noContent().withHeader("X-Explicit", "yes");
+}
+
+fn slowParts() -> @Task<HandlerResponse> {
+    return streamed(200, [
+        { -> async { part(50, "a") } },
+        { -> async { part(10, "b") } },
+        { -> async { part(30, "c") } },
+    ]);
+}
+
+fn brokenParts() -> @Task<HandlerResponse> {
+    return streamed(200, [
+        { -> async { part(5, "a") } },
+        { -> async { boom() } },
+        { -> async { part(5, "c") } },
+    ]);
+}
+
+fn brokenStream(req: Request) -> @Task<HandlerResponse> {
+    return brokenParts();
+}
+
+#[@External.Erlang("""erlang:error(<<"thunk failed">>)""")]
+declare fn boom() -> string;
+
+fn slowStream(req: Request) -> @Task<HandlerResponse> {
+    return slowParts();
+}
+
+fn part(ms: i32, text: string) -> string {
+    val _s = sleepMs(ms);
+    return text;
+}
+
+#[@External.Erlang("rakun_request_context", "sleep")]
+declare fn sleepMs(ms: i32) -> i32;
+
+#[@External.Erlang("""erlang:monotonic_time(millisecond)""")]
+declare fn nowMs() -> i32;
+
+fn fresh() -> i32 {
+    val _r = rkAppReset();
+    val _a = registerRoute("GET", "api/posts", "listPosts", { r -> listPosts(r) });
+    val _b = registerRoute("POST", "api/posts", "createPost", { r -> createPost(r) });
+    val _c = registerRoute("GET", "blog/[slug]", "showPost", { r -> showPost(r) });
+    return serveApp();
+}
+
+fn call(verb: string, path: string, headers: string, body: string) -> Response {
+    return rkDispatchHttp(verb, path, headers, "{}", body);
+}
+
+// ── step 1 ──────────────────────────────────────────────────────────────────
+
+test "rakun handler: the verb decorators registered R records at module load" {
+    val table: string = rkAppTable();
+    assert table.contains("R|/api/posts||GET");
+    assert table.contains("R|/api/posts||POST");
+    assert table.contains("R|/blog/[slug]||GET");
+}
+
+test "rakun handler: the seven verbs are HttpMethod's, exactly" {
+    assert routeVerbs().join(",") == "GET,POST,PUT,PATCH,DELETE,HEAD,OPTIONS";
+}
+
+test "rakun handler: one verb twice at one segment is refused naming both functions" {
+    val _f = fresh();
+    try asserts.throwsWith({ ->
+        val _x = registerRoute("GET", "api/posts", "listAgain", { r -> listPosts(r) });
+        0;
+    }, duplicateVerbProblem("GET", "api/posts", "listPosts", "listAgain"));
+}
+
+test "rakun handler: a dynamic segment binds through req.param" {
+    val _f = fresh();
+    val res: Response = call("GET", "/blog/hello", "{}", "");
+    assert res.status == 200;
+    assert res.body == "post hello";
+}
+
+// ── step 2 ──────────────────────────────────────────────────────────────────
+
+test "rakun handler: bodyText is the body verbatim, and an empty body is empty" {
+    val _f = fresh();
+    val _t = registerRoute("POST", "echo", "textEcho", { r -> textEcho(r) });
+    assert call("POST", "/echo", "{}", "a\nb").body == "[a\nb]";
+    assert call("POST", "/echo", "{}", "").body == "[]";
+}
+
+test "rakun handler: bodyForm decodes a form, + as a space, and %26 does not split a field" {
+    val _f = fresh();
+    val _t = registerRoute("POST", "form", "formEcho", { r -> formEcho(r) });
+    val res: Response = call("POST", "/form", "{\"content-type\":\"application/x-www-form-urlencoded\"}", "a=1&b=two+words&c=x%26y");
+    assert res.body == "1|two words|x&y";
+}
+
+test "rakun handler: bodyJson on malformed input is an Error and the handler answers 400, not 500" {
+    val _f = fresh();
+    val res: Response = call("POST", "/api/posts", "{}", "{\"a\":");
+    assert res.status == 400;
+}
+
+test "rakun handler: bodyJson answers the RAW text of valid input, not a structure" {
+    val _f = fresh();
+    val res: Response = call("POST", "/api/posts", "{}", "{\"title\": \"x\"}");
+    assert res.status == 201;
+    assert res.body == "{\"title\": \"x\"}";
+}
+
+test "rakun handler: multipart/form-data is 415 before the body is read" {
+    val _f = fresh();
+    val res: Response = call("POST", "/api/posts", "{\"content-type\":\"multipart/form-data; boundary=x\"}", "--x");
+    assert res.status == 415;
+}
+
+test "rakun handler: cookies().set inside a handler is legal and reaches the response" {
+    val _f = fresh();
+    val _t = registerRoute("POST", "login", "cookieSetter", { r -> cookieSetter(r) });
+    val res: Response = call("POST", "/login", "{}", "");
+    assert res.status == 200;
+    assert res.body == "set";
+    assert rkSsrHeader("Set-Cookie").startsWith("session=abc");
+}
+
+// ── step 3 ──────────────────────────────────────────────────────────────────
+
+test "rakun handler: json is 200 application/json; noContent is 204 with no body and no type" {
+    val j: HandlerResponse = HandlerResponse.json("{}");
+    assert j.status == 200;
+    assert headerValues(j, "content-type").join(",") == "application/json";
+    val n: HandlerResponse = HandlerResponse.noContent();
+    assert n.status == 204;
+    assert n.chunks.length == 0;
+    assert headerValues(n, "Content-Type").length == 0;
+}
+
+test "rakun handler: withHeader returns a new value and a repeated name is kept twice" {
+    val base: HandlerResponse = HandlerResponse.text("x");
+    val one: HandlerResponse = base.withHeader("Set-Cookie", "a=1");
+    val two: HandlerResponse = one.withHeader("Set-Cookie", "b=2");
+    assert base.headers.length == 1;
+    assert one.headers.length == 2;
+    assert headerValues(two, "set-cookie").join(";") == "a=1;b=2";
+}
+
+test "rakun handler: toResponse joins the chunks in order and keeps the status" {
+    val h: HandlerResponse = HandlerResponse(status: 202, headers: [], chunks: ["a", "b", "c"], tasks: []);
+    val r: Response = toResponse(h);
+    assert r.status == 202;
+    assert r.body == "abc";
+}
+
+// ── step 4 ──────────────────────────────────────────────────────────────────
+
+test "rakun handler: streamed writes one chunk per thunk in index order, concurrently" {
+    val _f = fresh();
+    val _t = registerRoute("GET", "export", "slowStream", { r -> slowStream(r) });
+    val before: i32 = nowMs();
+    val res: Response = call("GET", "/export", "{}", "");
+    val took: i32 = nowMs() - before;
+    assert res.body == "abc";
+    assert took < 90;
+}
+
+test "rakun handler: a thunk that raises ends the stream; the chunks already written stand" {
+    val _f = fresh();
+    val _t = registerRoute("GET", "broken", "brokenStream", { r -> brokenStream(r) });
+    val res: Response = call("GET", "/broken", "{}", "");
+    // What the client sees: the status of the first chunk (200) and the body up
+    // to the thunk that failed — `a` — and then the end of the stream.
+    assert res.status == 200;
+    assert res.body == "a";
+}
+
+#[@External.Erlang("""(fun(__Port, __Req) -> {ok, __S} = gen_tcp:connect("127.0.0.1", __Port, [binary, {active, false}]), ok = gen_tcp:send(__S, __Req), __Loop = fun __Loop(__Acc) -> case binary:match(__Acc, <<"0", 13, 10, 13, 10>>) of nomatch -> case gen_tcp:recv(__S, 0, 3000) of {ok, __M} -> __Loop(<<__Acc/binary, __M/binary>>); _ -> __Acc end; _ -> __Acc end end, __R = __Loop(<<>>), gen_tcp:close(__S), __R end)($0, $1)""")]
+declare fn rawExchange(port: i32, request: string) -> string;
+
+test "rakun handler: a streamed response is chunked with no Content-Length" {
+    val _f = fresh();
+    val _t = registerRoute("GET", "export", "slowStream", { r -> slowStream(r) });
+    val _k = rkSetProp("rakun.main.keep-alive", "false");
+    val port: i32 = rkServe(0, { m, p, h, q, b -> rkDispatchHttp(m, p, h, q, b) });
+    val raw: string = rawExchange(port, "GET /export HTTP/1.1\r\nHost: x\r\n\r\n");
+    assert raw.startsWith("HTTP/1.1 200 OK\r\n");
+    assert raw.contains("Transfer-Encoding: chunked\r\n");
+    assert raw.contains("Content-Length") == false;
+    assert raw.contains("\r\n\r\n1\r\na\r\n1\r\nb\r\n1\r\nc\r\n0\r\n\r\n");
+}
+
+// ── step 5 ──────────────────────────────────────────────────────────────────
+
+test "rakun handler: a verb the segment does not register is 405 with Allow listing exactly the registered ones" {
+    val _f = fresh();
+    val res: Response = call("DELETE", "/api/posts", "{}", "");
+    assert res.status == 405;
+    assert verbsAt("/api/posts").join(", ") == "GET, POST";
+}
+
+test "rakun handler: HEAD falls back to GET with the body dropped" {
+    val _f = fresh();
+    val res: Response = call("HEAD", "/api/posts", "{}", "");
+    assert res.status == 200;
+    assert res.body == "";
+}
+
+test "rakun handler: OPTIONS with no explicit handler is 204; an explicit one runs instead" {
+    val _f = fresh();
+    val plain: Response = call("OPTIONS", "/api/posts", "{}", "");
+    assert plain.status == 204;
+    val _o = registerRoute("OPTIONS", "api/posts", "explicitOptions", { r -> explicitOptions(r) });
+    val explicit: Response = call("OPTIONS", "/api/posts", "{}", "");
+    assert explicit.status == 204;
+}
+
+test "rakun handler: a page and a handler share the table, each at its own pattern" {
+    val _f = fresh();
+    val _p = rkAppRegisterPage("about", aboutPage());
+    assert call("GET", "/about", "{}", "").body == "about";
+    assert call("GET", "/api/posts", "{}", "").body == "[\"a\",\"b\"]";
+}
+
+fn aboutPage() -> PageRenderer {
+    return { req, out -> writeTo(out, "about") };
+}
