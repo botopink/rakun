@@ -13,7 +13,7 @@ module without breaking an import.
 | [`rakun-starter-web`](./rakun-starter-web/) | `rakun-starter`, `rakun-web` (validation is the bundled library `validation`, never listed) | `spring-boot-starter-webmvc` |
 | [`rakun-starter-data-sql`](./rakun-starter-data-sql/) | `rakun-starter`, `rakun-data` | `spring-boot-starter-data-jpa` + `-jdbc` |
 | [`rakun-starter-security`](./rakun-starter-security/) | `rakun-starter`, `rakun-security`, `rakun-session` | `spring-boot-starter-security` |
-| [`rakun-starter-actuator`](./rakun-starter-actuator/) | `rakun-starter`, `rakun-actuator` | `spring-boot-starter-actuator` |
+| [`rakun-starter-actuator`](./rakun-starter-actuator/) | `rakun-starter`, `rakun-actuator`, `rakun-metrics` | `spring-boot-starter-actuator` |
 | [`rakun-starter-cache`](./rakun-starter-cache/) | `rakun-starter`, `rakun-cache` | `spring-boot-starter-cache` |
 | [`rakun-starter-messaging`](./rakun-starter-messaging/) | `rakun-starter`, `rakun-messaging` | `spring-boot-starter-amqp` + `-kafka` |
 | [`rakun-starter-test`](./rakun-starter-test/) | `rakun-starter`, `rakun-test`, `onze` | `spring-boot-starter-test` |

@@ -1,0 +1,135 @@
+//// rakun-metrics — trace sampling and span export (front 75 step 8), through
+//// rakun-web's chain with front 11's span entry and this module's sampler.
+
+import {Request, Response, rkSetProp, rkRegisterRoute, rkServe, rkDispatchHttp} from "rakun";
+import {WebRequest, Chain, resetChain, runChain, rkChainSetRunner, chainNames} from "rakun-web";
+import {mountActuator} from "rakun-actuator/actuator";
+import {RestClient, ClientResponse} from "rakun-client";
+import {traceId, spanId, parentSpanId, sampled, traceparent, adoptTraceparent, installTracing, samplingEntryName, rkMetricsSpanTake, exportedSpanCount} from "tracing";
+import {rkSpanClear} from "rakun-actuator-api";
+
+#[@External.Erlang("rakun_runtime", "prop")]
+declare fn prop(key: string) -> string;
+
+fn installChain() -> i32 {
+    val _r = resetChain();
+    val _m = mountActuator();
+    val _t = installTracing();
+    return rkChainSetRunner({ method, path, headersWire, queryWire, body ->
+        runChain(method, path, headersWire, queryWire, body);
+    });
+}
+
+fn who(req: Request) -> Response {
+    val _a = rkSetProp("test.tr.trace", traceId());
+    val _b = rkSetProp("test.tr.span", spanId());
+    val _c = rkSetProp("test.tr.parent", parentSpanId());
+    val _d = rkSetProp("test.tr.header", traceparent());
+    val _e = rkSetProp("test.tr.sampled", if (sampled()) "yes" else "no");
+    return Response.ok("");
+}
+
+fn inner(req: Request) -> Response {
+    val _h = rkSetProp("test.tr.inbound", req.header("traceparent"));
+    return Response.ok("inner");
+}
+
+fn caller(req: Request) -> Response {
+    val _a = rkSetProp("test.tr.trace", traceId());
+    val res: ClientResponse = RestClient.builder().build().get(prop("test.tr.innerUrl")).retrieve();
+    return Response.ok(res.status.toString());
+}
+
+fn routes() -> i32 {
+    val _w = rkRegisterRoute("GET", "/tr/who", { req -> who(req) });
+    val _i = rkRegisterRoute("GET", "/tr/inner", { req -> inner(req) });
+    return rkRegisterRoute("GET", "/tr/call", { req -> caller(req) });
+}
+
+fn dispatch(path: string, header: string) -> Response {
+    val headers = if (header == "") "{}" else "{\"traceparent\":\"" + header + "\"}";
+    return rkDispatchHttp("GET", path, headers, "{}", "");
+}
+
+// How many exported spans carry `trace` and are named `name`.
+#[@External.Erlang("""(fun(__J, __T, __N) -> length([1 || __S <- json:decode(__J), maps:get(<<"traceId">>, __S) =:= __T, maps:get(<<"name">>, __S) =:= __N]) end)($0, $1, $2)""")]
+declare fn spansOf(json: string, trace: string, name: string) -> i32;
+
+val inbound = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+
+test "tracing: a valid traceparent continues the trace with a new span parented on the inbound one" {
+    val _i = installChain();
+    val _r = routes();
+    assert chainNames().indexOf(samplingEntryName()) >= 0;
+    val res = dispatch("/tr/who", inbound);
+    assert res.status == 200;
+    assert prop("test.tr.trace") == "4bf92f3577b34da6a3ce929d0e0e4736";
+    assert prop("test.tr.parent") == "00f067aa0ba902b7";
+    assert prop("test.tr.span").length() == 16 && prop("test.tr.span") != "00f067aa0ba902b7";
+}
+
+test "tracing: a malformed traceparent starts a new trace and the request still answers" {
+    val _i = installChain();
+    val _r = routes();
+    val res = dispatch("/tr/who", "00-nothex-00f067aa0ba902b7-01");
+    assert res.status == 200;
+    assert prop("test.tr.trace").length() == 32 && prop("test.tr.trace") != "4bf92f3577b34da6a3ce929d0e0e4736";
+    assert prop("test.tr.parent") == "";
+}
+
+test "tracing: an inbound 00 flag exports nothing even at probability 1" {
+    val _i = installChain();
+    val _r = routes();
+    val _p = rkSetProp("rakun.tracing.sampling.probability", "1");
+    val _t = rkMetricsSpanTake();
+    val res = dispatch("/tr/who", "00-4bf92f3577b34da6a3ce929d0e0e4737-00f067aa0ba902b7-00");
+    val spans = rkMetricsSpanTake();
+    val _u = rkSetProp("rakun.tracing.sampling.probability", "");
+    assert res.status == 200 && prop("test.tr.sampled") == "no";
+    assert spans.contains("4bf92f3577b34da6a3ce929d0e0e4737") == false, spans;
+    assert prop("test.tr.header").endsWith("-00");
+}
+
+test "tracing: probability 0 exports nothing and still propagates the header" {
+    val _i = installChain();
+    val _r = routes();
+    val _p = rkSetProp("rakun.tracing.sampling.probability", "0");
+    val _t = rkMetricsSpanTake();
+    val before = exportedSpanCount();
+    val _d = dispatch("/tr/who", "");
+    val spans = rkMetricsSpanTake();
+    val _u = rkSetProp("rakun.tracing.sampling.probability", "");
+    assert spans.contains(prop("test.tr.trace")) == false;
+    assert exportedSpanCount() == before;
+    val header = prop("test.tr.header");
+    assert header.startsWith("00-" + prop("test.tr.trace") + "-") && header.endsWith("-00"), header;
+}
+
+test "tracing: probability 1 exports one server span per request and one client span per call, on one trace" {
+    val _i = installChain();
+    val _r = routes();
+    val _a = rkSetProp("rakun.http.clients.allow", "127.0.0.0/8");
+    val _k = rkSetProp("rakun.main.keep-alive", "false");
+    val port = rkServe(0, { m, p, h, q, b -> rkDispatchHttp(m, p, h, q, b) });
+    val _url = rkSetProp("test.tr.innerUrl", "http://127.0.0.1:" + port.toString() + "/tr/inner");
+    val _p = rkSetProp("rakun.tracing.sampling.probability", "1");
+    val _t = rkMetricsSpanTake();
+    val res = dispatch("/tr/call", "");
+    val spans = rkMetricsSpanTake();
+    val _u = rkSetProp("rakun.tracing.sampling.probability", "");
+    val trace = prop("test.tr.trace");
+    assert res.status == 200 && res.body == "200", res.body;
+    assert spansOf(spans, trace, "http.server.request") == 2, spans;
+    assert spansOf(spans, trace, "http.client.request") == 1, spans;
+    val got = prop("test.tr.inbound");
+    assert got.startsWith("00-" + trace + "-") && got.endsWith("-01"), got;
+}
+
+test "tracing: outside a request there is no trace, and adopting a header makes one" {
+    val _c = rkSpanClear();
+    assert traceId() == "" && traceparent() == "" && sampled() == false;
+    assert adoptTraceparent("garbage") == false;
+    assert adoptTraceparent(inbound);
+    assert traceId() == "4bf92f3577b34da6a3ce929d0e0e4736" && spanId() == "00f067aa0ba902b7" && sampled();
+    val _d = rkSpanClear();
+}

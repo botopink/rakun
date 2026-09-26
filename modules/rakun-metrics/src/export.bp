@@ -1,0 +1,103 @@
+//// rakun-metrics — OTLP and StatsD export (front 75 step 5).
+////
+//// OTLP is HTTP/JSON (`/v1/metrics`, `/v1/traces`) through front 13's client;
+//// an `https` endpoint uses front 74's bundle named by
+//// `rakun.metrics.export.otlp.ssl-bundle`. `rakun.metrics.export.otlp.step`
+//// (milliseconds) is the push interval, and 0 disables the push without
+//// touching the registry. A push is ONE metrics body and at most one traces
+//// body: an unreachable collector costs one logged failure per interval, and
+//// the span buffer is bounded. The pusher's own client span is never sampled,
+//// so exporting does not feed itself.
+////
+//// StatsD is fire and forget over UDP to `rakun.metrics.export.statsd.host`
+//// / `.port`: a send that fails is swallowed, never raised into the caller.
+
+import {rkProp} from "rakun";
+import {RestClient, ClientResponse} from "rakun-client";
+import {rkSpanSetFlags} from "rakun-actuator-api";
+import {rkMetricsSpanTake} from "tracing";
+
+#[@External.Erlang("rakun_metrics", "otlp_metrics_json")]
+pub declare fn rkMetricsOtlpMetrics(service: string) -> string;
+
+#[@External.Erlang("rakun_metrics", "otlp_traces_json")]
+pub declare fn rkMetricsOtlpTraces(service: string, spansJsonArray: string) -> string;
+
+#[@External.Erlang("rakun_metrics", "otlp_start")]
+declare fn rkMetricsOtlpStart(stepMillis: i32, push: fn() -> i32) -> i32;
+
+#[@External.Erlang("rakun_metrics", "otlp_stop")]
+pub declare fn rkMetricsOtlpStop() -> i32;
+
+#[@External.Erlang("rakun_metrics", "otlp_running")]
+pub declare fn rkMetricsOtlpRunning() -> bool;
+
+#[@External.Erlang("rakun_metrics", "failure_note")]
+declare fn rkMetricsFailureNote(text: string) -> i32;
+
+#[@External.Erlang("rakun_metrics", "failure_count")]
+pub declare fn rkMetricsFailureCount() -> i32;
+
+#[@External.Erlang("rakun_metrics", "statsd_lines")]
+pub declare fn rkMetricsStatsdLines() -> string;
+
+#[@External.Erlang("rakun_metrics", "statsd_send")]
+pub declare fn rkMetricsStatsdSend(host: string, port: i32, payload: string) -> i32;
+
+#[@External.Erlang("""(fun(__S) -> try binary_to_integer(__S) catch _:_ -> 0 end end)($0)""")]
+declare fn toInt(s: string) -> i32;
+
+fn serviceName() -> string {
+    val n = rkProp("rakun.application.name");
+    return if (n == "") "rakun" else n;
+}
+
+// The client a push uses: front 74's bundle for an `https` endpoint.
+pub fn otlpClient(endpoint: string) -> RestClient {
+    val b = RestClient.builder().defaultHeader("content-type", "application/json");
+    val bundle = rkProp("rakun.metrics.export.otlp.ssl-bundle");
+    return if (endpoint.startsWith("https://") && bundle != "") b.sslBundle(bundle).build() else b.build();
+}
+
+fn trimmed(endpoint: string) -> string {
+    return if (endpoint.endsWith("/")) endpoint.slice(0, endpoint.length() - 1) else endpoint;
+}
+
+// One push: the metrics body, then the buffered spans when there are any.
+// Answers 0, or 1 when the collector did not take it (logged once).
+pub fn otlpPushOnce() -> i32 {
+    val endpoint = trimmed(rkProp("rakun.metrics.export.otlp.endpoint"));
+    if (endpoint == "") return 0;
+    val _quiet = rkSpanSetFlags("00");
+    val client = otlpClient(endpoint);
+    val m: ClientResponse = client.post(endpoint + "/v1/metrics", rkMetricsOtlpMetrics(serviceName())).retrieve();
+    val spans = rkMetricsSpanTake();
+    val t: ClientResponse = if (spans == "[]") ClientResponse(status: 200, body: "", headersJson: "{}") else client.post(endpoint + "/v1/traces", rkMetricsOtlpTraces(serviceName(), spans)).retrieve();
+    if (m.isOk() && t.isOk()) return 0;
+    val why = if (m.isOk()) t.body else m.body;
+    val _n = rkMetricsFailureNote(endpoint + ": " + why);
+    return 1;
+}
+
+// Starts the interval push from `rakun.metrics.export.otlp.step`; 0 (or no
+// endpoint) stops it. Answers whether a pusher runs.
+pub fn startOtlpExport() -> bool {
+    val step = toInt(rkProp("rakun.metrics.export.otlp.step"));
+    val endpoint = rkProp("rakun.metrics.export.otlp.endpoint");
+    if (step <= 0 || endpoint == "") {
+        val _s = rkMetricsOtlpStop();
+        return false;
+    };
+    val _p = rkMetricsOtlpStart(step, { -> otlpPushOnce() });
+    return rkMetricsOtlpRunning();
+}
+
+// One StatsD push; answers the datagrams sent (0 when the send failed).
+pub fn statsdPushOnce() -> i32 {
+    val host = rkProp("rakun.metrics.export.statsd.host");
+    val port = toInt(rkProp("rakun.metrics.export.statsd.port"));
+    if (host == "" || port <= 0) return 0;
+    val lines = rkMetricsStatsdLines();
+    if (lines == "") return 0;
+    return rkMetricsStatsdSend(host, port, lines);
+}

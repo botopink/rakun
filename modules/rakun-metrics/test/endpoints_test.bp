@@ -1,0 +1,111 @@
+//// rakun-metrics — the Prometheus exposition and the diagnostics endpoints
+//// (front 75 steps 4 and 7). Exposure is front 76's: each endpoint is
+//// reached with a stand-in decision installed and cleared again.
+
+import {io.fs} from "std";
+import {Response, rkDispatchHttp} from "rakun";
+import {mountActuator} from "rakun-actuator/actuator";
+import {installExposure, clearExposure} from "rakun-actuator/endpoint_host";
+import {Tag, counter, gauge, timer, prometheusTextFor} from "registry";
+import {registerMetricsEndpoints, processSorts} from "endpoints";
+
+fn t(k: string, v: string) -> Tag {
+    return Tag(key: k, value: v);
+}
+
+test "prometheus: a fixed registry renders the exact exposition block" {
+    val c = counter("p1.orders", [t("kind", "web")]);
+    val _c = c.increment(3);
+    val _g = gauge("p1.queue", [], { -> 7 });
+    val tm = timer("p1.latency", [t("kind", "web")]);
+    val _a = tm.record(3000);
+    val _b = tm.record(40000);
+    val text = prometheusTextFor("p1.");
+    assert text == "# TYPE p1_latency_seconds histogram\np1_latency_seconds_bucket{kind=\"web\",le=\"0.005\"} 1\np1_latency_seconds_bucket{kind=\"web\",le=\"0.01\"} 1\np1_latency_seconds_bucket{kind=\"web\",le=\"0.025\"} 1\np1_latency_seconds_bucket{kind=\"web\",le=\"0.05\"} 2\np1_latency_seconds_bucket{kind=\"web\",le=\"0.1\"} 2\np1_latency_seconds_bucket{kind=\"web\",le=\"0.25\"} 2\np1_latency_seconds_bucket{kind=\"web\",le=\"0.5\"} 2\np1_latency_seconds_bucket{kind=\"web\",le=\"1.0\"} 2\np1_latency_seconds_bucket{kind=\"web\",le=\"2.5\"} 2\np1_latency_seconds_bucket{kind=\"web\",le=\"5.0\"} 2\np1_latency_seconds_bucket{kind=\"web\",le=\"10.0\"} 2\np1_latency_seconds_bucket{kind=\"web\",le=\"+Inf\"} 2\np1_latency_seconds_count{kind=\"web\"} 2\np1_latency_seconds_sum{kind=\"web\"} 0.043\n# TYPE p1_orders_total counter\np1_orders_total{kind=\"web\"} 3\n# TYPE p1_queue gauge\np1_queue 7\n", text;
+}
+
+test "prometheus: a label value's quote, backslash and newline are escaped" {
+    val c = counter("p2.odd", [t("v", "a\"b\\c\nd")]);
+    val _c = c.increment(1);
+    assert prometheusTextFor("p2.") == "# TYPE p2_odd_total counter\np2_odd_total{v=\"a\\\"b\\\\c\\nd\"} 1\n";
+}
+
+#[@External.Erlang("""(fun() -> erlang:unique_integer([positive, monotonic]) end)()""")]
+declare fn tick() -> i32;
+
+test "prometheus: two scrapes in a row agree on counters and never go back on a gauge" {
+    val c = counter("p3.stable", []);
+    val _c = c.increment(2);
+    val _g = gauge("p3.rising", [], { -> tick() });
+    val first = prometheusTextFor("p3.stable");
+    val second = prometheusTextFor("p3.stable");
+    assert first == second;
+    val g1 = prometheusTextFor("p3.rising").split(" ").at(2) ?? "";
+    val g2 = prometheusTextFor("p3.rising").split(" ").at(2) ?? "";
+    assert toInt(g2.trim()) >= toInt(g1.trim()), g1 + " / " + g2;
+}
+
+#[@External.Erlang("""(fun(__S) -> try binary_to_integer(__S) catch _:_ -> -1 end end)($0)""")]
+declare fn toInt(s: string) -> i32;
+
+fn get(path: string, query: string) -> Response {
+    return rkDispatchHttp("GET", path, "{}", query, "");
+}
+
+fn exposed(id: string, path: string, query: string) -> Response {
+    val _e = installExposure({ x -> x == id });
+    val res = get(path, query);
+    val _c = clearExposure();
+    return res;
+}
+
+test "endpoints: prometheus, processes and vm are default-denied until exposed" {
+    val _m = mountActuator();
+    val _r = registerMetricsEndpoints();
+    assert get("/actuator/prometheus", "{}").status == 404;
+    assert get("/actuator/processes", "{}").status == 404;
+    assert get("/actuator/vm", "{}").status == 404;
+    val p = exposed("prometheus", "/actuator/prometheus", "{}");
+    assert p.status == 200 && p.body.contains("# TYPE "), p.body;
+    assert exposed("processes", "/actuator/processes", "{}").status == 200;
+    assert exposed("vm", "/actuator/vm", "{}").status == 200;
+}
+
+#[@External.Erlang("""(fun(__J, __K) -> __Rows = json:decode(__J), __Vs = [maps:get(__K, __R) || __R <- __Rows], __Keys = [<<"pid">>, <<"registered_name">>, <<"initial_call">>, <<"current_function">>, <<"reductions">>, <<"memory">>, <<"message_queue_len">>], __All = lists:all(fun(__R) -> lists:all(fun(__X) -> maps:is_key(__X, __R) end, __Keys) end, __Rows), __All andalso __Vs =:= lists:reverse(lists:sort(__Vs)) end)($0, $1)""")]
+declare fn rowsSortedBy(json: string, key: string) -> bool;
+
+#[@External.Erlang("""(fun(__J) -> length(json:decode(__J)) end)($0)""")]
+declare fn rowCount(json: string) -> i32;
+
+test "endpoints: processes answers the top rows sorted by the asked key, with every field" {
+    val _m = mountActuator();
+    val _r = registerMetricsEndpoints();
+    val red = exposed("processes", "/actuator/processes", "{\"sort\":\"reductions\",\"limit\":\"20\"}");
+    assert red.status == 200 && rowCount(red.body) == 20;
+    assert rowsSortedBy(red.body, "reductions");
+    val mem = exposed("processes", "/actuator/processes", "{\"sort\":\"memory\",\"limit\":\"5\"}");
+    assert rowCount(mem.body) == 5 && rowsSortedBy(mem.body, "memory");
+    val q = exposed("processes", "/actuator/processes", "{\"sort\":\"message_queue_len\",\"limit\":\"5\"}");
+    assert rowsSortedBy(q.body, "message_queue_len");
+    val bad = exposed("processes", "/actuator/processes", "{\"sort\":\"cpu\"}");
+    assert bad.status == 400 && bad.body.contains("sort `cpu` is not one of reductions, memory, message_queue_len"), bad.body;
+}
+
+#[@External.Erlang("""(fun(__S) -> __All = length(binary:matches(__S, <<"process_info(">>)), __Keyed = case re:run(__S, <<"process_info\\([A-Za-z_]+, ">>, [global]) of {match, __M} -> length(__M); nomatch -> 0 end, __All > 0 andalso __All =:= __Keyed end)($0)""")]
+declare fn everyProcessInfoIsKeyed(source: string) -> bool;
+
+test "endpoints: the sidecar never asks a process for its whole info" {
+    val src: string = fs.readText("src/sidecars/rakun_metrics.erl").unwrapOr("");
+    assert everyProcessInfoIsKeyed(src);
+}
+
+#[@External.Erlang("""(fun(__J) -> __M = maps:get(<<"memory">>, json:decode(__J)), __Now = erlang:memory(), lists:sort([atom_to_binary(__K) || {__K, _} <- __Now]) =:= lists:sort(maps:keys(__M)) andalso abs(maps:get(<<"total">>, __M) - proplists:get_value(total, __Now)) < proplists:get_value(total, __Now) div 20 end)($0)""")]
+declare fn sameMemory(json: string) -> bool;
+
+test "endpoints: vm reports the areas erlang:memory/0 does" {
+    val _m = mountActuator();
+    val _r = registerMetricsEndpoints();
+    val res = exposed("vm", "/actuator/vm", "{}");
+    assert sameMemory(res.body), res.body;
+    assert processSorts().length == 3;
+}

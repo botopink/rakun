@@ -1,0 +1,56 @@
+//// rakun-metrics — the actuator endpoints (front 75 steps 4 and 7):
+//// `prometheus` (the text exposition), `processes` (the top N processes by
+//// reductions, memory or message-queue length, in place of `threaddump`) and
+//// `vm` (`erlang:memory/0` by area, in place of `heapdump`). They are front
+//// 11 registrations; exposure is front 76's, so each is default-denied until
+//// exposed.
+
+import {Request} from "rakun";
+import {EndpointResponse, rkRegisterEndpoint} from "rakun-actuator-api";
+import {prometheusText} from "registry";
+
+#[@External.Erlang("rakun_metrics", "processes")]
+pub declare fn rkMetricsProcesses(sort: string, limit: i32) -> string;
+
+#[@External.Erlang("rakun_metrics", "vm_json")]
+pub declare fn rkMetricsVmJson() -> string;
+
+#[@External.Erlang("""(fun(__S) -> try binary_to_integer(__S) catch _:_ -> -1 end end)($0)""")]
+declare fn toInt(s: string) -> i32;
+
+pub fn prometheusContentType() -> string {
+    return "text/plain; version=0.0.4; charset=utf-8";
+}
+
+pub fn prometheusRead(req: Request) -> EndpointResponse {
+    return EndpointResponse(status: 200, contentType: prometheusContentType(), body: prometheusText());
+}
+
+pub fn processSorts() -> string[] {
+    return ["reductions", "memory", "message_queue_len"];
+}
+
+fn problem(status: i32, detail: string) -> EndpointResponse {
+    return EndpointResponse(status: status, contentType: "application/json", body: "{\"status\":" + status.toString() + ",\"detail\":\"" + detail + "\"}");
+}
+
+// `?sort=reductions|memory|message_queue_len&limit=N` (defaults: reductions, 20).
+pub fn processesRead(req: Request) -> EndpointResponse {
+    val given = req.query("sort");
+    val sort = if (given == "") "reductions" else given;
+    if (processSorts().indexOf(sort) < 0) return problem(400, "sort `" + sort + "` is not one of " + processSorts().join(", "));
+    val l = req.query("limit");
+    val limit = if (l == "") 20 else toInt(l);
+    if (limit < 1) return problem(400, "limit `" + l + "` is not a positive integer");
+    return EndpointResponse(status: 200, contentType: "application/json", body: rkMetricsProcesses(sort, limit));
+}
+
+pub fn vmRead(req: Request) -> EndpointResponse {
+    return EndpointResponse(status: 200, contentType: "application/json", body: rkMetricsVmJson());
+}
+
+pub fn registerMetricsEndpoints() -> i32 {
+    val _p = rkRegisterEndpoint("prometheus", "rakun-metrics", "read", { req -> prometheusRead(req) });
+    val _q = rkRegisterEndpoint("processes", "rakun-metrics", "read", { req -> processesRead(req) });
+    return rkRegisterEndpoint("vm", "rakun-metrics", "read", { req -> vmRead(req) });
+}

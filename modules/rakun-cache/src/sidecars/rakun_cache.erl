@@ -59,7 +59,17 @@
 row_put(Name, Key, Row, Tags, ExpireAt) ->
     ensure(),
     true = ets:insert(?ROWS, {{Name, Key}, Row, Tags, false, tick(), 0, ExpireAt}),
+    tel(put, Name, <<"stored">>),
     1.
+
+%% Front 75's bus: `[rakun, cache, get|put|evict, stop]` with `cache` and
+%% `result` (hit / miss / stored / evicted) when rakun-metrics is in the build.
+tel(Op, Name, Result) ->
+    case erlang:function_exported(rakun_telemetry, execute, 3) of
+        true -> try rakun_telemetry:execute([rakun, cache, Op, stop], #{}, #{cache => Name, result => Result})
+                catch _:_ -> ok end;
+        false -> ok
+    end.
 
 %% A read counts: the tick moves (LRU) and the hit count grows (LFU).
 row_get(Name, Key) ->
@@ -67,8 +77,9 @@ row_get(Name, Key) ->
     case ets:lookup(?ROWS, {Name, Key}) of
         [{K, Row, Tags, Marked, _Tick, Hits, ExpireAt}] ->
             true = ets:insert(?ROWS, {K, Row, Tags, Marked, tick(), Hits + 1, ExpireAt}),
+            tel(get, Name, <<"hit">>),
             Row;
-        [] -> undefined
+        [] -> tel(get, Name, <<"miss">>), undefined
     end.
 
 row_marked(Name, Key) ->
@@ -81,7 +92,7 @@ row_marked(Name, Key) ->
 row_delete(Name, Key) ->
     ensure(),
     case ets:member(?ROWS, {Name, Key}) of
-        true -> true = ets:delete(?ROWS, {Name, Key}), 1;
+        true -> true = ets:delete(?ROWS, {Name, Key}), tel(evict, Name, <<"evicted">>), 1;
         false -> 0
     end.
 

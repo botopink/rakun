@@ -163,7 +163,17 @@ publish(Arm, Dest, Key, Payload) ->
         true ->
             true = ets:insert(?PUBLISHED, {seq(), Arm, Dest, Key, Payload}),
             call({append, Arm, Dest, Key, Payload}),
+            tel(publish, Arm, Dest),
             0
+    end.
+
+%% Front 75's bus: `[rakun, messaging, publish|consume, stop]` with `broker`
+%% and `destination` when rakun-metrics is in the build.
+tel(Op, Broker, Dest) ->
+    case erlang:function_exported(rakun_telemetry, execute, 3) of
+        true -> try rakun_telemetry:execute([rakun, messaging, Op, stop], #{}, #{broker => Broker, destination => Dest})
+                catch _:_ -> ok end;
+        false -> ok
     end.
 
 %% `destination|key|payload`, publish order.
@@ -314,6 +324,7 @@ handle(Broker, Dest, Group, Invoke, AckMode, {Offset, Key, Payload, Headers}) ->
                 _ -> -1
             end,
     _ = Invoke(Broker, Dest, Key, Payload, Headers, Shown),
+    tel(consume, Broker, Dest),
     case {AckMode, get(rakun_msg_settled)} of
         {<<"none">>, _} -> ok;
         {<<"auto">>, _} -> call({settle, Tag, ack});

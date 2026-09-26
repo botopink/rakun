@@ -1,0 +1,84 @@
+//// rakun-metrics — the instrumentation bus (front 75 step 2).
+////
+//// `rakun_telemetry` is `:telemetry`'s shape over an ETS handler table (the
+//// real library is a hex package, not OTP), delegating to `telemetry` when it
+//// is loaded. An owning front EXECUTES an event and never imports this
+//// module — the router (`[rakun, http, request, stop]`, route = the registered
+//// pattern), front 11's spans (`[rakun, http, client, stop]`), rakun-cache and
+//// rakun-messaging call `rakun_telemetry:execute/3` behind a
+//// `function_exported/3` check. `installAutomaticMeters()` attaches the
+//// handlers that turn those events into meters; a front that emits nothing
+//// produces no series — there is no placeholder zero.
+////
+//// A botopink handler receives the event as dotted text and the two maps as
+//// JSON; a handler that raises is detached and its failure logged once.
+
+#[@External.Erlang("rakun_telemetry", "attach_text")]
+pub declare fn rkTelemetryAttach(id: string, event: string, handler: fn(event: string, measurementsJson: string, metadataJson: string) -> i32) -> i32;
+
+#[@External.Erlang("rakun_telemetry", "detach")]
+pub declare fn rkTelemetryDetachRaw(id: string) -> string;
+
+#[@External.Erlang("rakun_telemetry", "execute_text")]
+pub declare fn rkTelemetryExecute(event: string, measurementsJson: string, metadataJson: string) -> i32;
+
+#[@External.Erlang("rakun_telemetry", "handlers")]
+pub declare fn rkTelemetryHandlers() -> string[];
+
+#[@External.Erlang("rakun_telemetry", "failures")]
+pub declare fn rkTelemetryFailures() -> string[];
+
+#[@External.Erlang("rakun_telemetry", "reset")]
+pub declare fn rkTelemetryReset() -> i32;
+
+#[@External.Erlang("rakun_telemetry", "real_loaded")]
+pub declare fn rkTelemetryRealLoaded() -> bool;
+
+#[@External.Erlang("rakun_metrics", "auto_install")]
+declare fn rkMetricsAutoInstall() -> i32;
+
+pub fn attach(id: string, event: string, handler: fn(event: string, measurementsJson: string, metadataJson: string) -> i32) -> bool {
+    return rkTelemetryAttach(id, event, handler) == 1;
+}
+
+pub fn detach(id: string) -> i32 {
+    val _d = rkTelemetryDetachRaw(id);
+    return 0;
+}
+
+pub fn execute(event: string, measurementsJson: string, metadataJson: string) -> i32 {
+    return rkTelemetryExecute(event, measurementsJson, metadataJson);
+}
+
+pub type AutomaticMeter(meter: string, event: string, emitter: string)
+
+// The automatic meters and the events that feed them. The rows whose front
+// does not emit yet (front 08's `sql`, front 16's `scheduled`) are absent:
+// until the event exists there is nothing to subscribe to.
+pub fn automaticMeters() -> AutomaticMeter[] {
+    val all: AutomaticMeter[] = [
+        AutomaticMeter(meter: "http.server.requests", event: "rakun.http.request.stop", emitter: "front 04 - the router"),
+        AutomaticMeter(meter: "http.client.requests", event: "rakun.http.client.stop", emitter: "front 13 - the client's span"),
+        AutomaticMeter(meter: "cache.gets", event: "rakun.cache.get.stop", emitter: "front 12"),
+        AutomaticMeter(meter: "cache.puts", event: "rakun.cache.put.stop", emitter: "front 12"),
+        AutomaticMeter(meter: "cache.evictions", event: "rakun.cache.evict.stop", emitter: "front 12"),
+        AutomaticMeter(meter: "messaging.consumed", event: "rakun.messaging.consume.stop", emitter: "front 15"),
+        AutomaticMeter(meter: "messaging.published", event: "rakun.messaging.publish.stop", emitter: "front 15"),
+    ];
+    return all;
+}
+
+// `rakun.<subsystem>.<operation>.<start|stop|exception>` — or `""` when the
+// name has that shape, else the reason it does not.
+pub fn eventNameProblem(event: string) -> string {
+    val parts = event.split(".");
+    if (parts.length != 4) return "`" + event + "` has " + parts.length.toString() + " segments - an event is rakun.<subsystem>.<operation>.<phase>";
+    if ((parts.at(0) ?? "") != "rakun") return "`" + event + "` does not start with rakun";
+    val phase = parts.at(3) ?? "";
+    if (phase != "start" && phase != "stop" && phase != "exception") return "`" + event + "` ends in `" + phase + "` - the phase is start, stop or exception";
+    return "";
+}
+
+pub fn installAutomaticMeters() -> i32 {
+    return rkMetricsAutoInstall();
+}

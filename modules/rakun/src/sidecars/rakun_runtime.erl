@@ -466,12 +466,12 @@ match(Verb, Path) ->
 
 find_route(_Verb, _Want, []) ->
     nomatch;
-find_route(Verb, Want, [{_Seq, RVerb, _RPath, RSegs, Handler} | Rest]) ->
+find_route(Verb, Want, [{_Seq, RVerb, RPath, RSegs, Handler} | Rest]) ->
     case RVerb =:= Verb andalso length(RSegs) =:= length(Want) of
         false -> find_route(Verb, Want, Rest);
         true ->
             case bind(RSegs, Want, #{}) of
-                {ok, Params} -> {ok, Handler, Params};
+                {ok, Params} -> put(rakun_matched_route, RPath), {ok, Handler, Params};
                 nomatch -> find_route(Verb, Want, Rest)
             end
     end.
@@ -549,7 +549,44 @@ dispatch_http(Verb, Path, HeadersJson, QueryJson, Body) ->
         false -> handle(Verb, Path, HeadersJson, QueryJson, Body, undefined)
     end.
 
-handle(Verb, Path, HeadersJson, QueryJson, Body, _Chain) ->
+%% Every request the router answers executes `[rakun, http, request, stop]`
+%% (measurement `duration` in microseconds; metadata `method`, `route` — the
+%% REGISTERED pattern, never the concrete path — and `status`) on front 75's
+%% bus when rakun-metrics is in the build; a raise executes `…, exception` and
+%% propagates. Without the bus the cost is one `function_exported/3`.
+handle(Verb, Path, HeadersJson, QueryJson, Body, Chain) ->
+    case erlang:function_exported(rakun_telemetry, execute, 3) of
+        false -> handle_route(Verb, Path, HeadersJson, QueryJson, Body, Chain);
+        true ->
+            erase(rakun_matched_route),
+            T0 = erlang:monotonic_time(microsecond),
+            try handle_route(Verb, Path, HeadersJson, QueryJson, Body, Chain) of
+                Res ->
+                    Status = case Res of
+                                 #{status := S} -> S;
+                                 _ when is_tuple(Res), tuple_size(Res) >= 2, is_integer(element(2, Res)) -> element(2, Res);
+                                 _ -> 0
+                             end,
+                    Route = case get(rakun_matched_route) of
+                                undefined when Status =:= 404 -> <<"NOT_FOUND">>;
+                                undefined -> <<"fallback">>;
+                                R -> R
+                            end,
+                    _ = (try rakun_telemetry:execute([rakun, http, request, stop],
+                                                     #{duration => erlang:monotonic_time(microsecond) - T0},
+                                                     #{method => Verb, route => Route, status => Status})
+                         catch _:_ -> ok end),
+                    Res
+            catch C:E:St ->
+                _ = (try rakun_telemetry:execute([rakun, http, request, exception],
+                                                 #{duration => erlang:monotonic_time(microsecond) - T0},
+                                                 #{method => Verb, route => get(rakun_matched_route), kind => C})
+                     catch _:_ -> ok end),
+                erlang:raise(C, E, St)
+            end
+    end.
+
+handle_route(Verb, Path, HeadersJson, QueryJson, Body, _Chain) ->
     case match(Verb, Path) of
         nomatch ->
             case persistent_term:get(rakun_fallback, undefined) of

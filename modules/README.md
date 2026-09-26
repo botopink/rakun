@@ -33,6 +33,7 @@ refusal is the core's `config_check.bp`.
 | [rakun-data](./rakun-data/) | root · datasource · sql | erlang | `-data-jpa` / `-data-jdbc` / `-data-mongodb` / `-data-redis` | 08 · 09 · 77 · 78 | real code, 77 tests |
 | [rakun-hateoas](./rakun-hateoas/) | root · hal | erlang | `-hateoas` | 21 | real code, 14 tests |
 | [rakun-logging](./rakun-logging/) | root · cells · levels · formats · correlation · logging · digest · setup · endpoints | erlang | `-logging` | 17 | real code, 54 tests |
+| [rakun-metrics](./rakun-metrics/) | root · registry · bus · vm · tracing · export · endpoints · install | erlang | Micrometer + `-actuator` (prometheus) + tracing | 75 | real code, 41 tests |
 | [rakun-messaging](./rakun-messaging/) | root · messaging_host · message · registry · markers · messaging_health · container · templates | erlang | `-amqp` / `-kafka` / `-activemq` / `-artemis` | 15 · 86 · 90 | real code (in-process broker), 38 tests |
 | [rakun-scheduling](./rakun-scheduling/) | root · cron · registry · markers · executor · endpoint | erlang | `@Scheduled` / `-quartz` | 16 · 84 | real code, 67 tests |
 | [rakun-security](./rakun-security/) | root · principal · policy · jwt · password · users · users_sql · basic · csrf · method_security · security_filter · security | erlang | `-security`, `-oauth2-client`, `-saml2` | 10 · 79 | real code, 73 tests |
@@ -87,7 +88,6 @@ which owns its `botopink.json` — several of them name members that do not exis
 | `rakun-app` | 22 (+ 23 · 24 · 25 · 60 · 61 · 63 · 64 · 66) | split from core — the `app/` router, SSR, actions; depends on `jhonstart`, `emilia` |
 | `rakun-websocket` | 20 | split from `rakun-web` |
 | `rakun-tx` | 83 | keep, separate |
-| `rakun-metrics` | 75 | keep, one name (`rakun-observability` dropped as alias) |
 | `rakun-devtools` | 80 | keep, separate |
 | `rakun-release` | 81 | keep, separate |
 | `rakun-cli` | 88 | keep, separate |

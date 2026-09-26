@@ -21,7 +21,10 @@
 //// W3C TRACE CONTEXT. `traceparent: 00-<32 hex trace id>-<16 hex parent id>-01`.
 //// `continueTrace(header)` makes an inbound, well-formed header the parent of the
 //// next span; a malformed or absent one is ignored, so the next span starts a
-//// fresh trace. `currentTraceparent()` is what front 13's client sends.
+//// fresh trace. `currentTraceparent()` is what front 13's client sends. The
+//// trace-flags byte is the caller's (`rkSpanFlags`, `01` unless an inbound
+//// header or front 75's sampler set `00`), so a sampling decision made at
+//// the edge travels with the trace.
 
 #[@External.Erlang("rakun_actuator_api", "fresh_trace_id")]
 pub declare fn rkSpanFreshTraceId() -> string;
@@ -43,6 +46,17 @@ pub declare fn rkSpanPop(spanId: string) -> i32;
 
 #[@External.Erlang("rakun_actuator_api", "span_clear")]
 pub declare fn rkSpanClear() -> i32;
+
+// The trace-flags byte (`01` sampled, `00` not) of the caller's trace.
+#[@External.Erlang("rakun_actuator_api", "span_flags")]
+pub declare fn rkSpanFlags() -> string;
+
+#[@External.Erlang("rakun_actuator_api", "span_set_flags")]
+pub declare fn rkSpanSetFlags(flags: string) -> i32;
+
+// The parent of the caller's current span, `""` for a root.
+#[@External.Erlang("rakun_actuator_api", "span_parent")]
+pub declare fn rkSpanParent() -> string;
 
 #[@External.Erlang("rakun_actuator_api", "emit_start")]
 pub declare fn rkSpanEmitStart(name: string, traceId: string, spanId: string, parentId: string, attributes: string) -> i32;
@@ -121,7 +135,7 @@ pub fn subscribeSpans(onEvent: fn(event: string, measurementsJson: string, metad
 // ── W3C trace context ───────────────────────────────────────────────────────
 
 pub fn traceparentOf(span: Span) -> string {
-    return "00-" + span.traceId + "-" + span.spanId + "-01";
+    return "00-" + span.traceId + "-" + span.spanId + "-" + rkSpanFlags();
 }
 
 // The header for the caller's current span, `""` outside any span.
@@ -129,7 +143,7 @@ pub fn currentTraceparent() -> string {
     val current: string = rkSpanCurrent();
     if (current == "") return "";
     val parts: string[] = current.split("\t");
-    return "00-" + (parts.at(0) ?? "") + "-" + (parts.at(1) ?? "") + "-01";
+    return "00-" + (parts.at(0) ?? "") + "-" + (parts.at(1) ?? "") + "-" + rkSpanFlags();
 }
 
 fn isHex(s: string, size: i32) -> bool {
@@ -159,5 +173,6 @@ pub fn continueTrace(header: string) -> bool {
     if (validTraceparent(header) == false) return false;
     val parts: string[] = header.trim().split("-");
     val _p = rkSpanPush(parts.at(1) ?? "", parts.at(2) ?? "");
+    val _f = rkSpanSetFlags(if ((parts.at(3) ?? "") == "00") "00" else "01");
     return true;
 }

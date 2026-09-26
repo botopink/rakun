@@ -225,6 +225,11 @@ rakun/
 │   │                    the four markers, the in-process broker and the containers
 │   │                    (`sidecars/rakun_messaging.erl`), the templates, the
 │   │                    `messaging.<arm>` indicators
+│   ├── rakun-metrics/ ← OBSERVABILITY (§ Observability, front 75): the meter
+│   │                    registry, `rakun_telemetry` (the bus), the BEAM VM meters,
+│   │                    the prometheus / processes / vm endpoints, OTLP and
+│   │                    StatsD export, trace sampling (`sidecars/rakun_metrics.erl`,
+│   │                    `sidecars/rakun_telemetry.erl`)
 │   ├── rakun-websocket/ ← WEBSOCKET (§ WebSocket, front 20): the upgrade hook, the
 │   │                    connection loop, `pg` topics and the test client
 │   │                    (`sidecars/rakun_websocket.erl`), `#[wsEndpoint]`, health
@@ -2515,6 +2520,65 @@ front's README spells Spring's `management.endpoints.web.base-path` and `info.*`
 here they are `rakun.management.endpoints.web.base-path`, `rakun.management.endpoint.<id>.…`,
 `rakun.management.health.<id>.timeout` and `rakun.info.*`.
 
+
+## Observability — `modules/rakun-metrics/` (front 75)
+
+Sidecars `rakun_metrics.erl` (the registry, the renderers, the VM meters, the
+process diagnostics, the OTLP pusher) and `rakun_telemetry.erl` (the bus).
+`installMetrics()` is the boot entry.
+
+- **Registry** (`registry.bp`) — `counter`, `gauge` (a function read at
+  scrape time), `timer` (µs; count, total, max, histogram buckets),
+  `summary`, `timed(name, tags, { -> … })` (`outcome=ok|error`, a raise
+  re-raised). A meter is its name plus its tag SET (sorted in the host); a
+  handle carries the encoded tag key, so `increment` is one
+  `ets:update_counter/3`. At registration: `rakun.metrics.tags.*` common tags
+  (resolved once by `install`; a key a meter also carries refuses it),
+  `rakun.metrics.enable.<prefix>=false` (never registered, handle `!denied`),
+  `rakun.metrics.rename.<from>=<to>`, `rakun.metrics.distribution.slo.<name>`
+  (durations, sorted; a bad one refuses the boot naming it) and
+  `…percentiles-histogram.<name>=false` (no buckets). A name outside
+  `[A-Za-z][A-Za-z0-9_.]*` is refused naming the character. `MeterRegistry()`
+  is the injectable `#[component]`.
+- **Bus** (`bus.bp`) — `rakun_telemetry`: `attach/4`, `detach/1`,
+  `execute/3` over ETS, delegating to a loaded `telemetry`. An emitter never
+  imports rakun-metrics: the core router executes `[rakun, http, request,
+  stop]` (route = the REGISTERED pattern, `NOT_FOUND`, or `fallback`),
+  rakun-actuator-api forwards every span event, rakun-cache
+  `[rakun, cache, get|put|evict, stop]`, rakun-messaging
+  `[rakun, messaging, publish|consume, stop]` — each behind
+  `function_exported(rakun_telemetry, execute, 3)`. `installAutomaticMeters`
+  turns them into `http.server.requests`, `http.client.requests`,
+  `cache.*`, `messaging.*`. A raising handler is detached and logged once.
+- **VM** (`vm.bp`) — `beam.*` gauges (run queue, process / port / atom
+  counts and limits, memory by area, GC, `queue_max` sampled within
+  `rakun.metrics.beam.queue-sample-budget` ms);
+  `beam.schedulers.utilization` only with
+  `rakun.metrics.beam.scheduler-utilization=true` (turns
+  `scheduler_wall_time` on once). No `jvm.*` name.
+- **Endpoints** (`endpoints.bp`) — `prometheus` (text format 0.0.4:
+  `_total` counters, `_seconds` histograms with cumulative `le` buckets and
+  `+Inf`, label values escaped), `processes?sort=reductions|memory|message_queue_len&limit=N`
+  (asks each process for seven keys, never the whole info), `vm`. Front 11
+  registrations, default-denied until front 76 exposes them.
+- **Export** (`export.bp`) — OTLP/HTTP-JSON through rakun-client
+  (`rakun.metrics.export.otlp.endpoint`, `.step` ms — 0 stops the pusher,
+  `.ssl-bundle` for `https`): one metrics body and one traces body per push,
+  one logged failure per failed push, the span buffer capped at 2048. The
+  pusher's own client span is never sampled. StatsD over UDP
+  (`rakun.metrics.export.statsd.host` / `.port`), failures swallowed.
+- **Tracing** (`tracing.bp`) — front 11 continues the inbound `traceparent`
+  (flags included: `rkSpanFlags` / `rkSpanSetFlags` in rakun-actuator-api);
+  this module's chain entry at `orderMetrics() + 1` decides once, for a trace
+  minted here, against `rakun.tracing.sampling.probability` (default 0.1).
+  Sampled stop events are buffered as OTLP spans. `traceId`, `spanId`,
+  `parentSpanId`, `sampled`, `traceparent`, `adoptTraceparent`, `openSpan` /
+  `closeSpan` (not `startSpan` / `endSpan`: rakun-actuator-api exports those
+  names and the package import would be ambiguous), `exportedSpanCount`.
+- **Remote shell** — the BEAM's JMX: `erl -sname ops -setcookie "$(cat
+  ~/.erlang.cookie)" -remsh <node>@<host>` (the cookie must match the node's),
+  then `rakun_metrics:snapshot().` answers every series as a term, and
+  `observer` / `etop` run against the node.
 
 ## SQL data access — `modules/rakun-data/` (front 08)
 
