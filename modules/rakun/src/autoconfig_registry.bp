@@ -32,7 +32,7 @@
 ////
 //// Reached via `from "rakun"`; see ../AGENTS.md § The auto-configuration pass.
 
-import {io.fs} from "std";
+import {io.fs, json, json.Json} from "std";
 
 // ── the table ───────────────────────────────────────────────────────────────
 //
@@ -146,127 +146,83 @@ pub declare fn rkAutoPrint(line: string) -> i32;
 //     "dependencies": ["rakun", "std"]
 //     "dependencies": { "rakun": { "workspace": true } }
 //
-// The reader below normalises the same two the same way. It is a scanner, not
-// a JSON parser: it finds the `dependencies` key, takes the balanced container
-// that follows, and collects the names at ITS top level — every quoted string
-// for the array shape, every quoted KEY for the object shape. Nothing else in
-// the manifest is read, and a value nested inside a dependency's object is at
-// depth 1 and therefore never mistaken for a name.
+// The manifest is read by std's `json.decode` (RFC 8259, member order kept, a
+// duplicate member or trailing text refused) and the names are the array's
+// strings or the object's member NAMES — a value nested inside a dependency's
+// object is never a name. Anything else is a refusal naming what is wrong: a
+// document that is not JSON, a top level that is not an object, a
+// `dependencies` that is neither an array of strings nor an object.
 
 pub fn manifestName() -> string {
     return "botopink.json";
 }
 
-fn charAt(s: string, i: i32) -> string {
-    return s.at(i).unwrapOr("");
+pub fn manifestShapeProblem(what: string) -> string {
+    return "rakun: the " + manifestName() + " " + what;
 }
 
-// The index just past the closing quote of the string literal starting at
-// `open` (which must be the opening quote). A backslash escapes the next
-// character, so a name is never cut short by an escaped quote.
-fn endOfQuoted(s: string, open: i32) -> i32 {
-    var i = open + 1;
-    var run = true;
-    while (run) {
-        val c = charAt(s, i);
-        if (c == "") run = false else if (c == "\\") i = i + 2 else if (c == "\"") {
-            i = i + 1;
-            run = false;
-        } else i = i + 1;
+fn membersOf(v: Json) -> Array<#(string, Json)> {
+    return case v {
+        Obj(members: ms) -> ms;
+        _ -> [];
     };
-    return i;
 }
 
-fn quotedAt(s: string, open: i32) -> string {
-    val stop = endOfQuoted(s, open);
-    val inner = stop - 1;
-    var out = "";
-    var i = open + 1;
-    while (i < inner) {
-        out = out + charAt(s, i);
-        i = i + 1;
+fn isObject(v: Json) -> bool {
+    return case v {
+        Obj(members: _) -> true;
+        _ -> false;
     };
-    return out;
 }
 
-// The index of the first `[` or `{` at or after `from`, or -1.
-fn openerAfter(s: string, begin: i32) -> i32 {
-    var i = begin;
-    var found = 0 - 1;
-    var run = true;
-    while (run) {
-        val c = charAt(s, i);
-        if (c == "") run = false else if (c == "[" || c == "{") {
-            found = i;
-            run = false;
-        } else i = i + 1;
+fn itemsOf(v: Json) -> Array<Json> {
+    return case v {
+        Arr(items: xs) -> xs;
+        _ -> [];
     };
-    return found;
 }
 
-// The first non-space, non-newline character at or after `from`.
-fn nextSolid(s: string, begin: i32) -> string {
-    var i = begin;
-    var out = "";
-    var run = true;
-    while (run) {
-        val c = charAt(s, i);
-        val blank = (c == " " || c == "\n" || c == "\r" || c == "\t");
-        if (c == "") run = false else if (blank) i = i + 1 else {
-            out = c;
-            run = false;
-        };
+fn isArray(v: Json) -> bool {
+    return case v {
+        Arr(items: _) -> true;
+        _ -> false;
     };
-    return out;
 }
 
-// The scan's state, carried as a value rather than as loop-local `var`s: the
-// erlang backend lowers a loop body by collecting the variables it mutates
-// into a tuple, and a `var` declared inside a nested block of a loop body
-// comes out `unbound` in one of the branches. One loop per function, mutating
-// only what that function declared — the rule `profiles.bp` is written around.
-pub type DepScan(
-    out: string[],
-    i: i32,
-    depth: i32,
-    run: bool,
-)
+fn textOf(v: Json) -> string {
+    return case v {
+        Str(value: s) -> s;
+        _ -> "";
+    };
+}
 
-fn scanStep(text: string, isObject: bool, st: DepScan) -> DepScan {
-    val c = charAt(text, st.i);
-    if (c == "") return DepScan(out: st.out, i: st.i, depth: st.depth, run: false) else if (c == "\"") {
-        val name = quotedAt(text, st.i);
-        val stop = endOfQuoted(text, st.i);
-        val isKey = nextSolid(text, stop) == ":";
-        val take = (st.depth == 0) && (isObject == false || isKey);
-        var out = st.out;
-        if (take) out.push(name);
-        return DepScan(out: out, i: stop, depth: st.depth, run: true);
-    } else if (c == "[" || c == "{") {
-        return DepScan(out: st.out, i: st.i + 1, depth: st.depth + 1, run: true);
-    } else if (c == "]" || c == "}") {
-        if (st.depth == 0) return DepScan(out: st.out, i: st.i + 1, depth: 0, run: false) else return DepScan(out: st.out, i: st.i + 1, depth: st.depth - 1, run: true);
-    } else return DepScan(out: st.out, i: st.i + 1, depth: st.depth, run: true);
+fn isText(v: Json) -> bool {
+    return case v {
+        Str(value: _) -> true;
+        _ -> false;
+    };
 }
 
 // The normaliser, over the manifest TEXT. Exposed because it is the assertion
 // point for both on-disk shapes: a test hands it a literal and reads the list
 // back, with no file and no host between the two.
-pub fn manifestDependencies(text: string) -> string[] {
-    val none: string[] = [];
-    val at = text.indexOf("\"dependencies\"");
-    if (at < 0) return none else {
-        val open = openerAfter(text, at + 14);
-        if (open < 0) return none else {
-            val isObject = charAt(text, open) == "{";
-            val seed: string[] = [];
-            var st = DepScan(out: seed, i: open + 1, depth: 0, run: true);
-            while (st.run) {
-                st = scanStep(text, isObject, st);
-            };
-            return st.out;
-        };
+pub fn manifestDependencies(text: string) -> @Result<string[], string> {
+    val decoded = json.decode(text);
+    if (decoded.isError()) {
+        val assert Error(e) = decoded;
+        throw manifestShapeProblem("is not JSON - " + e);
     };
+    val root: Json = decoded.unwrapOr(Json.Null);
+    if (isObject(root) == false) throw manifestShapeProblem("is not a JSON object");
+    val found = membersOf(root).filter({ m -> m._0 == "dependencies" });
+    val none: string[] = [];
+    if (found.length == 0) return none;
+    val deps: Json = found.at(0).unwrapOr(#("", Json.Null))._1;
+    if (isObject(deps)) return membersOf(deps).map({ m -> m._0 });
+    if (isArray(deps) == false) throw manifestShapeProblem("declares `dependencies` as neither an array of names nor an object keyed by name");
+    val items = itemsOf(deps);
+    if (items.filter({ x -> isText(x) == false }).length > 0) throw manifestShapeProblem("lists a dependency that is not a string");
+    return items.map({ x -> textOf(x) });
 }
 
 // ── the module question ─────────────────────────────────────────────────────
@@ -287,7 +243,13 @@ pub fn moduleListIn(path: string) -> string[] {
     if (text == "") {
         @panic(manifestMissingProblem());
     };
-    return manifestDependencies(text);
+    val names = manifestDependencies(text);
+    if (names.isError()) {
+        val assert Error(e) = names;
+        @panic(path + ": " + e);
+    };
+    val none: string[] = [];
+    return names.unwrapOr(none);
 }
 
 pub fn moduleList() -> string[] {

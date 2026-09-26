@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### The debt rows (botopink `03-rakun`)
+
+- JSON goes through std's `json`: `manifestDependencies` reads `botopink.json`
+  with `json.decode` and refuses a malformed manifest (`manifestShapeProblem`)
+  instead of scanning it; the actuator's details check is `isJsonObject` over
+  `json.decode` (the `json_object_ok` cell is gone); the `db` indicator writes
+  its details with `json.object` / `json.quote`.
+
 ### Static files (botopink front 82)
 
 - `rakun-web`'s `static` entry at +150: roots, containment before any

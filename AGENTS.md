@@ -1750,10 +1750,14 @@ that needs a new KIND of condition adds a record letter and a branch in
 not write the branch twice in two host languages.
 
 The `#[conditionalOnModule]` manifest read is botopink for the same reason: it is
-`std`'s `fs.readText` plus a scanner over `botopink.json`'s `dependencies`, which
-normalises BOTH on-disk shapes (`["rakun"]` and `{"rakun": {…}}`) exactly as
+`std`'s `fs.readText` plus `json.decode` over `botopink.json`
+(`manifestDependencies`, `@Result<string[], string>`), which normalises BOTH
+on-disk shapes of `dependencies` (`["rakun"]` and `{"rakun": {…}}`) exactly as
 `compiler-cli/src/cli/config.zig` does, with fixtures under
-`test/fixtures/autoconfig/` asserting each. A manifest that cannot be read is a
+`test/fixtures/autoconfig/` asserting each. A document `json.decode` refuses (a
+duplicate member, trailing text), a top level that is not an object and a
+`dependencies` that is neither an array of strings nor an object are refused
+by name (`manifestShapeProblem`), never scanned. A manifest that cannot be read is a
 REFUSAL, not a `false`: "this module is not a dependency" and "I could not find
 out" are different answers, and a condition that silently takes the second for
 the first turns every `#[conditionalOnModule]` in the build off without saying so.
@@ -2264,7 +2268,7 @@ Decisions:
 - **The contract** (for the eight indicator fronts): a raise → `DOWN` with
   `{"error":"<reason>"}`; a timeout → `UNKNOWN` with `{"error":"timeout after <n>ms"}`
   and the process killed; an unknown status → `UNKNOWN`; details that are not a JSON
-  object → replaced by an error object; all indicators concurrent. The health body is
+  object (`isJsonObject`: std's `json.decode` reads an `Obj`) → replaced by an error object; all indicators concurrent. The health body is
   `{"status":"<aggregate>"}` — detail visibility and groups are front 76's, which
   renders them from `healthReport()`.
 - **Endpoint CORS** is a rakun-web CORS mapping keyed by the base path, from
@@ -2474,7 +2478,8 @@ process does not join the caller's transaction — the mark is per process).
 
 `#[component] #[healthIndicator("db")] DbHealthIndicator` checks the default
 datasource: `SELECT 1` through the pool → `UP` with `{"database":…,
-"validationQuery":"SELECT 1"}`, or `DOWN` with the reason; it never raises and never
+"validationQuery":"SELECT 1"}`, or `DOWN` with the reason (written by std's
+`json.object` / `json.quote`); it never raises and never
 boots a datasource nobody started. Because a library module's body does not run on
 erlang (below), `registerDbHealth()` makes the same registration explicitly; the
 application calls it beside `dataSourceBoot()`.
