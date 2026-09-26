@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Auto-configuration: exclusion through the property, the short-circuit said (botopink front 72 steps 4 and 5)
+
+- The condition report's not-applied row says when evaluation stopped at the
+  first of several conditions ("the ones after it were not evaluated").
+- Tests: the exclude property leaves a configuration's beans unbuildable
+  (`rkAutoGate` raises); the exclude property naming nothing halts naming the
+  value and every registered name; the short-circuit row.
+  `modules/rakun` 347 / 0 → **350 / 0**.
+
 ### Actuator: health, info and the endpoint host (botopink front 11)
 
 - New member `modules/rakun-actuator-api` (depends on `rakun` only): `Health`,

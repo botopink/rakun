@@ -334,6 +334,46 @@ test "rakun autoconfig: an exclusion naming nothing halts and lists what is regi
     }, unknownExclusionProblem("Nonexistent", ["SynMailAutoConfiguration", "SynCacheAutoConfiguration"]));
 }
 
+test "rakun autoconfig: the exclude property leaves the beans of the configuration unbuildable" {
+    val _r = rkAutoReset();
+    val _a = rkAutoRegister("SynMailAutoConfiguration", "", "", "");
+    val _ap = rkAutoProvides("SynMailAutoConfiguration", "SynMailSender");
+    val _b = rkAutoRegister("SynMailAutoConfiguration.sender", "", "", "");
+    val _bp = rkAutoProvides("SynMailAutoConfiguration.sender", "SynMailSender");
+    val _p = rkSetProp(excludeKey(), "SynMailAutoConfiguration");
+    val _n = autoConfigure();
+    val _c = rkSetProp(excludeKey(), "");
+    assert rkAutoState("SynMailAutoConfiguration") == excludedState();
+    assert rkAutoMatched("SynMailAutoConfiguration.sender") == false;
+    try asserts.throwsWith({ ->
+        rkAutoGate("SynMailAutoConfiguration.sender");
+        0;
+    }, "was not auto-configured");
+}
+
+test "rakun autoconfig: the report says evaluation stopped at the first failing condition" {
+    val _r = rkAutoReset();
+    val _a = rkAutoRegister("SynTwoConditions", "P|rakun.syn.two.first|*;P|rakun.syn.two.second|*", "", "");
+    val _b = rkAutoRegister("SynOneCondition", "P|rakun.syn.one.only|*", "", "");
+    val _p = rkSetProp("rakun.syn.two.first", "");
+    val _q = rkSetProp("rakun.syn.one.only", "");
+    val _n = autoConfigure();
+    val text = rkAutoReport();
+    assert text.contains("  SynTwoConditions: did not match: P|rakun.syn.two.first|* - the property is empty (the first failing condition; the ones after it were not evaluated)");
+    assert text.contains("  SynOneCondition: did not match: P|rakun.syn.one.only|* - the property is empty\n");
+    assert rkAutoReason("SynTwoConditions").contains("rakun.syn.two.second") == false;
+}
+
+test "rakun autoconfig: the exclude PROPERTY naming nothing halts, naming the value and the registered names" {
+    assert seedExcludable() == 2;
+    val _p = rkSetProp(excludeKey(), "Nonexistent");
+    try asserts.throwsWith({ ->
+        autoConfigure();
+        0;
+    }, unknownExclusionProblem("Nonexistent", ["SynMailAutoConfiguration", "SynCacheAutoConfiguration"]));
+    val _c = rkSetProp(excludeKey(), "");
+}
+
 test "rakun autoconfig: autoConfigurationReport is the application's name for the same string" {
     assert seedExcludable() == 2;
     val _c = rkSetProp(excludeKey(), "");
