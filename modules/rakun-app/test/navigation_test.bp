@@ -1,0 +1,315 @@
+//// rakun — navigation signals (front 63). The capture runs inside a request
+//// frame of front 62's; the three places a signal can be raised — a route
+//// handler, an action (front 24, through the same capture) and a page
+//// renderer — are asserted in one suite so the distinction is asserted, not
+//// assumed.
+
+import {testing.asserts} from "std";
+import {Request, Response, rkSetProp, rkProp, rkDispatchHttp} from "rakun";
+import {RequestPhase, RequestScope, beginRequest, endRequest} from "rakun/request_context";
+import {rkAppReset, rkAppRegisterPage} from "file_router";
+import {PageRenderer, ChunkWriter, writeTo} from "ssr";
+import {navigation: {NavKind, NavOutcome, signalToWire}} from "routing";
+import {
+    notFound,
+    redirect,
+    permanentRedirect,
+    redirectWithStatus,
+    captureSignals,
+    takeSignal,
+    peekSignal,
+    statusFor,
+    locationHeaderFor,
+    statusProblem,
+    unknownTargetProblem,
+    offListProblem,
+} from "navigation";
+import {HandlerResponse, registerRoute, serveApp} from "route_handler";
+
+// ── a frame, and a table to validate targets against ────────────────────────
+
+fn open() -> i64 {
+    return beginRequest(RequestScope(id: "nav", phase: RequestPhase.Handler, method: "GET", path: "/", query: "", headersWire: "", strict: false));
+}
+
+fn close() -> string {
+    return endRequest();
+}
+
+fn page(label: string) -> PageRenderer {
+    return { req, out -> writeTo(out, label) };
+}
+
+fn table() -> i32 {
+    val _r = rkAppReset();
+    val _a = rkAppRegisterPage("login", page("login"));
+    val _b = rkAppRegisterPage("blog", page("blog"));
+    val _c = rkAppRegisterPage("new", page("new"));
+    val _d = rkAppRegisterPage("x", page("x"));
+    return rkAppRegisterPage("done", page("done"));
+}
+
+#[@External.Erlang("""(fun(__F) -> try __F(), <<>> catch throw:__R when is_binary(__R) -> __R end end)($0)""")]
+declare fn thrownBy(work: fn() -> i32) -> string;
+
+fn kindName(out: NavOutcome) -> string {
+    return case out.kind {
+        None -> "None";
+        NotFound -> "NotFound";
+        Redirect -> "Redirect";
+    };
+}
+
+// ── step 1: the signal ──────────────────────────────────────────────────────
+
+test "rakun navigation: notFound never returns - the statement after it does not execute" {
+    val _t = table();
+    val _o = open();
+    val _z = rkSetProp("test.nav.reached", "");
+    val answer = captureSignals({ ->
+        val _n = notFound();
+        val _m = rkSetProp("test.nav.reached", "yes");
+        1;
+    }, 0);
+    val out = takeSignal();
+    val _c = close();
+    assert answer == 0;
+    assert rkProp("test.nav.reached") == "";
+    assert kindName(out) == "NotFound";
+}
+
+test "rakun navigation: redirect is a 307 NavOutcome, permanentRedirect a 308" {
+    val _t = table();
+    val _o = open();
+    val _a = captureSignals({ -> redirect("/login") }, 0);
+    val one = takeSignal();
+    val _b = captureSignals({ -> permanentRedirect("/new") }, 0);
+    val two = takeSignal();
+    val _c = close();
+    assert kindName(one) == "Redirect";
+    assert one.location == "/login";
+    assert one.status == 307;
+    assert two.status == 308;
+}
+
+test "rakun navigation: a status outside 303, 307 and 308 raises naming the set" {
+    val _t = table();
+    try asserts.throwsWith({ ->
+        val _x = redirectWithStatus("/x", 302);
+        0;
+    }, statusProblem(302));
+}
+
+test "rakun navigation: a relative target no route matches raises naming it" {
+    val _t = table();
+    try asserts.throwsWith({ ->
+        val _x = redirect("/nowhere");
+        0;
+    }, unknownTargetProblem("/nowhere"));
+}
+
+test "rakun navigation: an absolute target needs its host on rakun.navigation.allowedHosts" {
+    val _t = table();
+    try asserts.throwsWith({ ->
+        val _x = redirect("https://example.com/");
+        0;
+    }, offListProblem("https://example.com/", "example.com"));
+    val _a = rkSetProp("rakun.navigation.allowedHosts", "example.com");
+    assert thrownBy({ -> redirect("https://example.com/") }) == "nav:redirect:https://example.com/";
+    val _u = rkSetProp("rakun.navigation.allowedHosts", "");
+}
+
+test "rakun navigation: the protocol-relative //host is absolute and checked against the same list" {
+    val _t = table();
+    try asserts.throwsWith({ ->
+        val _x = redirect("//evil.example");
+        0;
+    }, offListProblem("//evil.example", "evil.example"));
+}
+
+// ── step 2: the capture ─────────────────────────────────────────────────────
+
+test "rakun navigation: a body that returns is answered and leaves no signal" {
+    val _o = open();
+    val answer = captureSignals({ -> 7 }, 0);
+    val out = takeSignal();
+    val _c = close();
+    assert answer == 7;
+    assert kindName(out) == "None";
+}
+
+test "rakun navigation: a raise that is not a signal passes through with its reason" {
+    val _o = open();
+    val reason = thrownBy({ -> captureSignals({ -> throwPlain("boom") }, 0) });
+    val bare = thrownBy({ -> captureSignals({ -> throwPlain("nav:") }, 0) });
+    val _c = close();
+    assert reason == "boom";
+    assert bare == "nav:";
+}
+
+#[@External.Erlang("""erlang:throw($0)""")]
+declare fn throwPlain(reason: string) -> i32;
+
+test "rakun navigation: takeSignal clears, peekSignal does not" {
+    val _t = table();
+    val _o = open();
+    val _a = captureSignals({ -> notFound() }, 0);
+    val peeked = peekSignal();
+    val first = takeSignal();
+    val second = takeSignal();
+    val _c = close();
+    assert kindName(peeked) == "NotFound";
+    assert kindName(first) == "NotFound";
+    assert kindName(second) == "None";
+}
+
+test "rakun navigation: a nested capture does not hide the signal from the outer one" {
+    val _t = table();
+    val _o = open();
+    val _outer = captureSignals({ -> captureSignals({ -> notFound() }, 0) }, 0);
+    val out = takeSignal();
+    val _c = close();
+    assert kindName(out) == "NotFound";
+}
+
+test "rakun navigation: captureSignals outside a request raises" {
+    try asserts.throwsWith({ ->
+        captureSignals({ -> 1 }, 0);
+    }, "captureSignals()");
+}
+
+fn loadPost(slug: string) -> @Result<string, string> {
+    if (slug == "") throw "no slug";
+    val _n = notFound();
+    return slug;
+}
+
+test "rakun navigation: a signal inside try … catch still reaches the capture - it is not an error" {
+    val _t = table();
+    val _o = open();
+    val answer = captureSignals({ ->
+        val v = try loadPost("missing") catch "fallback";
+        v.length;
+    }, -1);
+    val out = takeSignal();
+    val _c = close();
+    assert answer == -1;
+    assert kindName(out) == "NotFound";
+}
+
+// ── step 3: through await ───────────────────────────────────────────────────
+
+fn deepTwo() -> @Task<i32> {
+    val _n = notFound();
+    return 1;
+}
+
+fn deepOne() -> @Task<i32> {
+    val v = await deepTwo();
+    return v + 1;
+}
+
+test "rakun navigation: a signal raised two awaits deep is captured and the awaited value is never used" {
+    val _t = table();
+    val _o = open();
+    val _z = rkSetProp("test.nav.used", "");
+    val _a = captureSignals({ -> awaitBody() }, zeroTask());
+    val out = takeSignal();
+    val _c = close();
+    assert kindName(out) == "NotFound";
+    assert rkProp("test.nav.used") == "";
+}
+
+fn zeroTask() -> @Task<i32> {
+    return 0;
+}
+
+fn awaitBody() -> @Task<i32> {
+    val v = await deepOne();
+    val _u = rkSetProp("test.nav.used", "yes");
+    return v;
+}
+
+// ── step 4: response composition ────────────────────────────────────────────
+
+test "rakun navigation: statusFor and locationHeaderFor" {
+    assert statusFor(NavOutcome(kind: NavKind.NotFound, location: "", status: 404)) == 404;
+    assert statusFor(NavOutcome(kind: NavKind.Redirect, location: "/a", status: 307)) == 307;
+    assert statusFor(NavOutcome(kind: NavKind.Redirect, location: "/a", status: 308)) == 308;
+    assert statusFor(NavOutcome(kind: NavKind.Redirect, location: "/a", status: 303)) == 303;
+    assert statusFor(NavOutcome(kind: NavKind.None, location: "", status: 0)) == 200;
+    assert (locationHeaderFor(NavOutcome(kind: NavKind.NotFound, location: "", status: 404)) ?? "none") == "none";
+    assert (locationHeaderFor(NavOutcome(kind: NavKind.Redirect, location: "/a", status: 307)) ?? "none") == "/a";
+}
+
+// ── step 5 and step 6: where a signal becomes a response ────────────────────
+
+fn missingPost(req: Request) -> @Task<HandlerResponse> {
+    val _n = notFound();
+    return HandlerResponse.text("never");
+}
+
+fn accountHandler(req: Request) -> @Task<HandlerResponse> {
+    val _r = redirect("/login");
+    return HandlerResponse.text("never");
+}
+
+fn signallingPage() -> PageRenderer {
+    return { req, out -> pageSignal(out) };
+}
+
+fn pageSignal(out: ChunkWriter) -> @Task<void> {
+    val _n = notFound();
+    await writeTo(out, "never");
+}
+
+test "rakun navigation: one notFound - 404 from a handler, a 500 from a page, N on the action wire" {
+    val _t = table();
+    val _s = serveApp();
+    val _h = registerRoute("GET", "api/posts/[slug]", "missingPost", { r -> missingPost(r) });
+    val _p = rkAppRegisterPage("broken", signallingPage());
+    val fromHandler: Response = rkDispatchHttp("GET", "/api/posts/none", "{}", "{}", "");
+    val fromPage: Response = rkDispatchHttp("GET", "/broken", "{}", "{}", "");
+    val _o = open();
+    val _a = captureSignals({ -> notFound() }, 0);
+    val wire: string = signalToWire(takeSignal());
+    val _c = close();
+    assert fromHandler.status == 404;
+    assert fromPage.status == 500;
+    assert wire == "N";
+}
+
+test "rakun navigation: a handler's redirect answers 307 with Location" {
+    val _t = table();
+    val _s = serveApp();
+    val _h = registerRoute("GET", "account", "accountHandler", { r -> accountHandler(r) });
+    val res: Response = rkDispatchHttp("GET", "/account", "{}", "{}", "");
+    assert res.status == 307;
+}
+
+test "rakun navigation: the action wire of a captured redirect is routing's literal" {
+    val _t = table();
+    val _o = open();
+    val _a = captureSignals({ -> redirect("/blog") }, 0);
+    val wire: string = signalToWire(takeSignal());
+    val _c = close();
+    assert wire == "R|307|/blog";
+}
+
+// ── step 7: the reasons, literally ──────────────────────────────────────────
+
+test "rakun navigation: the four reasons are routing's, caught at the host boundary" {
+    val _t = table();
+    assert thrownBy({ -> notFound() }) == "nav:not-found";
+    assert thrownBy({ -> redirect("/login") }) == "nav:redirect:/login";
+    assert thrownBy({ -> permanentRedirect("/new") }) == "nav:permanent-redirect:/new";
+    assert thrownBy({ -> redirectWithStatus("/done", 303) }) == "nav:see-other:/done";
+}
+
+test "rakun navigation: an unknown nav verb stays loud" {
+    val _o = open();
+    try asserts.throwsWith({ ->
+        captureSignals({ -> throwPlain("nav:teleport:/x") }, 0);
+    }, "unknown signal verb");
+    val _c = close();
+}

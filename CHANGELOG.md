@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### rakun-app: navigation signals (botopink front 63)
+
+- `navigation.bp` + `sidecars/rakun_navigation.erl`: `notFound` / `redirect` /
+  `permanentRedirect` / `redirectWithStatus` throw `routing`'s reasons, a
+  redirect target validated against the table or
+  `rakun.navigation.allowedHosts`; `captureSignals` / `takeSignal` /
+  `peekSignal` over front 62's frame; `statusFor` / `locationHeaderFor`.
+- Front 25's handlers capture: a `notFound()` is 404, a redirect a 3xx with
+  `Location`.
+- `test/navigation_test.bp` (19 cells): `modules/rakun-app` 53 / 0 →
+  **72 / 0**.
+
 ### HTTP clients — `rakun-client` (botopink front 13)
 
 - `RestClient` over one builder (`RestClient.builder()` → `baseUrl`, `defaultHeader`, `connectTimeout`, `readTimeout`, `redirects`, `maxRedirects`, `sslBundle`, `build`) and one request chain (`get/head/delete/options`, `post/put/patch`, `.header`, `.cached`, `.revalidate`) with two terminal operations: `retrieve()` and `retrieveFuture() -> @Task<ClientResponse>` (eager on erlang; two issued before either is awaited run sequentially).

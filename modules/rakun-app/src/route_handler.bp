@@ -45,7 +45,8 @@ import {
 } from "rakun/request_context";
 import {rkAppRegisterHandler, rkAppHasRender, rkAppRender, rkAppRegisterSource, rkAppSources, rkAppTable, entryLine} from "file_router";
 import {servePage, chunkWriter, rkSsrBegin, rkSsrBody, rkSsrStatus, rkSsrWrite, rkSsrClose, rkSsrSetStatus, rkSsrGuard, rkSsrStarted, rkSsrClosed, rkSsrPageRequest} from "ssr";
-import {table: {RouteEntry, parseTable, writeTable}, match: {RouteMatch, matchPath}} from "routing";
+import {table: {RouteEntry, parseTable, writeTable}, match: {RouteMatch, matchPath}, navigation: {NavKind, NavOutcome}} from "routing";
+import {captureSignals, takeSignal, statusFor, locationHeaderFor} from "navigation";
 
 // ── the response ────────────────────────────────────────────────────────────
 
@@ -308,10 +309,31 @@ pub fn serveHandler(req: Request, m: RouteMatch) -> @Task<i32> {
     val _o = if (opened) beginRequest(RequestScope(id: "handler", phase: RequestPhase.Handler, method: verb, path: req.path, query: "", headersWire: "", strict: false)) else 0;
     val previous: RequestPhase = requestPhase();
     val _p = setPhase(RequestPhase.Handler);
-    val result = rkRunHandler({ -> handle(handlerReq) });
+    // A navigation signal out of the handler (front 63) becomes a 404 or a 3xx
+    // with `Location`; any other raise is a 500.
+    val result = rkRunHandler({ -> captureSignals({ -> handle(handlerReq) }, signalled()) });
+    val out: NavOutcome = takeSignal();
     val _r = setPhase(previous);
     val cookies: string = if (opened) endRequest() else "";
-    return writeHandlerResponse(result, headFallback, cookies);
+    val answered: HandlerResponse = signalResponse(out, result);
+    return writeHandlerResponse(answered, headFallback, cookies);
+}
+
+fn signalled() -> @Task<HandlerResponse> {
+    return HandlerResponse.noContent();
+}
+
+// The response a captured signal answers, or the handler's own when there was
+// none.
+pub fn signalResponse(out: NavOutcome, own: HandlerResponse) -> HandlerResponse {
+    val none: bool = case out.kind {
+        None -> true;
+        _ -> false;
+    };
+    if (none) return own;
+    val bare: HandlerResponse = HandlerResponse(status: statusFor(out), headers: [], chunks: [], tasks: []);
+    val location: string = locationHeaderFor(out) ?? "";
+    if (location == "") return bare else return bare.withHeader("Location", location);
 }
 
 fn writeNoHandler(verb: string, pattern: string) -> i32 {

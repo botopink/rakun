@@ -1,0 +1,155 @@
+//// rakun — navigation signals (front 63): `notFound()` and `redirect(…)` from
+//// server code nested anywhere inside a route handler (front 25) or a server
+//// action (front 24), and the capture that turns one into a response.
+////
+//// A SIGNAL IS A THROW, not a returned sentinel (`sidecars/rakun_navigation.erl`):
+//// the reason is `routing`'s `signalReason` — `nav:not-found`,
+//// `nav:redirect:<loc>`, `nav:permanent-redirect:<loc>`, `nav:see-other:<loc>`
+//// — and the vocabulary, the recogniser and the action wire codec are all the
+//// bundled library `routing`'s (`navigation`), imported by both sides so
+//// neither names the other (decision 116). Nothing here spells a reason.
+////
+//// THE CAPTURE (`captureSignals`) runs a body; a thrown reason `isSignalReason`
+//// accepts is written onto the request frame (front 62 — outside a request it
+//// raises) and the fallback answered; any other raise passes through
+//// unchanged; an unknown `nav:` verb raises loudly (version skew). A signal is
+//// consumed once, by `takeSignal()`; `peekSignal()` reads without clearing.
+////
+//// A PAGE RENDERER IS NOT A SIGNAL SOURCE (decision 117 rule 1): front 23's
+//// dispatch captures nothing, so a `notFound()` out of a page is a failed
+//// render. Front 25's handler wrapper captures: 404, or a 3xx with `Location`.
+////
+//// A REDIRECT TARGET IS VALIDATED: a relative destination must match a route
+//// in front 22's table, and an absolute one (`http://`, `https://`, or the
+//// protocol-relative `//`) must name a host on `rakun.navigation.allowedHosts`
+//// — empty by default, so only relative destinations are legal. There is no
+//// flag that disables the check.
+
+import {rkProp} from "rakun";
+import {rkReqPutSlot, rkReqSlot, demandRequest} from "rakun/request_context";
+import {navigation: {NavKind, NavOutcome, signalReason, signalFromReason, isSignalReason, signalToWire, signalFromWire}} from "routing";
+import {appMatch} from "file_router";
+
+#[@External.Erlang("rakun_navigation", "signal")]
+declare fn rkNavSignal(reason: string) -> i32;
+
+#[@External.Erlang("rakun_navigation", "try_body")]
+declare fn rkNavTry<T>(body: fn() -> T) -> string;
+
+#[@External.Erlang("rakun_navigation", "value")]
+declare fn rkNavValue<T>(fallback: T) -> T;
+
+#[@External.Erlang("rakun_navigation", "rethrow")]
+declare fn rkNavRethrow(reason: string) -> i32;
+
+// ── step 1: the signal ──────────────────────────────────────────────────────
+
+pub fn notFound() -> i32 {
+    return rkNavSignal(signalReason(NavOutcome(kind: NavKind.NotFound, location: "", status: 404)));
+}
+
+pub fn redirect(location: string) -> i32 {
+    return redirectWithStatus(location, 307);
+}
+
+pub fn permanentRedirect(location: string) -> i32 {
+    return redirectWithStatus(location, 308);
+}
+
+pub fn statusProblem(status: i32) -> string {
+    return "rakun navigation: a redirect status is 303, 307 or 308, not " + status.toString();
+}
+
+pub fn unknownTargetProblem(location: string) -> string {
+    return "rakun navigation: redirect to `" + location + "` - no route in the table matches it";
+}
+
+pub fn offListProblem(location: string, host: string) -> string {
+    return "rakun navigation: redirect to `" + location + "` - the host `" + host + "` is not on rakun.navigation.allowedHosts";
+}
+
+pub fn redirectWithStatus(location: string, status: i32) -> i32 {
+    val known: bool = (status == 303) || (status == 307) || (status == 308);
+    if (known == false) @panic(statusProblem(status));
+    val _v = validateTarget(location);
+    return rkNavSignal(signalReason(NavOutcome(kind: NavKind.Redirect, location: location, status: status)));
+}
+
+pub fn isAbsolute(location: string) -> bool {
+    return location.startsWith("http://") || location.startsWith("https://") || location.startsWith("//");
+}
+
+pub fn hostOf(location: string) -> string {
+    val rest: string = if (location.startsWith("//")) location.slice(2, location.length) else (location.split("://").at(1) ?? "");
+    val hostPort: string = (rest.split("/").at(0) ?? "");
+    return (hostPort.split(":").at(0) ?? "").toLower();
+}
+
+pub fn allowedHosts() -> string[] {
+    return rkProp("rakun.navigation.allowedHosts").split(",").map({ h -> h.trim().toLower() }).filter({ h -> h != "" });
+}
+
+fn validateTarget(location: string) -> i32 {
+    val absolute: bool = isAbsolute(location);
+    val host: string = if (absolute) hostOf(location) else "";
+    val listed: bool = allowedHosts().filter({ h -> h == host }).length > 0;
+    if (absolute && (listed == false)) @panic(offListProblem(location, host));
+    val path: string = location.split("?").at(0) ?? location;
+    val routed: bool = absolute || (appMatch(path) != null);
+    if (routed == false) @panic(unknownTargetProblem(location));
+    return 0;
+}
+
+// ── step 2: the capture ─────────────────────────────────────────────────────
+
+pub fn captureSignals<T>(body: fn() -> T, fallback: T) -> T {
+    val _d = demandRequest("captureSignals()");
+    val reason: string = rkNavTry(body);
+    if (reason == "") return rkNavValue(fallback);
+    // A `nav:` reason with a verb `routing` does not know is VERSION SKEW
+    // between the two sides, and stays loud: `signalFromReason` raises for it.
+    val recognised: bool = isSignalReason(reason);
+    val skewed: bool = (recognised == false) && reason.startsWith("nav:") && (reason.length > 4);
+    val _k = if (skewed) loudSkew(reason) else 0;
+    if (recognised == false) {
+        val _r = rkNavRethrow(reason);
+        return fallback;
+    };
+    val out: NavOutcome = signalFromReason(reason);
+    val _w = rkReqPutSlot("navigation", signalToWire(out));
+    return fallback;
+}
+
+fn loudSkew(reason: string) -> i32 {
+    val _o = signalFromReason(reason);
+    return 0;
+}
+
+pub fn peekSignal() -> NavOutcome {
+    val _d = demandRequest("peekSignal()");
+    return signalFromWire(rkReqSlot("navigation"));
+}
+
+pub fn takeSignal() -> NavOutcome {
+    val out: NavOutcome = peekSignal();
+    val _c = rkReqPutSlot("navigation", "");
+    return out;
+}
+
+// ── step 4: response composition ────────────────────────────────────────────
+
+pub fn statusFor(out: NavOutcome) -> i32 {
+    return case out.kind {
+        NotFound -> 404;
+        Redirect -> out.status;
+        _ -> 200;
+    };
+}
+
+pub fn locationHeaderFor(out: NavOutcome) -> ?string {
+    val redirecting: bool = case out.kind {
+        Redirect -> true;
+        _ -> false;
+    };
+    if (redirecting) return out.location else return null;
+}

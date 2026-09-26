@@ -1568,6 +1568,33 @@ handler mode (no default `Content-Type`, headers appended). `bodyText`,
 `bodyForm` (std's `encoding.formParse`, read with `formField`), `bodyJson`
 (validated by `json.decode`, answered as the RAW TEXT).
 
+## Navigation signals — `modules/rakun-app/src/navigation.bp` (front 63)
+
+`notFound()`, `redirect(loc)` (307), `permanentRedirect(loc)` (308) and
+`redirectWithStatus(loc, 303 | 307 | 308)` THROW a string reason built by the
+bundled library `routing`'s `signalReason` (`nav:not-found`,
+`nav:redirect:<loc>`, …) through `rakun_navigation:signal/1`; they are
+declared `-> i32` and never return. A signal is a throw rather than a sentinel
+so it composes through nested calls and through `await` (eager on the BEAM),
+and botopink's `try … catch` — which unwraps a `@Result` only — cannot swallow
+it (asserted). A redirect target is validated when raised: a relative one must
+match a route in the table (`appMatch`), an absolute one (`http://`,
+`https://`, protocol-relative `//`) must name a host on
+`rakun.navigation.allowedHosts`, empty by default — no flag disables it.
+
+`captureSignals(body, fallback)` runs the body inside a front 62 frame
+(outside one it raises): a reason `isSignalReason` accepts is written onto the
+frame and the fallback answered; any other raise passes through with its
+reason; a `nav:` reason with an unknown verb raises loudly (version skew).
+`takeSignal()` consumes the outcome, `peekSignal()` reads it. `statusFor` /
+`locationHeaderFor` compose a response. The vocabulary and the action wire
+codec (`signalToWire` / `signalFromWire`) are `routing`'s; nothing here spells
+a reason. Front 25's handler wrapper captures (404, or a 3xx with `Location`);
+front 23's page dispatch does NOT — a page's `notFound` is the HTML library's,
+and one raised out of a renderer is a 500 (decision 117 rule 1). A `var`
+mutated inside a lambda body (outside a `for`) does not lower on erlang, so the
+test's "never reached" counters are property writes.
+
 ## The auto-configuration pass
 
 `modules/rakun/src/autoconfig.bp`, `conditions.bp`, `condition_report.bp` and
