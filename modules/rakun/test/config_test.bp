@@ -529,3 +529,31 @@ test "rakun config: a float reader parses a fraction" {
     assert got < 2.51;
     assert rkPropFloat("my.service.absent", 1.25) == 1.25;
 }
+
+// ── `.json` through std's reader (decision 117 rule 7) ──────────────────────
+
+test "rakun config: a .json value's escapes are decoded by std's json.decode" {
+    val r = parseJson("{\"a\":{\"u\":\"\\u0041\",\"b\":\"x\\by\",\"s\":\"a\\/b\"},\"n\":8080,\"f\":1.5,\"t\":true,\"z\":null,\"xs\":[\"p\",\"q\"]}", "app.json");
+    assert r.isOk();
+    val docs = r.unwrapOr([]);
+    val entries = (docs.at(0) ?? Doc(origin: "", entries: [], conditions: [])).entries;
+    assert entryAt(entries, "a.u") == "A";
+    assert entryAt(entries, "a.b").length == 3;
+    assert entryAt(entries, "a.b").startsWith("x");
+    assert entryAt(entries, "a.b") != "x\\by";
+    assert entryAt(entries, "a.s") == "a/b";
+    assert entryAt(entries, "n") == "8080";
+    assert entryAt(entries, "f") == "1.5";
+    assert entryAt(entries, "t") == "true";
+    assert entryAt(entries, "z") == "";
+    assert entryAt(entries, "xs[1]") == "q";
+}
+
+test "rakun config: a malformed .json is refused with json.decode's message, naming the file" {
+    val r = parseJson("{\"a\": 1,}", "config/app.json");
+    assert r.isError();
+    val assert Error(e) = r;
+    assert e.startsWith("config/app.json: json.decode: ");
+    val dup = parseJson("{\"a\": 1, \"a\": 2}", "dup.json");
+    assert dup.isError();
+}

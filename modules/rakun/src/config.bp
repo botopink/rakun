@@ -29,7 +29,7 @@
 ////     module also references a sibling erlang module. `env` and `fs` are reached
 ////     here beside rakun's own host cells, which is exactly that case.
 
-import {io: {fs, env, random}} from "std";
+import {io: {fs, env, random}, json, json.Json} from "std";
 import {rkSetProp, rkProp} from "runtime";
 import {matches, expand, setResolved} from "profiles";
 
@@ -240,205 +240,77 @@ fn joinKey(prefix: string, name: string) -> string {
 }
 
 // ── `.json` ─────────────────────────────────────────────────────────────────
-// A flattening scanner: it never builds a tree, it emits `a.b.c` and `a[0]` as
-// it walks. Written here rather than over std's `json` because std's decoder
-// answers a `@Result<string, string>` with nothing to walk (the front's third
-// language-gap row) — and because a sidecar decoder could not be tested from a
-// `.bp` file on the only row this member gates.
+// std's `json.decode` reads the document (RFC 8259, member order kept, a
+// duplicate or trailing text refused — decision 117 rule 7); this module only
+// FLATTENS the tree into the table's keys: `a.b.c` for a member, `a[0]` for an
+// item, the scalar's text for a leaf. A string is its decoded text (`\u0041`,
+// `\b`, `\/` are `A`, U+0008, `/`), a bool `true` / `false`, `null` the empty
+// value an absent property reads as anyway, and a number its shortest text —
+// an integral value with no fraction, so `8080` stays `8080`. A top-level
+// scalar has no key and binds nothing. A malformed document is refused with
+// `json.decode`'s own `Error`, prefixed by the file it came from.
 
 pub fn parseJson(text: string, origin: string) -> @Result<Array<Doc>, string> {
-    var out: Array<Entry> = [];
-    var kinds: string[] = [];
-    var prefixes: string[] = [];
-    var idxs: string[] = [];
-    var cur = "";
-    var mode = "value";
-    var i = 0;
-    var done = false;
-    var err = "";
-    var guard = 0;
-    i = skipWs(text, 0);
-    if (charOf(text, i) == "") done = true;
-    while (done == false) {
-        guard = guard + 1;
-        if (guard > 2000000) {
-            err = origin + ": json scanner did not terminate";
-            done = true;
-        };
-        i = skipWs(text, i);
-        val c = charOf(text, i);
-        if (done) {
-        } else if (mode == "value") {
-            if (c == "{") {
-                i = skipWs(text, i + 1);
-                if (charOf(text, i) == "}") {
-                    i = i + 1;
-                    mode = "after";
-                } else {
-                    kinds.push("o");
-                    prefixes.push(cur);
-                    idxs.push("0");
-                    val k = jsonString(text, i);
-                    if (k == "") {
-                        err = origin + ": expected a quoted object key";
-                        done = true;
-                    } else {
-                        i = jsonStringEnd(text, i);
-                        i = skipWs(text, i);
-                        if (charOf(text, i) != ":") {
-                            err = origin + ": expected ':' after an object key";
-                            done = true;
-                        } else {
-                            i = i + 1;
-                            cur = joinKey(lastOf(prefixes), jsonUnquote(k));
-                        };
-                    };
-                };
-            } else if (c == "[") {
-                i = skipWs(text, i + 1);
-                if (charOf(text, i) == "]") {
-                    i = i + 1;
-                    mode = "after";
-                } else {
-                    kinds.push("a");
-                    prefixes.push(cur);
-                    idxs.push("1");
-                    cur = cur + "[0]";
-                };
-            } else if (c == "") {
-                err = origin + ": unexpected end of input";
-                done = true;
-            } else {
-                val lit = jsonScalar(text, i);
-                if (lit == "") {
-                    err = origin + ": unexpected character '" + c + "'";
-                    done = true;
-                } else {
-                    i = i + toI32(lit);
-                    if (cur != "") out.push(Entry(key: cur, value: jsonUnquote(lit)));
-                    mode = "after";
-                };
-            };
-        } else {
-            if (kinds.length == 0) done = true else if (c == ",") {
-                i = skipWs(text, i + 1);
-                if (lastOf(kinds) == "o") {
-                    val k2 = jsonString(text, i);
-                    if (k2 == "") {
-                        err = origin + ": expected a quoted object key";
-                        done = true;
-                    } else {
-                        i = jsonStringEnd(text, i);
-                        i = skipWs(text, i);
-                        if (charOf(text, i) != ":") {
-                            err = origin + ": expected ':' after an object key";
-                            done = true;
-                        } else {
-                            i = i + 1;
-                            cur = joinKey(lastOf(prefixes), jsonUnquote(k2));
-                            mode = "value";
-                        };
-                    };
-                } else {
-                    val n = lastOf(idxs);
-                    cur = lastOf(prefixes) + "[" + n + "]";
-                    idxs = setLast(idxs, "" + (toI32(n) + 1));
-                    mode = "value";
-                };
-            } else if (c == "}") {
-                if (lastOf(kinds) != "o") {
-                    err = origin + ": '}' closing an array";
-                    done = true;
-                } else {
-                    i = i + 1;
-                    kinds = dropLast(kinds);
-                    cur = lastOf(prefixes);
-                    prefixes = dropLast(prefixes);
-                    idxs = dropLast(idxs);
-                };
-            } else if (c == "]") {
-                if (lastOf(kinds) != "a") {
-                    err = origin + ": ']' closing an object";
-                    done = true;
-                } else {
-                    i = i + 1;
-                    kinds = dropLast(kinds);
-                    cur = lastOf(prefixes);
-                    prefixes = dropLast(prefixes);
-                    idxs = dropLast(idxs);
-                };
-            } else {
-                err = origin + ": expected ',' or a closing bracket";
-                done = true;
-            };
-        };
+    val root = json.decode(text);
+    if (root.isError()) {
+        val assert Error(e) = root;
+        throw origin + ": " + e;
     };
-    if (err != "") throw err;
     var docs: Array<Doc> = [];
-    docs.push(splitConditions(origin, out));
+    docs.push(splitConditions(origin, flattenJson(root.unwrapOr(Json.Null), "")));
     return docs;
 }
 
-// The three `json*` helpers below answer LENGTH-PREFIXED strings ("<n> <text>")
-// so one call can report both how far it read and what it read: botopink has no
-// multiple-return and a mutable out-parameter would need a reference type.
-
-fn jsonString(text: string, start: i32) -> string {
-    if (charOf(text, start) != "\"") return "" else {
-        var i = start + 1;
-        var body = "";
-        var run = true;
-        while (run) {
-            val c = charOf(text, i);
-            if (c == "") run = false else if (c == "\\") {
-                body = body + unescape(charOf(text, i + 1));
-                i = i + 2;
-            } else if (c == "\"") {
-                run = false;
-                i = i + 1;
-            } else {
-                body = body + c;
-                i = i + 1;
-            };
+fn flattenJson(v: Json, key: string) -> Array<Entry> {
+    var out: Array<Entry> = [];
+    val kind = case v {
+        Obj(members: _) -> "o";
+        Arr(items: _) -> "a";
+        _ -> "s";
+    };
+    if (kind == "o") {
+        for (jsonMembers(v)) { m ->
+            for (flattenJson(m._1, joinKey(key, m._0))) { e -> out.push(e); };
         };
-        return "" + (i - start) + " " + body;
+    } else if (kind == "a") {
+        var i = 0;
+        for (jsonItems(v)) { x ->
+            for (flattenJson(x, key + "[" + i.toString() + "]")) { e -> out.push(e); };
+            i = i + 1;
+        };
+    } else if (key != "") {
+        out.push(Entry(key: key, value: jsonLeafText(v)));
+    };
+    return out;
+}
+
+fn jsonMembers(v: Json) -> Array<#(string, Json)> {
+    return case v {
+        Obj(members: ms) -> ms;
+        _ -> [];
     };
 }
 
-fn jsonStringEnd(text: string, start: i32) -> i32 {
-    val s = jsonString(text, start);
-    return start + toI32(s);
-}
-
-fn jsonUnquote(lenAndBody: string) -> string {
-    val n = toI32(lenAndBody);
-    return sub(lenAndBody, ("" + n).length() + 1, lenAndBody.length());
-}
-
-fn unescape(c: string) -> string {
-    if (c == "n") return "\n" else if (c == "t") return "\t" else if (c == "r") return "\r" else return c;
-}
-
-// A scalar: a quoted string, a number, `true`, `false` or `null`. Answers the
-// same `"<consumed> <text>"` shape; `null` answers an empty value, which is what
-// an absent property reads as anyway.
-fn jsonScalar(text: string, start: i32) -> string {
-    val c = charOf(text, start);
-    if (c == "\"") return jsonString(text, start) else if (sub(text, start, start + 4) == "true") return "4 true" else if (sub(text, start, start + 5) == "false") return "5 false" else if (sub(text, start, start + 4) == "null") return "4 " else {
-        var i = start;
-        var body = "";
-        var run = true;
-        while (run) {
-            val ch = charOf(text, i);
-            val numeric = isDigit(ch) || ch == "-" || ch == "+" || ch == "." || ch == "e" || ch == "E";
-            if (numeric) {
-                body = body + ch;
-                i = i + 1;
-            } else run = false;
-        };
-        if (body == "") return "" else return "" + (i - start) + " " + body;
+fn jsonItems(v: Json) -> Array<Json> {
+    return case v {
+        Arr(items: xs) -> xs;
+        _ -> [];
     };
 }
+
+fn jsonLeafText(v: Json) -> string {
+    return case v {
+        Str(value: s) -> s;
+        Bool(value: b) -> if (b) "true" else "false";
+        Num(value: x) -> numeralText(x);
+        _ -> "";
+    };
+}
+
+// A number's shortest text: an integral value (below 2^53) with no fraction,
+// anything else OTP's shortest round-tripping float.
+#[@External.Erlang("""(fun(__F) -> case (__F == trunc(__F)) andalso (abs(__F) < 9007199254740992.0) of true -> integer_to_binary(trunc(__F)); false -> float_to_binary(__F, [short]) end end)($0)""")]
+declare fn numeralText(x: f64) -> string;
 
 // ── `.yaml` / `.yml` — a documented SUBSET ──────────────────────────────────
 // Block mappings, block sequences, plain and quoted scalars, `#` comments and

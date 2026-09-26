@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### `.json` configuration reads through std's `json.decode` (botopink front 05, decision 117 rule 7)
+
+- `parseJson` is std's RFC 8259 reader plus a flattener (`a.b.c`, `a[0]`); the
+  hand scanner (`jsonString` / `jsonUnquote` / `jsonScalar`, ~150 lines) is
+  gone. `\u0041`, `\b` and `\/` decode; a trailing comma or a duplicate member
+  is refused with `json.decode`'s message, prefixed by the file. A number is its
+  shortest text (`8080` stays `8080`). `test/config_test.bp` +2:
+  `modules/rakun` 333 / 0 → **335 / 0**.
+
 ### `#[validated]` configuration refuses the boot (botopink fronts 05 step 9 and 14 step 6)
 
 - `#[configurationProperties]` + `#[validated]` registers a boot check
