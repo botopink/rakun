@@ -31,6 +31,7 @@
 -export([begin_page/0, begin_handler/0, add_header/2, stream/1,
          set_status/1, set_header/2, write/1, close/0,
          status/0, header/1, closed/0, started/0, streamed/0, body/0, guard/1,
+         log_failure/1,
          page_request/2, set_fallback/1, clear_fallback/0]).
 
 -define(STATE, rakun_ssr_writer).
@@ -227,16 +228,25 @@ streamed() -> get(rakun_streamed) =:= true.
 
 body() -> iolist_to_binary(lists:reverse(maps:get(buffer, state()))).
 
-%% Run the renderer; answer `<<>>`, or the reason it raised. A raise is a failed
-%% render — a `nav:` reason included, because page signals are the HTML library's
-%% (decision 117 rule 1) and rakun translates none of them.
+%% Run the renderer; answer the text it answers (`<<>>` when it succeeded, the
+%% problem naming its `Error(msg)` otherwise), or the reason it raised. A raise
+%% is a failed render — a `nav:` reason included, because page signals are the
+%% HTML library's (decision 117 rule 1) and rakun translates none of them.
 guard(Thunk) ->
     try Thunk() of
+        Text when is_binary(Text) -> Text;
         _ -> <<>>
     catch
         error:{rakun_chunk_writer, Why} -> Why;
         Class:Reason -> iolist_to_binary(io_lib:format("~p:~0p", [Class, Reason]))
     end.
+
+%% A failed render's reason goes to the log, never on the wire (decision 130):
+%% one `logger` error under a correlation digest, which is answered.
+log_failure(Reason) ->
+    Digest = list_to_binary(string:to_lower(integer_to_list(erlang:phash2({Reason, erlang:unique_integer()}), 16))),
+    logger:error("rakun ssr: failed render (correlation ~s): ~ts", [Digest, Reason]),
+    Digest.
 
 %% ═══ the request a renderer is handed ════════════════════════════════════════
 %% The core's request value carries the path parameters the CORE router bound —

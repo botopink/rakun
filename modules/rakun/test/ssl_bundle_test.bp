@@ -64,6 +64,7 @@ import {
     keyMismatchProblem,
     verifyNoneWarning,
     absolutePath,
+    isWindowsAbsolute,
     isJks,
     carriesSeparator,
     knownProtocol,
@@ -432,6 +433,17 @@ test "rakun ssl: half a keystore is refused, naming the half that is missing" {
     )) == 0;
 }
 
+test "rakun ssl: a drive letter or a UNC share is a Windows absolute path, nothing else is" {
+    assert isWindowsAbsolute("C:\\certs\\server.pem");
+    assert isWindowsAbsolute("c:/certs");
+    assert isWindowsAbsolute("\\\\host\\share");
+    assert isWindowsAbsolute("C:certs") == false;
+    assert isWindowsAbsolute("1:\\x") == false;
+    assert isWindowsAbsolute("certs\\server.pem") == false;
+    assert isWindowsAbsolute("/etc/ssl") == false;
+    assert isWindowsAbsolute("C:") == false;
+}
+
 test "rakun ssl: a file that is not there is refused, naming the absolute path searched" {
     val _f = freshRegistry();
     val text: string = missingFileProblem("one", "keystore.certificate", "certs/server.pem");
@@ -453,6 +465,11 @@ test "rakun ssl: a file that is not there is refused, naming the absolute path s
     // in it on the commonJS row (see the header of this file). Idempotence is
     // the same property without the import.
     assert absolutePath(resolved) == resolved;
+    // A Windows spelling is absolute as written, never joined onto the cwd.
+    assert absolutePath("C:\\certs\\server.pem") == "C:\\certs\\server.pem";
+    assert absolutePath("d:/certs/server.pem") == "d:/certs/server.pem";
+    assert absolutePath("\\\\host\\share\\ca.pem") == "\\\\host\\share\\ca.pem";
+    assert missingFileProblem("one", "keystore.certificate", "C:\\certs\\server.pem").contains("C:\\certs\\server.pem");
     try asserts.throwsWith({ ->
         checkFile("one", "keystore.certificate", "certs/definitely-not-here.pem");
     }, "and nothing is there");

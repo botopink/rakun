@@ -22,8 +22,6 @@
 ////     therefore built character by character through `charOf`/`sub`.
 ////   * `Array.pop` is `lists:last/1` on the erlang row — it reads, it does not
 ////     remove. Nothing here pops; a stack shrinks by rebuilding (`dropLast`).
-////   * A declared parameter default is not applied at a call site yet, so every
-////     call passes every argument.
 ////   * std modules written in botopink (`path`, `json`, `dict`) are emitted into
 ////     an `std/` subdirectory and only load on the erlang row when the emitting
 ////     module also references a sibling erlang module. `env` and `fs` are reached
@@ -1333,9 +1331,10 @@ pub fn parseDataSize(raw: string, unit: string, key: string) -> DataSize {
 
 // ── the typed readers ───────────────────────────────────────────────────────
 // Front 04 owns `rkProp`/`rkPropInt`; these are the rest, and they carry ROW 8 —
-// the declared default — as their second argument, because a declared field
-// default is not applied at a call site yet (the front's first language-gap
-// row). `rkValue` is the string reader that also resolves `${random.*}` at
+// the declared default — as their second argument, because `@Decl.Field`
+// carries no default: a `#[configurationProperties]` emitter cannot read
+// `enabled: bool = false` off the field, so `#[defaultValue]` spells it and
+// the emitted reader passes it (the front's first language-gap row). `rkValue` is the string reader that also resolves `${random.*}` at
 // REFERENCE time.
 //
 // RELAXED BINDING lives here rather than in the emitter: a reader tries the
@@ -1580,12 +1579,10 @@ pub fn registerRakunKeys() -> i32 {
 //       no further wiring.
 //   val __rkCat_<Name> = rkRegisterConfigKeys(...)      — the run-time catalogue.
 //
-// A LIST FIELD IS RECOGNISED BY AN EMPTY `typeName`. `@Decl` renders no name at
-// all for a generic type: `hosts: string[]` reflects as `typeName == ""`, the
-// same as `Array<string>` would. An empty name is therefore read as a list here,
-// which is right for every array and wrong for any other generic field — the
-// only signal the reflection offers, and a gap worth closing in `@Decl` rather
-// than around.
+// A LIST FIELD IS `string[]` OR `Array<string>`. `@Decl` spells a field's type
+// as written, so both spellings bind through `rkPropList`; a list of anything
+// else (`i32[]`, `Array<Duration>`) has no reader and is refused at the
+// annotation rather than bound as a scalar.
 //
 // RELAXED BINDING IS IN THE READER, NOT THE EMITTER. The spec puts the
 // `remoteAddress` → `remote-address` rewrite in the decorator. It is in
@@ -1597,6 +1594,7 @@ pub fn registerRakunKeys() -> i32 {
 
 pub fn configurationProperties(comptime decl: @Decl, prefix: string) {
     var args: Array<string> = [];
+    var unbindable = "";
     var catalogue: Array<string> = [];
     decl.fields.forEach({ f ->
         var unit = "";
@@ -1609,10 +1607,11 @@ pub fn configurationProperties(comptime decl: @Decl, prefix: string) {
         });
         val key = "prefix + \".\" + \"" + f.name + "\"";
         val quoted = "\"" + fallback + "\"";
-        val reader = if (nested) "__rkBind_" + f.typeName + "(" + key + ")" else if (f.typeName == "bool") "rkPropBool(" + key + ", " + (if (fallback == "") "false" else fallback) + ")" else if (f.typeName == "i32") "rkPropIntOr(" + key + ", " + (if (fallback == "") "0" else fallback) + ")" else if (f.typeName == "f64") "rkPropFloat(" + key + ", " + (if (fallback == "") "0.0" else fallback) + ")" else if (f.typeName == "Duration") "rkPropDuration(" + key + ", \"" + unit + "\")" else if (f.typeName == "DataSize") "rkPropSize(" + key + ", \"" + unit + "\")" else if (f.typeName == "string[]") "rkPropList(" + key + ")" else if (f.typeName == "Array<string>") "rkPropList(" + key + ")" else if (f.typeName == "") "rkPropList(" + key + ")" else if (f.typeName.contains("[]")) "rkPropList(" + key + ")" else if (f.typeName.startsWith("Array<")) "rkPropList(" + key + ")" else "rkValueOr(" + key + ", " + quoted + ")";
+        val reader = if (nested) "__rkBind_" + f.typeName + "(" + key + ")" else if (f.typeName == "bool") "rkPropBool(" + key + ", " + (if (fallback == "") "false" else fallback) + ")" else if (f.typeName == "i32") "rkPropIntOr(" + key + ", " + (if (fallback == "") "0" else fallback) + ")" else if (f.typeName == "f64") "rkPropFloat(" + key + ", " + (if (fallback == "") "0.0" else fallback) + ")" else if (f.typeName == "Duration") "rkPropDuration(" + key + ", \"" + unit + "\")" else if (f.typeName == "DataSize") "rkPropSize(" + key + ", \"" + unit + "\")" else if (f.typeName == "string[]" || f.typeName == "Array<string>") "rkPropList(" + key + ")" else "rkValueOr(" + key + ", " + quoted + ")";
+        val listOfOther = (f.typeName.endsWith("[]") || f.typeName.startsWith("Array<")) && f.typeName != "string[]" && f.typeName != "Array<string>";
+        if (listOfOther && unbindable == "") unbindable = f.name + ": " + f.typeName;
         args.push(f.name + ": " + reader);
-        val shown = if (f.typeName == "") "string[]" else f.typeName;
-        catalogue.push(f.name + ":" + shown + ":" + fallback);
+        catalogue.push(f.name + ":" + f.typeName + ":" + fallback);
     });
     @emit("pub fn __rkBind_" + decl.name + "(prefix: string) -> " + decl.name + " { return " + decl.name + "(" + args.join(
             ", "
@@ -1635,6 +1634,7 @@ pub fn configurationProperties(comptime decl: @Decl, prefix: string) {
     };
     if (decl.kind != DeclKind.Type) decl.fail("#[configurationProperties] must annotate a type");
     if (decl.variants.length > 0) decl.fail("#[configurationProperties] must annotate a type with fields, not an enum");
+    if (unbindable != "") decl.fail("#[configurationProperties] cannot bind the list field " + unbindable + " - a list binds as string[] or Array<string>, one comma-separated property");
 }
 
 // `#[nested]` marks a field bound under `<prefix>.<field>` by its own type's

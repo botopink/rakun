@@ -43,19 +43,11 @@
 //// the basename of the module this file emits, which `shipErlSidecars` skips
 //// SILENTLY (front 04's rule).
 
-// `std`'s `path` was `{error, undef}` on the erlang row when this front was
-// written against `2e6bb4ac`, and `absolutePath` below was three lines of
-// POSIX-only string work because of it. The compiler fixed it — three defects
-// at once: a prelude-defaults guard, the emitted escript's sibling loader
-// silently skipping a module `erlc` had refused, and the loader not being
-// emitted at all for a `from "std"` import — and `path` is green on both rows
-// as of `4fe1747e`, verified here before this line was written.
-//
-// It is used again rather than left alone, and that is not a tidying preference:
-// `path.isAbsolute` knows about a drive letter and a leading slash does not.
-// rakun's `windows-2022` commonJS row is `allow_fail: false`
-// (`.github/workflows/test.yml:50`), so a POSIX-only `absolutePath` names the
-// wrong path in the one refusal whose whole job is to name the right one.
+// `absolutePath` names the file a refusal searched, so it must know an
+// absolute path on either host. std's `path` is posix-shaped (`isAbsolute` is a
+// leading `/`); a Windows spelling — a drive letter (`C:\certs\server.pem`,
+// `C:/certs`) or a UNC share (`\\host\share`) — is recognised here, so it is
+// never joined onto the working directory.
 import {path, io: {fs, process}} from "std";
 import {rkProp, rkSetProp} from "runtime";
 import {sub, toI32, rkValue, rkValueOr, rkPropIntOr, rkPropBool, rkPropList} from "config";
@@ -340,8 +332,18 @@ pub fn verifyNoneWarning(name: string) -> string {
 
 // ── validation ──────────────────────────────────────────────────────────────
 
+// `C:\…`, `C:/…` or `\\host\…`.
+pub fn isWindowsAbsolute(given: string) -> bool {
+    if (given.startsWith("\\\\")) return true;
+    if (given.length() < 3) return false;
+    val drive: string = given.slice(0, 1).toUpper();
+    val letter: bool = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".contains(drive);
+    val sep: string = given.slice(2, 3);
+    return letter && (given.slice(1, 2) == ":") && (sep == "\\" || sep == "/");
+}
+
 pub fn absolutePath(given: string) -> string {
-    if (path.isAbsolute(given)) return given else {
+    if (path.isAbsolute(given) || isWindowsAbsolute(given)) return given else {
         return path.join([process.cwd(), given]);
     };
 }

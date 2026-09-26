@@ -9,7 +9,7 @@
 import {testing.asserts} from "std";
 import {io: {fs, env}} from "std";
 import {moduleVersions} from "version_set";
-import {manifestDependencies, manifestPackageName, resolvedModuleListIn, dependencyManifest} from "autoconfig_registry";
+import {manifestDependencies, manifestDependencyNames, manifestPackageName, resolvedModuleListIn, dependencyManifest} from "autoconfig_registry";
 import {moduleVerdict} from "conditions";
 
 // The out-of-repo dependencies a starter may name — a literal list, so a new
@@ -30,17 +30,19 @@ fn manifestOf(dir: string) -> string {
 // Every problem the lint finds with one starter directory.
 fn starterProblems(dir: string, text: string) -> string[] {
     var out: string[] = [];
+    val parsed = manifestDependencies(text);
+    if (parsed.isError()) {
+        val assert Error(e) = parsed;
+        return ["starter directory `" + dir + "`: " + e];
+    };
     val name = manifestPackageName(text);
     if (name != dir) out.push("starter directory `" + dir + "` holds a manifest named `" + name + "` - the two must agree");
     if (name.startsWith("rakun-starter") == false) out.push("starter `" + name + "` must be named with the prefix `rakun-starter` (a third-party starter is `<project>-rakun-starter`, outside starters/)");
     val known = moduleVersions().map({ m -> m.name });
-    val deps = manifestDependencies(text);
-    var seen: string[] = [];
+    val deps = manifestDependencyNames(text);
     for (deps) { d ->
         val ok = known.filter({ k -> k == d }).length > 0 || allowList().filter({ a -> a == d }).length > 0;
         if (ok == false) out.push("starter `" + name + "` depends on unknown `" + d + "` - known: " + known.join(", ") + "; allowed out of repo: " + allowList().join(", "));
-        if (seen.filter({ s -> s == d }).length > 0) out.push("starter `" + name + "` declares `" + d + "` twice");
-        seen.push(d);
     };
     return out;
 }
@@ -73,7 +75,7 @@ test "starters: every dependency resolves to a directory holding a botopink.json
     for (starterNames()) { n ->
         val file = "../../starters/" + n + "/botopink.json";
         val text = manifestOf(n);
-        for (manifestDependencies(text)) { d ->
+        for (manifestDependencyNames(text)) { d ->
             val target = dependencyManifest(file, text, d);
             if (target == "" || fs.exists(target) == false) broken.push(n + " -> " + d);
         };
@@ -103,11 +105,13 @@ test "starters: a wrong prefix fails the lint naming the prefix" {
 }
 
 test "starters: an unknown dependency fails, listing the known names; a duplicate fails" {
-    val text = "{\"name\": \"rakun-starter-x\", \"dependencies\": {\"rakun\": {\"workspace\": true}, \"spring\": {\"path\": \"../spring\"}, \"rakun\": {\"workspace\": true}}}";
+    val text = "{\"name\": \"rakun-starter-x\", \"dependencies\": {\"rakun\": {\"workspace\": true}, \"spring\": {\"path\": \"../spring\"}}}";
     val problems = starterProblems("rakun-starter-x", text).join("\n");
     assert problems.contains("depends on unknown `spring` - known: rakun, rakun-actuator"), problems;
     assert problems.contains("allowed out of repo: onze");
-    assert problems.contains("declares `rakun` twice");
+    val twice = "{\"name\": \"rakun-starter-x\", \"dependencies\": {\"rakun\": {\"workspace\": true}, \"rakun\": {\"workspace\": true}}}";
+    val dup = starterProblems("rakun-starter-x", twice).join("\n");
+    assert dup.contains("duplicate member name `rakun`"), dup;
 }
 
 test "starters: the allow-list is a literal list" {

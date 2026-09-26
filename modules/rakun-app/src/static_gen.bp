@@ -46,7 +46,7 @@ import {
     isDynamic, dynamicReason, requestLive, draftBypass,
 } from "rakun";
 import {rkAppTable, rkAppRender} from "file_router";
-import {PageRenderer, chunkWriter, writeTo, matchPage, PageMatch, rkSsrBegin, rkSsrBody, rkSsrStatus, rkSsrGuard, rkSsrPageRequest} from "ssr";
+import {PageRenderer, ChunkWriter, chunkWriter, writeTo, matchPage, PageMatch, rkSsrBegin, rkSsrBody, rkSsrStatus, rkSsrGuard, rkSsrPageRequest} from "ssr";
 import {CacheScope, CachePolicy, CachePeek, cachePolicy, cacheLifeOf, cacheStore, cachePeek} from "rakun-cache/cache";
 import {SegmentConfig, DynamicMode, modeName, configFor, normalizePattern, patternInTable, unknownPatternProblem} from "segment_config";
 import {
@@ -232,8 +232,22 @@ pub fn decodeEntry(s: string) -> ?PrerenderEntry {
     );
 }
 
+fn writeNothing(out: ChunkWriter) -> @Task<@Result<void, string>> {
+    await writeTo(out, "");
+    return;
+}
+
+// The renderer's refusal as the failure text, "" when it rendered.
+fn outcomeOf(render: PageRenderer, req: Request, out: ChunkWriter) -> @Task<string> {
+    val r: @Result<void, string> = await render(req, out);
+    return case r {
+        Ok(_) -> "";
+        Error(msg) -> msg;
+    };
+}
+
 fn noRenderer() -> PageRenderer {
-    return { req, out -> writeTo(out, "") };
+    return { req, out -> writeNothing(out) };
 }
 
 // One render of `path` in its own front 62 frame: `<status>\t<touched>\t<reason>\t<failure>`
@@ -247,7 +261,7 @@ pub fn renderOnce(path: string, strict: bool) -> Rendered {
     val _f = beginRequest(RequestScope(id: "prerender", phase: RequestPhase.Render, method: "GET", path: path, query: "", headersWire: "", strict: strict));
     val _b = rkSsrBegin();
     val pageReq: Request = rkSsrPageRequest(rkMakeRequest("GET", path, "{}", "{}", "{}", ""), found.params);
-    val failure: string = rkStaticHidden({ -> rkSsrGuard({ -> render(pageReq, chunkWriter()) }) });
+    val failure: string = rkStaticHidden({ -> rkSsrGuard({ -> outcomeOf(render, pageReq, chunkWriter()) }) });
     val touched = isDynamic();
     val reason = dynamicReason();
     val _e = endRequest();

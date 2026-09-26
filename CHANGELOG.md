@@ -2,6 +2,39 @@
 
 ## Unreleased
 
+### The debt rows (botopink `03-rakun`)
+
+- JSON goes through std's `json`: `manifestDependencies` reads `botopink.json`
+  with `json.decode` and refuses a malformed manifest (`manifestShapeProblem`)
+  instead of scanning it; the actuator's details check is `isJsonObject` over
+  `json.decode` (the `json_object_ok` cell is gone); the `db` indicator writes
+  its details with `json.object` / `json.quote`.
+- `rakun-app`: `PageRenderer` answers `@Task<@Result<void, string>>`
+  (decision 130); an `Error(msg)` is a failed render like a raise — 500 before
+  the first chunk, closed after, the message logged under a correlation digest
+  and never written. `splitQuery` / `encodeQuery` are gone: `queryDict` is std's
+  `querystring.parse` and refuses a malformed component. `matchPage` /
+  `appResponse` narrow the optional match instead of a dummy fallback.
+- `absolutePath` knows a Windows absolute path (`C:\certs\server.pem`,
+  `c:/certs`, `\\host\share`) and never joins it onto the working directory
+  (`isWindowsAbsolute`).
+- `#[configurationProperties]`: an `Array<string>` field binds as a list like
+  `string[]`; a list of another element type is refused at the annotation; the
+  empty-`typeName` arm is gone (`@Decl` spells every type).
+- The "declared parameter defaults are never applied" notes are re-measured: a
+  closed default of a function, a record field or a method applies across a
+  module boundary, so the notes that said otherwise are gone; what stays is
+  narrower — a decorator argument's declared default is not applied (the
+  comptime call fails), and `@Decl.Field` carries no default.
+- `#[transactional]` / `#[methodSecurity]`: the "type reflection loses"
+  refusal is gone — `@Decl` spells every type, so a proxy forwards an `i32[]`
+  parameter and an `Array<string>` return; `#[halResource]` names the field's
+  spelled type in its refusal.
+- Graceful shutdown's socket half is front 04's: `rkStopAccepting`, `rkDrain`
+  and `rkConnectionCount` are core cells in `runtime.bp`, asserted by the core
+  (a closed listening socket refuses a new connection while an open one still
+  answers); `rakun-web`'s `shutdown.bp` imports them.
+
 ### Static files (botopink front 82)
 
 - `rakun-web`'s `static` entry at +150: roots, containment before any

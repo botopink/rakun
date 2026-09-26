@@ -6,6 +6,11 @@ import {io: {fs, env}} from "std";
 import {Request, rkSetProp, rkProp, beginRequest, endRequest, RequestScope, RequestPhase, rkReqPutSlot, cookies} from "rakun";
 import {rkAppReset, rkAppRegisterPage, registerRoute} from "file_router";
 import {PageRenderer, ChunkWriter, writeTo} from "ssr";
+
+fn textBody(out: ChunkWriter, text: string) -> @Task<@Result<void, string>> {
+    await writeTo(out, text);
+    return;
+}
 import {route_kinds: {RouteKind, routeKindOf}} from "routing";
 import {CacheScope, cachePolicy, cacheLifeOf, cachePeek, revalidateTag} from "rakun-cache/cache";
 import {SegmentConfig, DynamicMode, FetchCache, defaultSegmentConfig, registerSegmentConfig} from "segment_config";
@@ -22,39 +27,42 @@ declare fn sleepMs(ms: i32) -> i32;
 // ── renderers ───────────────────────────────────────────────────────────────
 
 fn textPage(label: string) -> PageRenderer {
-    return { req, out -> writeTo(out, label) };
+    return { req, out -> textBody(out, label) };
 }
 
 fn propPage(key: string) -> PageRenderer {
     return { req, out -> propBody(out, key) };
 }
 
-fn propBody(out: ChunkWriter, key: string) -> @Task<void> {
+fn propBody(out: ChunkWriter, key: string) -> @Task<@Result<void, string>> {
     val _c = rkStaticBump("renders:" + key);
     if (rkProp(key + ".fail") == "1") @panic("regeneration failed on purpose");
     val slow = rkProp(key + ".slow");
     val _s = if (slow != "") sleepMs(3000) else 0;
     await writeTo(out, "v=" + rkProp(key));
+    return;
 }
 
 fn cookiePage() -> PageRenderer {
     return { req, out -> cookieBody(out) };
 }
 
-fn cookieBody(out: ChunkWriter) -> @Task<void> {
+fn cookieBody(out: ChunkWriter) -> @Task<@Result<void, string>> {
     val c = cookies().get("session");
     await writeTo(out, "session");
+    return;
 }
 
 fn sleepyPage(ms: i32) -> PageRenderer {
     return { req, out -> sleepyBody(out, ms) };
 }
 
-fn sleepyBody(out: ChunkWriter, ms: i32) -> @Task<void> {
+fn sleepyBody(out: ChunkWriter, ms: i32) -> @Task<@Result<void, string>> {
     val _g = rkStaticGaugeEnter("renders");
     val _s = sleepMs(ms);
     val _x = rkStaticGaugeExit("renders");
     await writeTo(out, "slept");
+    return;
 }
 
 fn fresh() -> i32 {

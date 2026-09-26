@@ -19,7 +19,7 @@
 %%% MODULE ATOM. `rakun_actuator`, never a module basename the build emits.
 -module(rakun_actuator).
 
--export([run_health/2, json_object_ok/1]).
+-export([run_health/2]).
 -export([invoke_endpoint/2]).
 -export([cache_get/1, cache_put/3, cache_reset/0]).
 -export([meta_put/2, meta_get/1, meta_reset/0]).
@@ -149,13 +149,6 @@ reason_text({_Tag, M, _}) when is_binary(M) -> M;
 reason_text(R) -> fmt(R).
 
 fmt(R) -> iolist_to_binary(io_lib:format("~p", [R])).
-
-json_object_ok(Text) ->
-    try json:decode(Text) of
-        M when is_map(M) -> true;
-        _ -> false
-    catch _:_ -> false
-    end.
 
 %% ═══ endpoints ═══════════════════════════════════════════════════════════════
 

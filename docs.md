@@ -1013,8 +1013,8 @@ pub type RakunMailAutoConfiguration(
 ```
 
 The markers are conjunctive and read top to bottom; `"*"` on a property means
-"set and non-empty" and is spelled out because a declared parameter default is
-never applied at a call site. A type is named by a STRING because a decorator
+"set and non-empty" and is spelled out because a decorator argument's declared
+default is not applied. A type is named by a STRING because a decorator
 argument is an ordinary value and there is no type-of-type — the same spelling
 Spring reaches with `excludeName`. There is no `anyOf` and no expression
 language: a configuration that needs a disjunction splits into two, which is
@@ -1278,8 +1278,8 @@ if (report.isValid() == false) return Response.withStatus(400, report.toProblemD
 | `#[constraint(name)]` | `string` | the registered constraint answers `""` |
 
 There is **no `#[future]`**: the name reads as the `future` effect annotation
-that decision 118 removed. `#[sizeBetween]` names both bounds because a declared parameter
-default is never applied at a call site.
+that decision 118 removed. `#[sizeBetween]` names both bounds because a decorator argument's
+declared default is not applied.
 
 A marker on a field whose type it cannot check is a **located compile error**,
 not a row that quietly always holds — `#[notBlank]` on an `i32` refuses, it does

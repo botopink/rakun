@@ -11,6 +11,7 @@ import {rkEnter, rkDone, rkSingleton, rkBuildCount};
 import {rkSetProp, rkProp};
 import {rkRegisterRoute, rkRouteCount, rkDispatchHttp, rkServe};
 import {rkSetReplyHeader, rkReplyHeaders, rkBoot};
+import {rkStopAccepting, rkDrain, rkConnectionCount};
 import {toI32};
 import {async, io: {net, fs, process, env}, io.net.Socket} from "std";
 
@@ -252,6 +253,20 @@ test "rakun server: a slow request on one connection does not hold up another" {
     assert bodyOf(get(port, "/srv/hello")) == "hello";
     assert bodyOf(readResponse(slow)) == "slow";
     val _c = slow.close();
+}
+
+test "rakun server: stop accepting closes the listening socket and keeps the open connections" {
+    val port = start();
+    val held = open(port);
+    val _a = held.send("GET /srv/hello HTTP/1.1\r\nHost: x\r\n\r\n");
+    assert statusOf(readResponse(held)) == "200";
+    val _x = rkStopAccepting();
+    assert net.connect("127.0.0.1", port, 500).isError();
+    val _b = held.send("GET /srv/hello HTTP/1.1\r\nHost: x\r\n\r\n");
+    assert bodyOf(readResponse(held)) == "hello";
+    val _d = rkDrain(1000);
+    assert rkConnectionCount() == 0;
+    val _c = held.close();
 }
 
 test "rakun server: killing a connection process mid-request leaves another in-flight request alone" {
