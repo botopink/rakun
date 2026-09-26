@@ -2471,13 +2471,12 @@ and `rkTxRun` refuses any propagation but `required` at run time. The proxy runs
 the DEFAULT datasource. The application site imports `transactional`, `rkTxRun` and
 the core's `rkSingleton`.
 
-Reflection keeps only a type's HEAD: `Array<string>` reflects as `Array`, `@Result<…>`
-as `Result`, and `T[]`, `?T` and a function type as `""`; `Method` carries no
-visibility. So the proxy forwards every reflected method (a private one too),
-refuses a method whose PARAMETER type is lossy (`""` or a generic head) or whose
-RETURN type is a generic head, naming the method and parameter, and emits a `""`
-return as a void method — the inner call still runs in the transaction, and a caller
-that used the value fails to compile at its own call site.
+Reflection spells every parameter and return type as written (`i32[]`,
+`Array<string>`, `@Result<…>`, a function type); `Method` carries no visibility.
+So the proxy redeclares each method's signature verbatim and forwards every
+reflected method (a private one too); a method with no return type is emitted as
+a void method. `test/sql_build_test.bp` builds a proxy over an `i32[]` parameter
+and an `Array<string>` return.
 
 The statement log (`rkSqlLogOn()`, `rkSqlLogLines()`, `rkSqlLogReset()`) records
 each statement as written with its params (`SELECT … WHERE id = :id  params=[id=1]`)
@@ -3041,7 +3040,7 @@ profile active fails at boot); `rakun.security.password.encoder`;
   on the type); unmarked everywhere is `authenticated`. `#[permitAll]` still reads the
   context, so ANY proxy method outside a request raises. `#[preAuthorize]` fails the
   build naming the supported forms; `#[secured]` with an expression fails too;
-  reflection-lossy parameters fail as for `<Type>Tx`.
+  signatures are redeclared verbatim as for `<Type>Tx`.
 - **CSRF**: double-submit (`XSRF-TOKEN` cookie, `SameSite=Strict`, readable by
   script; `X-CSRF-Token` header), required on every method but GET/HEAD/OPTIONS/TRACE
   when the request carries AMBIENT credentials: the session cookie OR Basic

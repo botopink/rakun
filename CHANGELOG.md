@@ -26,6 +26,10 @@
   module boundary, so the notes that said otherwise are gone; what stays is
   narrower — a decorator argument's declared default is not applied (the
   comptime call fails), and `@Decl.Field` carries no default.
+- `#[transactional]` / `#[methodSecurity]`: the "type reflection loses"
+  refusal is gone — `@Decl` spells every type, so a proxy forwards an `i32[]`
+  parameter and an `Array<string>` return; `#[halResource]` names the field's
+  spelled type in its refusal.
 
 ### Static files (botopink front 82)
 

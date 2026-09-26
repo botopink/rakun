@@ -27,14 +27,10 @@
 //// The application site imports `rkTxRun` (rakun-data) and `rkSingleton`
 //// (rakun), and the type needs a stereotype for `__rkMake_<Type>()`.
 ////
-//// WHAT REFLECTION LOSES, AND THE REFUSAL. A reflected parameter or return
-//// type keeps only its head: `Array<string>` and `@Result<T, E>` reflect as
-//// `Array` and `Result`, and an optional, an array (`T[]`) or a function type
-//// reflect as `""`. A proxy cannot redeclare a signature it cannot read, so a
-//// method with such a PARAMETER, or with a generic RETURN, fails the build
-//// naming the method. A `""` return is emitted as a void method — the inner
-//// call still runs inside the transaction, and a caller that used the value
-//// fails to compile at its own call site rather than getting a wrong one.
+//// SIGNATURES ARE REDECLARED VERBATIM. `@Decl` spells every parameter and
+//// return type as written (`i32[]`, `Array<string>`, `@Result<T, E>`, a
+//// function type), so the proxy redeclares each method's signature as it
+//// reads it; a method with no return type is emitted as a void method.
 //// Every reflected method is forwarded: `Method` carries no visibility, so a
 //// private method is forwarded too.
 ////
@@ -44,7 +40,6 @@
 
 pub fn transactional(comptime decl: @Decl) {
     var methods: Array<string> = [];
-    var lossy = "";
     var refused = "";
     decl.methods.forEach({ m ->
         var plain = false;
@@ -60,18 +55,12 @@ pub fn transactional(comptime decl: @Decl) {
         var params: Array<string> = [];
         var args: Array<string> = [];
         m.params.forEach({ p ->
-            val lost = p.typeName == "" || p.typeName == "Array" || p.typeName == "Result" || p.typeName == "Task" || p.typeName == "Map" || p.typeName == "Dict" || p.typeName == "Set" || p.typeName == "Option";
-            val note = if ((lost && p.name != "self" && lossy == "")) decl.name + "." + m.name + " parameter '" + p.name + "'" else lossy;
-            lossy = note;
             if (p.name != "self") {
                 params.push(p.name + ": " + p.typeName);
                 args.push(p.name);
             };
         });
         val ret = m.returnType;
-        val lostRet = ret == "Array" || ret == "Result" || ret == "Task" || ret == "Map" || ret == "Dict" || ret == "Set" || ret == "Option";
-        val retNote = if ((lostRet && lossy == "")) decl.name + "." + m.name + " return type '" + ret + "'" else lossy;
-        lossy = retNote;
         val call = "self.inner." + m.name + "(" + args.join(", ") + ")";
         val label = decl.name + "." + m.name;
         val head = if (params.length > 0) "pub fn " + m.name + "(self: Self, " + params.join(", ") + ")" else "pub fn " + m.name + "(self: Self)";
@@ -90,7 +79,6 @@ pub fn transactional(comptime decl: @Decl) {
     if (decl.kind != DeclKind.Type) decl.fail("#[transactional] must annotate a type - a decorator cannot wrap a method body, so the transaction lives on the <Type>Tx proxy the type-level marker emits");
     if (decl.variants.length > 0) decl.fail("#[transactional] must annotate a type with fields, not an enum");
     if (refused != "") decl.fail("#[transactional]: " + refused + " - only REQUIRED is implemented (a nested call joins the open transaction); REQUIRES_NEW and NESTED (savepoints) are not implemented and are refused rather than ignored");
-    if (lossy != "") decl.fail("#[transactional] cannot forward " + lossy + ": reflection keeps only a type's head (an optional, an array, a function type or a generic argument is lost), so the proxy cannot redeclare it - pass a record instead, or move the method to a type without #[transactional]");
 }
 
 pub fn noTransaction(comptime decl: @Decl) {
