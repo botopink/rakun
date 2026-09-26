@@ -29,7 +29,7 @@
 //// `rakun-actuator`.
 
 import {Request, rkProp, rkPropIntOr} from "rakun";
-import {json} from "std";
+import {json, json.Json} from "std";
 import {
     Health,
     EndpointResponse,
@@ -42,9 +42,6 @@ import {rkPropDuration, Duration} from "rakun/config";
 
 #[@External.Erlang("rakun_actuator", "run_health")]
 pub declare fn rkActuatorRunHealth(jobs: string, unused: string) -> string;
-
-#[@External.Erlang("rakun_actuator", "json_object_ok")]
-pub declare fn rkActuatorJsonObject(text: string) -> bool;
 
 #[@External.Erlang("rakun_actuator", "disk_facts")]
 pub declare fn rkActuatorDiskFacts(path: string, thresholdBytes: i32) -> string;
@@ -123,6 +120,18 @@ fn errorDetails(reason: string) -> string {
     return json.object([#("error", json.quote(reason))]);
 }
 
+// Whether `text` is one JSON object, read by std's `json.decode` (RFC 8259: a
+// duplicate member or trailing text is not an object this host vouches for).
+pub fn isJsonObject(text: string) -> bool {
+    return case json.decode(text) {
+        Ok(v) -> case v {
+            Obj(members: _) -> true;
+            _ -> false;
+        };
+        Error(_e) -> false;
+    };
+}
+
 // One `id\tkind\tpayload` line from the host becomes a component, and every
 // rule of the contract is applied here.
 pub fn componentOf(line: string) -> ComponentHealth {
@@ -137,7 +146,7 @@ pub fn componentOf(line: string) -> ComponentHealth {
     val status: string = statusToken(a);
     if (knownStatuses().indexOf(status) < 0) return ComponentHealth(id: id, status: "UNKNOWN", details: errorDetails("unknown status " + a));
     val details: string = if (b.trim() == "") "{}" else b;
-    if (rkActuatorJsonObject(details) == false) return ComponentHealth(id: id, status: status, details: errorDetails("details are not a JSON object"));
+    if (isJsonObject(details) == false) return ComponentHealth(id: id, status: status, details: errorDetails("details are not a JSON object"));
     return ComponentHealth(id: id, status: status, details: details);
 }
 

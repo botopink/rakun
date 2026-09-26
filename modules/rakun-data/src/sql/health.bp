@@ -27,6 +27,7 @@ import {rkScan, rkSingleton, rkEnter, rkDone, rkProp, rkPropInt, component} from
 import {Health, healthDown, healthIndicator, rkRegisterHealthIndicator} from "rakun-actuator-api";
 import {rkPoolStarted, rkDataSourceArm, defaultDataSourceName} from "datasource";
 import {runStatement} from "sql/template";
+import {json} from "std";
 
 // `SELECT 1` on every arm this front ships; the ETS arm answers it as a
 // literal select.
@@ -34,16 +35,12 @@ pub fn livenessStatement(arm: string) -> string {
     return "SELECT 1";
 }
 
-fn jsonText(s: string) -> string {
-    return "\"" + s.replaceAll("\\", "\\\\").replaceAll("\"", "\\\"").replaceAll("\n", "\\n") + "\"";
-}
-
 pub fn dbHealth(name: string) -> Health {
-    if (rkPoolStarted(name) == false) return healthDown("{\"error\":" + jsonText("the datasource '" + name + "' has not been started") + "}") else {
+    if (rkPoolStarted(name) == false) return healthDown(json.object([#("error", json.quote("the datasource '" + name + "' has not been started"))])) else {
         val arm = rkDataSourceArm(name);
         val statement = livenessStatement(arm);
         val o = runStatement(name, statement, []);
-        if (o.ok) return Health(status: "UP", details: "{\"database\":" + jsonText(arm) + ",\"validationQuery\":" + jsonText(statement) + "}") else return healthDown("{\"database\":" + jsonText(arm) + ",\"error\":" + jsonText(o.error) + "}");
+        if (o.ok) return Health(status: "UP", details: json.object([#("database", json.quote(arm)), #("validationQuery", json.quote(statement))])) else return healthDown(json.object([#("database", json.quote(arm)), #("error", json.quote(o.error))]));
     };
 }
 

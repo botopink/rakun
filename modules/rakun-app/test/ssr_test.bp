@@ -8,7 +8,7 @@
 //// buffer); the second half over front 04's listener, where the writer streams
 //// HTTP/1.1 chunks and a raw client reads them as bytes.
 
-import {testing.asserts, async} from "std";
+import {testing.asserts, async, collections.Dict} from "std";
 import {Request, Response, rkSetProp, rkDispatchHttp, rkServe} from "rakun";
 import {rkAppReset} from "file_router";
 import {
@@ -25,8 +25,8 @@ import {
     closeOut,
     rkSsrBegin,
     rkSsrHeader,
-    splitQuery,
-    encodeQuery,
+    queryDict,
+    renderErrorProblem,
 } from "ssr";
 import {RequestPhase, requestPhase, isDynamic, cookies, cookieDefaults} from "rakun/request_context";
 
@@ -40,65 +40,72 @@ fn chunks(parts: string[]) -> PageRenderer {
     return { req, out -> writeAll(out, parts) };
 }
 
-fn writeAll(out: ChunkWriter, parts: string[]) -> @Task<void> {
+fn writeAll(out: ChunkWriter, parts: string[]) -> @Task<@Result<void, string>> {
     for (parts) { p ->
         val _w = writeTo(out, p);
     };
+    return;
 }
 
 fn redirecting() -> PageRenderer {
     return { req, out -> redirectBody(out) };
 }
 
-fn redirectBody(out: ChunkWriter) -> @Task<void> {
+fn redirectBody(out: ChunkWriter) -> @Task<@Result<void, string>> {
     val _st = setStatusOn(out, 307);
     val _sh = setHeaderOn(out, "location", "/login");
     await closeOut(out);
+    return;
 }
 
 fn ownNotFound() -> PageRenderer {
     return { req, out -> notFoundBody(out) };
 }
 
-fn notFoundBody(out: ChunkWriter) -> @Task<void> {
+fn notFoundBody(out: ChunkWriter) -> @Task<@Result<void, string>> {
     val _st = setStatusOn(out, 404);
     await writeTo(out, "nothing here");
+    return;
 }
 
 fn lateStatus() -> PageRenderer {
     return { req, out -> lateBody(out) };
 }
 
-fn lateBody(out: ChunkWriter) -> @Task<void> {
+fn lateBody(out: ChunkWriter) -> @Task<@Result<void, string>> {
     await writeTo(out, "first");
     val _st = setStatusOn(out, 500);
+    return;
 }
 
 fn afterClose() -> PageRenderer {
     return { req, out -> afterCloseBody(out) };
 }
 
-fn afterCloseBody(out: ChunkWriter) -> @Task<void> {
+fn afterCloseBody(out: ChunkWriter) -> @Task<@Result<void, string>> {
     await closeOut(out);
     await writeTo(out, "too late");
+    return;
 }
 
 fn phaseProbe() -> PageRenderer {
     return { req, out -> phaseBody(out) };
 }
 
-fn phaseBody(out: ChunkWriter) -> @Task<void> {
+fn phaseBody(out: ChunkWriter) -> @Task<@Result<void, string>> {
     val inRender: bool = requestPhase() == RequestPhase.Render;
     await writeTo(out, if (inRender) "render" else "other");
+    return;
 }
 
 fn cookieWriter() -> PageRenderer {
     return { req, out -> cookieBody(out) };
 }
 
-fn cookieBody(out: ChunkWriter) -> @Task<void> {
+fn cookieBody(out: ChunkWriter) -> @Task<@Result<void, string>> {
     val _c = setCookieNow();
     await writeTo(out, "unreachable");
+    return;
 }
 
 fn setCookieNow() -> i32 {
@@ -109,39 +116,60 @@ fn navRaiser() -> PageRenderer {
     return { req, out -> navBody(out) };
 }
 
-fn navBody(out: ChunkWriter) -> @Task<void> {
+fn navBody(out: ChunkWriter) -> @Task<@Result<void, string>> {
     val _n = raiseNav();
     await writeTo(out, "unreachable");
+    return;
 }
 
 #[@External.Erlang("""erlang:error({nav, <<"nav:not-found">>})""")]
 declare fn raiseNav() -> i32;
 
+fn erroring() -> PageRenderer {
+    return { req, out -> erroringBody(out) };
+}
+
+fn erroringBody(out: ChunkWriter) -> @Task<@Result<void, string>> {
+    throw "the post store is down: secret-dsn";
+}
+
+fn lateErroring() -> PageRenderer {
+    return { req, out -> lateErroringBody(out) };
+}
+
+fn lateErroringBody(out: ChunkWriter) -> @Task<@Result<void, string>> {
+    await writeTo(out, "shell");
+    throw "the tail is down: secret-dsn";
+}
+
 fn paramsEcho() -> PageRenderer {
     return { req, out -> paramsBody(req, out) };
 }
 
-fn paramsBody(req: Request, out: ChunkWriter) -> @Task<void> {
+fn paramsBody(req: Request, out: ChunkWriter) -> @Task<@Result<void, string>> {
     await writeTo(out, req.param("slug") + "|" + req.query("tab"));
+    return;
 }
 
 fn slowSecond() -> PageRenderer {
     return { req, out -> slowBody(out) };
 }
 
-fn slowBody(out: ChunkWriter) -> @Task<void> {
+fn slowBody(out: ChunkWriter) -> @Task<@Result<void, string>> {
     await writeTo(out, "shell;");
     val _s = sleepMs(400);
     await writeTo(out, "tail");
+    return;
 }
 
 fn plainText() -> PageRenderer {
     return { req, out -> plainBody(out) };
 }
 
-fn plainBody(out: ChunkWriter) -> @Task<void> {
+fn plainBody(out: ChunkWriter) -> @Task<@Result<void, string>> {
     val _sh = setHeaderOn(out, "content-type", "text/plain");
     await writeTo(out, "x");
+    return;
 }
 
 #[@External.Erlang("rakun_request_context", "sleep")]
@@ -223,6 +251,27 @@ test "rakun ssr: a raised navigation reason is a failed render, 500 - not 404" {
     assert res.status == 500;
 }
 
+test "rakun ssr: a renderer's Error before the first chunk is a 500, its message never on the wire" {
+    val _f = fresh();
+    val _p = page("erroring", erroring());
+    val res: Response = get("/erroring");
+    assert res.status == 500;
+    assert res.body.contains("secret-dsn") == false;
+    assert res.body.contains("post store") == false;
+}
+
+test "rakun ssr: a renderer's Error after the first chunk closes the response it began" {
+    val _f = fresh();
+    val _p = page("late-error", lateErroring());
+    val res: Response = get("/late-error");
+    assert res.status == 200;
+    assert res.body == "shell";
+}
+
+test "rakun ssr: the Error text names the renderer's message for the log" {
+    assert renderErrorProblem("boom") == "rakun ssr: the page renderer answered Error: boom";
+}
+
 test "rakun ssr: the render runs in phase Render, where a cookie write raises" {
     val _f = fresh();
     val _p = page("phase", phaseProbe());
@@ -292,9 +341,26 @@ declare fn toInt(s: string) -> i32;
 
 // ── the query codec ─────────────────────────────────────────────────────────
 
-test "rakun ssr: splitQuery / encodeQuery percent-code, which std's querystring does not" {
-    val pairs = splitQuery("?a=%20b&c=d=e&flag");
-    assert pairs.length == 3;
-    assert pairs.map({ p -> p._0 + "=" + p._1 }).join("&") == "a= b&c=d=e&flag=";
-    assert encodeQuery([#("a b", "c;d")]) == "a%20b=c%3Bd";
+fn queryProblem(query: string) -> string {
+    return case queryDict(query) {
+        Ok(_d) -> "";
+        Error(e) -> e;
+    };
+}
+
+test "rakun ssr: the query dict is std's querystring, first `=` splits, last duplicate wins" {
+    val d = queryDict("?a=%20b&c=d=e&flag&a=2").unwrapOr(Dict.empty());
+    assert d.size() == 3;
+    assert (d.at("a") ?? "?") == "2";
+    assert (d.at("c") ?? "?") == "d=e";
+    assert (d.at("flag") ?? "?") == "";
+    assert (queryDict("x=a+b").unwrapOr(Dict.empty()).at("x") ?? "?") == "a+b";
+}
+
+test "rakun ssr: a malformed query component is refused, never kept as written" {
+    assert queryProblem("a=%zz") == "querystring.parse: a `%` not followed by two hex digits";
+    assert queryProblem("a=100%") == "querystring.parse: a `%` not followed by two hex digits";
+    assert queryProblem("a=%0A") == "querystring.parse: an escape that decodes to a control character";
+    assert queryProblem("a=%C3") == "querystring.parse: an escape sequence that is not UTF-8";
+    assert queryProblem("a=%7E") == "";
 }

@@ -35,10 +35,10 @@
 //// service has to establish an authentication explicitly
 //// (`withAuthentication`).
 ////
-//// REFLECTION keeps only a type's head, so — exactly as for `<Type>Tx` — a
-//// method whose parameter type reflection loses, or whose return is a generic
-//// head, fails the build naming it, and every reflected method is forwarded
-//// (`Method` carries no visibility).
+//// REFLECTION spells every parameter and return type as written (`i32[]`,
+//// `@Result<User, string>`), so — exactly as for `<Type>Tx` — the proxy
+//// redeclares each method's signature verbatim, and every reflected method is
+//// forwarded (`Method` carries no visibility).
 
 import {raiseProblem} from "rakun-web";
 import {Authentication, currentAuthentication, hasAuthority, rkSecNoteDecision} from "principal";
@@ -111,7 +111,6 @@ pub fn methodSecurity(comptime decl: @Decl) {
         typeRequirement = p;
     });
     var methods: Array<string> = [];
-    var lossy = "";
     var expression = "";
     decl.methods.forEach({ m ->
         var required = typeRequirement;
@@ -126,18 +125,12 @@ pub fn methodSecurity(comptime decl: @Decl) {
         var params: Array<string> = [];
         var args: Array<string> = [];
         m.params.forEach({ p ->
-            val lost = p.typeName == "" || p.typeName == "Array" || p.typeName == "Result" || p.typeName == "Task" || p.typeName == "Map" || p.typeName == "Dict" || p.typeName == "Set" || p.typeName == "Option";
-            val note = if ((lost && p.name != "self" && lossy == "")) decl.name + "." + m.name + " parameter '" + p.name + "'" else lossy;
-            lossy = note;
             if (p.name != "self") {
                 params.push(p.name + ": " + p.typeName);
                 args.push(p.name);
             };
         });
         val ret = m.returnType;
-        val lostRet = ret == "Array" || ret == "Result" || ret == "Task" || ret == "Map" || ret == "Dict" || ret == "Set" || ret == "Option";
-        val retNote = if ((lostRet && lossy == "")) decl.name + "." + m.name + " return type '" + ret + "'" else lossy;
-        lossy = retNote;
         val call = "self.inner." + m.name + "(" + args.join(", ") + ")";
         val head = if (params.length > 0) "pub fn " + m.name + "(self: Self, " + params.join(", ") + ")" else "pub fn " + m.name + "(self: Self)";
         val sig = if (ret != "") head + " -> " + ret else head;
@@ -150,5 +143,4 @@ pub fn methodSecurity(comptime decl: @Decl) {
     if (decl.kind != DeclKind.Type) decl.fail("#[methodSecurity] must annotate a type - a decorator cannot wrap a method body, so the check lives on the <Type>Sec proxy the type-level marker emits");
     if (decl.variants.length > 0) decl.fail("#[methodSecurity] must annotate a type with fields or methods, not an enum - an enum has no methods to secure");
     if (expression != "") decl.fail("#[preAuthorize] is not ported: expression-based security needs an expression language and botopink has none (" + expression + "). Supported forms: #[secured(\"ROLE\")], #[secured(\"ROLE_A,ROLE_B\")] (any of) and #[permitAll]; write a subject check as ordinary code in the method");
-    if (lossy != "") decl.fail("#[methodSecurity] cannot forward " + lossy + ": reflection keeps only a type's head (an optional, an array, a function type or a generic argument is lost), so the proxy cannot redeclare it - pass a record instead, or move the method to a type without #[methodSecurity]");
 }

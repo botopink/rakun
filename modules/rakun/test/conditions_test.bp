@@ -65,6 +65,7 @@ import {
     moduleList,
     moduleListIn,
     manifestDependencies,
+    manifestShapeProblem,
     manifestName,
     manifestMissingProblem,
 } from "autoconfig_registry";
@@ -303,16 +304,37 @@ test "rakun conditions: an empty blob matches" {
 
 // ── the manifest ────────────────────────────────────────────────────────────
 
+fn depsOf(text: string) -> string {
+    val none: string[] = [];
+    return manifestDependencies(text).unwrapOr(none).join(",");
+}
+
+fn manifestRefusal(text: string) -> string {
+    return case manifestDependencies(text) {
+        Ok(_names) -> "";
+        Error(e) -> e;
+    };
+}
+
 test "rakun conditions: both on-disk shapes of dependencies normalise to one list" {
-    assert manifestDependencies("{\"dependencies\": [\"rakun\", \"std\"]}").join(",") == "rakun,std";
-    assert manifestDependencies("{\"dependencies\": {\"rakun\": {\"workspace\": true}, \"std\": {}}}").join(",") == "rakun,std";
-    assert manifestDependencies("{\"name\": \"x\", \"targets\": [\"erlang\"]}").length == 0;
-    assert manifestDependencies("{\"dependencies\": {}}").length == 0;
+    assert depsOf("{\"dependencies\": [\"rakun\", \"std\"]}") == "rakun,std";
+    assert depsOf("{\"dependencies\": {\"rakun\": {\"workspace\": true}, \"std\": {}}}") == "rakun,std";
+    assert manifestDependencies("{\"name\": \"x\", \"targets\": [\"erlang\"]}").isOk();
+    assert depsOf("{\"name\": \"x\", \"targets\": [\"erlang\"]}") == "";
+    assert manifestDependencies("{\"dependencies\": {}}").isOk();
+    assert depsOf("{\"dependencies\": {}}") == "";
 }
 
 test "rakun conditions: a nested value is never mistaken for a dependency name" {
-    val deps = manifestDependencies("{\"dependencies\": {\"rakun\": {\"workspace\": true, \"version\": \"0.0.1\"}}}");
-    assert deps.join(",") == "rakun";
+    assert depsOf("{\"dependencies\": {\"rakun\": {\"workspace\": true, \"version\": \"0.0.1\"}}}") == "rakun";
+}
+
+test "rakun conditions: a manifest std's json refuses is refused, never scanned" {
+    assert manifestRefusal("{\"dependencies\": [\"rakun\",]}").startsWith(manifestShapeProblem("is not JSON - "));
+    assert manifestRefusal("{\"dependencies\": [\"a\"], \"dependencies\": [\"b\"]}").startsWith(manifestShapeProblem("is not JSON - "));
+    assert manifestRefusal("[\"rakun\"]") == manifestShapeProblem("is not a JSON object");
+    assert manifestRefusal("{\"dependencies\": \"rakun\"}") == manifestShapeProblem("declares `dependencies` as neither an array of names nor an object keyed by name");
+    assert manifestRefusal("{\"dependencies\": [\"rakun\", 1]}") == manifestShapeProblem("lists a dependency that is not a string");
 }
 
 test "rakun conditions: the manifest is read off disk in both shapes" {

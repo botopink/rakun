@@ -1068,11 +1068,11 @@ Two deliberate departures from the spec, both arguable and both here:
   the `SCREAMING_SNAKE` one. A decorator body cannot call a helper, so the
   emitter would have to inline the string surgery in every marker; and the
   reader covers three spellings where the emitter would have produced one.
-- **A list field is recognised by an EMPTY `typeName`.** `@Decl` renders no name
-  for a generic type: `hosts: string[]` reflects as `typeName == ""`, exactly as
-  `Array<string>` would. An empty name is read as a list, which is right for
-  every array and wrong for any other generic field. It is the only signal the
-  reflection offers and it is a gap worth closing in `@Decl` rather than around.
+- **A list field is `string[]` or `Array<string>`.** `@Decl` spells a field's
+  type as written, so both bind through `rkPropList` and the catalogue shows the
+  spelling. A list of anything else (`i32[]`, `Array<Duration>`) has no reader
+  and is refused at the annotation (`cannot bind the list field …`), never
+  bound as a scalar.
 
 ### The key catalogue
 
@@ -1513,7 +1513,7 @@ renderers. What stays is the seam, and it points inwards (decision 114):
 ```bp
 pub type ChunkWriter(setStatus: fn(code: i32) -> void, setHeader: fn(name: string, value: string) -> void,
                      write: fn(chunk: string) -> @Task<void>, close: fn() -> @Task<void>)
-pub type PageRenderer = fn(req: Request, out: ChunkWriter) -> @Task<void>;
+pub type PageRenderer = fn(req: Request, out: ChunkWriter) -> @Task<@Result<void, string>>;
 pub fn page(pattern: string, render: PageRenderer) -> i32      // front 22's rkAppRegisterPage
 pub fn servePage(req: Request, out: ChunkWriter) -> @Task<i32> // the status written
 ```
@@ -1525,8 +1525,16 @@ pub fn servePage(req: Request, out: ChunkWriter) -> @Task<i32> // the status wri
   parameters whose `query` read calls front 62's `markDynamic("searchParams")`
   (under `rakun.render.strict=true` that read RAISES — a static export's
   failure). A raise out of the renderer — a navigation reason included; page
-  signals are the HTML library's (decision 117 rule 1) — answers 500 when
-  nothing was written yet. The response is closed exactly once.
+  signals are the HTML library's (decision 117 rule 1) — and an `Error(msg)` it
+  answers are one failed render (decision 130): 500 when nothing was written
+  yet, the response closed otherwise, the reason (`renderErrorProblem(msg)` for
+  an `Error`) logged by `rakun_ssr:log_failure/1` under a correlation digest and
+  never written. The response is closed exactly once.
+- **A renderer body ends in `return;`.** A `-> @Task<@Result<void, string>>`
+  body that falls off its end is not an `Ok` on erlang (it answers its last
+  value, and the dispatch reads that as a failed render) — a compiler defect,
+  a `language-gaps.md` row; every renderer here and in the tests returns
+  explicitly.
 - **The writer** (`src/sidecars/rakun_ssr.erl`, per serving process): 200 with
   `Content-Type: text/html; charset=utf-8` unless the renderer said otherwise;
   `setStatus` / `setHeader` after the first `write`, and any call after `close`,
@@ -1545,8 +1553,17 @@ pub fn servePage(req: Request, out: ChunkWriter) -> @Task<i32> // the status wri
   a method call `write/2`), and an imported fn-type alias resolves the names it
   mentions in the importer's scope, so a module writing a `PageRenderer` imports
   `Request` from `rakun` even when it never spells it (`language-gaps.md`).
-- `splitQuery` / `encodeQuery` / `queryDict` (the query codec over std's
-  `encoding`, front 62's `decodeComponent`) and `buildId()` stay here.
+- `queryDict(query) -> @Result<Dict<string, string>, string>` is std's
+  `querystring.parse` folded into a dict (a later duplicate wins); a malformed
+  component is refused, never kept as written (03r-e, std-a). rakun keeps no
+  query codec of its own. `buildId()` stays here.
+- **An optional is read by narrowing**: `matchPage` and `appResponse` test
+  `found != null` and read the match; no dummy `RouteMatch` fallback.
+  `matchPage` binds the narrowed value to `val m: RouteMatch = found;` before
+  reading `m.params.at(k).unwrapOr("")`: on a narrowed optional whose type is
+  another package's, that chain lowers to a bare `unwrapOr/2` on erlang and
+  fails on commonJS (measured with `routing`'s `matchPath`; a `language-gaps.md`
+  row).
 
 ## `route.bp` handlers — `modules/rakun-app/src/route_handler.bp` (front 25)
 
@@ -1750,10 +1767,14 @@ that needs a new KIND of condition adds a record letter and a branch in
 not write the branch twice in two host languages.
 
 The `#[conditionalOnModule]` manifest read is botopink for the same reason: it is
-`std`'s `fs.readText` plus a scanner over `botopink.json`'s `dependencies`, which
-normalises BOTH on-disk shapes (`["rakun"]` and `{"rakun": {…}}`) exactly as
+`std`'s `fs.readText` plus `json.decode` over `botopink.json`
+(`manifestDependencies`, `@Result<string[], string>`), which normalises BOTH
+on-disk shapes of `dependencies` (`["rakun"]` and `{"rakun": {…}}`) exactly as
 `compiler-cli/src/cli/config.zig` does, with fixtures under
-`test/fixtures/autoconfig/` asserting each. A manifest that cannot be read is a
+`test/fixtures/autoconfig/` asserting each. A document `json.decode` refuses (a
+duplicate member, trailing text), a top level that is not an object and a
+`dependencies` that is neither an array of strings nor an object are refused
+by name (`manifestShapeProblem`), never scanned. A manifest that cannot be read is a
 REFUSAL, not a `false`: "this module is not a dependency" and "I could not find
 out" are different answers, and a condition that silently takes the second for
 the first turns every `#[conditionalOnModule]` in the build off without saying so.
@@ -2161,7 +2182,15 @@ that exist — a version outside it is a 400 problem naming them; a version in
 `rakun.web.apiversion.sunset.<v>` is set, `Sunset`. With nothing configured the
 entry passes every request through. `installBuiltins` registers seven entries.
 
-### Step 10 — graceful shutdown (`shutdown.bp`; the socket half in `rakun_runtime.erl`)
+### Step 10 — graceful shutdown (`shutdown.bp`; the socket half is front 04's)
+
+The socket half is the core's: `rkStopAccepting`, `rkDrain` and
+`rkConnectionCount` are declared in `modules/rakun/src/runtime.bp` over
+`rakun_runtime.erl`'s listener and asserted there
+(`test/erlang_runtime_server_test.bp` "stop accepting closes the listening
+socket and keeps the open connections"); `shutdown.bp` imports them from
+`rakun` and only orders the sequence.
+
 
 `gracefulShutdown()` is the ORDER, and nothing else: (1) front 76's
 `readinessDrained()` — `rakun_runtime:readiness_drained/0` calls
@@ -2264,7 +2293,7 @@ Decisions:
 - **The contract** (for the eight indicator fronts): a raise → `DOWN` with
   `{"error":"<reason>"}`; a timeout → `UNKNOWN` with `{"error":"timeout after <n>ms"}`
   and the process killed; an unknown status → `UNKNOWN`; details that are not a JSON
-  object → replaced by an error object; all indicators concurrent. The health body is
+  object (`isJsonObject`: std's `json.decode` reads an `Obj`) → replaced by an error object; all indicators concurrent. The health body is
   `{"status":"<aggregate>"}` — detail visibility and groups are front 76's, which
   renders them from `healthReport()`.
 - **Endpoint CORS** is a rakun-web CORS mapping keyed by the base path, from
@@ -2450,13 +2479,12 @@ and `rkTxRun` refuses any propagation but `required` at run time. The proxy runs
 the DEFAULT datasource. The application site imports `transactional`, `rkTxRun` and
 the core's `rkSingleton`.
 
-Reflection keeps only a type's HEAD: `Array<string>` reflects as `Array`, `@Result<…>`
-as `Result`, and `T[]`, `?T` and a function type as `""`; `Method` carries no
-visibility. So the proxy forwards every reflected method (a private one too),
-refuses a method whose PARAMETER type is lossy (`""` or a generic head) or whose
-RETURN type is a generic head, naming the method and parameter, and emits a `""`
-return as a void method — the inner call still runs in the transaction, and a caller
-that used the value fails to compile at its own call site.
+Reflection spells every parameter and return type as written (`i32[]`,
+`Array<string>`, `@Result<…>`, a function type); `Method` carries no visibility.
+So the proxy redeclares each method's signature verbatim and forwards every
+reflected method (a private one too); a method with no return type is emitted as
+a void method. `test/sql_build_test.bp` builds a proxy over an `i32[]` parameter
+and an `Array<string>` return.
 
 The statement log (`rkSqlLogOn()`, `rkSqlLogLines()`, `rkSqlLogReset()`) records
 each statement as written with its params (`SELECT … WHERE id = :id  params=[id=1]`)
@@ -2474,7 +2502,8 @@ process does not join the caller's transaction — the mark is per process).
 
 `#[component] #[healthIndicator("db")] DbHealthIndicator` checks the default
 datasource: `SELECT 1` through the pool → `UP` with `{"database":…,
-"validationQuery":"SELECT 1"}`, or `DOWN` with the reason; it never raises and never
+"validationQuery":"SELECT 1"}`, or `DOWN` with the reason (written by std's
+`json.object` / `json.quote`); it never raises and never
 boots a datasource nobody started. Because a library module's body does not run on
 erlang (below), `registerDbHealth()` makes the same registration explicitly; the
 application calls it beside `dataSourceBoot()`.
@@ -2831,8 +2860,8 @@ The consumer imports the seams its markers use beside the markers
 Decisions:
 
 - **Three markers, not one `#[scheduled(cron:, fixedRate:, …)]`**: markers take
-  positional arguments and declared parameter defaults are never applied to a
-  decorator. `#[scheduler]` stacks under a STEREOTYPE (its closure is
+  positional arguments and a decorator argument's declared default is not
+  applied (the comptime call fails). `#[scheduler]` stacks under a STEREOTYPE (its closure is
   `{ -> __rkMake_<Type>().<fn>() }`, so a task and an HTTP handler share one instance;
   a type without one is refused naming the fix). Refused at comptime, located: a
   marker off a method, `#[scheduler]` with no trigger method, two triggers on one
@@ -3019,7 +3048,7 @@ profile active fails at boot); `rakun.security.password.encoder`;
   on the type); unmarked everywhere is `authenticated`. `#[permitAll]` still reads the
   context, so ANY proxy method outside a request raises. `#[preAuthorize]` fails the
   build naming the supported forms; `#[secured]` with an expression fails too;
-  reflection-lossy parameters fail as for `<Type>Tx`.
+  signatures are redeclared verbatim as for `<Type>Tx`.
 - **CSRF**: double-submit (`XSRF-TOKEN` cookie, `SameSite=Strict`, readable by
   script; `X-CSRF-Token` header), required on every method but GET/HEAD/OPTIONS/TRACE
   when the request carries AMBIENT credentials: the session cookie OR Basic
@@ -3319,8 +3348,8 @@ that decision 118 removed (a `-> @Task<…>` return replaced it), and a marker
 that looks like a removed effect is a trap. The temporal markers are
 `#[pastDate]` and `#[futureDate]`.
 
-`#[sizeBetween]` takes BOTH bounds because a declared parameter default is never
-applied at a call site; Spring's single `@Size(min = …)` with the other half
+`#[sizeBetween]` takes BOTH bounds because a decorator argument's declared
+default is not applied (the comptime call fails); Spring's single `@Size(min = …)` with the other half
 optional has no botopink spelling, and pretending otherwise would produce a
 decorator that silently drops an argument.
 
@@ -3466,6 +3495,16 @@ front 04's `server_test.bp:74,80`. `modules/rakun-web`: **104/104** on BOTH rows
 `botopink-lang/scripts/restricted-targets.txt` moves: `rakun-web commonJS 0`
 stays `0`, core rakun's `2` stays `2`.
 
+
+### The path a refusal names
+
+`absolutePath(given)` is what "the absolute path searched" names in
+`missingFileProblem`. std's `path` is posix-shaped (`isAbsolute` is a leading
+`/`), so `isWindowsAbsolute` recognises a drive letter (`C:\certs\server.pem`,
+`c:/certs`) and a UNC share (`\\host\share`) as absolute as written; only a
+relative path is joined onto `process.cwd()`. `test/ssl_bundle_test.bp` asserts
+both spellings, and idempotence (`absolutePath(resolved) == resolved`) without
+importing `io.process` into the test file.
 
 ### The listener over TLS (landed with the track's second pass)
 
