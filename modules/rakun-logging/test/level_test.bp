@@ -1,0 +1,79 @@
+//// rakun-logging — the resolver (Step 1): prefix resolution, the root
+//// fallback, the Trace/Debug collapse, `isEnabled` short-circuiting. Records
+//// are counted on a capturing OTP handler, so "never reaches `logger:log/3`"
+//// is observed at OTP, not inferred. Every property a cell sets is set back.
+
+import {testing.asserts} from "std";
+import {rkSetProp, rkReqShareBump, rkReqShareCount, rkReqShareReset} from "rakun";
+import {Level, effectiveLevelName, rankOf, levelProblem, otpLevel} from "levels";
+import {Logger, logger} from "logging";
+import {rkLogCaptureStart, rkLogCaptureCount, rkLogCaptureStop} from "cells";
+
+fn built(text: string) -> string {
+    val _b = rkReqShareBump("rakun-logging-built");
+    return text;
+}
+
+test "level: the longest prefix wins" {
+    val _a = rkSetProp("rakun.logging.level.rakun.data", "debug");
+    val viaParent = logger("rakun.data.sql").isEnabled(Level.Debug);
+    val _b = rkSetProp("rakun.logging.level.rakun.data.sql", "warn");
+    val overridden = logger("rakun.data.sql").isEnabled(Level.Debug);
+    val sibling = logger("rakun.data.datasource").isEnabled(Level.Debug);
+    val warnOn = logger("rakun.data.sql").isEnabled(Level.Warn);
+    val _c = rkSetProp("rakun.logging.level.rakun.data", "");
+    val _d = rkSetProp("rakun.logging.level.rakun.data.sql", "");
+    try asserts.isTrue(viaParent);
+    try asserts.isFalse(overridden);
+    try asserts.isTrue(sibling);
+    try asserts.isTrue(warnOn);
+}
+
+test "level: with no key set the root applies" {
+    try asserts.equals(effectiveLevelName("app.nothing.set"), "info");
+    val _a = rkSetProp("rakun.logging.level.root", "error");
+    val level = effectiveLevelName("app.nothing.set");
+    val warnOff = logger("app.nothing.set").isEnabled(Level.Warn);
+    val _b = rkSetProp("rakun.logging.level.root", "");
+    try asserts.equals(level, "error");
+    try asserts.isFalse(warnOff);
+}
+
+test "level: a trace record is discarded before OTP when the level is debug" {
+    val _a = rkSetProp("rakun.logging.level.app.collapse", "debug");
+    val _h = rkLogCaptureStart("console");
+    val log = logger("app.collapse");
+    val _t = log.trace("dropped");
+    val afterTrace = rkLogCaptureCount();
+    val _d = log.debug("kept");
+    val afterDebug = rkLogCaptureCount();
+    val _x = rkLogCaptureStop();
+    val _b = rkSetProp("rakun.logging.level.app.collapse", "");
+    try asserts.equals(afterTrace, 0);
+    try asserts.equals(afterDebug, 1);
+    try asserts.equals(otpLevel(Level.Trace), otpLevel(Level.Debug));
+}
+
+test "level: isEnabled false means the message is never built" {
+    val _r = rkReqShareReset();
+    val _h = rkLogCaptureStart("console");
+    val log: Logger = logger("app.lazy");
+    if (log.isEnabled(Level.Debug)) {
+        val _d = log.debug(built("expensive"));
+    };
+    val _l = log.lazily(Level.Trace, { -> built("also expensive") });
+    val _i = log.lazily(Level.Info, { -> built("cheap") });
+    val count = rkLogCaptureCount();
+    val _x = rkLogCaptureStop();
+    try asserts.equals(rkReqShareCount("rakun-logging-built"), 1);
+    try asserts.equals(count, 1);
+}
+
+test "level: an unknown level spelling raises naming the key" {
+    try asserts.equals(rankOf("verbose"), -1);
+    try asserts.equals(rankOf("WARNING"), 3);
+    val _a = rkSetProp("rakun.logging.level.app.bad", "verbose");
+    try asserts.throwsWith({ -> val _e = logger("app.bad").isEnabled(Level.Info); 0; }, "rakun.logging.level.app.bad");
+    val _b = rkSetProp("rakun.logging.level.app.bad", "");
+    try asserts.contains(levelProblem("k", "verbose"), "trace, debug, info, warn, error, off");
+}

@@ -1,0 +1,213 @@
+//// rakun-logging — the `loggers` and `logfile` endpoints.
+////
+//// Defined here, registered through `rakun-actuator-api` (never the host), and
+//// hosted by front 11. Who may reach them is front 11's (and front 76's)
+//// decision alone: nothing in this module reads a key that opens, closes or
+//// bypasses either endpoint — `POST /actuator/loggers/{name}` changes the
+//// running system and `logfile` serves whatever the application wrote.
+////
+//// `loggers`: `GET` lists every known logger (created, configured or
+//// overridden), `ROOT` first, and every group, with configured and effective
+//// levels; `GET …/{name}` answers one; `POST …/{name}` with `{"level":"debug"}`
+//// sets a run-time override that the next record reads (no restart), on a
+//// group it applies to every member, and `{"level":null}` resets the name to
+//// its INHERITED level — the override becomes `inherit`, which also masks a
+//// configured `rakun.logging.level.<name>` for that name. Run-time levels are
+//// rakun's own override table, not `logger:set_module_level/2`: rakun levels
+//// are keyed by logger NAME, OTP module levels by Erlang module.
+////
+//// `logfile`: the configured file, `Range: bytes=a-b` / `a-` / `-n` answered
+//// 206 with `Content-Range`, a range past the end 416, no file configured 404.
+
+import {Request, HttpMethod, rkSetReplyHeader} from "rakun";
+import {EndpointResponse, endpointJson, rkRegisterEndpoint} from "rakun-actuator-api";
+import {json} from "std";
+import {rankOf, rankName, configuredOn, effectiveLevelName, groupNames, groupMembers, isGroup, rootLevel} from "levels";
+import {logFilePath} from "setup";
+import {
+    rkLogOverrideSet,
+    rkLogOverrideNames,
+    rkLogRegisteredNames,
+    rkLogPropKeys,
+    rkLogFileSize,
+    rkLogReadRange,
+} from "cells";
+
+fn lines(raw: string) -> string[] {
+    var out: string[] = [];
+    if (raw == "") return out;
+    for (raw.split("\n")) { l -> if (l != "") out.push(l); };
+    return out;
+}
+
+fn upperOrNull(level: string) -> string {
+    if (level == "") return "null";
+    if (level == "inherit") return "null";
+    return json.quote(rankName(rankOf(level)));
+}
+
+fn problem(status: i32, detail: string) -> EndpointResponse {
+    return EndpointResponse(status: status, contentType: "application/json", body: "{\"status\":" + status.toString() + ",\"detail\":" + json.quote(detail) + "}");
+}
+
+// ── loggers ─────────────────────────────────────────────────────────────────
+
+pub fn knownLoggers() -> string[] {
+    var out: string[] = ["root"];
+    val groups = groupNames();
+    for (lines(rkLogRegisteredNames())) { n -> if (out.contains(n) == false) out.push(n); };
+    for (lines(rkLogPropKeys("rakun.logging.level."))) { k ->
+        val n = k.slice(20, k.length());
+        if (out.contains(n) == false && groups.contains(n) == false) out.push(n);
+    };
+    for (lines(rkLogOverrideNames())) { n ->
+        if (out.contains(n) == false && groups.contains(n) == false) out.push(n);
+    };
+    return out;
+}
+
+pub fn loggerJson(name: string) -> string {
+    val effective = if (name == "root") rootLevel() else effectiveLevelName(name);
+    return "{\"configuredLevel\":" + upperOrNull(configuredOn(name)) + ",\"effectiveLevel\":" + upperOrNull(effective) + "}";
+}
+
+pub fn groupJson(group: string) -> string {
+    val members = groupMembers(group).map({ m -> json.quote(m) });
+    return "{\"configuredLevel\":" + upperOrNull(configuredOn(group)) + ",\"members\":[" + members.join(",") + "]}";
+}
+
+fn displayName(name: string) -> string {
+    if (name == "root") return "ROOT";
+    return name;
+}
+
+pub fn loggersJson() -> string {
+    val loggers = knownLoggers().map({ n -> json.quote(displayName(n)) + ":" + loggerJson(n) });
+    val groups = groupNames().map({ g -> json.quote(g) + ":" + groupJson(g) });
+    return "{\"levels\":[\"OFF\",\"ERROR\",\"WARN\",\"INFO\",\"DEBUG\",\"TRACE\"],\"loggers\":{" + loggers.join(",")
+        + "},\"groups\":{" + groups.join(",") + "}}";
+}
+
+// The `level` member of a POST body: its lowercase text, `null` for a JSON
+// null, or "" when absent or not a string.
+pub fn levelOfBody(body: string) -> string {
+    val at = body.indexOf("\"level\"");
+    if (at < 0) return "";
+    val rest = body.slice(at + 7, body.length()).trim();
+    if (rest.startsWith(":") == false) return "";
+    val value = rest.slice(1, rest.length()).trim();
+    if (value.startsWith("null")) return "null";
+    if (value.startsWith("\"") == false) return "";
+    val close = value.slice(1, value.length()).indexOf("\"");
+    if (close < 0) return "";
+    return value.slice(1, close + 1).trim().toLower();
+}
+
+pub fn setLevel(name: string, body: string) -> EndpointResponse {
+    val canonical = if (name.toLower() == "root") "root" else name;
+    val level = levelOfBody(body);
+    if (level == "") return problem(400, "body must be {\"level\":\"<level>\"} or {\"level\":null}");
+    if (level == "null") {
+        val _i = rkLogOverrideSet(canonical, if (canonical == "root") "info" else "inherit");
+        return EndpointResponse(status: 204, contentType: "application/json", body: "");
+    };
+    if (rankOf(level) < 0) return problem(400, "`" + level + "` is not a level - accepted: trace, debug, info, warn, error, off");
+    val _s = rkLogOverrideSet(canonical, level);
+    return EndpointResponse(status: 204, contentType: "application/json", body: "");
+}
+
+// The operation behind the endpoint: `method` is `GET` or `POST`, `name` is
+// the path segment after `loggers/` ("" for the listing).
+pub fn loggersOperation(method: string, name: string, body: string) -> EndpointResponse {
+    if (method == "POST") {
+        if (name == "") return problem(405, "POST needs a logger or group name");
+        return setLevel(name, body);
+    };
+    if (name == "") return endpointJson(loggersJson());
+    if (isGroup(name)) return endpointJson(groupJson(name));
+    val canonical = if (name.toLower() == "root") "root" else name;
+    return endpointJson(loggerJson(canonical));
+}
+
+fn methodText(m: HttpMethod) -> string {
+    val t = case m {
+        HttpMethod.Get -> "GET";
+        HttpMethod.Post -> "POST";
+        HttpMethod.Put -> "PUT";
+        HttpMethod.Patch -> "PATCH";
+        HttpMethod.Delete -> "DELETE";
+        HttpMethod.Head -> "HEAD";
+        HttpMethod.Options -> "OPTIONS";
+    };
+    return t;
+}
+
+pub fn nameAfter(path: string, segment: string) -> string {
+    val marker = "/" + segment + "/";
+    val at = path.indexOf(marker);
+    if (at < 0) return "";
+    return path.slice(at + marker.length(), path.length());
+}
+
+pub fn loggersEndpoint(req: Request) -> EndpointResponse {
+    return loggersOperation(methodText(req.method), nameAfter(req.path, "loggers"), req.body());
+}
+
+// ── logfile ─────────────────────────────────────────────────────────────────
+
+fn digitsValue(s: string) -> i32 {
+    var n: i32 = 0;
+    for (s.chars()) { c ->
+        val d = "0123456789".indexOf(c);
+        if (d >= 0) n = n * 10 + d;
+    };
+    return n;
+}
+
+fn allDigits(s: string) -> bool {
+    var ok = s != "";
+    for (s.chars()) { c -> if ("0123456789".indexOf(c) < 0) ok = false; };
+    return ok;
+}
+
+pub fn logfileOperation(range: string) -> EndpointResponse {
+    val path = logFilePath();
+    if (path == "") return problem(404, "no log file is configured (rakun.logging.file.name or rakun.logging.file.path)");
+    val size = rkLogFileSize(path);
+    if (size < 0) return problem(404, "the log file has not been written yet");
+    val r = range.trim();
+    if (r == "") return EndpointResponse(status: 200, contentType: "text/plain; charset=utf-8", body: rkLogReadRange(path, 0, size - 1));
+    if (r.startsWith("bytes=") == false) return problem(416, "only a single bytes range is supported");
+    val spec = r.slice(6, r.length()).trim();
+    val dash = spec.indexOf("-");
+    if (dash < 0 || spec.contains(",")) return problem(416, "only a single bytes range is supported");
+    val a = spec.slice(0, dash).trim();
+    val b = spec.slice(dash + 1, spec.length()).trim();
+    val suffix = (a == "");
+    if (suffix && allDigits(b) == false) return problem(416, "malformed range");
+    if (suffix == false && allDigits(a) == false) return problem(416, "malformed range");
+    if (b != "" && allDigits(b) == false) return problem(416, "malformed range");
+    val tail: i32 = if (suffix) digitsValue(b) else 0;
+    val first: i32 = if (suffix) (if (tail >= size) 0 else size - tail) else digitsValue(a);
+    val wanted: i32 = if (suffix || b == "") size - 1 else digitsValue(b);
+    val last: i32 = if (wanted > size - 1) size - 1 else wanted;
+    if (first > last || first >= size) {
+        val _u = rkSetReplyHeader("Content-Range", "bytes */" + size.toString());
+        return problem(416, "range not satisfiable");
+    };
+    val _h = rkSetReplyHeader("Content-Range", "bytes " + first.toString() + "-" + last.toString() + "/" + size.toString());
+    return EndpointResponse(status: 206, contentType: "text/plain; charset=utf-8", body: rkLogReadRange(path, first, last));
+}
+
+pub fn logfileEndpoint(req: Request) -> EndpointResponse {
+    return logfileOperation(req.header("range"));
+}
+
+// ── registration ────────────────────────────────────────────────────────────
+
+// Called by the application at boot (a library's module body does not run on
+// the erlang row). Registers through the API; the host routes and guards.
+pub fn registerLoggingEndpoints() -> i32 {
+    val _l = rkRegisterEndpoint("loggers", "rakun-logging", "read,write", { req -> loggersEndpoint(req) });
+    return rkRegisterEndpoint("logfile", "rakun-logging", "read", { req -> logfileEndpoint(req) });
+}

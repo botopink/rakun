@@ -1,0 +1,257 @@
+//// rakun-logging — file output, rotation, external configuration and the
+//// startup summary (Steps 6 and 8). Every file lives under
+//// `$HOME/.cache/bp-rakun/front-17/`; every property a cell sets is set back
+//// to "" and every handler it installs is removed. The console handler is
+//// kept quiet with `rakun.logging.threshold.console=off`, and the console
+//// schema is observed on a capturing handler instead.
+
+import {testing.asserts, io.env} from "std";
+import {rkSetProp, rkProp, event, publishEvent, rkListenerReset} from "rakun";
+import {Level, effectiveLevelName} from "levels";
+import {Logger, logger} from "logging";
+import {bootLogging, logFilePath, archiveCount, startupSummary, registerStartupSummary, logStartupSummary} from "setup";
+import {
+    rkLogFixFacts,
+    rkLogUnfixFacts,
+    rkLogCaptureStart,
+    rkLogCaptureLines,
+    rkLogCaptureCount,
+    rkLogCaptureStop,
+    rkLogRemoveHandlers,
+    rkLogFileSync,
+    rkLogReadRange,
+    rkLogFileSize,
+    rkLogListDir,
+    rkLogDeleteFile,
+    rkLogWriteFile,
+    rkLogMakeDir,
+    rkLogHandlerIds,
+} from "cells";
+
+fn scratch(sub: string) -> string {
+    val dir = env.read("HOME").unwrapOr(".") + "/.cache/bp-rakun/front-17/" + sub;
+    val _m = rkLogMakeDir(dir);
+    for (rkLogListDir(dir).split("\n")) { f -> if (f != "") { val _d = rkLogDeleteFile(dir + "/" + f); }; };
+    return dir;
+}
+
+fn setAll(props: string[], clear: bool) -> i32 {
+    for (props) { p ->
+        val eq = p.indexOf("=");
+        val _s = rkSetProp(p.slice(0, eq), if (clear) "" else p.slice(eq + 1, p.length()));
+    };
+    return 0;
+}
+
+fn readAll(path: string) -> string {
+    val _s = rkLogFileSync();
+    val size = rkLogFileSize(path);
+    if (size <= 0) return "";
+    return rkLogReadRange(path, 0, size - 1);
+}
+
+fn writeMany(log: Logger, n: i32) -> i32 {
+    var i = 0;
+    while (i < n) {
+        val _i = log.info("rotation filler line number " + i.toString() + " padded with enough text to fill the file quickly");
+        i = i + 1;
+    };
+    return n;
+}
+
+test "file: records reach the file and the console in their two formats" {
+    val dir = scratch("file-out");
+    val props = [
+        "rakun.logging.file.name=" + dir + "/app.log",
+        "rakun.logging.structured.format.console=plain",
+        "rakun.logging.structured.format.file=ecs",
+        "rakun.logging.threshold.console=off",
+        "rakun.application.name=billing",
+    ];
+    val _p = setAll(props, false);
+    val _f = rkLogFixFacts(1767225600, "<0.1.0>", "node-0001");
+    val booted = bootLogging();
+    val _h = rkLogCaptureStart("console");
+    val log: Logger = logger("app.file");
+    val _a = log.info("first");
+    val _b = log.warn("second");
+    val console = rkLogCaptureLines("console");
+    val _x = rkLogCaptureStop();
+    val path = logFilePath();
+    val written = readAll(path);
+    val handlers = rkLogHandlerIds();
+    val _r = rkLogRemoveHandlers();
+    val _u = rkLogUnfixFacts();
+    val _q = setAll(props, true);
+    assert booted.isOk() == true;
+    try asserts.equals(path, dir + "/app.log");
+    try asserts.equals(handlers, "rakun_console\nrakun_file");
+    try asserts.equals(console,
+        \\2026-01-01T00:00:00Z  INFO <0.1.0> --- [billing] [main] app.file : first
+        \\2026-01-01T00:00:00Z  WARN <0.1.0> --- [billing] [main] app.file : second
+    );
+    try asserts.equals(written,
+        \\{"@timestamp":"2026-01-01T00:00:00Z","log.level":"INFO","message":"first","service.name":"billing","process.thread.name":"<0.1.0>","log.logger":"app.file"}
+        \\{"@timestamp":"2026-01-01T00:00:00Z","log.level":"WARN","message":"second","service.name":"billing","process.thread.name":"<0.1.0>","log.logger":"app.file"}
+        \\
+    );
+}
+
+test "file: file.path names a directory holding rakun.log" {
+    val _p = rkSetProp("rakun.logging.file.path", "/var/log/billing");
+    val path = logFilePath();
+    val _q = rkSetProp("rakun.logging.file.path", "");
+    try asserts.equals(path, "/var/log/billing/rakun.log");
+    try asserts.equals(logFilePath(), "");
+}
+
+test "file: rotation happens at max-size and keeps max-history archives" {
+    val dir = scratch("rotate-history");
+    val props = [
+        "rakun.logging.file.name=" + dir + "/rakun.log",
+        "rakun.logging.file.max-size=1KB",
+        "rakun.logging.file.max-history=2",
+        "rakun.logging.threshold.console=off",
+    ];
+    val _p = setAll(props, false);
+    val archives = archiveCount();
+    val booted = bootLogging();
+    val _w = writeMany(logger("app.rotate"), 120);
+    val _s = rkLogFileSync();
+    val files = rkLogListDir(dir);
+    val live = rkLogFileSize(dir + "/rakun.log");
+    val _r = rkLogRemoveHandlers();
+    val _q = setAll(props, true);
+    assert booted.isOk() == true;
+    try asserts.equals(archives, 2);
+    try asserts.equals(files, "rakun.log\nrakun.log.0\nrakun.log.1");
+    try asserts.isTrue(live <= 1024 + 200);
+}
+
+test "file: the total-size-cap deletes archives beyond it" {
+    val dir = scratch("rotate-cap");
+    val props = [
+        "rakun.logging.file.name=" + dir + "/rakun.log",
+        "rakun.logging.file.max-size=1KB",
+        "rakun.logging.file.max-history=7",
+        "rakun.logging.file.total-size-cap=2KB",
+        "rakun.logging.threshold.console=off",
+    ];
+    val _p = setAll(props, false);
+    val archives = archiveCount();
+    val booted = bootLogging();
+    val _w = writeMany(logger("app.rotate"), 120);
+    val _s = rkLogFileSync();
+    val files = rkLogListDir(dir);
+    val _r = rkLogRemoveHandlers();
+    val _q = setAll(props, true);
+    assert booted.isOk() == true;
+    try asserts.equals(archives, 1);
+    try asserts.equals(files, "rakun.log\nrakun.log.0");
+}
+
+test "file: the defaults are 10MB per file, 7 archives, 100MB in all" {
+    try asserts.equals(archiveCount(), 7);
+}
+
+fn sysConfig(dir: string) -> string {
+    val path = dir + "/logging.sys.config";
+    val _w = rkLogWriteFile(path,
+        "[{rakun_logging, [{\"rakun.logging.level.app.sys\", \"debug\"}, "
+        + "{profile, staging, [{\"rakun.logging.level.app.stage\", \"trace\"}]}]}].\n");
+    return path;
+}
+
+test "file: rakun.logging.config loads a sys.config whose keys win over application.yaml" {
+    val dir = scratch("sysconfig");
+    val path = sysConfig(dir);
+    val props = [
+        "rakun.logging.level.app.sys=warn",
+        "rakun.logging.config=" + path,
+        "rakun.logging.threshold.console=off",
+    ];
+    val _p = setAll(props, false);
+    val booted = bootLogging();
+    val level = effectiveLevelName("app.sys.component");
+    val _r = rkLogRemoveHandlers();
+    val _q = setAll(props, true);
+    val _l = rkSetProp("rakun.logging.config.loaded", "");
+    val _v = rkSetProp("rakun.logging.level.app.stage", "");
+    try asserts.equals(booted.unwrapOr(""), path);
+    try asserts.equals(level, "debug");
+}
+
+test "file: a profile section applies only when that profile is active" {
+    val dir = scratch("sysconfig-profile");
+    val path = sysConfig(dir);
+    val props = ["rakun.logging.config=" + path, "rakun.logging.threshold.console=off"];
+    val _p = setAll(props, false);
+    val _a = bootLogging();
+    val inactive = effectiveLevelName("app.stage");
+    val _v1 = rkSetProp("rakun.logging.level.app.sys", "");
+    val _pr = rkSetProp("rakun.profiles.resolved", "prod,staging");
+    val _b = bootLogging();
+    val active = effectiveLevelName("app.stage");
+    val _r = rkLogRemoveHandlers();
+    val _q = setAll(props, true);
+    val _x = rkSetProp("rakun.profiles.resolved", "");
+    val _l = rkSetProp("rakun.logging.config.loaded", "");
+    val _v2 = rkSetProp("rakun.logging.level.app.sys", "");
+    val _v3 = rkSetProp("rakun.logging.level.app.stage", "");
+    try asserts.equals(inactive, "info");
+    try asserts.equals(active, "trace");
+}
+
+test "file: an unreadable sys.config refuses the boot naming the key" {
+    val _p = rkSetProp("rakun.logging.config", "/nonexistent/logging.sys.config");
+    val booted = bootLogging();
+    val _q = rkSetProp("rakun.logging.config", "");
+    assert booted.isError() == true;
+}
+
+// ── the startup summary (Step 8) ────────────────────────────────────────────
+
+test "summary: the line carries elapsed time, pid, node, port, profiles and the config file" {
+    val line = startupSummary("billing", 1842, 2011, "4242", "billing@host", 8080, ["prod", "metrics"], "config/logging.sys.config");
+    try asserts.equals(line,
+        "Started billing in 1.842s (process running for 2.011s) - pid 4242, node billing@host, port 8080, profiles [prod, metrics], logging config config/logging.sys.config");
+    val none: string[] = [];
+    val bare = startupSummary("billing", 5, 7, "1", "n", 0, none, "");
+    try asserts.contains(bare, "profiles []");
+    try asserts.contains(bare, "logging config none");
+    try asserts.contains(bare, "in 0.005s");
+}
+
+test "summary: emitted once at ready at Info from rakun.core.Bootstrap with front 05's profiles" {
+    val _r = rkListenerReset();
+    val _p = rkSetProp("rakun.profiles.resolved", "prod,metrics");
+    val _a = rkSetProp("rakun.application.name", "billing");
+    val _h = rkLogCaptureStart("console");
+    val _g1 = registerStartupSummary(0, 8080);
+    val _g2 = registerStartupSummary(0, 8080);
+    val before = rkLogCaptureCount();
+    val _e = publishEvent(event("ApplicationReady", "test", ""));
+    val count = rkLogCaptureCount();
+    val line = rkLogCaptureLines("console");
+    val _x = rkLogCaptureStop();
+    val _q = rkSetProp("rakun.profiles.resolved", "");
+    val _b = rkSetProp("rakun.application.name", "");
+    val _z = rkListenerReset();
+    try asserts.equals(before, 0);
+    try asserts.equals(count, 1);
+    try asserts.contains(line, "  INFO ");
+    try asserts.contains(line, " rakun.core.Bootstrap : Started billing in ");
+    try asserts.contains(line, "profiles [prod, metrics]");
+    try asserts.contains(line, ", port 8080,");
+    try asserts.contains(line, " - pid ");
+    try asserts.contains(line, ", node ");
+    try asserts.contains(line, "logging config none");
+}
+
+test "summary: with no profile active it prints profiles []" {
+    val _h = rkLogCaptureStart("console");
+    val _s = logStartupSummary(0, 0);
+    val line = rkLogCaptureLines("console");
+    val _x = rkLogCaptureStop();
+    try asserts.contains(line, "profiles [],");
+}

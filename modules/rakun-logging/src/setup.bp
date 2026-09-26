@@ -1,0 +1,240 @@
+//// rakun-logging — the boot: formats, levels, groups, file output, external
+//// configuration and the startup summary.
+////
+//// `bootLogging()` is an explicit call (a dependency's module body never runs
+//// on the erlang row). It refuses — an `Error` naming the key and the accepted
+//// values — on an unknown format or level; it applies `rakun.logging.config`
+//// (a `sys.config`) OVER the loaded properties; it installs the console
+//// handler and, when a file is configured, the rotating file handler; it logs
+//// every group name that shadows a logger name. It answers the configuration
+//// file it loaded, or "".
+////
+//// FILE OUTPUT. `rakun.logging.file.name` (a path) or `rakun.logging.file.path`
+//// (a directory, the file is `<path>/rakun.log`); rotation is OTP
+//// `logger_std_h`'s: `max-size` (default 10MB) per file, `max-history`
+//// (default 7) archives, and `total-size-cap` (default 100MB) folded into the
+//// archive count — `min(max-history, cap / max-size - 1)` archives, so the live
+//// file plus its archives never exceed the cap.
+////
+//// EXTERNAL CONFIGURATION. `rakun.logging.config` names an Erlang term file:
+////     [{rakun_logging, [{"rakun.logging.level.root", "debug"},
+////                       {profile, staging, [{"rakun.logging.level.app", "trace"}]}]}].
+//// An unconditional entry always applies; a `{profile, Name, Entries}` section
+//// applies only when `Name` is among front 05's resolved profiles. Every entry
+//// is written into the property table after the application's own files were
+//// loaded, so a key set here wins over the same key in `application.yaml`.
+
+import {rkProp, rkSetProp, rkPropSize, rkPropIntOr, rkRegisterListener, listenersFor} from "rakun";
+import {Level, rankOf, levelProblem, groupCollisions} from "levels";
+import {isFormat, formatProblem} from "formats";
+import {logger, consoleFormatKey, fileFormatKey, applicationName} from "logging";
+import {
+    rkLogPropKeys,
+    rkLogRegisteredNames,
+    rkLogInstallConsole,
+    rkLogInstallFile,
+    rkLogConsult,
+    rkLogEnsureOtp,
+    rkLogNowMillis,
+    rkLogOsPid,
+    rkLogNode,
+    rkLogUptimeMillis,
+} from "cells";
+
+pub fn configKey() -> string {
+    return "rakun.logging.config";
+}
+
+pub fn loadedConfigKey() -> string {
+    return "rakun.logging.config.loaded";
+}
+
+fn lines(raw: string) -> string[] {
+    var out: string[] = [];
+    if (raw == "") return out;
+    for (raw.split("\n")) { l -> if (l != "") out.push(l); };
+    return out;
+}
+
+fn activeProfiles() -> string[] {
+    val raw = rkProp("rakun.profiles.resolved");
+    var out: string[] = [];
+    if (raw == "") return out;
+    for (raw.split(",")) { p -> if (p.trim() != "") out.push(p.trim()); };
+    return out;
+}
+
+// ── validation ──────────────────────────────────────────────────────────────
+
+pub fn formatKeyProblem(key: string) -> string {
+    val raw = rkProp(key);
+    if (raw == "") return "";
+    if (isFormat(raw.trim().toLower())) return "";
+    return formatProblem(key, raw);
+}
+
+pub fn levelKeysProblem() -> string {
+    var problem = "";
+    for (lines(rkLogPropKeys("rakun.logging.level."))) { key ->
+        val raw = rkProp(key);
+        if (problem == "" && rankOf(raw) < 0) problem = levelProblem(key, raw);
+    };
+    return problem;
+}
+
+// ── sys.config ──────────────────────────────────────────────────────────────
+
+// Applies the file named by `rakun.logging.config`; answers the path, or ""
+// when the key is unset.
+pub fn applyExternalConfig() -> @Result<string, string> {
+    val path = rkProp(configKey()).trim();
+    if (path == "") return "";
+    val wire = rkLogConsult(path);
+    if (wire.startsWith("error\t")) throw "rakun logging: `" + configKey() + "` names `" + path + "`, which could not be read: " + wire.slice(6, wire.length());
+    val actives = activeProfiles();
+    for (lines(wire)) { line ->
+        val cells: string[] = line.split("\t");
+        val profile = cells.at(0) ?? "";
+        val key = cells.at(1) ?? "";
+        val value = cells.at(2) ?? "";
+        if (profile == "" || actives.contains(profile)) {
+            val _s = rkSetProp(key, value);
+        };
+    };
+    val _l = rkSetProp(loadedConfigKey(), path);
+    return path;
+}
+
+// ── file output ─────────────────────────────────────────────────────────────
+
+pub fn logFilePath() -> string {
+    val name = rkProp("rakun.logging.file.name").trim();
+    if (name != "") return name;
+    val dir = rkProp("rakun.logging.file.path").trim();
+    if (dir == "") return "";
+    if (dir.endsWith("/")) return dir + "rakun.log";
+    return dir + "/rakun.log";
+}
+
+pub fn maxSizeBytes() -> i32 {
+    val v = rkPropSize("rakun.logging.file.max-size", "bytes").bytes;
+    if (v <= 0) return 10485760;
+    return v;
+}
+
+pub fn totalSizeCapBytes() -> i32 {
+    val v = rkPropSize("rakun.logging.file.total-size-cap", "bytes").bytes;
+    if (v <= 0) return 104857600;
+    return v;
+}
+
+pub fn maxHistory() -> i32 {
+    return rkPropIntOr("rakun.logging.file.max-history", 7);
+}
+
+// Archives kept: the history, lowered so live file + archives fit the cap.
+pub fn archiveCount() -> i32 {
+    val byCap = totalSizeCapBytes() / maxSizeBytes() - 1;
+    val history = maxHistory();
+    val kept = if (byCap < history) byCap else history;
+    if (kept < 0) return 0;
+    return kept;
+}
+
+// ── thresholds ──────────────────────────────────────────────────────────────
+
+// `rakun.logging.threshold.console` / `.file`: the lowest level a handler
+// writes (Spring's `logging.threshold.*`), as the OTP handler level. Unset is
+// `all`; `off` is `none`. A record still has to pass its logger's level first.
+pub fn thresholdOf(key: string) -> string {
+    val raw = rkProp(key).trim().toLower();
+    if (raw == "") return "all";
+    val rank = rankOf(raw);
+    if (rank < 0) return "all";
+    if (rank <= 1) return "debug";
+    if (rank == 2) return "info";
+    if (rank == 3) return "warning";
+    if (rank == 4) return "error";
+    return "none";
+}
+
+// ── the boot ────────────────────────────────────────────────────────────────
+
+// The first refusal the boot would raise over the current properties, or "".
+pub fn bootProblem() -> string {
+    val consoleProblem = formatKeyProblem(consoleFormatKey());
+    if (consoleProblem != "") return consoleProblem;
+    val fileProblem = formatKeyProblem(fileFormatKey());
+    if (fileProblem != "") return fileProblem;
+    val consoleThreshold = rkProp("rakun.logging.threshold.console");
+    if (consoleThreshold != "" && rankOf(consoleThreshold) < 0) return levelProblem("rakun.logging.threshold.console", consoleThreshold);
+    val fileThreshold = rkProp("rakun.logging.threshold.file");
+    if (fileThreshold != "" && rankOf(fileThreshold) < 0) return levelProblem("rakun.logging.threshold.file", fileThreshold);
+    return levelKeysProblem();
+}
+
+pub fn bootLogging() -> @Result<string, string> {
+    val loaded = try applyExternalConfig();
+    val problemText = bootProblem();
+    if (problemText != "") throw problemText;
+    val _o = rkLogEnsureOtp();
+    val _c = rkLogInstallConsole(thresholdOf("rakun.logging.threshold.console"));
+    val file = logFilePath();
+    if (file != "") {
+        val _f = rkLogInstallFile(file, maxSizeBytes(), archiveCount(), thresholdOf("rakun.logging.threshold.file"));
+    };
+    val boot = logger("rakun.logging");
+    for (groupCollisions(lines(rkLogRegisteredNames()))) { g ->
+        val _w = boot.infoWith("logging group resolves over the logger of the same name", [#("group", g)]);
+    };
+    return loaded;
+}
+
+// ── the startup summary ─────────────────────────────────────────────────────
+
+fn seconds(millis: i32) -> string {
+    val whole = millis / 1000;
+    val frac = millis - whole * 1000;
+    return whole.toString() + "." + frac.toString().padStart(3, "0") + "s";
+}
+
+pub fn startupSummary(
+    app: string,
+    elapsedMillis: i32,
+    uptimeMillis: i32,
+    osPid: string,
+    node: string,
+    port: i32,
+    profiles: string[],
+    configFile: string,
+) -> string {
+    val config = if (configFile == "") "none" else configFile;
+    return "Started " + app + " in " + seconds(elapsedMillis) + " (process running for " + seconds(uptimeMillis)
+        + ") - pid " + osPid + ", node " + node + ", port " + port.toString()
+        + ", profiles [" + profiles.join(", ") + "], logging config " + config;
+}
+
+pub fn logStartupSummary(startedAtMillis: i32, port: i32) -> i32 {
+    val app = applicationName();
+    val line = startupSummary(
+        if (app == "") "application" else app,
+        rkLogNowMillis() - startedAtMillis,
+        rkLogUptimeMillis(),
+        rkLogOsPid(),
+        rkLogNode(),
+        port,
+        activeProfiles(),
+        rkProp(loadedConfigKey()),
+    );
+    return logger("rakun.core.Bootstrap").info(line);
+}
+
+// Registers the summary on front 06's `ApplicationReady`, so it is written
+// once, when the application is ready. A second registration is a no-op (the
+// listener table appends, so registering twice would double the line).
+pub fn registerStartupSummary(startedAtMillis: i32, port: i32) -> i32 {
+    var already = false;
+    for (listenersFor("ApplicationReady")) { l -> if (l.owner == "rakun-logging") already = true; };
+    if (already) return 0;
+    return rkRegisterListener("ApplicationReady", "rakun-logging", { ev -> logStartupSummary(startedAtMillis, port) });
+}

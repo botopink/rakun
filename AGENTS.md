@@ -2649,6 +2649,123 @@ buffered, not streamed (the 50 MB heap box is open). The file is flat
 (`src/rules.bp`, `test/rules_test.bp`) rather than `src/rules/**`: a test file
 in a subdirectory cannot call into the project on erlang today.
 
+## Structured logging — `modules/rakun-logging/` (front 17)
+
+One `Logger` type, five levels, over OTP `logger`. Depends on `rakun` and
+`rakun-actuator-api` (the `loggers`/`logfile` endpoints register through the API,
+never the host; `rakun-actuator` is not a dependency). erlang only; the host module
+is `src/sidecars/rakun_logging.erl`.
+
+| File | Holds |
+|---|---|
+| `src/cells.bp` | every host cell of the member (all `#[@External.Erlang("rakun_logging", …)]`): emit, facts (+ the test seam `rkLogFixFacts(seconds, pid, node)`), property-key listing, run-time overrides, logger-name registry, correlation slot, capture handler, console/file handlers, `sys.config` consult, file reads |
+| `src/levels.bp` | `Level { Trace, Debug, Info, Warn, Error }`, `otpLevel`, ranks (`off` accepted in keys), the groups (`web`, `sql` predefined; `rakun.logging.group.<name>`), the resolver `effectiveLevelName(name)` / `enabledFor(name, level)` |
+| `src/formats.bp` | `LogRecord`, the four schemas `renderEcs`/`renderGelf`/`renderLogstash`/`renderPlain`, `render(format, record)`, `formatProblem` |
+| `src/correlation.bp` | `correlationId()`, `withCorrelationId(id)`, `clearCorrelationId()`, `beginCorrelation(traceparent, xRequestId)`, `correlated(traceparent, xRequestId, work)`, `freshCorrelation(work)`, `correlationFromHeaders`, `traceIdOf` |
+| `src/logging.bp` | `Logger(name)` with `trace`/`debug`/`info`/`warn`/`error` + `…With(message, fields)`, `log(level, message, fields)`, `isEnabled(level)`, `lazily(level, build)`; `logger(name)`; `emitRecord`; `formatAt(key)` |
+| `src/digest.bp` | `errorDigest`, `logErrorWithDigest`, `logErrorWithDigestFields`, `clientErrorBody`, `topFramesOf`, `stripLineNumbers` |
+| `src/setup.bp` | `bootLogging()` / `bootProblem()`, `applyExternalConfig()` (`sys.config`), `logFilePath()`, `archiveCount()`, `thresholdOf(key)`, `startupSummary(…)`, `logStartupSummary(startedAt, port)`, `registerStartupSummary(startedAt, port)` |
+| `src/endpoints.bp` | `loggersOperation(method, name, body)`, `logfileOperation(range)`, `loggersEndpoint(req)`, `logfileEndpoint(req)`, `registerLoggingEndpoints()` |
+| `src/sidecars/rakun_logging.erl` | `emit/6` → `logger:log/3` (domain `[rakun]`), the formatter `format/2`, the capturing handler `log/2`, the `logger_std_h` handlers `rakun_console`/`rakun_file`, overrides and names (`persistent_term`), the correlation slot (process dictionary), the capture table (owned by `rakun_logging_owner`) |
+
+The level mapping (recorded here as the README asks):
+
+| rakun | OTP |
+|---|---|
+| `Trace` | `debug` |
+| `Debug` | `debug` |
+| `Info` | `info` |
+| `Warn` | `warning` |
+| `Error` | `error` |
+
+Trace and Debug collapse on OTP, so rakun's own check runs BEFORE `logger:log/3`: a
+record below the logger's effective level is dropped without a message being rendered
+or OTP being called. The rakun level rides in the record metadata (`rk_level`).
+
+**The digest is the only part of a server error that crosses to the client.**
+`logErrorWithDigest` writes one ERROR record with the full message, class, module
+and frames and returns the digest; `clientErrorBody(digest)` (`{"digest":"…"}`) is the
+whole payload a renderer may send (front 31 renders it).
+
+Decisions:
+
+- **Keys are `rakun.*`** (decision 115 rule 4): `rakun.logging.level.<name>`,
+  `rakun.logging.group.<name>`, `rakun.logging.structured.format.console`/`.file`,
+  `rakun.logging.file.name`/`.path`/`.max-size`/`.max-history`/`.total-size-cap`,
+  `rakun.logging.threshold.console`/`.file` (Spring's `logging.threshold.*`),
+  `rakun.logging.config`, `rakun.application.name`; the resolved profile list is front
+  05's `rakun.profiles.resolved`.
+- **Resolution**: for each dotted prefix, longest first — run-time override on that
+  name; `rakun.logging.level.<prefix>` unless the prefix is a GROUP name (a group name
+  and a logger name that collide resolve to the group; `bootLogging()` logs each
+  collision it sees among created loggers); a level on any group listing the prefix
+  as a member. Then the root (override `root`, key `rakun.logging.level.root`,
+  default `info`). A bad level spelling raises naming the key. Groups are read from
+  the live property table on every resolution (a key scan of `rakun_props`), so a
+  property set in a test or by a refresh applies with no cache to invalidate.
+- **Rendering happens in botopink**, once per target: the record reaches OTP with the
+  console line and the file line in its metadata, and `rakun_logging:format/2` only
+  picks one. So the bytes a collector sees are the bytes the tests assert. Unset
+  format = `plain` (the development default); `ecs`, `gelf`, `logstash` are single-line
+  JSON through std's `json.quote`; an optional field with no value (`service.name`,
+  `trace.id`, `error.digest`) is omitted, never written empty. The timestamp's
+  fraction is written only when non-zero (`2026-01-01T00:00:00Z`), per the snapshots.
+  `logstash` and `plain` carry no trace id (the snapshots pin that); ECS has `trace.id`,
+  GELF `_trace_id`. Extra GELF keys fold every non `[A-Za-z0-9-]` byte to `_`.
+- **OTP set-up** (`ensure_otp/0`, once per node): the primary level opens to `all`
+  (rakun decides levels), the OTP `default` handler is set back to the old primary level
+  and given a `stop` filter for domain `[rakun]` — rakun's own handlers print rakun
+  records, each with a `rakun_only` domain filter.
+- **Correlation** lives in the process dictionary: a `#[service]` three calls down
+  reads it for free; a worker gets it with `withCorrelationId(id)`. `correlated` and
+  `freshCorrelation` restore the previous id. With no id of its own a process inside
+  front 62's request frame answers the frame's `requestId()`. The id comes from a
+  valid `traceparent` (front 11's `validTraceparent`), else `x-request-id`, else 16
+  hex from `rand` (a correlation handle, not a secret). The member does not register a
+  rakun-web filter (no `rakun-web` dependency): the application wraps its chain with
+  `correlated(req.header("traceparent"), req.header("x-request-id"), { -> chain.next(req) })`.
+- **Digest hash**: `hash.strongHash` (SHA-256, 32 hex) truncated to 16 — std's
+  `contentHash` is a 32-bit djb2 fold (≤ 8 hex) and cannot supply 16 characters.
+  Input `module|errorClass|message|topFrames`, top frames = first three
+  whitespace-separated frames with `:<digits>` stripped. Argument values go in record
+  fields (`logErrorWithDigestFields`), never into the digest.
+- **File output** is `logger_std_h` (`max_no_bytes`, `max_no_files`); the total cap is
+  folded into the archive count, `min(max-history, cap / max-size - 1)`, so live file
+  + archives never exceed it. Archives are `<file>.0 … <file>.N-1`.
+- **`sys.config`** (`rakun.logging.config`): `[{rakun_logging, [{Key, Value} |
+  {profile, Name, [{Key, Value}]}]}].`; entries are written into the property table
+  after the application's files, so they win over `application.yaml`; a profile section
+  applies only when its profile is in `rakun.profiles.resolved`. The loaded path is
+  stored under `rakun.logging.config.loaded` and named by the startup summary.
+- **Run-time levels** (`POST /actuator/loggers/{name}`) are rakun's own override table,
+  not `logger:set_module_level/2` (rakun levels are keyed by logger name, OTP's by
+  Erlang module). `{"level":null}` writes the override `inherit`, which masks the name's
+  own key so the parent's level applies.
+- **Endpoints** return `EndpointResponse` (front 11's contract), not `Response`;
+  `Content-Range` goes out through front 04's `rkSetReplyHeader`. They register as
+  `loggers` (`read,write`) and `logfile` (`read`) with `registerLoggingEndpoints()`.
+  Front 11's host routes one segment, GET only, so `/loggers/{name}` and `POST` answer
+  through the operations but are not reachable over HTTP until front 04/11 route them;
+  who may reach either is front 11/76's decision — no key here opens or bypasses it.
+- **Explicit calls** (a dependency's module body does not run on erlang):
+  `bootLogging()`, `registerLoggingEndpoints()`, `registerStartupSummary(startedAtMillis, port)`
+  (on front 06's `ApplicationReady`, registered once).
+- **A consumer must import `Logger` (and `Level`)** beside `logger`: with the type not
+  in scope, a method call such as `logger(x).isEnabled(…)` was dispatched to another
+  imported type's same-named method (`DraftMode.isEnabled` from the core) — a
+  compiler defect, recorded in the front's report.
+- **Front-75 boundary**: this member carries a trace id on a record; it creates no span
+  and exports no metric. Front 75 reads the correlation field (`correlationId()`,
+  `trace.id`).
+
+Not built: the refusal of both routes for an unauthorized caller is front 11/76's host
+behaviour and is not asserted here (no host dependency); front 31's client half of the
+digest.
+
+Measured: `rakun-logging` 54 passed / 0 failed / 0 compile failures
+(`format_test.bp` 13, `level_test.bp` 5, `group_test.bp` 6, `correlation_test.bp` 6,
+`digest_test.bp` 5, `file_test.bp` 11, `endpoint_test.bp` 8).
+
 ## Validation — the bundled `validation` library (front 14, moved by decision 116 rule 5)
 
 Front 14's member `modules/rakun-validation` is gone: its seven modules are the

@@ -1,0 +1,92 @@
+//// rakun-logging — `error.digest` (Step 5): stability, sensitivity to the
+//// fault and insensitivity to the occurrence, the one-record guarantee, and
+//// the boundary — the body a renderer hands the client carries the digest and
+//// neither the message nor a frame, checked here rather than trusted.
+
+import {testing.asserts} from "std";
+import {rkSetProp} from "rakun";
+import {Level} from "levels";
+import {Logger, logger} from "logging";
+import {withCorrelationId, clearCorrelationId} from "correlation";
+import {errorDigest, logErrorWithDigest, logErrorWithDigestFields, clientErrorBody, topFramesOf, stripLineNumbers} from "digest";
+import {rkLogFixFacts, rkLogUnfixFacts, rkLogCaptureStart, rkLogCaptureLines, rkLogCaptureCount, rkLogCaptureStop} from "cells";
+
+fn frames() -> string {
+    return "InvoiceService.charge/2:88 InvoiceRepo.charge/2:41 rakun.core.router.dispatch/1:12 rakun.core.listener.loop/3:7";
+}
+
+fn digestUnder(seconds: i32, node: string, requestId: string, amount: string) -> string {
+    val _f = rkLogFixFacts(seconds, "<0.9.0>", node);
+    val _c = withCorrelationId(requestId);
+    val log: Logger = logger("app.billing.invoices");
+    val d = logErrorWithDigestFields(log, "app.billing.invoices", "gateway_declined", "charge declined", frames(), [#("amount", amount)]);
+    val _x = clearCorrelationId();
+    val _u = rkLogUnfixFacts();
+    return d;
+}
+
+test "digest: the same fault raised twice produces the same digest" {
+    val a = errorDigest("app.billing.invoices", "gateway_declined", "charge declined", frames());
+    val b = errorDigest("app.billing.invoices", "gateway_declined", "charge declined", frames());
+    try asserts.equals(a, b);
+    try asserts.equals(a.length(), 16);
+}
+
+// The digest reads the source and nothing about the node, so the fixture is
+// a literal: any node of this build computes exactly it (and it is the
+// SHA-256 of the documented input, recomputable with `sha256sum`).
+test "digest: the same fault on two nodes of one build produces the pinned digest" {
+    val onA = digestUnder(1767225600, "billing@node-a", "req-1", "1999");
+    val onB = digestUnder(1767225600, "billing@node-b", "req-1", "1999");
+    try asserts.equals(onA, onB);
+    try asserts.equals(onA, errorDigest("app.billing.invoices", "gateway_declined", "charge declined", frames()));
+    try asserts.equals(onA, "90e4cc2a07abe1fb");
+}
+
+test "digest: the message changes it, the time the request id and argument values do not" {
+    val base = digestUnder(1767225600, "n", "req-1", "1999");
+    val later = digestUnder(1767312000, "n", "req-1", "1999");
+    val otherRequest = digestUnder(1767225600, "n", "req-2", "1999");
+    val otherArgument = digestUnder(1767225600, "n", "req-1", "5");
+    val otherMessage = errorDigest("app.billing.invoices", "gateway_declined", "charge refused", frames());
+    val otherLines = errorDigest("app.billing.invoices", "gateway_declined", "charge declined",
+        "InvoiceService.charge/2:90 InvoiceRepo.charge/2:44 rakun.core.router.dispatch/1:13");
+    try asserts.equals(base, later);
+    try asserts.equals(base, otherRequest);
+    try asserts.equals(base, otherArgument);
+    try asserts.equals(base, otherLines);
+    try asserts.notEquals(base, otherMessage);
+    try asserts.equals(topFramesOf(frames()), "InvoiceService.charge/2 InvoiceRepo.charge/2 rakun.core.router.dispatch/1");
+    try asserts.equals(stripLineNumbers("invoice.bp:42"), "invoice.bp");
+}
+
+test "digest: logErrorWithDigest writes exactly one record with the full message and frames" {
+    val _p = rkSetProp("rakun.logging.structured.format.console", "ecs");
+    val _f = rkLogFixFacts(1767225600, "<0.1.0>", "node-0001");
+    val _h = rkLogCaptureStart("console");
+    val log: Logger = logger("app.billing.invoices");
+    val digest = logErrorWithDigest(log, "app.billing.invoices", "gateway_declined", "charge declined for invoice 7", frames());
+    val count = rkLogCaptureCount();
+    val line = rkLogCaptureLines("console");
+    val _x = rkLogCaptureStop();
+    val _u = rkLogUnfixFacts();
+    val _q = rkSetProp("rakun.logging.structured.format.console", "");
+    try asserts.equals(count, 1);
+    try asserts.contains(line, "\"log.level\":\"ERROR\"");
+    try asserts.contains(line, "\"message\":\"charge declined for invoice 7\"");
+    try asserts.contains(line, "\"error.digest\":\"" + digest + "\"");
+    try asserts.contains(line, "InvoiceService.charge/2:88");
+    try asserts.contains(line, "\"error.type\":\"gateway_declined\"");
+}
+
+test "digest: the body handed to the client carries the digest and neither the message nor a frame" {
+    val message = "charge declined for invoice 7 with code 51";
+    val digest = errorDigest("app.billing.invoices", "gateway_declined", message, frames());
+    val body = clientErrorBody(digest);
+    try asserts.equals(body, "{\"digest\":\"" + digest + "\"}");
+    try asserts.notContains(body, "charge");
+    try asserts.notContains(body, "invoice 7");
+    try asserts.notContains(body, "gateway_declined");
+    for (frames().split(" ")) { f -> assert body.contains(f) == false; };
+    try asserts.notContains(body, "InvoiceService");
+}

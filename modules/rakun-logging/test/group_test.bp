@@ -1,0 +1,88 @@
+//// rakun-logging — groups (Step 3): the predefined `web` and `sql`, their
+//// redefinition, and a group name colliding with a logger name. Every
+//// property a cell sets is set back to "".
+
+import {testing.asserts} from "std";
+import {rkSetProp} from "rakun";
+import {Level, groupMembers, groupNames, isGroup, effectiveLevelName, groupCollisions} from "levels";
+import {Logger, logger} from "logging";
+import {bootLogging} from "setup";
+import {rkLogFixFacts, rkLogUnfixFacts, rkLogCaptureStart, rkLogCaptureLines, rkLogCaptureStop, rkLogRemoveHandlers} from "cells";
+
+test "group: web and sql are predefined with their members" {
+    try asserts.equals(groupMembers("web").join(","), "rakun.web,rakun.core.router,rakun.core.middleware,rakun.client");
+    try asserts.equals(groupMembers("sql").join(","), "rakun.data.sql,rakun.data.datasource,rakun.data.transaction");
+    try asserts.isTrue(isGroup("web"));
+    try asserts.isTrue(isGroup("sql"));
+}
+
+test "group: a level on web raises every member" {
+    val _a = rkSetProp("rakun.logging.level.web", "debug");
+    val levels = [
+        effectiveLevelName("rakun.web"),
+        effectiveLevelName("rakun.core.router"),
+        effectiveLevelName("rakun.core.middleware.cors"),
+        effectiveLevelName("rakun.client"),
+        effectiveLevelName("rakun.data.sql"),
+    ].join(",");
+    val _b = rkSetProp("rakun.logging.level.web", "");
+    try asserts.equals(levels, "debug,debug,debug,debug,info");
+}
+
+test "group: a level on sql raises its three members" {
+    val _a = rkSetProp("rakun.logging.level.sql", "trace");
+    val levels = [
+        effectiveLevelName("rakun.data.sql"),
+        effectiveLevelName("rakun.data.datasource"),
+        effectiveLevelName("rakun.data.transaction"),
+        effectiveLevelName("rakun.data.other"),
+    ].join(",");
+    val _b = rkSetProp("rakun.logging.level.sql", "");
+    try asserts.equals(levels, "trace,trace,trace,info");
+}
+
+test "group: redefining web replaces the predefined membership entirely" {
+    val _g = rkSetProp("rakun.logging.group.web", "app.http, app.views");
+    val _l = rkSetProp("rakun.logging.level.web", "debug");
+    val members = groupMembers("web").join(",");
+    val levels = [
+        effectiveLevelName("app.http"),
+        effectiveLevelName("app.views.home"),
+        effectiveLevelName("rakun.client"),
+    ].join(",");
+    val _a = rkSetProp("rakun.logging.group.web", "");
+    val _b = rkSetProp("rakun.logging.level.web", "");
+    try asserts.equals(members, "app.http,app.views");
+    try asserts.equals(levels, "debug,debug,info");
+}
+
+test "group: an application group is a name usable wherever a logger name is" {
+    val _g = rkSetProp("rakun.logging.group.tomcat", "org.apache.catalina,org.apache.coyote");
+    val _l = rkSetProp("rakun.logging.level.tomcat", "warn");
+    val listed = groupNames().contains("tomcat");
+    val level = effectiveLevelName("org.apache.coyote.http11");
+    val _a = rkSetProp("rakun.logging.group.tomcat", "");
+    val _b = rkSetProp("rakun.logging.level.tomcat", "");
+    try asserts.isTrue(listed);
+    try asserts.equals(level, "warn");
+}
+
+test "group: a group name and a logger name that collide resolve to the group and the boot says so" {
+    val web: Logger = logger("web");
+    val _l = rkSetProp("rakun.logging.level.web", "error");
+    val loggerLevel = effectiveLevelName("web");
+    val memberLevel = effectiveLevelName("rakun.web");
+    val _f = rkLogFixFacts(1767225600, "<0.1.0>", "node-0001");
+    val _h = rkLogCaptureStart("console");
+    val booted = bootLogging();
+    val lines = rkLogCaptureLines("console");
+    val _x = rkLogCaptureStop();
+    val _r = rkLogRemoveHandlers();
+    val _u = rkLogUnfixFacts();
+    val _b = rkSetProp("rakun.logging.level.web", "");
+    assert booted.isOk() == true;
+    try asserts.equals(groupCollisions(["web", "app.x"]).join(","), "web");
+    try asserts.equals(loggerLevel, "info");
+    try asserts.equals(memberLevel, "error");
+    try asserts.contains(lines, "rakun.logging : logging group resolves over the logger of the same name | group=web");
+}

@@ -1,0 +1,99 @@
+//// rakun-logging — `error.digest`, the server half.
+////
+//// THE RULE: the digest is the only part of a server error that crosses to
+//// the client. `logErrorWithDigest` writes ONE error record holding the full
+//// message, the class, the module and the frames, and returns the digest;
+//// `clientErrorBody(digest)` is the whole payload a renderer may send.
+////
+//// THE SCHEME: the first 16 hex characters of a hash over
+//// `module|errorClass|message|topFrames`, where `topFrames` is the first three
+//// whitespace-separated frames with line numbers (`:<digits>`) stripped. Not in
+//// the input: the timestamp, the request id, the node, any argument value — the
+//// digest names a FAULT, not an occurrence, so a thousand hits of one bug are
+//// one digest on every node of the build, and it changes when the code does.
+//// Argument values travel as record FIELDS (`logErrorWithDigestFields`), which
+//// the digest never reads.
+////
+//// THE HASH is std's `strongHash` (SHA-256, 32 hex), truncated to 16. Front
+//// 03's `contentHash` is a 32-bit djb2 fold — at most 8 hex characters — so it
+//// cannot supply 16; a digest is also derived from a message that may carry
+//// outside text, which is `strongHash`'s stated use.
+
+import {hash, json} from "std";
+import {Level} from "levels";
+import {Logger, emitRecord} from "logging";
+
+fn isDigit(c: string) -> bool {
+    return "0123456789".contains(c) && c != "";
+}
+
+// `:<digits>` removed wherever it appears: `invoice.bp:42` → `invoice.bp`,
+// `{invoice,charge,2,[{line,42}]}`-style frames are normalised by the caller.
+pub fn stripLineNumbers(frame: string) -> string {
+    val cs: string[] = frame.chars();
+    var out = "";
+    var i = 0;
+    val n = cs.length;
+    while (i < n) {
+        val c = cs.at(i) ?? "";
+        val next = cs.at(i + 1) ?? "";
+        if (c == ":" && isDigit(next)) {
+            var j = i + 1;
+            while (j < n && isDigit(cs.at(j) ?? "")) {
+                j = j + 1;
+            };
+            i = j;
+        } else {
+            out = out + c;
+            i = i + 1;
+        };
+    };
+    return out;
+}
+
+pub fn topFramesOf(frames: string) -> string {
+    var kept: string[] = [];
+    for (frames.replaceAll("\n", " ").replaceAll("\t", " ").split(" ")) { f ->
+        val t = f.trim();
+        if (t != "" && kept.length < 3) kept.push(stripLineNumbers(t));
+    };
+    return kept.join(" ");
+}
+
+pub fn digestInput(module: string, errorClass: string, message: string, topFrames: string) -> string {
+    return module + "|" + errorClass + "|" + message + "|" + topFramesOf(topFrames);
+}
+
+pub fn errorDigest(module: string, errorClass: string, message: string, topFrames: string) -> string {
+    return hash.strongHash(digestInput(module, errorClass, message, topFrames)).slice(0, 16);
+}
+
+pub fn logErrorWithDigestFields(
+    log: Logger,
+    module: string,
+    errorClass: string,
+    message: string,
+    topFrames: string,
+    fields: Array<#(string, string)>,
+) -> string {
+    val digest = errorDigest(module, errorClass, message, topFrames);
+    var all: Array<#(string, string)> = [
+        #("error.module", module),
+        #("error.type", errorClass),
+        #("error.stack_trace", topFrames),
+    ];
+    for (fields) { f -> all.push(f); };
+    val _w = emitRecord(log.name, Level.Error, message, all, digest);
+    return digest;
+}
+
+pub fn logErrorWithDigest(log: Logger, module: string, errorClass: string, message: string, topFrames: string) -> string {
+    val none: Array<#(string, string)> = [];
+    return logErrorWithDigestFields(log, module, errorClass, message, topFrames, none);
+}
+
+// The payload a renderer hands the client for a server error: the digest and
+// nothing else.
+pub fn clientErrorBody(digest: string) -> string {
+    return "{\"digest\":" + json.quote(digest) + "}";
+}

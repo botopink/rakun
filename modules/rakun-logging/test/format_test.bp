@@ -1,0 +1,235 @@
+//// rakun-logging — the four schemas, escaping, split console/file formats and
+//// the unknown-format refusal (Step 2), over the shared source of
+//// `specs/1.0.10-beta/03-rakun/test-snap.md` § 17.
+////
+//// The snapshot helper the spec names (`assertLog`) is `renderLog` here: it
+//// sets the properties, fixes the facts (clock 2026-01-01T00:00:00Z, pid
+//// `<0.1.0>`, node `node-0001`) and the correlation id `trace-0001`, installs
+//// a CAPTURING OTP handler, emits every event through a real `Logger`, and
+//// answers the lines the handler received — records read back from OTP, not
+//// from stdout. Each cell compares the whole capture with the pinned snapshot
+//// text, and restores every property it set.
+////
+//// Event strings are `"<level> <logger> <message>[ | <k>=<v>,…]"`.
+
+import {testing.asserts} from "std";
+import {rkSetProp} from "rakun";
+import {Level} from "levels";
+import {logger} from "logging";
+import {withCorrelationId, clearCorrelationId} from "correlation";
+import {bootLogging, bootProblem} from "setup";
+import {rkLogFixFacts, rkLogUnfixFacts, rkLogCaptureStart, rkLogCaptureLines, rkLogCaptureStop, rkLogRemoveHandlers} from "cells";
+
+fn levelOf(name: string) -> Level {
+    if (name == "trace") return Level.Trace;
+    if (name == "debug") return Level.Debug;
+    if (name == "warn") return Level.Warn;
+    if (name == "error") return Level.Error;
+    return Level.Info;
+}
+
+fn fieldsOf(raw: string) -> Array<#(string, string)> {
+    var out: Array<#(string, string)> = [];
+    if (raw == "") return out;
+    for (raw.split(",")) { kv ->
+        val eq = kv.indexOf("=");
+        out.push(#(kv.slice(0, eq), kv.slice(eq + 1, kv.length())));
+    };
+    return out;
+}
+
+fn emitEvent(event: string) -> i32 {
+    val s1 = event.indexOf(" ");
+    val level = event.slice(0, s1);
+    val rest = event.slice(s1 + 1, event.length());
+    val s2 = rest.indexOf(" ");
+    val name = rest.slice(0, s2);
+    val tail = rest.slice(s2 + 1, rest.length());
+    val bar = tail.indexOf(" | ");
+    val message = if (bar < 0) tail else tail.slice(0, bar);
+    val fields = if (bar < 0) "" else tail.slice(bar + 3, tail.length());
+    return logger(name).log(levelOf(level), message, fieldsOf(fields));
+}
+
+fn setProps(props: string[], clear: bool) -> i32 {
+    for (props) { p ->
+        val eq = p.indexOf("=");
+        val _s = rkSetProp(p.slice(0, eq), if (clear) "" else p.slice(eq + 1, p.length()));
+    };
+    return 0;
+}
+
+fn renderLogTo(target: string, props: string[], events: string[]) -> string {
+    val _p = setProps(props, false);
+    val _f = rkLogFixFacts(1767225600, "<0.1.0>", "node-0001");
+    val _c = withCorrelationId("trace-0001");
+    val _h = rkLogCaptureStart(target);
+    for (events) { e -> val _e = emitEvent(e); };
+    val out = rkLogCaptureLines(target);
+    val _x = rkLogCaptureStop();
+    val _y = clearCorrelationId();
+    val _z = rkLogUnfixFacts();
+    val _q = setProps(props, true);
+    return out;
+}
+
+fn renderLog(props: string[], events: string[]) -> string {
+    return renderLogTo("console", props, events);
+}
+
+test "log: ecs renders the documented field set in fixed order" {
+    val out = renderLog(
+        ["rakun.logging.structured.format.console=ecs", "rakun.application.name=billing"],
+        ["info app.billing.invoices charging invoice | invoice.id=7"]);
+    try asserts.equals(out,
+        \\{"@timestamp":"2026-01-01T00:00:00Z","log.level":"INFO","message":"charging invoice","service.name":"billing","process.thread.name":"<0.1.0>","log.logger":"app.billing.invoices","trace.id":"trace-0001","invoice.id":"7"}
+    );
+}
+
+test "log: gelf renders the documented field set with underscore extras" {
+    val out = renderLog(
+        ["rakun.logging.structured.format.console=gelf", "rakun.application.name=billing"],
+        ["warn app.billing.invoices charge declined | invoice.id=7,gateway.code=51"]);
+    try asserts.equals(out,
+        \\{"version":"1.1","host":"node-0001","short_message":"charge declined","timestamp":1767225600,"level":4,"_logger":"app.billing.invoices","_trace_id":"trace-0001","_invoice_id":"7","_gateway_code":"51"}
+    );
+}
+
+test "log: logstash renders the documented field set" {
+    val out = renderLog(
+        ["rakun.logging.structured.format.console=logstash", "rakun.application.name=billing"],
+        ["error app.billing.invoices gateway unreachable"]);
+    try asserts.equals(out,
+        \\{"@timestamp":"2026-01-01T00:00:00Z","@version":"1","message":"gateway unreachable","logger_name":"app.billing.invoices","level":"ERROR","level_value":40000}
+    );
+}
+
+test "log: plain renders the console line" {
+    val out = renderLog(
+        ["rakun.logging.structured.format.console=plain", "rakun.application.name=billing"],
+        ["info app.billing.invoices charging invoice", "warn app.billing.invoices charge declined"]);
+    try asserts.equals(out,
+        \\2026-01-01T00:00:00Z  INFO <0.1.0> --- [billing] [main] app.billing.invoices : charging invoice
+        \\2026-01-01T00:00:00Z  WARN <0.1.0> --- [billing] [main] app.billing.invoices : charge declined
+    );
+}
+
+test "log: a quote and a newline round-trip through ecs" {
+    val out = renderLog(
+        ["rakun.logging.structured.format.console=ecs", "rakun.application.name=billing"],
+        ["info app.billing.invoices say \"hi\"\nthen \\ stop"]);
+    try asserts.equals(out,
+        "{\"@timestamp\":\"2026-01-01T00:00:00Z\",\"log.level\":\"INFO\",\"message\":\"say \\\"hi\\\"\\nthen \\\\ stop\",\"service.name\":\"billing\",\"process.thread.name\":\"<0.1.0>\",\"log.logger\":\"app.billing.invoices\",\"trace.id\":\"trace-0001\"}"
+    );
+}
+
+test "log: a quote a backslash a newline and a control character round-trip through gelf and logstash" {
+    val gelf = renderLog(
+        ["rakun.logging.structured.format.console=gelf", "rakun.application.name=billing"],
+        ["info app.x a \"q\" b \\ c\nd\te"]);
+    try asserts.contains(gelf, "\"short_message\":\"a \\\"q\\\" b \\\\ c\\nd\\te\"");
+    val stash = renderLog(
+        ["rakun.logging.structured.format.console=logstash", "rakun.application.name=billing"],
+        ["info app.x a \"q\" b \\ c\nd\te"]);
+    try asserts.contains(stash, "\"message\":\"a \\\"q\\\" b \\\\ c\\nd\\te\"");
+    try asserts.isFalse(stash.contains("\n"));
+}
+
+test "log: every schema writes one line per record" {
+    val ecs = renderLog(["rakun.logging.structured.format.console=ecs"], ["info app.x one\ntwo", "info app.x three"]);
+    try asserts.equals(ecs.split("\n").length, 2);
+    val plain = renderLog(["rakun.logging.structured.format.console=plain"], ["info app.x one\ntwo"]);
+    try asserts.equals(plain.split("\n").length, 1);
+    try asserts.contains(plain, "one\\ntwo");
+}
+
+test "log: console and file carry different formats at the same time" {
+    val props = [
+        "rakun.logging.structured.format.console=plain",
+        "rakun.logging.structured.format.file=ecs",
+        "rakun.application.name=billing",
+    ];
+    val _p = setProps(props, false);
+    val _f = rkLogFixFacts(1767225600, "<0.1.0>", "node-0001");
+    val _c = withCorrelationId("trace-0001");
+    val _h1 = rkLogCaptureStart("console");
+    val _h2 = rkLogCaptureStart("file");
+    val _e = logger("app.split").info("both targets");
+    val console = rkLogCaptureLines("console");
+    val file = rkLogCaptureLines("file");
+    val _x = rkLogCaptureStop();
+    val _y = clearCorrelationId();
+    val _z = rkLogUnfixFacts();
+    val _q = setProps(props, true);
+    try asserts.equals(console, "2026-01-01T00:00:00Z  INFO <0.1.0> --- [billing] [main] app.split : both targets");
+    try asserts.equals(file,
+        \\{"@timestamp":"2026-01-01T00:00:00Z","log.level":"INFO","message":"both targets","service.name":"billing","process.thread.name":"<0.1.0>","log.logger":"app.split","trace.id":"trace-0001"}
+    );
+}
+
+test "log: an unknown format refuses the boot naming the key and the four values" {
+    val _s = rkSetProp("rakun.logging.structured.format.console", "xml");
+    val message = bootProblem();
+    val r = bootLogging();
+    val _c = rkSetProp("rakun.logging.structured.format.console", "");
+    val _h = rkLogRemoveHandlers();
+    assert r.isError() == true;
+    try asserts.contains(message, "rakun.logging.structured.format.console");
+    try asserts.contains(message, "ecs, gelf, logstash, plain");
+}
+
+test "log: an unknown file format refuses the boot too" {
+    val _s = rkSetProp("rakun.logging.structured.format.file", "yaml");
+    val message = bootProblem();
+    val r = bootLogging();
+    val _c = rkSetProp("rakun.logging.structured.format.file", "");
+    val _h = rkLogRemoveHandlers();
+    assert r.isError() == true;
+    try asserts.contains(message, "rakun.logging.structured.format.file");
+}
+
+test "log: a trace record is discarded when the level is debug and root applies elsewhere" {
+    val out = renderLog(
+        ["rakun.logging.structured.format.console=plain", "rakun.application.name=billing", "rakun.logging.level.app.billing=debug"],
+        [
+            "trace app.billing.invoices building request",
+            "debug app.billing.invoices gateway result=0",
+            "debug app.other pool idle",
+            "info app.other pool ready",
+        ]);
+    try asserts.equals(out,
+        \\2026-01-01T00:00:00Z DEBUG <0.1.0> --- [billing] [main] app.billing.invoices : gateway result=0
+        \\2026-01-01T00:00:00Z  INFO <0.1.0> --- [billing] [main] app.other : pool ready
+    );
+}
+
+test "log: longest prefix wins and the web group raises every member" {
+    val out = renderLog(
+        [
+            "rakun.logging.structured.format.console=plain",
+            "rakun.application.name=billing",
+            "rakun.logging.level.rakun.data=debug",
+            "rakun.logging.level.rakun.data.sql=warn",
+            "rakun.logging.level.web=debug",
+        ],
+        [
+            "debug rakun.data.sql select 1",
+            "debug rakun.data.datasource pool idle",
+            "warn rakun.data.sql slow query",
+            "debug rakun.client GET /products",
+            "debug rakun.core.router matched /api",
+        ]);
+    try asserts.equals(out,
+        \\2026-01-01T00:00:00Z DEBUG <0.1.0> --- [billing] [main] rakun.data.datasource : pool idle
+        \\2026-01-01T00:00:00Z  WARN <0.1.0> --- [billing] [main] rakun.data.sql : slow query
+        \\2026-01-01T00:00:00Z DEBUG <0.1.0> --- [billing] [main] rakun.client : GET /products
+        \\2026-01-01T00:00:00Z DEBUG <0.1.0> --- [billing] [main] rakun.core.router : matched /api
+    );
+}
+
+test "log: every record of a request carries the correlation id" {
+    val out = renderLog(
+        ["rakun.logging.structured.format.console=ecs"],
+        ["info app.a first", "warn app.b second", "error app.c third"]);
+    try asserts.equals(out.split("\"trace.id\":\"trace-0001\"").length, 4);
+}

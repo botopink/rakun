@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+### Structured logging (botopink front 17)
+
+- `modules/rakun-logging`: one `Logger` type with five levels over OTP `logger`
+  (Trace/Debug → `debug`, Info → `info`, Warn → `warning`, Error → `error`); the level
+  check runs before `logger:log/3`, so a Trace record under a Debug logger never reaches OTP;
+  `isEnabled` and `lazily(level, build)` keep an expensive message from being built.
+- Levels by longest prefix (`rakun.logging.level.<name>`, root default `info`), the
+  predefined `web` and `sql` groups, `rakun.logging.group.<name>` to define or replace one;
+  a group name wins over a colliding logger name and the boot logs it.
+- Four single-line schemas — `ecs`, `gelf`, `logstash`, `plain` (default) — with fixed field
+  order, set per target (`rakun.logging.structured.format.console` / `.file`); an unknown
+  format or level refuses the boot naming the key and the accepted values.
+- Correlation id per process: from `traceparent`, then `x-request-id`, else generated;
+  `correlated`, `freshCorrelation` (scheduled tasks, listeners) and `withCorrelationId`
+  (workers); falls back to front 62's request frame id.
+- `error.digest`: `errorDigest` / `logErrorWithDigest` (one ERROR record, full detail) and
+  `clientErrorBody` — the digest is the only part of a server error that crosses to the client.
+- File output and rotation through `logger_std_h` (`rakun.logging.file.name` / `.path`,
+  `max-size`, `max-history`, `total-size-cap`), handler thresholds
+  (`rakun.logging.threshold.console` / `.file`), `rakun.logging.config` (`sys.config` with
+  profile sections, winning over `application.yaml`).
+- The `loggers` (list, one, run-time set, group set, reset to inherited) and `logfile`
+  (`Range` → 206 + `Content-Range`, 404 without a file) endpoints, registered through
+  `rakun-actuator-api`.
+- The startup summary on `ApplicationReady` from `rakun.core.Bootstrap`: elapsed time,
+  process uptime, OS pid, node, port, front 05's profiles (`profiles []` when none) and the
+  logging configuration file.
+- 54 tests green on erlang.
+
 ### rakun-web: URL rules (botopink front 65)
 
 - `rules.bp`: `Matcher` (compiled once), `sourceToPattern`, `capturesOf`,

@@ -1,0 +1,165 @@
+//// rakun-logging — the four output schemas.
+////
+//// A record is rendered HERE, once per target, and handed to OTP already
+//// rendered; the formatter module `rakun_logging` only picks the line its
+//// handler is configured for. Field order within a schema is fixed, so two
+//// lines of one schema diff cleanly; an optional field that has no value
+//// (`service.name` with no application name, `trace.id` outside any
+//// correlation scope, `error.digest` on a record that is not a fault) is left
+//// out rather than written empty, and never moves another field.
+////
+//// | schema     | fields, in order                                                                                       |
+//// |------------|--------------------------------------------------------------------------------------------------------|
+//// | `ecs`      | `@timestamp` `log.level` `message` `service.name` `process.thread.name` `log.logger` `trace.id` `error.digest` + fields |
+//// | `gelf`     | `version` `host` `short_message` `timestamp` `level` `_logger` `_trace_id` `_error_digest` + `_`-fields |
+//// | `logstash` | `@timestamp` `@version` `message` `logger_name` `level` `level_value` `error_digest` + fields          |
+//// | `plain`    | `<timestamp> <LEVEL> <pid> --- [<app>] [<thread>] <logger> : <message>[ | k=v,…]`                    |
+////
+//// JSON strings go through std's `json.quote` (RFC 8259: quote, backslash,
+//// newline and every control character escaped), so a message cannot break a
+//// line or a record. `plain` is for a human and escapes only line breaks, so
+//// one record stays one line.
+
+import {json} from "std";
+import {rkLogIso, rkLogGelfTs} from "cells";
+import {rankName} from "levels";
+
+pub type LogRecord(
+    millis: i32,
+    rank: i32,
+    logger: string,
+    message: string,
+    fields: Array<#(string, string)>,
+    trace: string,
+    digest: string,
+    pid: string,
+    node: string,
+    thread: string,
+    app: string,
+)
+
+pub fn validFormats() -> string {
+    return "ecs, gelf, logstash, plain";
+}
+
+pub fn isFormat(name: string) -> bool {
+    return name == "ecs" || name == "gelf" || name == "logstash" || name == "plain";
+}
+
+pub fn formatProblem(key: string, raw: string) -> string {
+    return "rakun logging: `" + key + "` is `" + raw + "`, which is not a log format - accepted: " + validFormats();
+}
+
+fn q(s: string) -> string {
+    return json.quote(s);
+}
+
+fn member(key: string, encoded: string) -> string {
+    return q(key) + ":" + encoded;
+}
+
+fn object(members: string[]) -> string {
+    return "{" + members.join(",") + "}";
+}
+
+// ── ecs ─────────────────────────────────────────────────────────────────────
+
+pub fn renderEcs(r: LogRecord) -> string {
+    var m: string[] = [];
+    m.push(member("@timestamp", q(rkLogIso(r.millis))));
+    m.push(member("log.level", q(rankName(r.rank))));
+    m.push(member("message", q(r.message)));
+    if (r.app != "") m.push(member("service.name", q(r.app)));
+    m.push(member("process.thread.name", q(r.pid)));
+    m.push(member("log.logger", q(r.logger)));
+    if (r.trace != "") m.push(member("trace.id", q(r.trace)));
+    if (r.digest != "") m.push(member("error.digest", q(r.digest)));
+    for (r.fields) { f -> m.push(member(f._0, q(f._1))); };
+    return object(m);
+}
+
+// ── gelf ────────────────────────────────────────────────────────────────────
+
+// Syslog severities, as GELF 1.1 asks: error 3 · warning 4 · info 6 · debug 7.
+pub fn gelfLevel(rank: i32) -> string {
+    if (rank <= 1) return "7";
+    if (rank == 2) return "6";
+    if (rank == 3) return "4";
+    return "3";
+}
+
+// GELF additional fields match `^[\w\.\-]*$` and are `_`-prefixed; rakun also
+// folds `.` to `_` (`invoice.id` → `_invoice_id`) so a collector that indexes
+// on the name does not read the dot as nesting.
+pub fn gelfKey(key: string) -> string {
+    var out = "_";
+    for (key.chars()) { c ->
+        val keep = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-".contains(c);
+        if (keep) out = out + c else out = out + "_";
+    };
+    return out;
+}
+
+pub fn renderGelf(r: LogRecord) -> string {
+    var m: string[] = [];
+    m.push(member("version", q("1.1")));
+    m.push(member("host", q(r.node)));
+    m.push(member("short_message", q(r.message)));
+    m.push(member("timestamp", rkLogGelfTs(r.millis)));
+    m.push(member("level", gelfLevel(r.rank)));
+    m.push(member("_logger", q(r.logger)));
+    if (r.trace != "") m.push(member("_trace_id", q(r.trace)));
+    if (r.digest != "") m.push(member("_error_digest", q(r.digest)));
+    for (r.fields) { f -> m.push(member(gelfKey(f._0), q(f._1))); };
+    return object(m);
+}
+
+// ── logstash ────────────────────────────────────────────────────────────────
+
+// Logback's level integers: TRACE 5000 · DEBUG 10000 · INFO 20000 · WARN 30000 · ERROR 40000.
+pub fn logstashLevelValue(rank: i32) -> string {
+    if (rank == 0) return "5000";
+    if (rank == 1) return "10000";
+    if (rank == 2) return "20000";
+    if (rank == 3) return "30000";
+    return "40000";
+}
+
+pub fn renderLogstash(r: LogRecord) -> string {
+    var m: string[] = [];
+    m.push(member("@timestamp", q(rkLogIso(r.millis))));
+    m.push(member("@version", q("1")));
+    m.push(member("message", q(r.message)));
+    m.push(member("logger_name", q(r.logger)));
+    m.push(member("level", q(rankName(r.rank))));
+    m.push(member("level_value", logstashLevelValue(r.rank)));
+    if (r.digest != "") m.push(member("error_digest", q(r.digest)));
+    for (r.fields) { f -> m.push(member(f._0, q(f._1))); };
+    return object(m);
+}
+
+// ── plain ───────────────────────────────────────────────────────────────────
+
+fn oneLine(s: string) -> string {
+    return s.replaceAll("\r", "\\r").replaceAll("\n", "\\n");
+}
+
+pub fn renderPlain(r: LogRecord) -> string {
+    val head = rkLogIso(r.millis) + " " + rankName(r.rank).padStart(5, " ") + " " + r.pid
+        + " --- [" + r.app + "] [" + r.thread + "] " + r.logger + " : " + oneLine(r.message);
+    var extras: string[] = [];
+    if (r.digest != "") extras.push("error.digest=" + r.digest);
+    for (r.fields) { f -> extras.push(f._0 + "=" + oneLine(f._1)); };
+    if (extras.length == 0) return head;
+    return head + " | " + extras.join(",");
+}
+
+// ── dispatch ────────────────────────────────────────────────────────────────
+
+pub fn render(format: string, r: LogRecord) -> string {
+    if (format == "ecs") return renderEcs(r);
+    if (format == "gelf") return renderGelf(r);
+    if (format == "logstash") return renderLogstash(r);
+    if (format != "plain") @panic(formatProblem("rakun.logging.structured.format", format));
+    return renderPlain(r);
+}

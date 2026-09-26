@@ -32,7 +32,7 @@ refusal is the core's `config_check.bp`.
 | [rakun-client](./rakun-client/) | root · address · settings · response · cache · transport · health · client · request · exchange | erlang | `RestClient` / `WebClient` | 13 | real code, 70 tests |
 | [rakun-data](./rakun-data/) | root · datasource · sql | erlang | `-data-jpa` / `-data-jdbc` / `-data-mongodb` / `-data-redis` | 08 · 09 · 77 · 78 | real code, 77 tests |
 | [rakun-hateoas](./rakun-hateoas/) | root | erlang | `-hateoas` | 21 | scaffold |
-| [rakun-logging](./rakun-logging/) | root | erlang | `-logging` | 17 | scaffold |
+| [rakun-logging](./rakun-logging/) | root · cells · levels · formats · correlation · logging · digest · setup · endpoints | erlang | `-logging` | 17 | real code, 54 tests |
 | [rakun-messaging](./rakun-messaging/) | root | erlang | `-amqp` / `-kafka` / `-activemq` / `-artemis` | 15 · 86 · 90 | scaffold |
 | [rakun-scheduling](./rakun-scheduling/) | root | erlang | `@Scheduled` / `-quartz` | 16 · 84 | scaffold |
 | [rakun-security](./rakun-security/) | root | erlang | `-security`, `-oauth2-client`, `-saml2` | 10 · 79 | scaffold |

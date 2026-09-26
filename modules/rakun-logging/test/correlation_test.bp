@@ -1,0 +1,210 @@
+//// rakun-logging — correlation (Step 4): header reuse, generation, the id on
+//// every record of a request down three calls into `#[service]` beans, the ids
+//// of scheduled and listener runs, `withCorrelationId` into a worker, and
+//// concurrent isolation. Records are read back from the capturing OTP handler
+//// in ECS; the id is taken from `trace.id`.
+
+import {testing.asserts, async} from "std";
+import {service, rkScan, rkSingleton, rkEnter, rkDone, rkSetProp, rkReqSleep} from "rakun";
+import {Level} from "levels";
+import {Logger, logger} from "logging";
+import {
+    correlationFromHeaders,
+    correlationId,
+    withCorrelationId,
+    clearCorrelationId,
+    beginCorrelation,
+    correlated,
+    freshCorrelation,
+    traceIdOf,
+} from "correlation";
+import {rkLogCaptureStart, rkLogCaptureLines, rkLogCaptureStop} from "cells";
+
+fn traceIds(lines: string) -> string[] {
+    var out: string[] = [];
+    for (lines.split("\n")) { l ->
+        val at = l.indexOf("\"trace.id\":\"");
+        if (at >= 0) {
+            val rest = l.slice(at + 12, l.length());
+            out.push(rest.slice(0, rest.indexOf("\"")));
+        } else {
+            out.push("");
+        };
+    };
+    return out;
+}
+
+fn allEqual(xs: string[], id: string) -> bool {
+    var ok = xs.length > 0;
+    for (xs) { x -> if (x != id) ok = false; };
+    return ok;
+}
+
+fn startCapture() -> i32 {
+    val _f = rkSetProp("rakun.logging.structured.format.console", "ecs");
+    return rkLogCaptureStart("console");
+}
+
+fn stopCapture() -> string {
+    val lines = rkLogCaptureLines("console");
+    val _x = rkLogCaptureStop();
+    val _f = rkSetProp("rakun.logging.structured.format.console", "");
+    return lines;
+}
+
+// ── three calls deep ────────────────────────────────────────────────────────
+
+#[service]
+pub type LedgerRepo {
+    pub fn record(self: Self, id: string) -> i32 {
+        val log: Logger = logger("app.ledger.repo");
+        return log.info("row written for " + id);
+    }
+}
+
+#[service]
+pub type LedgerService(
+    repo: LedgerRepo,
+) {
+    pub fn post(self: Self, id: string) -> i32 {
+        val log: Logger = logger("app.ledger.service");
+        val _i = log.info("posting " + id);
+        return self.repo.record(id);
+    }
+}
+
+#[service]
+pub type LedgerFacade(
+    ledger: LedgerService,
+) {
+    pub fn handle(self: Self, id: string) -> i32 {
+        val log: Logger = logger("app.ledger.facade");
+        val _i = log.info("handling " + id);
+        return self.ledger.post(id);
+    }
+}
+
+fn handleRequest(id: string) -> i32 {
+    val facade = LedgerFacade(ledger: LedgerService(repo: LedgerRepo()));
+    val log: Logger = logger("app.ledger.handler");
+    val _h = log.info("request " + id);
+    return facade.handle(id);
+}
+
+// ── concurrent runs ─────────────────────────────────────────────────────────
+
+fn requestRun(label: string) -> string {
+    return correlated("", "", { -> slowLog(label) });
+}
+
+fn slowLog(label: string) -> string {
+    val log: Logger = logger("app.concurrent");
+    val _a = log.info("start " + label);
+    val _s = rkReqSleep(30);
+    val _b = log.info("end " + label);
+    return correlationId();
+}
+
+fn scheduledRun(label: string) -> string {
+    return freshCorrelation({ -> slowLog(label) });
+}
+
+fn workerRun(id: string) -> string {
+    val _w = withCorrelationId(id);
+    val log: Logger = logger("app.worker");
+    val _i = log.info("retry scheduled");
+    return correlationId();
+}
+
+fn concurrentRequests() -> @Task<string[]> {
+    return await async.runAll([
+        { -> async { requestRun("a") } },
+        { -> async { requestRun("b") } },
+    ]);
+}
+
+fn concurrentBackground() -> @Task<string[]> {
+    return await async.runAll([
+        { -> async { scheduledRun("task") } },
+        { -> async { scheduledRun("listener") } },
+    ]);
+}
+
+fn startWorker(id: string) -> @Task<string[]> {
+    return await async.runAll([{ -> async { workerRun(id) } }]);
+}
+
+fn workerWithoutHandOff() -> @Task<string[]> {
+    return await async.runAll([{ -> async { correlationId() } }]);
+}
+
+// ── the cells ───────────────────────────────────────────────────────────────
+
+test "correlation: a traceparent is reused, then x-request-id, else an id is generated" {
+    val tp = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+    try asserts.equals(correlationFromHeaders(tp, "req-7"), "4bf92f3577b34da6a3ce929d0e0e4736");
+    try asserts.equals(correlationFromHeaders("", "req-7"), "req-7");
+    try asserts.equals(correlationFromHeaders("not-a-traceparent", "req-7"), "req-7");
+    val a = correlationFromHeaders("", "");
+    val b = correlationFromHeaders("", "");
+    try asserts.equals(a.length(), 16);
+    try asserts.notEquals(a, b);
+    try asserts.equals(traceIdOf("00-00000000000000000000000000000000-00f067aa0ba902b7-01"), "");
+}
+
+test "correlation: every record of a request carries one id three calls deep" {
+    val _c = startCapture();
+    val _r = correlated("", "req-ledger-1", { -> handleRequest("inv-1") });
+    val lines = stopCapture();
+    val ids = traceIds(lines);
+    try asserts.equals(ids.length, 4);
+    try asserts.isTrue(allEqual(ids, "req-ledger-1"));
+    try asserts.equals(correlationId(), "");
+}
+
+test "correlation: a scope restores the previous id" {
+    val _o = withCorrelationId("outer");
+    val inner = correlated("", "inner", { -> correlationId() });
+    val after = correlationId();
+    val _x = clearCorrelationId();
+    try asserts.equals(inner, "inner");
+    try asserts.equals(after, "outer");
+}
+
+test "correlation: a scheduled task and a listener each get an id and two concurrent runs differ" {
+    val _c = startCapture();
+    val ids = await concurrentBackground();
+    val lines = stopCapture();
+    val first = ids.at(0) ?? "";
+    val second = ids.at(1) ?? "";
+    try asserts.equals(first.length(), 16);
+    try asserts.equals(second.length(), 16);
+    try asserts.notEquals(first, second);
+    val seen = traceIds(lines);
+    try asserts.equals(seen.length, 4);
+    try asserts.equals(seen.filter({ s -> s == first }).length, 2);
+    try asserts.equals(seen.filter({ s -> s == second }).length, 2);
+}
+
+test "correlation: withCorrelationId propagates an id into a worker started by a request" {
+    val id = beginCorrelation("", "req-worker-9");
+    val handed = await startWorker(correlationId());
+    val bare = await workerWithoutHandOff();
+    val _x = clearCorrelationId();
+    try asserts.equals(id, "req-worker-9");
+    try asserts.equals(handed.at(0) ?? "", "req-worker-9");
+    try asserts.equals(bare.at(0) ?? "x", "");
+}
+
+test "correlation: two concurrent requests never share an id" {
+    val _c = startCapture();
+    val ids = await concurrentRequests();
+    val lines = stopCapture();
+    val first = ids.at(0) ?? "";
+    val second = ids.at(1) ?? "";
+    try asserts.notEquals(first, "");
+    try asserts.notEquals(first, second);
+    val seen = traceIds(lines);
+    try asserts.equals(seen.filter({ s -> s == first }).length, 2);
+    try asserts.equals(seen.filter({ s -> s == second }).length, 2);
+}

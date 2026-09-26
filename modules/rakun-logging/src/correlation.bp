@@ -1,0 +1,82 @@
+//// rakun-logging — the correlation id.
+////
+//// Every request, scheduled run and listener delivery has one id, and every
+//// record emitted while it is in flight carries it (`trace.id` in ECS,
+//// `_trace_id` in GELF). The id lives in the PROCESS: on the BEAM a request is
+//// served by one process, so a `#[service]` three calls down reads the same
+//// slot without the id being passed. A worker is another process and starts
+//// with none — `withCorrelationId(id)` hands it over.
+////
+//// WHERE THE ID COMES FROM. `beginCorrelation(traceparent, xRequestId)`: a
+//// well-formed W3C `traceparent` wins (its trace id — front 11's
+//// `validTraceparent`), then a non-empty `x-request-id` (front 07's
+//// `X-Request-Id`, the header rakun-web echoes), then a fresh id. With no id of
+//// its own the process falls back to front 62's request frame (`requestId()`),
+//// so a record inside a frame is never uncorrelated.
+////
+//// A SCOPE RESTORES. `correlated(…, work)` and `freshCorrelation(work)` set
+//// the id for the duration of `work` and put the previous one back, so a
+//// keep-alive connection process never carries one request's id into the next.
+
+import {requestLive, requestId} from "rakun";
+import {validTraceparent} from "rakun-actuator-api";
+import {rkLogCorrelation, rkLogSetCorrelation, rkLogFreshId} from "cells";
+
+pub fn traceIdOf(traceparent: string) -> string {
+    if (validTraceparent(traceparent) == false) return "";
+    val parts: string[] = traceparent.trim().split("-");
+    return parts.at(1) ?? "";
+}
+
+pub fn correlationFromHeaders(traceparent: string, xRequestId: string) -> string {
+    val fromTrace = traceIdOf(traceparent);
+    if (fromTrace != "") return fromTrace;
+    val given = xRequestId.trim();
+    if (given != "") return given;
+    return rkLogFreshId();
+}
+
+pub fn freshCorrelationId() -> string {
+    return rkLogFreshId();
+}
+
+// The id of the work in flight on this process, or "" outside any scope.
+pub fn correlationId() -> string {
+    val own = rkLogCorrelation();
+    if (own != "") return own;
+    if (requestLive()) return requestId();
+    return "";
+}
+
+pub fn withCorrelationId(id: string) -> i32 {
+    return rkLogSetCorrelation(id);
+}
+
+pub fn clearCorrelationId() -> i32 {
+    return rkLogSetCorrelation("");
+}
+
+pub fn beginCorrelation(traceparent: string, xRequestId: string) -> string {
+    val id = correlationFromHeaders(traceparent, xRequestId);
+    val _s = rkLogSetCorrelation(id);
+    return id;
+}
+
+// A request's scope: the id from its headers for the duration of `work`.
+pub fn correlated<T>(traceparent: string, xRequestId: string, work: fn() -> T) -> T {
+    val previous = rkLogCorrelation();
+    val _b = beginCorrelation(traceparent, xRequestId);
+    val out = work();
+    val _r = rkLogSetCorrelation(previous);
+    return out;
+}
+
+// A background run's scope — a `#[scheduled]` firing (front 16) or a listener
+// delivery (front 15): a fresh id for the duration of `work`.
+pub fn freshCorrelation<T>(work: fn() -> T) -> T {
+    val previous = rkLogCorrelation();
+    val _s = rkLogSetCorrelation(rkLogFreshId());
+    val out = work();
+    val _r = rkLogSetCorrelation(previous);
+    return out;
+}

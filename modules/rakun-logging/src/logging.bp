@@ -1,0 +1,129 @@
+//// rakun-logging — the `Logger`.
+////
+//// One type, five levels, over OTP `logger`. The level check is HERE, before
+//// the host call: a record below the logger's effective level is dropped
+//// without a message being rendered or `logger:log/3` being called, which is
+//// what keeps Trace and Debug apart although OTP maps both to `debug`.
+//// `isEnabled` exists so an expensive message is not BUILT for a level that is
+//// off, and `lazily(level, build)` is the same guard with the builder passed in.
+////
+//// Fields are a list, never interpolated into the sentence: a structured log
+//// whose values live inside the message is an unstructured log.
+
+import {rkProp} from "rakun";
+import {Level, levelRank, levelName, otpLevel, enabledFor} from "levels";
+import {LogRecord, render, isFormat, formatProblem} from "formats";
+import {correlationId} from "correlation";
+import {rkLogEmit, rkLogRegisterName, rkLogNowMillis, rkLogPid, rkLogNode, rkLogThread, rkLogWantsFile} from "cells";
+
+pub fn consoleFormatKey() -> string {
+    return "rakun.logging.structured.format.console";
+}
+
+pub fn fileFormatKey() -> string {
+    return "rakun.logging.structured.format.file";
+}
+
+// Unset means `plain`, the development default and the one shape a human
+// reads; a spelling that is not one of the four raises naming the key.
+pub fn formatAt(key: string) -> string {
+    val raw = rkProp(key).trim().toLower();
+    val name = if (raw == "") "plain" else raw;
+    if (isFormat(name) == false) @panic(formatProblem(key, rkProp(key)));
+    return name;
+}
+
+pub fn applicationName() -> string {
+    return rkProp("rakun.application.name");
+}
+
+pub fn emitRecord(name: string, level: Level, message: string, fields: Array<#(string, string)>, digest: string) -> i32 {
+    if (enabledFor(name, level) == false) return 0;
+    val trace = correlationId();
+    val rec = LogRecord(
+        millis: rkLogNowMillis(),
+        rank: levelRank(level),
+        logger: name,
+        message: message,
+        fields: fields,
+        trace: trace,
+        digest: digest,
+        pid: rkLogPid(),
+        node: rkLogNode(),
+        thread: rkLogThread(),
+        app: applicationName(),
+    );
+    val console = render(formatAt(consoleFormatKey()), rec);
+    val file = if (rkLogWantsFile()) render(formatAt(fileFormatKey()), rec) else console;
+    return rkLogEmit(otpLevel(level), levelName(level), name, console, file, trace);
+}
+
+fn none() -> Array<#(string, string)> {
+    val empty: Array<#(string, string)> = [];
+    return empty;
+}
+
+pub type Logger(
+    name: string,
+) {
+    pub fn trace(self: Self, message: string) -> i32 {
+        return emitRecord(self.name, Level.Trace, message, none(), "");
+    }
+
+    pub fn traceWith(self: Self, message: string, fields: Array<#(string, string)>) -> i32 {
+        return emitRecord(self.name, Level.Trace, message, fields, "");
+    }
+
+    pub fn debug(self: Self, message: string) -> i32 {
+        return emitRecord(self.name, Level.Debug, message, none(), "");
+    }
+
+    pub fn debugWith(self: Self, message: string, fields: Array<#(string, string)>) -> i32 {
+        return emitRecord(self.name, Level.Debug, message, fields, "");
+    }
+
+    pub fn info(self: Self, message: string) -> i32 {
+        return emitRecord(self.name, Level.Info, message, none(), "");
+    }
+
+    pub fn infoWith(self: Self, message: string, fields: Array<#(string, string)>) -> i32 {
+        return emitRecord(self.name, Level.Info, message, fields, "");
+    }
+
+    pub fn warn(self: Self, message: string) -> i32 {
+        return emitRecord(self.name, Level.Warn, message, none(), "");
+    }
+
+    pub fn warnWith(self: Self, message: string, fields: Array<#(string, string)>) -> i32 {
+        return emitRecord(self.name, Level.Warn, message, fields, "");
+    }
+
+    pub fn error(self: Self, message: string) -> i32 {
+        return emitRecord(self.name, Level.Error, message, none(), "");
+    }
+
+    pub fn errorWith(self: Self, message: string, fields: Array<#(string, string)>) -> i32 {
+        return emitRecord(self.name, Level.Error, message, fields, "");
+    }
+
+    pub fn log(self: Self, level: Level, message: string, fields: Array<#(string, string)>) -> i32 {
+        return emitRecord(self.name, level, message, fields, "");
+    }
+
+    pub fn isEnabled(self: Self, level: Level) -> bool {
+        return enabledFor(self.name, level);
+    }
+
+    // `build` runs only when `level` is on for this logger.
+    pub fn lazily(self: Self, level: Level, build: fn() -> string) -> i32 {
+        if (enabledFor(self.name, level) == false) return 0;
+        return emitRecord(self.name, level, build(), none(), "");
+    }
+}
+
+// The name is what `rakun.logging.level.*` resolves against and what the
+// `loggers` endpoint lists; creating a logger registers it.
+pub fn logger(name: string) -> Logger {
+    val _r = rkLogRegisterName(name);
+    return Logger(name: name);
+}

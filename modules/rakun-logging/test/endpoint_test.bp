@@ -1,0 +1,133 @@
+//// rakun-logging — the `loggers` and `logfile` endpoints (Step 7), driven
+//// through their operations (`loggersOperation(method, name, body)`,
+//// `logfileOperation(range)`) and through the rows they register in
+//// `rakun-actuator-api`. Every override a cell sets is reset.
+
+import {testing.asserts, io.env} from "std";
+import {rkSetProp, rkReplyHeaders} from "rakun";
+import {endpointIds, rkApiEndpointOps, rkApiEndpointOwner, rkApiEndpointRemove} from "rakun-actuator-api";
+import {Level, effectiveLevelName} from "levels";
+import {Logger, logger} from "logging";
+import {loggersOperation, logfileOperation, levelOfBody, registerLoggingEndpoints, nameAfter} from "endpoints";
+import {rkLogCaptureStart, rkLogCaptureCount, rkLogCaptureStop, rkLogOverrideReset, rkLogWriteFile, rkLogMakeDir} from "cells";
+
+// Front 04's reply-header list is per process; the test clears it between
+// reads through the core's own cell, which `runtime.bp` does not export.
+#[@External.Erlang("rakun_runtime", "clear_reply_headers")]
+declare fn clearReplyHeaders() -> i32;
+
+test "loggers: POST a level takes effect on the next record without a restart" {
+    val _r = rkLogOverrideReset();
+    val _s = rkSetProp("rakun.logging.level.rakun.data", "info");
+    val log: Logger = logger("rakun.data.sql");
+    val _h = rkLogCaptureStart("console");
+    val _a = log.debug("before");
+    val before = rkLogCaptureCount();
+    val res = loggersOperation("POST", "rakun.data", "{\"level\":\"debug\"}");
+    val _b = log.debug("after");
+    val after = rkLogCaptureCount();
+    val _x = rkLogCaptureStop();
+    val one = loggersOperation("GET", "rakun.data", "");
+    val _q = rkSetProp("rakun.logging.level.rakun.data", "");
+    val _z = rkLogOverrideReset();
+    try asserts.equals(res.status, 204);
+    try asserts.equals(before, 0);
+    try asserts.equals(after, 1);
+    try asserts.equals(one.body, "{\"configuredLevel\":\"DEBUG\",\"effectiveLevel\":\"DEBUG\"}");
+}
+
+test "loggers: setting a level on a group sets it on every member" {
+    val _r = rkLogOverrideReset();
+    val res = loggersOperation("POST", "sql", "{\"level\":\"trace\"}");
+    val levels = [
+        effectiveLevelName("rakun.data.sql"),
+        effectiveLevelName("rakun.data.datasource"),
+        effectiveLevelName("rakun.data.transaction"),
+    ].join(",");
+    val group = loggersOperation("GET", "sql", "");
+    val _z = rkLogOverrideReset();
+    try asserts.equals(res.status, 204);
+    try asserts.equals(levels, "trace,trace,trace");
+    try asserts.equals(group.body, "{\"configuredLevel\":\"TRACE\",\"members\":[\"rakun.data.sql\",\"rakun.data.datasource\",\"rakun.data.transaction\"]}");
+}
+
+test "loggers: a null level returns the logger to its inherited level" {
+    val _r = rkLogOverrideReset();
+    val _p = rkSetProp("rakun.logging.level.app.inv", "warn");
+    val _c = rkSetProp("rakun.logging.level.app.inv.charges", "trace");
+    val _a = loggersOperation("POST", "app.inv.charges", "{\"level\":\"error\"}");
+    val set = effectiveLevelName("app.inv.charges");
+    val res = loggersOperation("POST", "app.inv.charges", "{\"level\": null}");
+    val reset = effectiveLevelName("app.inv.charges");
+    val body = loggersOperation("GET", "app.inv.charges", "").body;
+    val _q = rkSetProp("rakun.logging.level.app.inv", "");
+    val _d = rkSetProp("rakun.logging.level.app.inv.charges", "");
+    val _z = rkLogOverrideReset();
+    try asserts.equals(res.status, 204);
+    try asserts.equals(set, "error");
+    try asserts.equals(reset, "warn");
+    try asserts.equals(body, "{\"configuredLevel\":null,\"effectiveLevel\":\"WARN\"}");
+}
+
+test "loggers: the listing names ROOT, the known loggers and both groups" {
+    val _r = rkLogOverrideReset();
+    val _l: Logger = logger("app.listed");
+    val body = loggersOperation("GET", "", "").body;
+    try asserts.startsWith(body, "{\"levels\":[\"OFF\",\"ERROR\",\"WARN\",\"INFO\",\"DEBUG\",\"TRACE\"],\"loggers\":{\"ROOT\":{\"configuredLevel\":null,\"effectiveLevel\":\"INFO\"}");
+    try asserts.contains(body, "\"app.listed\":{\"configuredLevel\":null,\"effectiveLevel\":\"INFO\"}");
+    try asserts.contains(body, "\"groups\":{\"web\":{\"configuredLevel\":null,\"members\":[\"rakun.web\",\"rakun.core.router\",\"rakun.core.middleware\",\"rakun.client\"]},\"sql\":");
+}
+
+test "loggers: a bad level or a body without one answers 400" {
+    try asserts.equals(loggersOperation("POST", "app.x", "{\"level\":\"loud\"}").status, 400);
+    try asserts.equals(loggersOperation("POST", "app.x", "{}").status, 400);
+    try asserts.equals(loggersOperation("POST", "", "{\"level\":\"info\"}").status, 405);
+    try asserts.equals(levelOfBody("{\"level\" : \"DEBUG\"}"), "debug");
+    try asserts.equals(nameAfter("/actuator/loggers/rakun.data", "loggers"), "rakun.data");
+    try asserts.equals(nameAfter("/actuator/loggers", "loggers"), "");
+}
+
+test "logfile: 404 when no file is configured" {
+    val res = logfileOperation("");
+    try asserts.equals(res.status, 404);
+}
+
+test "logfile: Range is honoured with 206 and Content-Range" {
+    val dir = env.read("HOME").unwrapOr(".") + "/.cache/bp-rakun/front-17/logfile";
+    val _m = rkLogMakeDir(dir);
+    val path = dir + "/rakun.log";
+    val _w = rkLogWriteFile(path, "0123456789abcdefghij");
+    val _p = rkSetProp("rakun.logging.file.name", path);
+    val _c0 = clearReplyHeaders();
+    val whole = logfileOperation("");
+    val mid = logfileOperation("bytes=2-5");
+    val midHeaders = rkReplyHeaders();
+    val open = logfileOperation("bytes=15-");
+    val tail = logfileOperation("bytes=-3");
+    val past = logfileOperation("bytes=50-60");
+    val _c1 = clearReplyHeaders();
+    val _q = rkSetProp("rakun.logging.file.name", "");
+    try asserts.equals(whole.status, 200);
+    try asserts.equals(whole.body, "0123456789abcdefghij");
+    try asserts.equals(mid.status, 206);
+    try asserts.equals(mid.body, "2345");
+    try asserts.contains(midHeaders, "\"Content-Range\":\"bytes 2-5/20\"");
+    try asserts.equals(open.body, "fghij");
+    try asserts.equals(tail.body, "hij");
+    try asserts.equals(past.status, 416);
+}
+
+test "endpoints: loggers and logfile register through rakun-actuator-api" {
+    val _r = registerLoggingEndpoints();
+    val ids = endpointIds();
+    val loggersOwner = rkApiEndpointOwner("loggers");
+    val loggersOps = rkApiEndpointOps("loggers");
+    val logfileOps = rkApiEndpointOps("logfile");
+    val _a = rkApiEndpointRemove("loggers");
+    val _b = rkApiEndpointRemove("logfile");
+    try asserts.isTrue(ids.contains("loggers"));
+    try asserts.isTrue(ids.contains("logfile"));
+    try asserts.equals(loggersOwner, "rakun-logging");
+    try asserts.equals(loggersOps, "read,write");
+    try asserts.equals(logfileOps, "read");
+}

@@ -1,0 +1,256 @@
+//// rakun-logging — levels, groups and the resolver.
+////
+//// FIVE LEVELS OVER OTP'S EIGHT. The mapping is stated, not inferred:
+//// Trace → debug, Debug → debug, Info → info, Warn → warning, Error → error.
+//// Trace and Debug collapse on OTP, so the level check runs HERE, before
+//// `logger:log/3`: a Trace record under a Debug logger never reaches OTP.
+////
+//// LONGEST PREFIX WINS. A level applies to a logger name and every dotted name
+//// beneath it. For each prefix of the name, longest first, the resolver asks
+//// in this order: a run-time override set by the `loggers` endpoint on that
+//// name; `rakun.logging.level.<prefix>` (unless the prefix is a GROUP name —
+//// a group name and a logger name that collide resolve to the group); a level
+//// on any group that lists the prefix as a member (override first, then key).
+//// An override of `inherit` (the endpoint's reset) masks the name itself, so
+//// its parent's level applies. With nothing found the root applies: override `root`, then
+//// `rakun.logging.level.root`, then `info`.
+////
+//// GROUPS. `web` and `sql` are predefined; `rakun.logging.group.<name>` (a
+//// comma list) defines a group or REPLACES a predefined one entirely — the
+//// predefined membership is a default, not a floor.
+////
+//// AN UNKNOWN LEVEL NAME RAISES naming the key and the accepted values. There
+//// is no lenient mode.
+
+import {rkProp} from "rakun";
+import {rkLogPropKeys, rkLogOverride} from "cells";
+
+pub type Level {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+pub fn levelName(level: Level) -> string {
+    val name = case level {
+        Level.Trace -> "trace";
+        Level.Debug -> "debug";
+        Level.Info -> "info";
+        Level.Warn -> "warn";
+        Level.Error -> "error";
+    };
+    return name;
+}
+
+// Ranks: trace 0 · debug 1 · info 2 · warn 3 · error 4 · off 5.
+pub fn levelRank(level: Level) -> i32 {
+    val rank = case level {
+        Level.Trace -> 0;
+        Level.Debug -> 1;
+        Level.Info -> 2;
+        Level.Warn -> 3;
+        Level.Error -> 4;
+    };
+    return rank;
+}
+
+pub fn otpLevel(level: Level) -> string {
+    val name = case level {
+        Level.Trace -> "debug";
+        Level.Debug -> "debug";
+        Level.Info -> "info";
+        Level.Warn -> "warning";
+        Level.Error -> "error";
+    };
+    return name;
+}
+
+pub fn validLevels() -> string {
+    return "trace, debug, info, warn, error, off";
+}
+
+pub fn levelProblem(key: string, raw: string) -> string {
+    return "rakun logging: `" + key + "` is `" + raw + "`, which is not a level - accepted: " + validLevels();
+}
+
+// -1 for a spelling that is not a level; `warning` is accepted as OTP's name
+// for `warn`, and case does not matter.
+pub fn rankOf(raw: string) -> i32 {
+    val v = raw.trim().toLower();
+    if (v == "trace") return 0;
+    if (v == "debug") return 1;
+    if (v == "info") return 2;
+    if (v == "warn" || v == "warning") return 3;
+    if (v == "error") return 4;
+    if (v == "off") return 5;
+    return -1;
+}
+
+pub fn rankName(rank: i32) -> string {
+    if (rank == 0) return "TRACE";
+    if (rank == 1) return "DEBUG";
+    if (rank == 2) return "INFO";
+    if (rank == 3) return "WARN";
+    if (rank == 4) return "ERROR";
+    return "OFF";
+}
+
+fn checked(key: string, raw: string) -> i32 {
+    val rank = rankOf(raw);
+    if (rank < 0) @panic(levelProblem(key, raw));
+    return rank;
+}
+
+// ── keys ────────────────────────────────────────────────────────────────────
+
+pub fn levelKey(name: string) -> string {
+    return "rakun.logging.level." + name;
+}
+
+pub fn groupKey(name: string) -> string {
+    return "rakun.logging.group." + name;
+}
+
+// ── groups ──────────────────────────────────────────────────────────────────
+
+pub fn predefinedGroups() -> string[] {
+    return ["web", "sql"];
+}
+
+pub fn predefinedMembers(group: string) -> string[] {
+    if (group == "web") return ["rakun.web", "rakun.core.router", "rakun.core.middleware", "rakun.client"];
+    if (group == "sql") return ["rakun.data.sql", "rakun.data.datasource", "rakun.data.transaction"];
+    return [];
+}
+
+fn splitList(raw: string) -> string[] {
+    var out: string[] = [];
+    for (raw.split(",")) { part ->
+        val t = part.trim();
+        if (t != "") out.push(t);
+    };
+    return out;
+}
+
+// Configured group names: every `rakun.logging.group.<name>` key, plus the
+// indexed form a YAML sequence flattens to (`…group.<name>[0]`).
+fn configuredGroups() -> string[] {
+    val raw = rkLogPropKeys("rakun.logging.group.");
+    var out: string[] = [];
+    if (raw == "") return out;
+    for (raw.split("\n")) { key ->
+        val rest = key.slice(20, key.length());
+        val bracket = rest.indexOf("[");
+        val name = if (bracket < 0) rest else rest.slice(0, bracket);
+        if (out.contains(name) == false) out.push(name);
+    };
+    return out;
+}
+
+pub fn groupNames() -> string[] {
+    var out: string[] = predefinedGroups();
+    for (configuredGroups()) { g ->
+        if (out.contains(g) == false) out.push(g);
+    };
+    return out;
+}
+
+pub fn isGroup(name: string) -> bool {
+    return groupNames().contains(name);
+}
+
+pub fn groupMembers(group: string) -> string[] {
+    val direct = rkProp(groupKey(group));
+    if (direct != "") return splitList(direct);
+    var indexed: string[] = [];
+    var i = 0;
+    var run = true;
+    while (run) {
+        val v = rkProp(groupKey(group) + "[" + i.toString() + "]");
+        if (v == "") run = false else {
+            indexed.push(v.trim());
+            i = i + 1;
+        };
+    };
+    if (indexed.length > 0) return indexed;
+    return predefinedMembers(group);
+}
+
+// ── the resolver ────────────────────────────────────────────────────────────
+
+// The level configured on exactly `name` (no inheritance), or "" — the
+// override first, then the key. Validated: a bad spelling raises.
+pub fn configuredOn(name: string) -> string {
+    val over = rkLogOverride(name);
+    if (over == "inherit") return "";
+    if (over != "") return over;
+    val raw = rkProp(levelKey(name));
+    if (raw == "") return "";
+    val _c = checked(levelKey(name), raw);
+    return raw;
+}
+
+// The level a group sets on its members, or "".
+fn groupLevelFor(prefix: string, groups: string[]) -> string {
+    var found = "";
+    for (groups) { g ->
+        if (found == "") {
+            if (groupMembers(g).contains(prefix)) {
+                val lvl = configuredOn(g);
+                if (lvl != "") found = lvl;
+            };
+        };
+    };
+    return found;
+}
+
+fn levelAtPrefix(prefix: string, groups: string[]) -> string {
+    val over = rkLogOverride(prefix);
+    if (over == "inherit") return "";
+    if (over != "") return over;
+    val own = if (groups.contains(prefix)) "" else configuredOn(prefix);
+    if (own != "") return own;
+    return groupLevelFor(prefix, groups);
+}
+
+pub fn rootLevel() -> string {
+    val lvl = configuredOn("root");
+    if (lvl == "") return "info";
+    return lvl;
+}
+
+// The effective level of a logger name, lowercase.
+pub fn effectiveLevelName(name: string) -> string {
+    val groups = groupNames();
+    var parts: string[] = name.split(".");
+    var found = "";
+    while (found == "" && parts.length > 0) {
+        val prefix = parts.join(".");
+        found = levelAtPrefix(prefix, groups);
+        parts = parts.slice(0, parts.length - 1);
+    };
+    if (found == "") return rootLevel().trim().toLower();
+    return found.trim().toLower();
+}
+
+pub fn effectiveRank(name: string) -> i32 {
+    val raw = effectiveLevelName(name);
+    val rank = rankOf(raw);
+    if (rank < 0) @panic(levelProblem(levelKey(name), raw));
+    return rank;
+}
+
+pub fn enabledFor(name: string, level: Level) -> bool {
+    return levelRank(level) >= effectiveRank(name);
+}
+
+// Group names that are also used as a logger name — reported by the boot.
+pub fn groupCollisions(loggerNames: string[]) -> string[] {
+    var out: string[] = [];
+    for (groupNames()) { g ->
+        if (loggerNames.contains(g)) out.push(g);
+    };
+    return out;
+}
