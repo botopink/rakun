@@ -1,0 +1,57 @@
+//// rakun-websocket — what fails the BUILD (front 20 step 2): each cell writes
+//// a one-file project depending on this member by path and builds it
+//// (rakun-scheduling's `build_test.bp` shape), under
+//// `.botopinkbuild/tmp/rakun-websocket-fixtures/`. The compiler is
+//// `$BOTOPINK_BIN`, else `botopink` on `PATH`, else the meta-repository's.
+
+import {testing.asserts} from "std";
+import {io: {fs, process}} from "std";
+
+fn compilerCommand() -> string {
+    return "B=\"$BOTOPINK_BIN\"; [ -n \"$B\" ] || B=\"$(command -v botopink)\"; [ -n \"$B\" ] || B=../../../botopink-lang/zig-out/bin/botopink; [ -x \"$B\" ] || { echo \"no botopink compiler: set BOTOPINK_BIN\"; exit 0; }; B=\"$(cd \"$(dirname \"$B\")\" && pwd)/$(basename \"$B\")\"; ";
+}
+
+fn dep(name: string, dir: string) -> string {
+    return "    \"" + name + "\": { \"path\": \"" + dir + "\" }";
+}
+
+fn buildFixture(name: string, source: string) -> string {
+    val dir = process.cwd() + "/.botopinkbuild/tmp/rakun-websocket-fixtures/" + name;
+    val here = process.cwd();
+    val _m = process.runShell("rm -rf '" + dir + "' && mkdir -p '" + dir + "/src'");
+    val deps = ["rakun", "rakun-actuator-api", "rakun-web", "rakun-data", "rakun-security"].map({ m -> dep(m, here + "/../" + m) });
+    val all = deps.map({ d -> d });
+    val manifest = "{\n  \"name\": \"" + name + "\",\n  \"version\": \"0.0.1\",\n  \"src\": \"src/\",\n  \"entry\": \"root.bp\",\n  \"target\": \"erlang\",\n  \"targets\": [\"erlang\"],\n  \"dependencies\": {\n" + all.join(",\n") + ",\n" + dep("rakun-websocket", here) + "\n  }\n}\n";
+    val _j = fs.writeText(dir + "/botopink.json", manifest);
+    val _s = fs.writeText(dir + "/src/root.bp", source);
+    return process.runShell(compilerCommand() + "cd '" + dir + "' && \"$B\" build --target erlang --out out 2>&1 < /dev/null; echo \"exit=$?\"");
+}
+
+fn header() -> string {
+    return "import {service, rkScan, rkSingleton, rkEnter, rkDone} from \"rakun\";\nimport {wsEndpoint, WsSession, rkRegisterWsEndpoint} from \"rakun-websocket\";\n\n";
+}
+
+fn onMessage() -> string {
+    return "    pub fn onMessage(self: Self, session: WsSession, message: string) -> i32 {\n        return 0;\n    }\n";
+}
+
+test "build: a well-formed endpoint builds" {
+    val out = buildFixture("ok", header() + "#[service]\n#[wsEndpoint(\"/ws/ok\")]\npub type Ok() {\n" + onMessage() + "}\n");
+    try asserts.contains(out, "exit=0");
+}
+
+test "build: #[wsEndpoint] anywhere but on a record-shaped type fails with a located message" {
+    val onFn = buildFixture("on-fn", header() + "#[wsEndpoint(\"/ws/x\")]\npub fn nope() -> i32 {\n    return 0;\n}\n");
+    try asserts.contains(onFn, "#[wsEndpoint] must annotate a record-shaped type");
+    try asserts.contains(onFn, "src/root.bp:");
+    try asserts.notContains(onFn, "exit=0");
+    val onEnum = buildFixture("on-enum", header() + "#[wsEndpoint(\"/ws/x\")]\npub type Mode {\n    On,\n    Off,\n}\n");
+    try asserts.contains(onEnum, "#[wsEndpoint] must annotate a record-shaped type");
+    try asserts.notContains(onEnum, "exit=0");
+}
+
+test "build: a type without onMessage is refused naming the missing method" {
+    val out = buildFixture("no-message", header() + "#[service]\n#[wsEndpoint(\"/ws/x\")]\npub type Mute() {\n    pub fn onOpen(self: Self, session: WsSession) -> i32 {\n        return 0;\n    }\n}\n");
+    try asserts.contains(out, "#[wsEndpoint] Mute has no onMessage(self: Self, session: WsSession, message: string) -> i32");
+    try asserts.notContains(out, "exit=0");
+}

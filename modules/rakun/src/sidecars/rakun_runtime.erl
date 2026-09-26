@@ -1048,6 +1048,33 @@ serve_requests(Sock, Dispatcher) ->
             Body = read_body(Sock, Headers, Idle),
             {RawPath, Query} = split_query(Path),
             Response = run_handler(Dispatcher, Verb, RawPath, Headers, Query, Body),
+            case upgrade_hook(Headers) of
+                {ok, Hook} ->
+                    %% Front 20: an `Upgrade: websocket` request, and a member
+                    %% installed the hook. The dispatcher has already answered
+                    %% (the chain, security, the endpoint's own route); the hook
+                    %% reads that answer, owns the socket from here on, and this
+                    %% process becomes the WebSocket connection until it closes.
+                    _ = Hook(Sock, get(rakun_transport), RawPath, Headers, Response),
+                    close_connection(Sock);
+                none ->
+                    serve_answer(Sock, Dispatcher, Response)
+            end;
+        _ ->
+            close_connection(Sock)
+    end.
+
+upgrade_hook(Headers) ->
+    case string:lowercase(maps:get(<<"upgrade">>, Headers, <<>>)) of
+        <<"websocket">> ->
+            case persistent_term:get(rakun_upgrade_hook, undefined) of
+                undefined -> none;
+                Hook -> {ok, Hook}
+            end;
+        _ -> none
+    end.
+
+serve_answer(Sock, Dispatcher, Response) ->
             %% A handler that streamed (front 23's chunk writer) already wrote
             %% its head and its chunks; the acceptor writes nothing more.
             KeepAlive = case get(rakun_streamed) of
@@ -1059,10 +1086,7 @@ serve_requests(Sock, Dispatcher) ->
             case KeepAlive andalso not Draining of
                 true -> serve_requests(Sock, Dispatcher);
                 false -> close_connection(Sock)
-            end;
-        _ ->
-            close_connection(Sock)
-    end.
+            end.
 
 close_connection(Sock) ->
     _ = ets:delete(?CONNS, self()),

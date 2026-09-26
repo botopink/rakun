@@ -1,0 +1,141 @@
+//// rakun-websocket — sessions, topics, the boot and the health report.
+//// Front 20 steps 1, 3–5.
+////
+//// THE WIRE CONTRACT (what the browser half is written against):
+////
+//// | Item | Value |
+//// |---|---|
+//// | Upgrade | `GET <path>` with `Upgrade: websocket`, `Connection: Upgrade`, `Sec-WebSocket-Key`, `Sec-WebSocket-Version: 13` |
+//// | Subprotocol | `rakun.v1`, echoed; omitted is accepted, any other offer is refused at upgrade (400) |
+//// | Frame | text: `{"t":"<topic>","d":"<payload>"}`, `{"t":"","d":"<payload>"}` for a direct message |
+//// | Heartbeat | the server pings every `rakun.websocket.heartbeat-seconds` (30); the client answers pong; no answer for `idle-timeout-seconds` (90) closes with `1001` |
+//// | Close codes | `1000` normal · `1008` unauthorized · `1013` backpressure · `1011` handler error · `4001` session revoked · `1009` frame over `max-frame-bytes` (65536) · `1003` binary frame |
+////
+//// THE UPGRADE. `installWebsocket()` registers one `GET <path>` route per
+//// endpoint answering `101`, and installs the hook front 04's connection
+//// process calls for an `Upgrade: websocket` request after the dispatcher has
+//// answered it. So the request goes through the application's chain first:
+//// front 10 refusing it (401/403) is a handshake closed at once with `1008`,
+//// no handler reached; an unregistered path is 404; `rakun.websocket.
+//// max-connections` (10000) is enforced there with 503. The route records the
+//// principal front 10 established, and the session carries it.
+
+import {json} from "std";
+import {Request, Response, rkRegisterRoute} from "rakun";
+import {Health, healthDown, rkRegisterHealthIndicator} from "rakun-actuator-api";
+import {principal, tryOutsideRequest} from "rakun-security/security";
+import {
+    rkWsRegisterEndpoint, rkWsEndpoints, rkWsDuplicates, rkWsReset, rkWsInstall, rkWsAccepting,
+    rkWsNotePrincipal, rkWsSend, rkWsClose, rkWsSubscribe, rkWsUnsubscribe, rkWsBroadcast,
+    rkWsSessionsOn, rkWsOpenCount, rkWsTopicCount, rkWsRefusedCount,
+} from "ws_host";
+
+pub behavior WsHandler {
+    fn onOpen(self: Self, session: WsSession) -> i32;
+    fn onMessage(self: Self, session: WsSession, message: string) -> i32;
+    fn onClose(self: Self, session: WsSession, code: i32, reason: string) -> i32;
+}
+
+pub fn directFrame(message: string) -> string {
+    return "{\"t\":\"\",\"d\":" + json.quote(message) + "}";
+}
+
+pub fn topicFrame(topic: string, message: string) -> string {
+    return "{\"t\":" + json.quote(topic) + ",\"d\":" + json.quote(message) + "}";
+}
+
+pub type WsSession(id: string, principal: string, path: string) {
+    // Queues `message` to this connection only, as a direct frame. 1 when
+    // queued, 0 when the session is gone or its outbound queue is at the cap.
+    pub fn send(self: Self, message: string) -> i32 {
+        return rkWsSend(self.id, directFrame(message));
+    }
+
+    pub fn close(self: Self, code: i32, reason: string) -> i32 {
+        return rkWsClose(self.id, code, reason);
+    }
+}
+
+// What `#[wsEndpoint]` emits; the hand-written form takes the same closures.
+pub fn rkRegisterWsEndpoint(
+    path: string,
+    typeName: string,
+    onOpen: fn(id: string, principal: string, path: string) -> i32,
+    onMessage: fn(id: string, principal: string, path: string, message: string) -> i32,
+    onClose: fn(id: string, principal: string, path: string, code: i32, reason: string) -> i32,
+) -> i32 {
+    return rkWsRegisterEndpoint(path, typeName, onOpen, onMessage, onClose);
+}
+
+// ── topics ──────────────────────────────────────────────────────────────────
+
+pub fn subscribe(session: WsSession, topic: string) -> i32 {
+    return rkWsSubscribe(session.id, topic);
+}
+
+pub fn unsubscribe(session: WsSession, topic: string) -> i32 {
+    return rkWsUnsubscribe(session.id, topic);
+}
+
+// Fire-and-forget to every subscriber on every connected node; answers how
+// many frames were queued. It never waits for a slow client.
+pub fn broadcast(topic: string, message: string) -> i32 {
+    return rkWsBroadcast(topic, topicFrame(topic, message));
+}
+
+pub fn sessionsOn(topic: string) -> i32 {
+    return rkWsSessionsOn(topic);
+}
+
+// The session-revocation close front 18's path calls.
+pub fn revokeSession(session: WsSession) -> i32 {
+    return rkWsClose(session.id, 4001, "session revoked");
+}
+
+// ── the boot ────────────────────────────────────────────────────────────────
+
+pub fn websocketConfigProblem() -> string {
+    val dups = rkWsDuplicates();
+    if (dups.length > 0) {
+        val f = (dups[0] ?? "").split("|");
+        return "rakun-websocket: two endpoints serve " + (f[0] ?? "") + ": " + (f[1] ?? "") + " and " + (f[2] ?? "") + " - one path is one endpoint";
+    };
+    return "";
+}
+
+fn upgradeRoute(req: Request) -> Response {
+    val who = tryOutsideRequest({ -> principal().name });
+    val _p = rkWsNotePrincipal(who.unwrapOr(""));
+    return Response.withStatus(101, "");
+}
+
+// Refuses a duplicate path, installs the upgrade hook, registers one route
+// per endpoint and the `websocket` health indicator. Answers the endpoints.
+pub fn installWebsocket() -> i32 {
+    val problem = websocketConfigProblem();
+    if (problem != "") @panic(problem);
+    val _i = rkWsInstall();
+    val paths = rkWsEndpoints().map({ e -> e.split("|")[0] ?? "" });
+    for (paths) { p -> val _r = rkRegisterRoute("GET", p, { req -> upgradeRoute(req) }); };
+    val _h = rkRegisterHealthIndicator("websocket", "rakun-websocket", { -> websocketHealth() });
+    return paths.length;
+}
+
+pub fn resetWebsocket() -> i32 {
+    return rkWsReset();
+}
+
+// ── health ──────────────────────────────────────────────────────────────────
+
+// Open connections, topics with a subscriber, and upgrades refused by the cap
+// since boot. DOWN while upgrades are not accepted (the hook not installed or
+// front 04's listener not running).
+pub fn websocketHealth() -> Health {
+    val details = json.object([
+        #("connections", rkWsOpenCount().toString()),
+        #("topics", rkWsTopicCount().toString()),
+        #("refusedByCap", rkWsRefusedCount().toString()),
+    ]);
+    if (rkWsAccepting() == false) return healthDown(details);
+    return Health(status: "UP", details: details);
+}

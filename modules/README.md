@@ -12,7 +12,7 @@ to a sibling or to the umbrella is a located error.
 
 ## Members today
 
-Fourteen members exist. The ten remaining scaffolds are **kept under their names** by the reconciliation
+Fifteen members exist (`rakun-websocket` was created by front 20). The ten remaining scaffolds are **kept under their names** by the reconciliation
 table of `03-rakun/modules.md` § Verdicts (no rename applied to a scaffold); each is a two-comment
 `src/root.bp` until its front lands, and its manifest lists `files: ["root.bp"]` so it ships one module
 rather than nothing. `targets` follows `03-rakun/modules.md` § Targets. Three members hold real code
@@ -38,6 +38,7 @@ refusal is the core's `config_check.bp`.
 | [rakun-security](./rakun-security/) | root · principal · policy · jwt · password · users · users_sql · basic · csrf · method_security · security_filter · security | erlang | `-security`, `-oauth2-client`, `-saml2` | 10 · 79 | real code, 73 tests |
 | [rakun-session](./rakun-session/) | root · host · session · signing · session_config · session_cookie · store_ets · store_sql · store_redis · session_filter · session_endpoint | erlang | `spring-session-jdbc` / `-data-redis` | 18 | real code, 36 tests |
 | [rakun-test](./rakun-test/) | root | erlang | `-test` | 19 | FakeRequest + toRequest, expect* assertions, MockMvc, resetSingletons/resetContext/contextSnapshot; 26 tests |
+| [rakun-websocket](./rakun-websocket/) | root · ws_host · ws · endpoint | erlang | `-websocket` | 20 | real code, 27 tests (no JavaScript) |
 | [rakun-web](./rakun-web/) | root · filter · negotiation · error · middleware · cors · compression · customizer · apiversion · shutdown · convention · tls · rules · static | erlang | `-webmvc` (websocket is `rakun-websocket`) | 07 · 65 · 82 | real code, 209 tests |
 
 `modules/rakun-web/` stopped being a scaffold with front 07: it carries the filter chain, CORS and

@@ -224,6 +224,9 @@ rakun/
 │   │                    the four markers, the in-process broker and the containers
 │   │                    (`sidecars/rakun_messaging.erl`), the templates, the
 │   │                    `messaging.<arm>` indicators
+│   ├── rakun-websocket/ ← WEBSOCKET (§ WebSocket, front 20): the upgrade hook, the
+│   │                    connection loop, `pg` topics and the test client
+│   │                    (`sidecars/rakun_websocket.erl`), `#[wsEndpoint]`, health
 │   └── rakun-<area>/  ← the remaining scaffolds (actuator · client ·
 │                        data · hateoas · logging · scheduling · security ·
 │                        session): `botopink.json` (files [root.bp] · targets per
@@ -385,6 +388,12 @@ on the warm path.
 - The router walks in registration order and takes the first route whose verb,
   segment count and every segment match (`:name` binding a path parameter).
   Registration order decides between two routes that both match, on both rows.
+- `serve_requests/2` carries the UPGRADE hook (front 20): a request with
+  `Upgrade: websocket` is dispatched as usual, and when a member put a fun under
+  the `rakun_upgrade_hook` persistent term, that fun gets the socket, the
+  transport, the path, the headers and the dispatcher's answer, owns the socket
+  from there and the connection process becomes the WebSocket connection. With
+  no hook installed an upgrade request is an ordinary request.
 - `dispatch_http/5` carries THE ONE HOOK later fronts hang off:
   `rakun_chain:run/6` when `rakun_web` is in the build, the handler directly when
   it is not. `Rakun.run` is frozen and hardcodes this dispatcher, so front 07's
@@ -3327,6 +3336,57 @@ containers, the arms' state, the published log and the startup log.
   Spring Integration and Kafka Streams 89 · retry, dead letters, idempotency 86 ·
   exchange topology and audit 87 · transactional publish 83. Non-text payloads
   wait on a byte type.
+
+## WebSocket — `modules/rakun-websocket/` (front 20)
+
+Depends on `rakun`, `rakun-web`, `rakun-security` (and, for it, `rakun-data`,
+`rakun-actuator-api`). A member of its own (`03-rakun/modules.md` splits it out of
+`rakun-web`), with flat test files. **Not one line of JavaScript**: the browser
+half is the browser's own `WebSocket` against the wire contract below.
+
+**The wire contract.**
+
+| Item | Value |
+|---|---|
+| Upgrade | `GET <path>` + `Upgrade: websocket`, `Connection: Upgrade`, `Sec-WebSocket-Key`, `Sec-WebSocket-Version: 13` |
+| Subprotocol | `rakun.v1`, echoed; omitted is accepted, any other offer is refused (400) |
+| Frame | text: `{"t":"<topic>","d":"<payload>"}` (topic), `{"t":"","d":"<payload>"}` (direct) |
+| Heartbeat | server ping every `rakun.websocket.heartbeat-seconds` (30); no frame for `idle-timeout-seconds` (90) closes with `1001` |
+| Close codes | `1000` normal · `1008` unauthorized · `1013` backpressure · `1011` handler error · `4001` session revoked · `1009` over `max-frame-bytes` (65536) · `1003` binary frame |
+
+- **Upgrade** — `installWebsocket()` refuses a duplicate path (naming both types),
+  installs the core's upgrade hook, registers one `GET <path>` route per endpoint
+  answering `101`, and registers the `websocket` indicator. The request goes
+  through the application's dispatcher first (front 07's chain, front 10's
+  security): `101` is a handshake, `401`/`403` on a registered path is a handshake
+  closed at once with `1008` (no handler runs), an unregistered path is 404,
+  `rakun.websocket.max-connections` (10000) answers 503 at the upgrade. The route
+  records the principal front 10 established; `WsSession(id, principal, path)`
+  carries it.
+- **Connection** — the connection process of front 04's `rakun_conn_sup` becomes
+  the WebSocket connection: one supervised process per connection. A raising
+  handler closes only its own connection with `1011`. Outbound frames are pushed
+  to the process's mailbox; `push` refuses and flags the connection once the
+  mailbox holds `rakun.websocket.max-outbound-queue` (1000) frames, and a
+  connection whose peer stopped reading (the socket driver holding unsent bytes)
+  waits, sees the flag and closes with `1013` — the mailbox never passes the cap.
+  The socket's high watermark is raised so a `send` never parks the process.
+- **Handlers** (`endpoint.bp`) — `#[wsEndpoint("/path")]` on a stereotyped
+  record type emits `val __rkWs_<T> = rkRegisterWsEndpoint(path, "<T>", open,
+  message, close)` into the type's module (which imports `rkRegisterWsEndpoint`
+  and `WsSession`); `onMessage(self, session, message) -> i32` is required,
+  `onOpen` / `onClose` default to no-ops; one component instance serves every
+  connection.
+- **Topics** — `subscribe` (idempotent), `unsubscribe`, `broadcast(topic, msg)`
+  (fire-and-forget, answers the count), `sessionsOn(topic)`, `revokeSession`
+  (`4001`), over OTP `pg` scope `rakun_ws` — a peer node's subscriber is reached
+  (`broadcast_test.bp` starts one with `peer`, or reports `skipped:`). A closing
+  connection leaves every group before its close frame goes out.
+- **Health** — `websocketHealth()`: `connections`, `topics`, `refusedByCap`; DOWN
+  while upgrades are not accepted (the hook uninstalled or front 04's listener not
+  running).
+- **Tests** use the sidecar's own client (`rkWsClientConnect` / `Send` / `Recv` /
+  `Pause` / `Autopong` / `Close`) against a listener on an ephemeral port.
 
 ## Static files — `modules/rakun-web/src/static.bp` (front 82)
 

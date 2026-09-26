@@ -1,0 +1,103 @@
+//// rakun-websocket — sessions, topics and broadcast (front 20 step 3).
+
+import {rkSetProp, rkServe, rkDispatchHttp} from "rakun";
+import {WsSession, rkRegisterWsEndpoint, installWebsocket, resetWebsocket, subscribe, unsubscribe, broadcast, sessionsOn, topicFrame} from "ws";
+import {rkWsClientConnect, rkWsClientRecv, rkWsClientSend, rkWsClientClose, rkWsSessionIds, rkWsTwoNodeBroadcast} from "ws_host";
+
+fn serve() -> i32 {
+    val _k = rkSetProp("rakun.main.keep-alive", "false");
+    return rkServe(0, { m, p, h, q, b -> rkDispatchHttp(m, p, h, q, b) });
+}
+
+fn session(id: string, principal: string, path: string) -> WsSession {
+    return WsSession(id: id, principal: principal, path: path);
+}
+
+// "join <topic>" subscribes, "leave <topic>" unsubscribes, "whoami" answers
+// the session id, anything else is sent to "to <id> <text>".
+fn boot() -> i32 {
+    val _r = resetWebsocket();
+    val _e = rkRegisterWsEndpoint("/ws/rooms", "Rooms", { id, principal, path -> 0 }, { id, principal, path, message ->
+        val s = session(id, principal, path);
+        if (message.startsWith("join ")) {
+            val n = subscribe(s, message.slice(5, message.length()));
+            s.send("joined " + n.toString());
+        } else if (message.startsWith("leave ")) {
+            val n = unsubscribe(s, message.slice(6, message.length()));
+            s.send("left " + n.toString());
+        } else s.send("id " + id);
+    }, { id, principal, path, code, reason -> 0 });
+    val _i = installWebsocket();
+    return serve();
+}
+
+fn connect(port: i32) -> string {
+    val r = rkWsClientConnect(port, "/ws/rooms", []);
+    return r.slice(4, r.length());
+}
+
+fn idOf(c: string) -> string {
+    val _s = rkWsClientSend(c, "whoami");
+    val got = rkWsClientRecv(c, 2000);
+    return got.slice("text:{\"t\":\"\",\"d\":\"id ".length(), got.length() - 2);
+}
+
+fn join(c: string, topic: string) -> string {
+    val _s = rkWsClientSend(c, "join " + topic);
+    return rkWsClientRecv(c, 2000);
+}
+
+test "broadcast: session.send reaches exactly that connection" {
+    val port = boot();
+    val a = connect(port);
+    val b = connect(port);
+    val idA = idOf(a);
+    val _x = idOf(b);
+    val _s = session(idA, "", "/ws/rooms").send("only a");
+    assert rkWsClientRecv(a, 2000) == "text:{\"t\":\"\",\"d\":\"only a\"}";
+    assert rkWsClientRecv(b, 300) == "none";
+}
+
+test "broadcast: reaches every subscriber, returns the count, and skips the rest" {
+    val port = boot();
+    val a = connect(port);
+    val b = connect(port);
+    val c = connect(port);
+    assert join(a, "prices") == "text:{\"t\":\"\",\"d\":\"joined 1\"}";
+    val _jb = join(b, "prices");
+    assert broadcast("prices", "up 3%") == 2;
+    assert rkWsClientRecv(a, 2000) == "text:" + topicFrame("prices", "up 3%");
+    assert rkWsClientRecv(b, 2000) == "text:{\"t\":\"prices\",\"d\":\"up 3%\"}";
+    assert rkWsClientRecv(c, 300) == "none";
+    assert sessionsOn("prices") == 2;
+}
+
+test "broadcast: subscribing twice is idempotent" {
+    val port = boot();
+    val a = connect(port);
+    assert join(a, "news") == "text:{\"t\":\"\",\"d\":\"joined 1\"}";
+    assert join(a, "news") == "text:{\"t\":\"\",\"d\":\"joined 0\"}";
+    assert sessionsOn("news") == 1;
+    assert broadcast("news", "once") == 1;
+}
+
+test "broadcast: a closed session leaves every topic without the broadcaster noticing" {
+    val port = boot();
+    val a = connect(port);
+    val b = connect(port);
+    val _ja = join(a, "t1");
+    val _ja2 = join(a, "t2");
+    val _jb = join(b, "t1");
+    val _c = rkWsClientClose(a, 1000);
+    val _w = rkWsClientRecv(a, 2000);
+    assert sessionsOn("t1") == 1;
+    assert sessionsOn("t2") == 0;
+    assert broadcast("t1", "still") == 1;
+    assert broadcast("t2", "nobody") == 0;
+}
+
+test "broadcast: on a two-node cluster it reaches the subscriber on the other node" {
+    val _r = resetWebsocket();
+    val out = rkWsTwoNodeBroadcast("cluster", topicFrame("cluster", "hi"));
+    assert out.startsWith("skipped: ") || out == "1|{\"t\":\"cluster\",\"d\":\"hi\"}", out;
+}
