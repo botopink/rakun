@@ -2567,6 +2567,33 @@ sanitizer. Keys are all `rakun.management.*` (03r-t).
 - **Report** — the `access` endpoint (gated like the rest, hidden by
   default): per id, exposed, configured and effective level, listener.
 
+## Schema migrations — `modules/rakun-data/src/migration/migrate.bp` (front 77)
+
+`migrationBoot()` at boot: refuses a bad `rakun.migration.ddl-auto`, registers
+the `migrations` endpoint, and — when migrations are on — runs them (or, with
+`dry-run=true`, halts with the dry run's code: 1 pending, 0 not). Sidecar
+`rakun_migration.erl`: the lock, the statement splitter, the version order.
+
+- **Files** — `V<version>__<desc>.sql` (components compared as integers) and
+  `R__<desc>.sql` in `rakun.migration.locations` (default `db/migration`); any
+  other `.sql` name or a duplicate version refuses the boot. No file and
+  `enabled` unset: off; `enabled=true`: a refusal.
+- **Run** — under OTP `global` lock `{rakun_migration, <ds>}`
+  (`rakun.migration.lock-timeout`, default 30000 ms; the holder's death frees
+  it; a standalone node warns once per driver), `rakun_schema_history` is
+  created, checksums (`hash.sha256`) validated (`validate-on-migrate=false`
+  is development-only), `baseline-on-migrate` / `baseline-version` /
+  `out-of-order` applied, then each pending file and its history row commit
+  in one transaction (`-- rakun:no-transaction` opts out). A failure records
+  `success=false`, stops and raises. Repeatables follow the versioned ones and
+  re-run when their checksum changes. `repairMigration(script)` is the only
+  rewrite of a recorded checksum.
+- **ddl-auto** — `create`/`create-drop` refused under
+  `rakun.migration.production-profiles` (default `prod,production`) and beside
+  migration files; `validate` allowed everywhere. The entity half (validate
+  and create against front 78's metadata) waits on front 78.
+- Tests: `test/migration_test.bp` (ETS arm; each test its own datasource).
+
 ## Observability — `modules/rakun-metrics/` (front 75)
 
 Sidecars `rakun_metrics.erl` (the registry, the renderers, the VM meters, the
