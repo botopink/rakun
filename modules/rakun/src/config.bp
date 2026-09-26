@@ -1749,6 +1749,18 @@ pub fn configurationProperties(comptime decl: @Decl, prefix: string) {
     @emit("val __rkCat_" + decl.name + " = rkRegisterConfigKeys(\"" + prefix + "\", \"" + catalogue.join(
             "|"
         ) + "\");");
+    // `#[validated]` beside it (the bundled `validation` library's, which emits
+    // `validate<Name>`) makes the record a BOOT check: bound and validated after
+    // the property sources are loaded and before the first component is
+    // constructed (`bootSequence`), not at its first injection.
+    var validated = false;
+    decl.annotations.forEach({ a ->
+        if (a.name == "validated") validated = true;
+    });
+    if (validated) {
+        @emit("pub fn __rkCheck_" + decl.name + "() -> string { return configProblemOf(\"" + decl.name + "\", \"" + prefix + "\", validate" + decl.name + "(__rkBind_" + decl.name + "(\"" + prefix + "\"))); }");
+        @emit("val __rkChk_" + decl.name + " = rkConfigCheckRegister(\"" + decl.name + "\", { -> __rkCheck_" + decl.name + "() });");
+    };
     if (decl.kind != DeclKind.Type) decl.fail("#[configurationProperties] must annotate a type");
     if (decl.variants.length > 0) decl.fail("#[configurationProperties] must annotate a type with fields, not an enum");
 }

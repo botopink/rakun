@@ -2763,8 +2763,23 @@ shadowed the imported one everywhere in it (`validate<TypeName>` came out
 unbound). `#[validated]` is `validation`'s, imported
 `import {decorators.validated} from "validation";`. `config_check.bp` ships the
 other half of the seam — `configProblem` / `refuseInvalidConfig`, which render a
-refusal naming property KEYS rather than field names; the boot call site
-(front 05's `rkConfigValidate`) is still front 05's to add.
+refusal naming property KEYS rather than field names.
+
+**The boot call site.** `#[configurationProperties]` on a record that also
+carries `#[validated]` emits, beside its binder, `__rkCheck_<Name>() -> string`
+(bind with the record's prefix, `validate<Name>`, `configProblemOf` — `""` when
+valid) and `val __rkChk_<Name> = rkConfigCheckRegister("<Name>", …)` at module
+load. `bootSequenceFor` installs the message source and runs every registered
+check (`rkConfigCheckRun`, the refusals `\n`-joined, in registration order)
+after event 3 and BEFORE the eager pass — with lazy initialization too — and an
+invalid configuration is `bootFailure`: `ApplicationFailedEvent`, then the
+panic carrying every violation line, and no component constructed. The table
+is `?CHECKS` in `rakun_runtime.erl`; a second registration under one name
+replaces the check and keeps its place. A module declaring such a record
+imports `rkConfigCheckRegister` (from the core) and `configProblemOf` (from
+`config_check`) beside the other emitted names. The checks are registered for
+the whole run — every test file on the erlang row shares one node — so a test
+that seeds an invalid value re-seeds a valid one before it ends.
 
 ### What an application must import
 

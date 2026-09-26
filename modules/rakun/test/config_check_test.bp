@@ -35,7 +35,10 @@ import {
 import {configurationProperties, defaultValue};
 import {rkSetProp, rkProp};
 import {rkSingleton, rkValueOr, rkPropBool, rkPropIntOr, rkPropFloat, rkPropList, rkPropDuration, rkPropSize, rkRegisterConfigKeys};
-import {propertyKey, violationLine, configProblem, refuseInvalidConfig, installMessageSource} from "config_check";
+import {rkConfigCheckRegister, rkConfigCheckRun, rkBuildCount};
+import {propertyKey, violationLine, configProblem, configProblemOf, refuseInvalidConfig, installMessageSource} from "config_check";
+import {bootSequenceFor} from "context";
+import {testing.asserts} from "std";
 
 #[validated]
 #[configurationProperties("app.billing")]
@@ -116,4 +119,67 @@ test "rakun validation: rakun's message source answers from rakun's keys" {
     assert templateFor("notBlank", "must not be blank") == "is required";
     val _q = rkSetProp("rakun.validation.messages.notBlank", "");
     assert templateFor("notBlank", "must not be blank") == "must not be blank";
+}
+
+// ── the boot check (front 05 step 9 · front 14 step 6) ──────────────────────
+//
+// `#[validated]` beside `#[configurationProperties]` registers a check at
+// module load; `bootSequence` runs every check after the property sources are
+// loaded and before the eager pass constructs anything. Each test below that
+// seeds an invalid value re-seeds a valid one before it ends: the check is
+// registered for the whole run, and a later file's `bootSequence` runs it too.
+
+#[validated]
+#[configurationProperties("app.mail")]
+pub type MailConfig(
+    #[sizeBetween(3, 8)]
+    sender: string,
+)
+
+fn validMail() -> i32 {
+    val _b = seed("http://x.test", "1");
+    return rkSetProp("app.mail.sender", "robot");
+}
+
+test "rakun validation: a #[validated] configuration record is a registered boot check" {
+    val _v = validMail();
+    assert rkConfigCheckRun() == "";
+    val _s = seed("", "1");
+    val refusal = rkConfigCheckRun();
+    val _r = validMail();
+    assert refusal.contains("`BillingConfig` is not valid - the application will not start");
+    assert refusal.contains("  app.billing.endpoint: must not be blank (notBlank)");
+    assert refusal.contains("MailConfig") == false;
+}
+
+test "rakun validation: an invalid configuration halts the boot before any component is constructed" {
+    val _s = seed("http://x.test", "42");
+    val before = rkBuildCount("OrderCache");
+    try asserts.throwsWith({ ->
+        val _b = bootSequenceFor("config-check");
+        0;
+    }, "app.billing.retryLimit: must be at most 10 (maxValue)");
+    val after = rkBuildCount("OrderCache");
+    val _r = validMail();
+    assert after == before;
+}
+
+test "rakun validation: two invalid records are one refusal naming both" {
+    val _s = seed("", "1");
+    val _m = rkSetProp("app.mail.sender", "x");
+    val refusal = rkConfigCheckRun();
+    val _r = validMail();
+    assert refusal.contains("`BillingConfig` is not valid");
+    assert refusal.contains("`MailConfig` is not valid");
+    assert refusal.contains("  app.mail.sender:");
+}
+
+test "rakun validation: the boot's message source answers a violation's message from rakun.validation.messages" {
+    val _i = installMessageSource();
+    val _p = rkSetProp("rakun.validation.messages.sizeBetween", "needs 3 to 8 characters");
+    val _m = rkSetProp("app.mail.sender", "x");
+    val refusal = rkConfigCheckRun();
+    val _q = rkSetProp("rakun.validation.messages.sizeBetween", "");
+    val _r = validMail();
+    assert refusal.contains("  app.mail.sender: needs 3 to 8 characters (sizeBetween)");
 }

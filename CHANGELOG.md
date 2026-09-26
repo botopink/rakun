@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### `#[validated]` configuration refuses the boot (botopink fronts 05 step 9 and 14 step 6)
+
+- `#[configurationProperties]` + `#[validated]` registers a boot check
+  (`__rkCheck_<Name>`, `rkConfigCheckRegister`); `bootSequenceFor` installs the
+  message source and runs every check after binding and before the eager pass,
+  and an invalid configuration fails the boot with every violation line naming
+  its property key — no component constructed. Three cells
+  (`rkConfigCheckRegister` / `rkConfigCheckRun` / `rkConfigCheckReset`) and
+  `config_check.configProblemOf`. `test/config_check_test.bp` +4:
+  `modules/rakun` 329 / 0 → **333 / 0** (erlang).
+
 ### rakun is erlang-only; the BEAM listener, measured (botopink front 04 steps 2, 5–7 and 10; decisions 113, 117 rule 9)
 
 - **Every manifest is `["erlang"]`** — the workspace root, the core (`"target":

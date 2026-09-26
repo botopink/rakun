@@ -50,7 +50,8 @@
          set_prop/2, prop/1, prop_int/1,
          register_route/3, route_count/0, route_paths/0,
          dispatch/2, dispatch_http/5,
-         serve/2]).
+         serve/2,
+         config_check_register/2, config_check_run/0, config_check_reset/0]).
 
 %% ── server surface with no node twin (`runtime.mjs` is frozen) ───────────────
 -export([set_reply_header/2, reply_headers_json/0, clear_reply_headers/0,
@@ -77,6 +78,7 @@
 -define(ROUTES,   rakun_routes).      %% ordered_set: {Seq, Verb, Path, Segs, Handler}
 -define(FAILURES, rakun_failures).    %% set:         {Term, Description, Action}
 -define(LOCKS,    rakun_build_locks). %% set:         {Name, Pid} — first construction in flight
+-define(CHECKS,   rakun_config_checks). %% set:       {Name, Seq, Fun} — `#[validated]` records
 
 -define(DEFAULT_BACKLOG, 128).
 -define(DEFAULT_IDLE_TIMEOUT, 60000).
@@ -163,6 +165,7 @@ create_tables() ->
     _ = ets:new(?ROUTES,   [ordered_set | Common]),
     _ = ets:new(?FAILURES, [set | Common]),
     _ = ets:new(?LOCKS,    [set | Common]),
+    _ = ets:new(?CHECKS,   [set | Common]),
     seed_failures(),
     ok.
 
@@ -290,6 +293,33 @@ await_loop(Name, Ref) ->
                     end
             end
     end.
+
+%% ═══ configuration checks (front 05 step 9 · front 14 step 6) ════════════════
+%% A `#[configurationProperties]` record that also carries `#[validated]`
+%% registers, at module load, a check that binds it and answers its refusal
+%% text (`""` when valid). The boot runs every check after the property sources
+%% are loaded and before the first component is constructed. A name registers
+%% once: a second registration replaces the check and keeps its place.
+
+config_check_register(Name, Fun) ->
+    ensure_started(),
+    Seq = case ets:lookup(?CHECKS, Name) of
+              [{_, S, _}] -> S;
+              [] -> erlang:unique_integer([monotonic, positive])
+          end,
+    true = ets:insert(?CHECKS, {Name, Seq, Fun}),
+    0.
+
+config_check_run() ->
+    ensure_started(),
+    Rows = lists:keysort(2, ets:tab2list(?CHECKS)),
+    Texts = [T || {_Name, _Seq, Fun} <- Rows, T <- [to_binary(Fun())], T =/= <<>>],
+    join(Texts, <<"\n">>).
+
+config_check_reset() ->
+    ensure_started(),
+    true = ets:delete_all_objects(?CHECKS),
+    0.
 
 %% ═══ properties ══════════════════════════════════════════════════════════════
 %% `runtime.mjs:84-97`. `prop/1` answers `""` for an absent key and `prop_int/1`
