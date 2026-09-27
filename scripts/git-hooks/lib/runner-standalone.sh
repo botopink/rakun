@@ -8,25 +8,49 @@
 # decision 75: the umbrella compiles nothing and `botopink test` there is a
 # refusal — else over the package's own src/ + test/), then `botopink build`
 # of every example (runExamplesGate — CI calls it too).
+#
+# Fail beats warn (decision 67): a compiler binary that cannot be found fails
+# the gate, a staged `*.snap.new` / `*.snap.md.new` fails the gate, and there
+# is no list of examples allowed to fail.
 set -euo pipefail
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
 NC='\033[0m'
 
 fail() { echo -e "${RED}✗ $1${NC}"; exit 1; }
 pass() { echo -e "${GREEN}✓ $1${NC}"; }
-warn() { echo -e "${YELLOW}⚠ $1${NC}"; }
 
+# The compiler binary, or a failure that says how to provide one. Never a
+# warning: a gate that skips its `.bp` stage gates nothing.
+requireBotopink() {
+    local bin
+    if bin=$(locateBotopink); then
+        echo "$bin"
+        return 0
+    fi
+    # Printed on stderr: the caller captures stdout as the path.
+    echo -e "${RED}✗ botopink binary not found — set BOTOPINK_BIN, build repository/botopink-lang (zig build install) so the enclosing checkout's zig-out/bin/botopink exists, or put botopink on \$PATH${NC}" >&2
+    return 1
+}
+
+# `$BOTOPINK_BIN`, else the compiler of the ENCLOSING checkout — the nearest
+# ancestor holding `repository/botopink-lang/` (a `zig-out/bin/botopink` there
+# or nothing: the walk stops at that checkout, so a worktree nested under the
+# main checkout never borrows the main checkout's binary), else a botopink-lang
+# checkout's own `zig-out`, else `$PATH`.
 locateBotopink() {
     if [ -n "${BOTOPINK_BIN:-}" ] && [ -x "$BOTOPINK_BIN" ]; then
         echo "$BOTOPINK_BIN"; return 0
     fi
     local cur; cur=$(pwd)
+    local cand
     while [ "$cur" != "/" ]; do
-        local cand="$cur/repository/botopink-lang/zig-out/bin/botopink"
-        [ -x "$cand" ] && { echo "$cand"; return 0; }
+        if [ -d "$cur/repository/botopink-lang" ]; then
+            cand="$cur/repository/botopink-lang/zig-out/bin/botopink"
+            [ -x "$cand" ] && { echo "$cand"; return 0; }
+            break
+        fi
         cand="$cur/zig-out/bin/botopink"
         [ -x "$cand" ] && [ -f "$cur/build.zig" ] && { echo "$cand"; return 0; }
         cur=$(dirname "$cur")
@@ -64,27 +88,46 @@ runStandaloneGate() {
         pass "No conflict markers"
     fi
 
+    # 1a. a snapshot rewrite is never committed: a `*.snap.new` /
+    #     `*.snap.md.new` is what a mismatch writes beside its snapshot, and
+    #     accepting it is a review, not an add (botopink-lang's gate.sh does the
+    #     same). The gate refuses the staged file; `.gitignore` keeps it out of
+    #     `git add .`.
+    local snapnew
+    snapnew=$(git diff --cached --name-only --diff-filter=ACMR | grep -E '\.snap(\.md)?\.new$' || true)
+    if [ -n "$snapnew" ]; then
+        echo "$snapnew" | sed 's/^/  /'
+        fail "a *.snap.new / *.snap.md.new is staged — review the snapshot, update the .snap.md, never commit the .new"
+    fi
+    pass "No staged *.snap.new"
+
     # 1b. front 23's own greps (`specs/.../23-rakun-ssr-pipeline` § Definition of
     #     done). Three claims that are cheap to check and expensive to lose:
     #     the SSR walker never calls the unescaped renderer, `repository/rakun/`
     #     names no module of onze (decision 77), and `ssr.bp` keeps no tag list
     #     of its own — the void and raw-text sets are front 94's, passed in as
     #     `ElementView` fields.
+    #
+    #     The greps read CODE, not comments (a `//` line is dropped before the
+    #     match), and whole identifiers: `onze` and `jhonstart` as words, the UI
+    #     types decision 114 forbids by name (`Element`, `ElementView`,
+    #     `Children`, `LayoutProps`, `PageProps`) — never the substring
+    #     `Element`, which `xmlElement` carries legitimately.
     local ssr="modules/rakun-app/src/ssr.bp"
     if [ -f "$ssr" ]; then
-        if grep -q 'renderToString' "$ssr"; then
+        if codeLines "$ssr" | grep -q 'renderToString'; then
             fail "ssr.bp calls renderToString — the frozen renderer escapes nothing; a single call is the whole hole"
         fi
         # Decisions 113-115: rakun builds no HTML and names neither the HTML
-        # library nor the orchestrator — not an import, not a key, not a
-        # marker, not a word in a comment (front 23 step 5, front 22 step 2).
-        if grep -rn 'from "jhonstart\|from "onze' modules/rakun/src/ modules/rakun-app/src/ 2>/dev/null | grep -q .; then
+        # library nor the orchestrator in code — not an import, not a key,
+        # not a marker (front 23 step 5, front 22 step 2).
+        if codeLines modules/rakun/src/*.bp modules/rakun-app/src/*.bp | grep -q 'from "jhonstart\|from "onze'; then
             fail "modules/rakun/src/ or modules/rakun-app/src/ imports jhonstart or onze (decision 113)"
         fi
-        if grep -rni 'onze' modules/rakun/src/ modules/rakun-app/src/ 2>/dev/null | grep -q .; then
+        if codeLines modules/rakun/src/*.bp modules/rakun-app/src/*.bp | grep -qiw 'onze'; then
             fail "modules/rakun/src/ or modules/rakun-app/src/ names onze (decisions 113, 115)"
         fi
-        if grep -rn 'Element\|LayoutProps\|jhonstart' modules/rakun-app/src/ 2>/dev/null | grep -q .; then
+        if codeLines modules/rakun-app/src/*.bp | grep -qwE 'Element|ElementView|Children|LayoutProps|PageProps|jhonstart'; then
             fail "modules/rakun-app/src/ names a UI type or the HTML library (decision 114)"
         fi
         local voidtag
@@ -95,17 +138,17 @@ runStandaloneGate() {
         done
         pass "front 22/23 greps: no renderToString, no onze or jhonstart, no UI type, no tag list"
     fi
+    # The compiler, before any stage that needs it: a miss is a failure here,
+    # not a skipped stage.
+    local bin
+    bin=$(requireBotopink) || exit 1
+    pass "Compiler: $bin"
 
     # 2. botopink test.
-    local bin
     if grep -q '"workspaces"' "$root/botopink.json" 2>/dev/null; then
         # A workspace: one `botopink test` per library member (modules/*/ with a
         # botopink.json), each on its own manifest target. The examples are
         # applications and are built by stage 3.
-        if ! bin=$(locateBotopink); then
-            warn "botopink binary not found (env BOTOPINK_BIN, ancestor zig-out/bin, or \$PATH) — skipping .bp gate"
-            return 0
-        fi
         local member found=""
         for member in "$root"/modules/*/; do
             [ -f "$member/botopink.json" ] || continue
@@ -126,10 +169,6 @@ runStandaloneGate() {
             echo "  (no .bp sources under src/ or test/ — nothing to test)"
             return 0
         fi
-        if ! bin=$(locateBotopink); then
-            warn "botopink binary not found (env BOTOPINK_BIN, ancestor zig-out/bin, or \$PATH) — skipping .bp gate"
-            return 0
-        fi
         echo -n "  Testing $(basename "$root") (botopink test)... "
         if ( cd "$root" && "$bin" test ) >/dev/null 2>&1; then
             echo -e "${GREEN}✓${NC}"
@@ -141,33 +180,26 @@ runStandaloneGate() {
         fi
     fi
 
-    # 3. every example builds, unless listed as known broken.
+    # 3. every example builds.
     runExamplesGate "$bin"
+}
+
+# codeLines <file>… — the files' lines with `//` comments removed (a whole
+# `//` / `////` line is dropped; a trailing `// …` is cut), so a grep over the
+# result reads code. A string literal is code and stays.
+codeLines() {
+    sed -E 's://.*$::' "$@"
 }
 
 # runExamplesGate <botopink-bin>
 #
 # Builds every `examples/*/` that has a `botopink.json` (each with its own
-# manifest target, into a throwaway --out). `scripts/known-broken-examples.txt`
-# lists the examples allowed to fail — one `examples/<name>  <reason>` per
-# line, `#` comments. The list cannot rot: a listed example that builds, or a
-# listed path that no longer exists, fails the gate too.
+# manifest target, into a throwaway --out). An example that does not build
+# fails the gate; there is no list of examples allowed to fail.
 runExamplesGate() {
     local bin="$1"
     local root
     root=$(git rev-parse --show-toplevel)
-    local list="$root/scripts/known-broken-examples.txt"
-    local known=""
-    if [ -f "$list" ]; then
-        # awk, not `grep -v | awk`: a list of only comments or blank lines has
-        # no entry, and grep's "no match" exit 1 would abort under pipefail.
-        # An unreadable list still fails (awk exits non-zero).
-        known=$(awk '!/^[[:space:]]*(#|$)/ {print $1}' "$list")
-    fi
-    local k
-    for k in $known; do
-        [ -f "$root/$k/botopink.json" ] || fail "$list names $k, which has no botopink.json — delete its line"
-    done
     local dir name rel out bad=""
     for dir in "$root"/examples/*/; do
         [ -f "$dir/botopink.json" ] || continue
@@ -176,19 +208,10 @@ runExamplesGate() {
         out=$(mktemp -d)
         echo -n "  Building $rel (botopink build)... "
         if ( cd "$dir" && "$bin" build --out "$out" ) >/dev/null 2>&1; then
-            if printf '%s\n' "$known" | grep -qx "$rel"; then
-                echo -e "${RED}✗${NC}"
-                bad="$bad\n  $rel builds but is listed in scripts/known-broken-examples.txt — delete its line"
-            else
-                echo -e "${GREEN}✓${NC}"
-            fi
+            echo -e "${GREEN}✓${NC}"
         else
-            if printf '%s\n' "$known" | grep -qx "$rel"; then
-                echo -e "${YELLOW}known broken${NC}"
-            else
-                echo -e "${RED}✗${NC}"
-                bad="$bad\n  $rel does not build — re-run: ( cd $dir && $bin build --out \$(mktemp -d) )"
-            fi
+            echo -e "${RED}✗${NC}"
+            bad="$bad\n  $rel does not build — re-run: ( cd $dir && $bin build --out \$(mktemp -d) )"
         fi
         rm -rf "$out"
     done

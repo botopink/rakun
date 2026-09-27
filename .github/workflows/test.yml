@@ -2,8 +2,17 @@
 #
 # Bootstrap path: check out this lib + botopink-lang, place this lib under
 # `botopink-lang/repository/rakun/` so the multi-root resolver finds it
-# without extra config, then run `zig build test-libs -- --lib rakun
-# --target <matrix.target>`.
+# without extra config, then run the library test runner from the
+# botopink-lang checkout with no `--lib`: the runner discovers every project
+# under `repository/` — the 25 modules, the 8 starters and the 3 examples of
+# this workspace (each on the target its manifest declares) — so no member is
+# outside the gate (gate-j; the pre-commit hook runs the same members).
+#
+# The matrix is the manifests' target set: rakun is erlang-only (decision
+# 113), so there is one target and three runners, every row hard. There is no
+# `commonJS` row (no member declares it) and no `beam` row (`botopink test`
+# cannot run beam — a row that prints "skipped" measures nothing). The
+# windows row installs OTP through `erlef/setup-beam`, as botopink-lang's does.
 #
 # `BOTOPINK_LANG_REF` (repo variable, default `feat`) lets the lib pin a
 # specific botopink-lang SHA during a compiler-version dance.
@@ -29,27 +38,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # `allow_fail: true` on the `erlang` axis: every `rk*` host cell in
-        # src/runtime.bp carries only an `@External.Node` form, so an erlang
-        # run stops at `function rkScan/1 undefined` (measured 2026-09-18 —
-        # only http.bp's 1 test, which touches no host cell, passes). Unlike
-        # emilia's and onze's process-dictionary cells, rakun's DI graph,
-        # router and HTTP server are 231 lines of runtime.mjs that do not fit
-        # an inline `@External.Erlang` expression; the axis stays soft until a
-        # library can ship an `.erl` host module (the CLI ships only `.mjs`
-        # sidecars). windows-2022 commonJS now runs the source step under
-        # `shell: bash` (ci-tail W1), closing the PowerShell `${LIB_NAME}`
-        # expansion gap.
         include:
-          - { runner: ubuntu-22.04, target: commonJS, allow_fail: false }
-          - { runner: ubuntu-22.04, target: erlang,   allow_fail: true  }
-          - { runner: ubuntu-22.04, target: beam,     allow_fail: false }
-          - { runner: macos-14,     target: commonJS, allow_fail: false }
-          - { runner: macos-14,     target: erlang,   allow_fail: true  }
-          - { runner: macos-14,     target: beam,     allow_fail: false }
-          - { runner: windows-2022, target: commonJS, allow_fail: false }
+          - { runner: ubuntu-22.04, target: erlang }
+          - { runner: macos-14,     target: erlang }
+          - { runner: windows-2022, target: erlang }
     runs-on: ${{ matrix.runner }}
-    continue-on-error: ${{ matrix.allow_fail }}
     steps:
       - name: Checkout this lib
         uses: actions/checkout@v5
@@ -76,22 +69,18 @@ jobs:
             cp -R self "botopink-lang/repository/${LIB_NAME}"
           fi
 
-      - name: Install required runtimes (linux)
-        if: matrix.runner == 'ubuntu-22.04' && (matrix.target == 'erlang' || matrix.target == 'beam')
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y erlang
-
-      - name: Install required runtimes (macos)
-        if: matrix.runner == 'macos-14' && (matrix.target == 'erlang' || matrix.target == 'beam')
-        run: |
-          brew install erlang
-
-      - name: Install Node 20 (for commonJS target)
-        if: matrix.target == 'commonJS'
-        uses: actions/setup-node@v5
+      # OTP 28 everywhere: the comptime runtime writes JSON via `json:encode/1`
+      # (OTP 27+), and the codegen fixtures need OTP 28's reading of the
+      # `abs/1` BIF-shadow diagnostic (a warning, not an error).
+      - name: Install Erlang/OTP (linux, windows)
+        if: matrix.runner != 'macos-14'
+        uses: erlef/setup-beam@v1
         with:
-          node-version: '20'
+          otp-version: '28'
+
+      - name: Install Erlang/OTP (macos)
+        if: matrix.runner == 'macos-14'
+        run: brew install erlang
 
       # H7 (v0.beta.19) — release fast path. Opt-in via the lib's
       # `BOTOPINK_USE_RELEASE_FASTPATH` repo variable. Set to `true` after
@@ -123,30 +112,51 @@ jobs:
           echo "runner:  ${{ matrix.runner }}"
           echo "fastpath: ${{ vars.BOTOPINK_USE_RELEASE_FASTPATH }}"
           echo "ref:     ${{ vars.BOTOPINK_LANG_REF || 'feat' }}"
+          erl -noshell -eval 'io:format("otp: ~s~n", [erlang:system_info(otp_release)]), halt().'
 
       - name: zig build install (source build path)
         if: ${{ vars.BOTOPINK_USE_RELEASE_FASTPATH != 'true' }}
         working-directory: botopink-lang
         run: zig build install
 
-      - name: zig build test-libs --lib ${{ env.LIB_NAME }} --target ${{ matrix.target }} (source)
+      # The compiler the cells and the fixture-build tests of `rakun-client`
+      # run (`BOTOPINK_BIN`): the one `zig build install` just produced, or the
+      # released one on the fast path.
+      - name: Export BOTOPINK_BIN
+        working-directory: botopink-lang
+        shell: bash
+        run: |
+          if [ "${{ vars.BOTOPINK_USE_RELEASE_FASTPATH }}" = "true" ]; then
+            bin=$(command -v botopink)
+          else
+            bin="$(pwd)/zig-out/bin/botopink"
+            [ "$RUNNER_OS" = "Windows" ] && bin="$bin.exe"
+          fi
+          [ -x "$bin" ] || { echo "botopink binary not found at $bin"; exit 1; }
+          echo "BOTOPINK_BIN=$bin" >> "$GITHUB_ENV"
+
+      # Every member and example of the workspace, one runner call: no `--lib`,
+      # so the runner's own discovery from `repository/` lists them all (a
+      # hand-written loop would be a second list to keep in step). `--strict`:
+      # a cell the runner cannot run is a failure, never a skip. The runner
+      # binary itself, not `scripts/test-libs.sh`: the cells are judged by
+      # their manifests, not by a ledger.
+      - name: botopink-lib-test --target ${{ matrix.target }} — every member and example (source)
         if: ${{ vars.BOTOPINK_USE_RELEASE_FASTPATH != 'true' }}
         working-directory: botopink-lang
         shell: bash
-        run: zig build test-libs -- --lib "${LIB_NAME}" --target "${{ matrix.target }}"
+        run: zig-out/bin/botopink-lib-test --target "${{ matrix.target }}" --strict --bin "$BOTOPINK_BIN"
 
-      - name: botopink-lib-test --lib ${{ env.LIB_NAME }} --target ${{ matrix.target }} (fast path)
+      - name: botopink-lib-test --target ${{ matrix.target }} — every member and example (fast path)
         if: ${{ vars.BOTOPINK_USE_RELEASE_FASTPATH == 'true' }}
         working-directory: botopink-lang
         shell: bash
-        run: botopink-lib-test --lib "${LIB_NAME}" --target "${{ matrix.target }}"
+        run: botopink-lib-test --target "${{ matrix.target }}" --strict --bin "$BOTOPINK_BIN"
 
       # Every examples/*/ with a botopink.json builds (runExamplesGate, the same
-      # stage as the pre-commit hook); scripts/known-broken-examples.txt lists
-      # the ones allowed to fail. Each example uses its own manifest target, so
-      # this runs once, not per target.
+      # stage as the pre-commit hook), on every row: an example that does not
+      # build fails the job.
       - name: Examples build
-        if: matrix.target == 'commonJS'
         working-directory: botopink-lang/repository/${{ env.LIB_NAME }}
         shell: bash
         run: |
