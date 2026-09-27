@@ -1,0 +1,126 @@
+//// rakun-cache — `#[cached]`, `#[cacheable]`, `#[cacheEvict]`. Front 12 step 4.
+////
+//// A decorator cannot wrap the body it annotates, so the Spring half is a
+//// TWIN, the shape onze's `#[mock]` and rakun-data's `#[transactional]` use.
+//// `#[cached]` on a `behavior` reflects its methods and emits, into the
+//// behavior's module:
+////
+////     pub type CachedProductCatalog(inner: ProductCatalog) implement ProductCatalog {
+////         pub fn productJson(self: Self, id: string) -> string {
+////             return cacheMethod("products", ["productJson", id], { -> self.inner.productJson(id) });
+////         }
+////         pub fn reprice(self: Self, id: string, body: string) -> string {
+////             val out = self.inner.reprice(id, body);
+////             val _e = cacheEvictAll("products");
+////             return out;
+////         }
+////         pub fn slugFor(self: Self, id: string) -> string {
+////             return self.inner.slugFor(id);
+////         }
+////     }
+////     pub fn cachedProductCatalog(inner: ProductCatalog) -> ProductCatalog { … }
+////
+//// A method with no cache annotation is delegated unchanged and never touches
+//// the store. Eviction runs AFTER the delegate returns, so a delegate that
+//// raises leaves the cache alone. `#[cacheEvict(name, false)]` removes the
+//// rows keyed `[<m>, args…]` for every `#[cacheable(name)]` method `m` of the
+//// behavior — the key its own arguments build under each reader.
+////
+//// The module carrying `#[cached]` imports `cacheMethod`, `cacheEvictAll` and
+//// `cacheEvictKeys` (spliced code resolves names where it is spliced). Another
+//// module imports the emitted `cached<Name>` like any `pub fn`.
+////
+//// A decorator body can call no function, so the checks are inline.
+
+pub fn cached(comptime decl: @Decl) {
+    var readers: Array<string> = [];
+    decl.methods.forEach({ m ->
+        m.annotations.forEach({ a ->
+            if (a.name == "cacheable") {
+                readers.push(a.args.join("").replaceAll("\"", "").trim() + "|" + m.name);
+            };
+        });
+    });
+    var methods: Array<string> = [];
+    var lossy = "";
+    var badReturn = "";
+    var twice = "";
+    decl.methods.forEach({ m ->
+        var readName = "";
+        var evictName = "";
+        var evictAll = false;
+        var marks = 0;
+        m.annotations.forEach({ a ->
+            if (a.name == "cacheable") {
+                readName = a.args.join("").replaceAll("\"", "").trim();
+                marks = marks + 1;
+            };
+            if (a.name == "cacheEvict") {
+                val first = if (a.args.length > 0) a.args[0] else "";
+                val second = if (a.args.length > 1) a.args[1] else "false";
+                evictName = first.replaceAll("\"", "").trim();
+                evictAll = second.trim() == "true";
+                marks = marks + 1;
+            };
+        });
+        val two = if (marks > 1 && twice == "") decl.name + "." + m.name else twice;
+        twice = two;
+        var params: Array<string> = [];
+        var args: Array<string> = [];
+        var keyArgs: Array<string> = [];
+        m.params.forEach({ p ->
+            val lost = p.typeName == "";
+            val note = if ((lost && p.name != "self" && lossy == "")) decl.name + "." + m.name + " parameter '" + p.name + "'" else lossy;
+            lossy = note;
+            if (p.name != "self") {
+                params.push(p.name + ": " + p.typeName);
+                args.push(p.name);
+                keyArgs.push(if (p.typeName == "string") p.name else p.name + ".toString()");
+            };
+        });
+        val ret = m.returnType;
+        val lostRet = false;
+        val retNote = if ((lostRet && lossy == "")) decl.name + "." + m.name + " return type '" + ret + "'" else lossy;
+        lossy = retNote;
+        val badRet = if (readName != "" && ret != "string" && badReturn == "") decl.name + "." + m.name + " returns `" + ret + "`" else badReturn;
+        badReturn = badRet;
+        val call = "self.inner." + m.name + "(" + args.join(", ") + ")";
+        val head = if (params.length > 0) "pub fn " + m.name + "(self: Self, " + params.join(", ") + ")" else "pub fn " + m.name + "(self: Self)";
+        val sig = if (ret != "") head + " -> " + ret else head;
+        val parts = if (keyArgs.length > 0) "[\"" + m.name + "\", " + keyArgs.join(", ") + "]" else "[\"" + m.name + "\"]";
+        var evictKeys: Array<string> = [];
+        readers.forEach({ r ->
+            val bar = r.indexOf("|");
+            val rname = r.slice(0, bar);
+            val rmethod = r.slice(bar + 1, r.length());
+            if (rname == evictName) {
+                evictKeys.push(if (keyArgs.length > 0) "[\"" + rmethod + "\", " + keyArgs.join(", ") + "]" else "[\"" + rmethod + "\"]");
+            };
+        });
+        val evictCall = if (evictAll) "cacheEvictAll(\"" + evictName + "\")" else "cacheEvictKeys(\"" + evictName + "\", [" + evictKeys.join(", ") + "])";
+        val body = if (readName != "") {
+            "return cacheMethod(\"" + readName + "\", " + parts + ", { -> " + call + " });";
+        } else {
+            if (evictName != "") {
+                if (ret != "") "val out = " + call + ";\n        val _e = " + evictCall + ";\n        return out;" else call + ";\n        val _e = " + evictCall + ";";
+            } else {
+                if (ret != "") "return " + call + ";" else call + ";";
+            };
+        };
+        methods.push(sig + " {\n        " + body + "\n    }");
+    });
+    if (decl.kind != DeclKind.Behavior) decl.fail("#[cached] must annotate a behavior - it reflects the behavior's method signatures and emits the Cached" + decl.name + " twin that implements it");
+    if (twice != "") decl.fail("#[cached]: " + twice + " carries both #[cacheable] and #[cacheEvict] - one cache role per method");
+    if (badReturn != "") decl.fail("#[cached]: " + badReturn + " - a #[cacheable] method returns string, the only value the store holds");
+    if (lossy != "") decl.fail("#[cached] cannot forward " + lossy + ": reflection gave no type for it, so the twin cannot redeclare it");
+    @emit("pub type Cached" + decl.name + "(inner: " + decl.name + ") implement " + decl.name + " {\n    " + methods.join("\n\n    ") + "\n}");
+    @emit("pub fn cached" + decl.name + "(inner: " + decl.name + ") -> " + decl.name + " {\n    return Cached" + decl.name + "(inner: inner);\n}");
+}
+
+pub fn cacheable(comptime decl: @Decl, name: string) {
+    if (decl.kind != DeclKind.Method) decl.fail("#[cacheable] must annotate a method of a #[cached] behavior");
+}
+
+pub fn cacheEvict(comptime decl: @Decl, name: string, allEntries: bool) {
+    if (decl.kind != DeclKind.Method) decl.fail("#[cacheEvict] must annotate a method of a #[cached] behavior");
+}

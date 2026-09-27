@@ -1,0 +1,111 @@
+//// rakun-messaging — the message shape, the registry and the direct
+//// delivery seam (front 15 steps 1–2).
+
+import {testing.asserts} from "std";
+import {io: {fs}} from "std";
+import {rkSetProp} from "rakun";
+import {Message, MessageBroker, InProcessBroker} from "message";
+import {rkRegisterListener, rkRegisterListenerAs, rkListenerCount, rkListenerDestinations, rkDeliver, rkDeliverKeyed} from "registry";
+import {resetMessaging, stopMessaging, startMessaging, messagingConfigProblem, published} from "container";
+import {rkMsgBump, rkMsgCount, rkMsgWaitUntil, rkMsgContainerWorkers} from "messaging_host";
+
+fn shape(msg: Message) -> i32 {
+    val _b = rkMsgBump("shape:" + msg.broker + ":" + msg.key + ":" + msg.offset.toString() + ":" + msg.headersJson);
+    return 0;
+}
+
+fn memory(arms: Array<string>) -> i32 {
+    for (arms) { a -> val _t = rkSetProp("rakun.messaging." + a + ".transport", "memory"); };
+    return 0;
+}
+
+fn clean() -> i32 {
+    val _s = stopMessaging();
+    for (["amqp", "kafka", "redis", "stream"]) { a -> val _t = rkSetProp("rakun.messaging." + a + ".transport", ""); };
+    return resetMessaging();
+}
+
+test "registry: Message carries the same fields on every arm - key empty and offset -1 where the arm has none" {
+    val _c = clean();
+    val _m = memory(["amqp", "kafka", "redis", "stream"]);
+    val _a = rkRegisterListenerAs("S.amqp", "amqp", "q", "", "q", { msg -> shape(msg) });
+    val _k = rkRegisterListenerAs("S.kafka", "kafka", "t", "g", "t", { msg -> shape(msg) });
+    val _r = rkRegisterListenerAs("S.redis", "redis", "c", "", "c", { msg -> shape(msg) });
+    val _s = rkRegisterListenerAs("S.stream", "stream", "s", "@first", "s", { msg -> shape(msg) });
+    val _b = startMessaging();
+    val broker = InProcessBroker(arm: "kafka");
+    val _p1 = InProcessBroker(arm: "amqp").publish("q", "", "x");
+    val _p2 = broker.publish("t", "k1", "x");
+    val _p3 = InProcessBroker(arm: "redis").publish("c", "", "x");
+    val _p4 = InProcessBroker(arm: "stream").publish("s", "", "x");
+    val done = rkMsgWaitUntil(3000, { ->
+        rkMsgCount("shape:amqp::-1:{}") == 1 && rkMsgCount("shape:kafka:k1:0:{}") == 1 && rkMsgCount("shape:redis::-1:{}") == 1 && rkMsgCount("shape:stream::0:{}") == 1
+    });
+    val _z = clean();
+    assert done;
+}
+
+test "registry: one handler written against Message compiles for all four arms" {
+    val _c = clean();
+    for (["amqp", "kafka", "redis", "stream"]) { a -> val _r = rkRegisterListener(a, "d-" + a, "", "d-" + a, { msg -> shape(msg) }); };
+    assert rkListenerCount() == 4;
+    assert rkListenerDestinations() == "d-amqp,d-kafka,d-redis,d-stream";
+}
+
+test "registry: MessageBroker is a behavior, and no type body here holds a bodyless method" {
+    val text: string = fs.readText("src/message.bp").unwrapOr("");
+    assert text.contains("pub behavior MessageBroker {");
+    assert text.contains("pub type Message(");
+    val b: InProcessBroker = InProcessBroker(arm: "amqp");
+    assert b.id() == "amqp";
+}
+
+test "registry: two listeners on one broker and destination are refused at boot naming both handlers" {
+    val _c = clean();
+    val _m = memory(["amqp"]);
+    val _a = rkRegisterListenerAs("OrderListeners.onOrderPlaced", "amqp", "orders", "", "orders", { msg -> 0 });
+    val _b = rkRegisterListenerAs("StrictListeners.onOrderPlaced", "amqp", "orders", "", "orders", { msg -> 1 });
+    val problem = messagingConfigProblem();
+    assert problem.contains("two listeners consume amqp orders: OrderListeners.onOrderPlaced and StrictListeners.onOrderPlaced");
+    try asserts.throwsWith({ -> startMessaging() }, "two listeners consume amqp orders");
+    val _z = clean();
+}
+
+test "registry: rkDeliver reaches the handler and returns its result with no broker running" {
+    val _c = clean();
+    val _a = rkRegisterListener("amqp", "orders", "", "orders", { msg -> msg.payload.length() + (if (msg.offset == -1) 100 else 0) });
+    val _k = rkRegisterListener("kafka", "events", "g", "events", { msg -> if (msg.key == "placed") 7 else 0 });
+    assert rkDeliver("amqp", "orders", "abcd") == 104;
+    assert rkDeliverKeyed("kafka", "events", "placed", "{}") == 7;
+    try asserts.throwsWith({ -> rkDeliver("amqp", "nobody", "x") }, "no listener consumes amqp nobody");
+}
+
+test "registry: a handler that raises takes only its own worker down" {
+    val _c = clean();
+    val _m = memory(["amqp"]);
+    val _p = rkSetProp("rakun.messaging.listener.work.concurrency", "3");
+    val _l = rkRegisterListener("amqp", "work", "", "work", { msg ->
+        if (msg.payload == "boom" && msg.headersJson == "{}") @panic("handler failed");
+        rkMsgBump("work:" + msg.payload);
+    });
+    val _s = startMessaging();
+    val q = InProcessBroker(arm: "amqp");
+    val _b = q.publish("work", "", "boom");
+    for (["a", "b", "c", "d", "e", "f"]) { p -> val _x = q.publish("work", "", p); };
+    val done = rkMsgWaitUntil(3000, { ->
+        rkMsgCount("work:boom") == 1 && rkMsgCount("work:a") == 1 && rkMsgCount("work:f") == 1 && rkMsgContainerWorkers("work") == 3
+    });
+    val workers = rkMsgContainerWorkers("work");
+    val _z = rkSetProp("rakun.messaging.listener.work.concurrency", "");
+    val _y = clean();
+    assert done;
+    assert workers == 3;
+}
+
+test "registry: concurrency is process count - the word thread appears nowhere in the module" {
+    for (["root.bp", "messaging_host.bp", "message.bp", "registry.bp", "markers.bp", "messaging_health.bp", "container.bp", "templates.bp", "sidecars/rakun_messaging.erl"]) { f ->
+        val text: string = fs.readText("src/" + f).unwrapOr("");
+        assert text != "";
+        assert text.toLower().contains("thread") == false;
+    };
+}

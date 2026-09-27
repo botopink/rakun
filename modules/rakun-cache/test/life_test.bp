@@ -1,0 +1,84 @@
+//// rakun-cache — lifetimes and freshness (front 12 step 2). The clock is the
+//// cache's own monotonic clock, advanced by the test (`rkCacheClockAdvance`)
+//// rather than waited on.
+
+import {rkSetProp, rkPropInt} from "rakun";
+import {CacheLife, CacheScope, cacheLife, cacheLifeOf, cachePolicy, cacheThrough, effectiveLife, freshness, resetCaches, drainRefreshes, cacheTraceOn, cacheTrace} from "cache";
+import {rkCacheClockAdvance, rkCacheWide} from "cache_host";
+
+fn boot() -> i32 {
+    val _t = rkSetProp("rakun.cache.type", "ets");
+    val _l = rkSetProp("life.loads", "0");
+    return resetCaches();
+}
+
+fn load() -> string {
+    val n = rkPropInt("life.loads") + 1;
+    val _s = rkSetProp("life.loads", n.toString());
+    return "v" + n.toString();
+}
+
+fn seconds(n: i32) -> i32 {
+    return rkCacheClockAdvance(rkCacheWide(n) * 1000);
+}
+
+fn same(l: CacheLife, stale: i32, revalidate: i32, expire: i32) -> bool {
+    return l.stale == stale && l.revalidate == revalidate && l.expire == expire;
+}
+
+test "life: the six profiles are exactly the table" {
+    assert same(cacheLife("seconds"), 30, 1, 60);
+    assert same(cacheLife("minutes"), 300, 60, 3600);
+    assert same(cacheLife("hours"), 300, 3600, 86400);
+    assert same(cacheLife("days"), 300, 86400, 604800);
+    assert same(cacheLife("weeks"), 300, 604800, 2592000);
+    assert same(cacheLife("max"), 300, 2592000, 31536000);
+}
+
+test "life: an unknown profile falls back to a one-hour expiry instead of raising" {
+    assert same(cacheLife("hourz"), 0, 60, 3600);
+}
+
+test "life: the freshness table" {
+    val l = cacheLifeOf(30, 10, 100);
+    assert freshness(rkCacheWide(9999), false, l) == "fresh";
+    assert freshness(rkCacheWide(10000), false, l) == "stale";
+    assert freshness(rkCacheWide(39999), false, l) == "stale";
+    assert freshness(rkCacheWide(40000), false, l) == "miss";
+    assert freshness(rkCacheWide(0), true, l) == "stale";
+    assert freshness(rkCacheWide(100000), true, l) == "miss";
+}
+
+test "life: older than revalidate but inside the stale window is served AND refreshed" {
+    val _b = boot();
+    val policy = cachePolicy(CacheScope.Shared, "life-stale", cacheLifeOf(30, 10, 100), []);
+    assert cacheThrough(policy, ["k"], { -> load() }) == "v1";
+    val _a = seconds(15);
+    assert cacheThrough(policy, ["k"], { -> load() }) == "v1";
+    val _d = drainRefreshes();
+    assert rkPropInt("life.loads") == 2;
+    assert cacheThrough(policy, ["k"], { -> load() }) == "v2";
+    assert rkPropInt("life.loads") == 2;
+}
+
+test "life: older than expire is never served, whatever its stale window" {
+    val _b = boot();
+    val policy = cachePolicy(CacheScope.Shared, "life-expire", cacheLifeOf(100000, 10, 60), []);
+    assert cacheThrough(policy, ["k"], { -> load() }) == "v1";
+    val _a = seconds(61);
+    assert cacheThrough(policy, ["k"], { -> load() }) == "v2";
+}
+
+test "life: a policy with no explicit expire inherits rakun.cache.<name>.ttl-seconds" {
+    val _b = boot();
+    val _p = rkSetProp("rakun.cache.life-ttl.ttl-seconds", "5");
+    assert effectiveLife(cacheLifeOf(0, 0, 0), 5).expire == 5;
+    assert effectiveLife(cacheLifeOf(0, 0, 0), 5).revalidate == 5;
+    val policy = cachePolicy(CacheScope.Shared, "life-ttl", cacheLifeOf(0, 0, 0), []);
+    assert cacheThrough(policy, ["k"], { -> load() }) == "v1";
+    val _a = seconds(4);
+    assert cacheThrough(policy, ["k"], { -> load() }) == "v1";
+    val _c = seconds(2);
+    assert cacheThrough(policy, ["k"], { -> load() }) == "v2";
+    val _z = rkSetProp("rakun.cache.life-ttl.ttl-seconds", "");
+}

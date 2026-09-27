@@ -1,0 +1,65 @@
+//// rakun-security — LDAP directory authentication (front 79 step 7) against
+//// a directory server this node runs (`rakun_ldap:test_server`, LDAPv3 BER
+//// through OTP's own `ELDAPv3` codec).
+
+import {Health} from "rakun-actuator-api";
+import {LdapConfig, LdapResult, ldapAuthenticate, ldapHealth} from "ldap/ldap";
+import {ldapHandles, ldapTestServer, ldapTestStop} from "ldap_host";
+
+fn directory() -> i32 {
+    return ldapTestServer([
+        #("cn=svc,dc=example", "svc-pw", "", []),
+        #("uid=ana,ou=people,dc=example", "ana-pw", "ana", ["cn=admins,dc=example", "cn=ops,dc=example", "cn=dev,dc=example"]),
+    ]);
+}
+
+fn config(port: i32, pattern: string) -> LdapConfig {
+    return LdapConfig(host: "127.0.0.1", port: port, serviceDn: "cn=svc,dc=example", servicePassword: "svc-pw", base: "dc=example", uidAttribute: "uid", userDnPattern: pattern);
+}
+
+test "ldap: a correct password authenticates with the DN as subject and one authority per memberOf" {
+    val port = directory();
+    val r = ldapAuthenticate(config(port, ""), "ana", "ana-pw");
+    val viaPattern = ldapAuthenticate(config(port, "uid={0},ou=people,dc=example"), "ana", "ana-pw");
+    val _s = ldapTestStop();
+    assert r.kind == "authenticated" && r.subject == "uid=ana,ou=people,dc=example", r.kind;
+    assert r.principal.authorities.length == 3 && r.principal.authorities.indexOf("cn=ops,dc=example") >= 0, r.principal.authorities.join("|");
+    assert viaPattern.kind == "authenticated", viaPattern.kind;
+    assert viaPattern.kind == "authenticated";
+}
+
+test "ldap: a wrong password and an unknown user are the same rejection" {
+    val port = directory();
+    val wrong = ldapAuthenticate(config(port, ""), "ana", "nope");
+    val nobody = ldapAuthenticate(config(port, ""), "zed", "whatever");
+    val _s = ldapTestStop();
+    assert wrong.kind == "rejected" && nobody.kind == "rejected";
+    assert wrong == nobody;
+}
+
+test "ldap: an unreachable directory is unavailable, not a rejection" {
+    val r = ldapAuthenticate(config(1, ""), "ana", "ana-pw");
+    assert r.kind == "unavailable";
+}
+
+test "ldap: the health indicator is DOWN on a failed service bind and carries no credential" {
+    val port = directory();
+    val up: Health = ldapHealth(config(port, ""));
+    val bad = LdapConfig(host: "127.0.0.1", port: port, serviceDn: "cn=svc,dc=example", servicePassword: "wrong-secret", base: "dc=example", uidAttribute: "uid", userDnPattern: "");
+    val down: Health = ldapHealth(bad);
+    val _s = ldapTestStop();
+    assert up.status == "UP" && down.status == "DOWN";
+    assert down.details.contains("wrong-secret") == false && down.details.contains("svc-pw") == false, down.details;
+}
+
+test "ldap: every handle opened is closed, on the failure paths too" {
+    val port = directory();
+    val before = ldapHandles();
+    val _a = ldapAuthenticate(config(port, ""), "ana", "ana-pw");
+    val _b = ldapAuthenticate(config(port, ""), "ana", "nope");
+    val _c = ldapAuthenticate(config(port, ""), "zed", "x");
+    val _d = ldapHealth(config(port, ""));
+    val _s = ldapTestStop();
+    val _e = ldapAuthenticate(config(port, ""), "ana", "ana-pw");
+    assert ldapHandles() == before;
+}

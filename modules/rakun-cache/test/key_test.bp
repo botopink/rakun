@@ -1,0 +1,67 @@
+//// rakun-cache — the key protocol (front 12 step 1).
+
+import {io: {fs, process}} from "std";
+import {rkSetProp} from "rakun";
+import {Session, newSession} from "rakun-session";
+import {rkSessPutCurrent, rkSessClearCurrent} from "rakun-session";
+import {CacheScope, cacheKey, privateKey, cachePolicy, cacheLifeOf, cacheThrough, resetCaches} from "cache";
+
+fn boot() -> i32 {
+    val _t = rkSetProp("rakun.cache.type", "ets");
+    return resetCaches();
+}
+
+test "key: a part cannot forge the boundary between two parts" {
+    assert cacheKey("p", ["a", "b"]) != cacheKey("p", ["a\u{1f}b"]);
+    assert cacheKey("p", ["a", "b"]) != cacheKey("p", ["ab"]);
+    assert cacheKey("p", ["a", "b"]) != cacheKey("p", ["a,b"]);
+    assert cacheKey("p", ["1:a"]) != cacheKey("p", ["1", "a"]);
+    assert cacheKey("p", ["a", "b"]) != cacheKey("q", ["a", "b"]);
+}
+
+test "key: the same namespace and parts give the same fixed-width key on every run" {
+    val k = cacheKey("products", ["productJson", "7"]);
+    assert k == cacheKey("products", ["productJson", "7"]);
+    assert k.startsWith("products:");
+    assert cacheKey("products", ["x"]).length() == k.length();
+    // Pinned: the key protocol is a contract between two entry points and
+    // across restarts; this literal changes only when the protocol does.
+    assert k == "products:6181371bd7a8dd4ab476d4c96b868af1";
+}
+
+test "key: private keys under two session ids differ, and neither read returns the other's value" {
+    val _b = boot();
+    assert privateKey("recs", "sid-a", ["r", "1"]) != privateKey("recs", "sid-b", ["r", "1"]);
+    assert privateKey("recs", "sid-a", ["r", "1"]) != cacheKey("recs", ["sid-a", "r", "1"]);
+    val policy = cachePolicy(CacheScope.Private, "recs", cacheLifeOf(0, 600, 600), []);
+    val _a = rkSessPutCurrent(newSession("sid-a", "alice", 0, 60));
+    val first = cacheThrough(policy, ["r", "1"], { -> "alice's" });
+    val again = cacheThrough(policy, ["r", "1"], { -> "reloaded" });
+    val _s = rkSessPutCurrent(newSession("sid-b", "bob", 0, 60));
+    val other = cacheThrough(policy, ["r", "1"], { -> "bob's" });
+    val _c = rkSessClearCurrent();
+    assert first == "alice's";
+    assert again == "alice's";
+    assert other == "bob's";
+}
+
+test "key: a private policy with no session in the request runs the loader and stores nothing" {
+    val _b = boot();
+    val _c = rkSessClearCurrent();
+    val policy = cachePolicy(CacheScope.Private, "recs-anon", cacheLifeOf(0, 600, 600), []);
+    val first = cacheThrough(policy, ["r"], { -> "one" });
+    val second = cacheThrough(policy, ["r"], { -> "two" });
+    assert first == "one" && second == "two";
+}
+
+test "key: every host cell is External.Erlang - no External.Node under src" {
+    val dir = process.cwd() + "/src";
+    val files = ["root.bp", "cache_host.bp", "cache.bp", "cached.bp", "cache_endpoint.bp"];
+    for (files) { f ->
+        val text = fs.readText(dir + "/" + f).unwrapOr("");
+        assert text != "";
+        assert text.contains("External.Node") == false;
+    };
+    val host = fs.readText(dir + "/cache_host.bp").unwrapOr("");
+    assert host.contains("#[@External.Erlang(\"rakun_cache\"");
+}

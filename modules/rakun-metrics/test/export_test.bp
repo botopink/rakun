@@ -1,0 +1,122 @@
+//// rakun-metrics — OTLP and StatsD export (front 75 step 5), against a
+//// collector served by this node.
+
+import {Request, Response, rkSetProp, rkRegisterRoute, rkServe, rkDispatchHttp} from "rakun";
+import {counter} from "registry";
+import {openSpan, closeSpan, rkMetricsSpanBuffered, rkMetricsSpanCap, installTracing} from "tracing";
+import {otlpClient, otlpPushOnce, startOtlpExport, rkMetricsOtlpRunning, rkMetricsOtlpStop, rkMetricsFailureCount, statsdPushOnce, rkMetricsStatsdSend} from "export";
+import {rkSpanSetFlags, rkSpanClear} from "rakun-actuator-api";
+
+#[@External.Erlang("rakun_runtime", "prop")]
+declare fn prop(key: string) -> string;
+
+#[@External.Erlang("""(fun(__Ms) -> timer:sleep(__Ms), 0 end)($0)""")]
+declare fn sleep(ms: i32) -> i32;
+
+fn record(key: string, req: Request) -> Response {
+    val n = prop(key + ".count");
+    val _c = rkSetProp(key + ".count", (toInt(n) + 1).toString());
+    val _b = rkSetProp(key, req.body());
+    return Response.ok("{}");
+}
+
+#[@External.Erlang("""(fun(__S) -> try binary_to_integer(__S) catch _:_ -> 0 end end)($0)""")]
+declare fn toInt(s: string) -> i32;
+
+fn collector(prefix: string) -> string {
+    val _a = rkSetProp("rakun.http.clients.allow", "127.0.0.0/8");
+    val _m = rkRegisterRoute("POST", prefix + "/v1/metrics", { req -> record("test" + prefix + ".metrics", req) });
+    val _t = rkRegisterRoute("POST", prefix + "/v1/traces", { req -> record("test" + prefix + ".traces", req) });
+    val _k = rkSetProp("rakun.main.keep-alive", "false");
+    val port = rkServe(0, { m, p, h, q, b -> rkDispatchHttp(m, p, h, q, b) });
+    return "http://127.0.0.1:" + port.toString() + prefix;
+}
+
+test "otlp: a push sends the metrics and the sampled spans through front 13's client" {
+    val url = collector("/otlp1");
+    val c = counter("x1.pushed", []);
+    val _i = c.increment(4);
+    val _t = installTracing();
+    val _f = rkSpanSetFlags("01");
+    val s = openSpan("x1.work");
+    val _e = closeSpan(s);
+    val _k = rkSpanClear();
+    val _p = rkSetProp("rakun.metrics.export.otlp.endpoint", url);
+    val r = otlpPushOnce();
+    val _u = rkSetProp("rakun.metrics.export.otlp.endpoint", "");
+    assert r == 0;
+    val metrics = prop("test/otlp1.metrics");
+    assert metrics.contains("\"resourceMetrics\"") && metrics.contains("\"name\":\"x1.pushed\""), metrics;
+    val traces = prop("test/otlp1.traces");
+    assert traces.contains("\"resourceSpans\"") && traces.contains("\"name\":\"x1.work\""), traces;
+}
+
+test "otlp: an https endpoint uses the configured SSL bundle, an http one none" {
+    val _b = rkSetProp("rakun.metrics.export.otlp.ssl-bundle", "otlp");
+    val secure = otlpClient("https://collector.example:4318");
+    val plain = otlpClient("http://collector.example:4318");
+    val _u = rkSetProp("rakun.metrics.export.otlp.ssl-bundle", "");
+    assert secure.settings.sslBundle == "otlp";
+    assert plain.settings.sslBundle == "";
+}
+
+test "otlp: an unreachable collector is one failure per push, and the span buffer stays bounded" {
+    val _a = rkSetProp("rakun.http.clients.allow", "127.0.0.0/8");
+    for (["x3.a", "x3.b", "x3.c", "x3.d", "x3.e"]) { n -> val _c = counter(n, []).increment(1); };
+    val _p = rkSetProp("rakun.metrics.export.otlp.endpoint", "http://127.0.0.1:1");
+    val before = rkMetricsFailureCount();
+    val _1 = otlpPushOnce();
+    val _2 = otlpPushOnce();
+    val _3 = otlpPushOnce();
+    val _u = rkSetProp("rakun.metrics.export.otlp.endpoint", "");
+    assert rkMetricsFailureCount() - before == 3;
+    val _t = installTracing();
+    val _f = rkSpanSetFlags("01");
+    val cap = rkMetricsSpanCap();
+    var i = 0;
+    while (i < cap + 50) {
+        val s = openSpan("x3.flood");
+        val _e = closeSpan(s);
+        i = i + 1;
+    };
+    val _k = rkSpanClear();
+    assert rkMetricsSpanBuffered() == cap;
+}
+
+test "otlp: step drives the push, and step 0 disables it without disabling the registry" {
+    val url = collector("/otlp4");
+    val _p = rkSetProp("rakun.metrics.export.otlp.endpoint", url);
+    val _z = rkSetProp("rakun.metrics.export.otlp.step", "0");
+    assert startOtlpExport() == false && rkMetricsOtlpRunning() == false;
+    val c = counter("x4.still", []);
+    assert c.increment(2) == 2;
+    val _s = rkSetProp("rakun.metrics.export.otlp.step", "50");
+    assert startOtlpExport();
+    val _w = sleep(400);
+    val _stop = rkMetricsOtlpStop();
+    val _u = rkSetProp("rakun.metrics.export.otlp.endpoint", "");
+    val _v = rkSetProp("rakun.metrics.export.otlp.step", "");
+    assert toInt(prop("test/otlp4.metrics.count")) >= 2, prop("test/otlp4.metrics.count");
+    assert rkMetricsOtlpRunning() == false;
+}
+
+#[@External.Erlang("""(fun() -> {ok, __S} = gen_udp:open(0, [binary, {active, false}]), {ok, __P} = inet:port(__S), persistent_term:put(rakun_metrics_test_udp, __S), __P end)()""")]
+declare fn udpListen() -> i32;
+
+#[@External.Erlang("""(fun() -> __S = persistent_term:get(rakun_metrics_test_udp), __R = case gen_udp:recv(__S, 0, 2000) of {ok, {_, _, __D}} -> __D; _ -> <<>> end, gen_udp:close(__S), __R end)()""")]
+declare fn udpReceive() -> string;
+
+test "statsd: a push is one datagram of lines, and a dead target never raises" {
+    val port = udpListen();
+    val c = counter("x5.sent", []);
+    val _i = c.increment(3);
+    val _h = rkSetProp("rakun.metrics.export.statsd.host", "127.0.0.1");
+    val _p = rkSetProp("rakun.metrics.export.statsd.port", port.toString());
+    val sent = statsdPushOnce();
+    val got = udpReceive();
+    val _u = rkSetProp("rakun.metrics.export.statsd.host", "");
+    assert sent == 1;
+    assert got.contains("x5.sent:3|c"), got;
+    assert rkMetricsStatsdSend("127.0.0.1", 1, "x:1|c") >= 0;
+    assert rkMetricsStatsdSend("no-such-host.invalid", 8125, "x:1|c") == 0;
+}

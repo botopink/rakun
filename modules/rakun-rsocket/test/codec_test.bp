@@ -1,0 +1,40 @@
+//// rakun-rsocket — the frame codec (front 92 step 1).
+
+import {testing.asserts} from "std";
+import {io: {process}} from "std";
+import {rsEncodeHex, rsDecodeHex, rsDecodePrefix, rsRouteMetadataHex, rsRouteOfHex} from "rsocket_host";
+
+fn back(t: i32, meta: string, data: string) -> string {
+    return rsDecodeHex(rsEncodeHex(t, 5, 0, meta, data), 1000);
+}
+
+test "codec: all twelve frame types encode and decode" {
+    val types = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+    val decoded = types.map({ t -> back(t, "m", "d") });
+    val typed = types.filter({ t -> (decoded.at(t - 1) ?? "").contains("{type," + t.toString() + "}") == false });
+    assert typed.length == 0, decoded.join("\n");
+}
+
+test "codec: a split frame waits for the rest; an oversized one is refused naming the limit" {
+    val f = rsEncodeHex(4, 1, 0, "meta", "hello");
+    assert rsDecodePrefix(f, 5) == "more" && rsDecodeHex(f, 1000).contains("{type,4}");
+    assert rsDecodeHex(f, 10).startsWith("error:the frame of ") && rsDecodeHex(f, 10).endsWith(" bytes exceeds the maximum of 10"), rsDecodeHex(f, 10);
+}
+
+test "codec: the metadata and data split is exact, empty sections included" {
+    val both = back(10, "mm", "dd");
+    val noMeta = back(10, "-", "dd");
+    val emptyMeta = back(10, "", "dd");
+    val emptyData = back(10, "mm", "");
+    assert both.contains("{data,<<\"dd\">>}") && both.contains("{meta,<<\"mm\">>}") && noMeta.contains("meta") == false;
+    assert emptyMeta.contains("{meta,<<>>}") && emptyMeta.contains("{data,<<\"dd\">>}") && emptyData.contains("{data,<<>>}") && emptyData.contains("{meta,<<\"mm\">>}");
+}
+
+test "routing: the route is a length-prefixed tag in the composite metadata" {
+    assert rsRouteMetadataHex("user.byId") == "fe00000a09757365722e62794964" && rsRouteOfHex(rsRouteMetadataHex("user.byId")) == "user.byId" && rsRouteOfHex("") == "";
+}
+
+test "codec: no byte or bit manipulation in the botopink sources" {
+    val hits = process.runShell("grep -nE 'bsl|bsr|band|bor|<<[0-9]' src/*.bp | grep -v '#\\[@External' | head -3");
+    assert hits == "", hits;
+}

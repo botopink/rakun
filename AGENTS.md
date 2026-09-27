@@ -36,7 +36,8 @@ The repository is a **workspace** (decision 75 of 1.0.10-beta): the root `botopi
 members and is never a package — no `src`, `files`, `entry` or `dependencies`; `botopink build/test`
 there is the located refusal `botopink.json is a workspace, not a package — run this command inside
 one of its members: …`. Every `modules/*/` and `examples/*/` holding a `botopink.json` is a member,
-named by its own manifest. The **core is the member `modules/rakun/`**; `from "rakun"` resolves to it.
+named by its own manifest, and so is every `starters/*/` (front 73: a manifest and a docblock-only
+root, no code). The **core is the member `modules/rakun/`**; `from "rakun"` resolves to it.
 
 ```text
 rakun/
@@ -44,7 +45,7 @@ rakun/
 ├── docs.md            ← what this lib provides + Spring mapping + loading notes
 ├── botopink.json      ← WORKSPACE: name rakun · version · targets [erlang] (decision 117
 │                        rule 9 — every member declares [erlang] too) · workspaces
-│                        ["modules/*", "examples/*"]. Nothing importable from it.
+│                        ["modules/*", "starters/*", "examples/*"]. Nothing importable from it.
 ├── modules/
 │   ├── README.md      ← the member table (14 today, 13 planned with their fronts), the
 │   │                    module ↔ Spring starter map, how to add a member
@@ -215,12 +216,34 @@ rakun/
 │   │                    rkDispatchHttp), `context.bp` (resetSingletons/resetContext/contextSnapshot);
 │   │                    test/ holds one file per piece plus the std-mocks + #[bean] pairing.
 │   │                    Re-exports nothing from std and ships no mocking code
-│   └── rakun-<area>/  ← the ten remaining scaffolds (actuator · cache · client ·
-│                        data · hateoas · logging · messaging · scheduling · security ·
+│   ├── rakun-cache/   ← CACHING (§ Caching, front 12): `cache.bp` (keys, lifetimes,
+│   │                    settings, `cacheThrough`, the verbs), `cached.bp` (the
+│   │                    `#[cached]` twin), `cache_endpoint.bp`, `cache_host.bp` over
+│   │                    `sidecars/rakun_cache.erl`; test/fixtures/{twin,imports} are
+│   │                    consumer projects `consumer_test.bp` copies and runs
+│   ├── rakun-messaging/ ← MESSAGING (§ Messaging, front 15): the listener registry,
+│   │                    the four markers, the in-process broker and the containers
+│   │                    (`sidecars/rakun_messaging.erl`), the templates, the
+│   │                    `messaging.<arm>` indicators
+│   ├── rakun-metrics/ ← OBSERVABILITY (§ Observability, front 75): the meter
+│   │                    registry, `rakun_telemetry` (the bus), the BEAM VM meters,
+│   │                    the prometheus / processes / vm endpoints, OTLP and
+│   │                    StatsD export, trace sampling (`sidecars/rakun_metrics.erl`,
+│   │                    `sidecars/rakun_telemetry.erl`)
+│   ├── rakun-websocket/ ← WEBSOCKET (§ WebSocket, front 20): the upgrade hook, the
+│   │                    connection loop, `pg` topics and the test client
+│   │                    (`sidecars/rakun_websocket.erl`), `#[wsEndpoint]`, health
+│   └── rakun-<area>/  ← the remaining scaffolds (actuator · client ·
+│                        data · hateoas · logging · scheduling · security ·
 │                        session): `botopink.json` (files [root.bp] · targets per
 │                        `specs/1.0.10-beta/03-rakun/modules.md` § Targets · dependencies
 │                        { "rakun": { "workspace": true } }) + a two-comment `src/root.bp`;
 │                        contents land per front
+├── starters/          ← front 73: eight `rakun-starter*` members — a curated dependency set
+│                        each (in-repo `{ "workspace": true }`, `onze` by `path`), `files`
+│                        [root.bp], a docblock-only root; README.md is the table, the
+│                        third-party `<project>-rakun-starter` rule and the subdirectory
+│                        limitation. Linted by `modules/rakun/test/starter_manifest_test.bp`
 ├── examples/
 │   ├── rakun/         ← member `rakun-example` (an application: entry main.bp, target erlang,
 │   │                    depends on `rakun` via { "workspace": true }); the sixty-second app
@@ -376,6 +399,19 @@ on the warm path.
 - The router walks in registration order and takes the first route whose verb,
   segment count and every segment match (`:name` binding a path parameter).
   Registration order decides between two routes that both match, on both rows.
+- `serve_requests/2` carries the BODY hook (front 24): before a body is read,
+  a fun under the `rakun_body_hook` persistent term gets the verb, the path and
+  the headers as JSON and answers `<<>>` (read the body) or `"<status>\n<body>"`
+  — written with `Connection: close`, the socket half-closed, at most 8 KiB
+  drained for 200 ms so the answer reaches a client still sending, and the
+  bytes received recorded under `rakun.server.last-refused-bytes`. Not one
+  byte of a refused body is handed to the dispatcher.
+- `serve_requests/2` carries the UPGRADE hook (front 20): a request with
+  `Upgrade: websocket` is dispatched as usual, and when a member put a fun under
+  the `rakun_upgrade_hook` persistent term, that fun gets the socket, the
+  transport, the path, the headers and the dispatcher's answer, owns the socket
+  from there and the connection process becomes the WebSocket connection. With
+  no hook installed an upgrade request is an ordinary request.
 - `dispatch_http/5` carries THE ONE HOOK later fronts hang off:
   `rakun_chain:run/6` when `rakun_web` is in the build, the handler directly when
   it is not. `Rakun.run` is frozen and hardcodes this dispatcher, so front 07's
@@ -1572,6 +1608,176 @@ handler mode (no default `Content-Type`, headers appended). `bodyText`,
 `bodyForm` (std's `encoding.formParse`, read with `formField`), `bodyJson`
 (validated by `json.decode`, answered as the RAW TEXT).
 
+## Server actions — `modules/rakun-app/src/actions.bp` (front 24)
+
+`#[serverAction]` on `pub fn name(form: FormData) -> @Task<ActionResult>` (or
+`-> @Task<@Result<ActionResult, E>>`) emits `val __rkAction_<name> =
+rkRegisterAction("<name>", <name>)`; the module imports `rkRegisterAction`.
+Reflection spells the return type as written, so the marker refuses any other
+return — `@Task<i32>` included — at build time. Sidecar
+`rakun_actions.erl`: the registry `{module, name} -> fun` (the module read off the
+fun with `erlang:fun_info/2`), the call (an `ActionResult`, `Ok`, `Error` or a
+raise, a `nav:` signal re-thrown), and the body hook.
+
+- **The id** (envelope version `v: 1`) — `actionId(module, name, buildId)` =
+  `a_` + the first 24 hex of `hash.hmacSha256(rakun.actions.secret, module + "."
+  + name + ":" + buildId)`; `actionIdOf(name)` is what onze hands a form;
+  `resolveAction(id)` compares every registered id with
+  `hash.equalsConstantTime`. The name alone never resolves.
+- **Configuration** — `rakun.actions.field`, `rakun.actions.header` (onze's
+  wire names; no default, no spelling here), `rakun.actions.secret` (≥ 32
+  characters), `rakun.actions.bodyLimit` (1048576, not below 4096).
+  `serveActions()` refuses a bad configuration naming the key, puts the action
+  path in front of front 25's `appResponse` and installs the body hook.
+- **Checks** (`preBodyRefusal`, in the hook before the body is read and again in
+  the dispatcher): no `Origin` or a host that is not `Host` → 403 (no key reaches
+  this), `multipart/form-data` → 415, over the limit → 413. Only POSTs to a PAGE
+  path are actions.
+- **Dispatch** (`dispatchAction(pathname, origin, host, contentType, body,
+  header)`): the header present is the scripted path (its value the id; `refresh`
+  re-renders); `application/json` is the JSON-RPC body (`actions`'
+  `parseRpcBody`, 400 when refused; each argument a form-encoded `name=value`
+  list); otherwise the configured field of the form body. Unknown id → 404,
+  empty. The action runs in its own frame in phase `Action` inside
+  `captureSignals`, the phase restored after. Progressive: a redirect → 303
+  `Location`, `notFound` → 404, else the page re-rendered (buffered, phase
+  `Render`) as the document. Scripted/RPC: 200 with `actions`' `writeEnvelope`
+  (`ok`, `state` = `writeState(message, fields)` or the failure's text,
+  `revalidated` = the frame's slot, `n` = `signalToWire`, `redirect` derived).
+  Refresh: an envelope whose `payload` is the re-rendered page. Queued cookies go
+  out as `Set-Cookie` through front 25's `writeHandlerResponse`.
+- `FormData(fields)` with `formValue(form, name)` (`""` when absent);
+  `ActionResult(message, fields)` with `done()`, `saying(msg)`,
+  `invalid(field, msg)` — an array of pairs, not a `Dict` (a `Dict` built in
+  another module does not dispatch its methods on erlang).
+- **Not here**: the file-level `pub val useServer = true;` is attached by
+  `onze build` (onze front 50); the markup is jhonstart front 67's.
+
+## Static generation — `modules/rakun-app/src/static_gen.bp`, `segment_config.bp` (front 60)
+
+rakun-app depends on rakun-cache because the prerendered entries live in
+front 12's store. Sidecar `rakun_static_gen.erl`: the config and params registries, the
+decided kinds, the bounded fan-out, single-flight regeneration, counters, a
+gauge and the failure log.
+
+- **Segment config** — `registerSegmentConfig(seg, SegmentConfig(dynamic,
+  dynamicParams, revalidate, fetchCache))`; `configFor(pattern)` folds the
+  ancestors root-down FIELD BY FIELD, a field left at `defaultSegmentConfig()`
+  (Auto · true · −1 · Auto) being inherited. `revalidate: 0` is normalised to
+  `ForceDynamic`. An unknown pattern or a second config raises.
+- **The decision** — `decideKind(config, hasParams, patternIsDynamic,
+  touchedDynamic, reason)`: ForceDynamic → D; ForceStatic/ErrorOnDynamic → S
+  (`force-static[ over <reason>]`); dynamic pattern without params → D, or S
+  with nothing enumerated under `dynamicParams: false`; touched → D (front 62's
+  reason); else S with `""`. The test asserts all 64 rows.
+- **Enumeration** — `registerStaticParams(seg, fn() -> @Task<StaticParams[]>)`,
+  `expandParams(pattern, rows)` (catch-all spans `/`, optional catch-all may be
+  empty; a missing, extra, slashed or duplicated binding raises).
+- **Prerender** — every page path rendered once in its own front 62 frame
+  (`renderOnce`), as unstarted thunks in at most `rakun.static.concurrency`
+  processes (default: the scheduler count); `prerenderAll(strict)`,
+  `prerenderPath(path, strict)`, `lookupPrerendered(path)`. An entry
+  (`PrerenderEntry(path, html, payload, tags, revalidateAt, buildHash)`) is JSON
+  stored with rakun-cache's `cacheStore` in the framework cache
+  `rakun.prerender` (shared scope, tagged `path:<path>`), which the kill switch
+  does not reach. `payload` is `""`: the payload is the HTML library's.
+- **Serving** — `serveStatic(path)`: a draft request (`draftBypass()`) gets
+  `null`; a stale entry (past `revalidateAt`, or marked by `revalidateTag` /
+  `revalidatePath`) is served at once and ONE regeneration starts
+  (`ets:insert_new` claim; the worker re-reads the store and renders only while
+  still stale); a failing regeneration keeps the entry and is logged to standard
+  error and `regenerationFailures()`.
+- **Kinds** — `routeKinds()` is `routing`'s `writeKinds` of the decisions.
+- **Export** — `staticExport(outDir)`: every page path rendered STRICT into
+  `<out>/<path>/index.html` plus `payload.json` beside it; a dynamic read (front
+  62's message), a handler route, a dynamic pattern without params, or a file
+  outside `<out>` (`path.isInside`) fails it.
+
+## Parallel and intercepting routes — `route_slots.bp`, `route_intercept.bp` (front 61)
+
+Pure functions over front 22's table and `routing`'s matcher; no sidecar (nothing
+to hold). A slot entry is `P|/dashboard/settings|team` (the `@team` segment
+removed); a slot belongs to the NEAREST layout above its shortest entry.
+
+- **Slots** — `slotsOf(table, layout)` (registration order, never the children
+  slot), `tableForSlot(table, slot)` (its entries with the slot cleared, so
+  `matchPath` answers, and its own `S`/`E` boundaries), `resolveSlot(table, slot,
+  layout, pathname, soft)` / `resolveSlots` → `SlotResolution(slot, state, entry,
+  params)`: matched `M` (with params, `slotParam(r, name)`); unmatched and soft →
+  `U` unchanged; unmatched and hard → `D` its `default.bp` or `E` empty — always a
+  resolution, so positions never shift. `slotStateLines(rs)` are the triples
+  `routing`'s `writeSlotStates` writes (the `z` section). Scan refusals:
+  `defaultProblem` (a `D` outside any slot, two under one slot),
+  `slotConflictProblem` (two pages of ONE slot at one URL — two slots at one URL is
+  what parallel routes are for).
+- **Interception** — `parseIntercept(folder)` (`(.)` Same · `(..)` Up1 ·
+  `(..)(..)` Up2 · `(...)` Root; a route group or a plain folder is `null`; a
+  dots-only marker like `(....)` raises), `resolveIntercept(marker, from)` (climbing
+  past the root raises). The marker stays in the pattern as written
+  (`/feed/[id]/(.)photo/[photoId]`); `interceptions(table)` reads each one's
+  origin and claimed pattern. `interceptFor(table, from, to, soft)` answers the
+  intercepting entry ONLY when `soft`; `isSoftNavigation()` is `x-rakun-nav:
+  soft` read through front 62's `headers()` (so it raises outside a request); a
+  missing header is hard. `interceptProblem` refuses a claimed pattern no page
+  serves and two interceptions from one origin claiming one target.
+
+## Locale routing — `modules/rakun-app/src/i18n.bp` (front 64)
+
+In rakun-app (the cut's home for i18n negotiation), over rakun-web's chain and
+rakun-cache. The locale set and the dictionary loader are two `persistent_term`
+cells written inline; the route table is unchanged (`[locale]` is an ordinary
+dynamic segment).
+
+- **Set** — `registerLocales(LocaleSet(locales, defaultLocale))`: normalised
+  (`normalizeTag`: `pt-br` → `pt-BR`), closed, registered once; a default outside
+  it, an empty set, a malformed tag or `_` refuse the boot. `isSupported`,
+  `locales()`.
+- **Negotiation** — `parseAcceptLanguage` (q in per-mille, highest first, a
+  malformed q 0, any length), `negotiate(set, accept, cookie)`: a supported
+  cookie, else the highest non-zero supported tag (`pt-PT` widens to `pt`, `pt`
+  never narrows), else the default.
+- **Paths** — `localeOfPath`, `stripLocale`, `withLocale` (each segment
+  percent-encoded once; no double prefix).
+- **Filter** — `installLocaleFilter(set)` at −450: a path under
+  `/api` · `/sitemap.xml` · `/robots.txt` or a `rakun.i18n.exclude` prefix passes;
+  a locale-prefixed one passes and is noted for `localeOf()`; any other redirects
+  307 to `withLocale(negotiated, path)` with the query rebuilt from the chain's
+  pairs. `localeOf()` / `htmlLang()` raise outside a request (front 62);
+  `setLocaleCookie` (cookie `rakun.i18n.cookie`, default `RAKUN_LOCALE`) raises in
+  a render.
+- **Dictionaries** — the typed form is the app's records; `dictionaryBlob(locale)`
+  (open sets) reads through `registerDictionaryLoader`'s function into the
+  framework cache `rakun.i18n` (60 s); `declaredLocaleFiles(appDir)` +
+  `dictionaryProblem(set, files)` are the build check.
+- **Alternates** — `alternatesFor(set, pathname)`: one `Alternate(hreflang, href)`
+  per locale plus `x-default`, absolute under `rakun.i18n.origin`.
+
+## Metadata file routes — `modules/rakun-app/src/metadata_routes.bp` (front 66)
+
+Eight Next conventions as routes: `sitemap.xml`, `robots.txt`,
+`manifest.webmanifest`, `favicon.ico`, `icon.*`, `apple-icon.*`,
+`opengraph-image` and `twitter-image`. Each `register*` adds ONE `R` entry with
+verb `GET` to front 22's table through front 25's `registerRoute` — the table
+format is unchanged. Host cells are `rakun_metadata_routes.erl` (file read,
+SHA-256 hash); the renderers are pure botopink.
+
+- **Renderers** — `renderSitemap` (every value through `escape.html`, an empty
+  field omitted), `renderSitemapIndex`, `shardEntries` (50 000 URLs / 50 MB per
+  document — no key raises it), `renderRobots`, `renderManifest` (std's JSON
+  writers). A vocabulary value outside the protocol's set, a line break in a
+  robots value, or a second sitemap / robots / manifest refuses the
+  registration; a family is claimed only after its value validated.
+- **Icons and images** — `registerIconFile`, `registerImageFile` (a file under
+  `rakun.appDir`, `path.isInside`-checked, must exist), `registerImageRoute` +
+  `setImageRenderer` (an opaque `PageRenderer`; none set answers 501 naming
+  front 70). Resolution is nearest-ancestor; `iconsFor` / `imagesFor` /
+  `imageUrlFor` / `manifestHref` answer DATA with a `?<16 hex>` content hash, and
+  front 32 writes the tags — no HTML here. Served files carry a one-year
+  immutable cache header.
+- **Scan** — `scanMetadataFiles(appDir)` over std's `io.fs.glob`, skipping `_`
+  folders. A module fn here must not be named like an auto-imported erlang BIF
+  (`element/2` hijacks record field reads — `language-gaps.md`).
+
 ## Navigation signals — `modules/rakun-app/src/navigation.bp` (front 63)
 
 `notFound()`, `redirect(loc)` (307), `permanentRedirect(loc)` (308) and
@@ -1753,6 +1959,25 @@ by name (`manifestShapeProblem`), never scanned. A manifest that cannot be read 
 REFUSAL, not a `false`: "this module is not a dependency" and "I could not find
 out" are different answers, and a condition that silently takes the second for
 the first turns every `#[conditionalOnModule]` in the build off without saying so.
+
+The question is asked of the RESOLVED set (front 73): `resolvedModuleListIn(file)`
+walks the manifest's dependencies breadth first, following `{ "path": … }`
+(relative to the declaring manifest) and `{ "workspace": true }` (a member of the
+nearest ancestor whose manifest declares `"workspaces"`); a `git` entry or a bare
+name counts and is not followed. `moduleList()` is that set for the working
+directory's manifest, so declaring `rakun-starter-data-sql` makes
+`#[conditionalOnModule("rakun-data")]` true and the starter's own name counts
+too. `moduleVerdict(rec, resolved)` is the `M` branch; a refusal observes
+`resolved dependencies: a,b,…`.
+
+### The version set — `modules/rakun/src/version_set.bp` (front 73)
+
+`rakunVersion()`, `moduleVersions()` (one row per `modules/*` and `starters/*`
+member), `versionOf(name)` (`""` when unpinned) and
+`versionSetProblems(manifests)`. `test/version_set_test.bp` reads every manifest
+and fails on a disagreeing version, a directory with no row, or a row with no
+directory — a new member adds its row in the same commit. The actuator's `info`
+reports it under `rakun` (`rakunInfo`).
 
 The module atom may not be `autoconfig`: rakun emits `rakun/autoconfig`, and
 `shipErlSidecars` skips a qualifier matching a module this build emitted —
@@ -2305,6 +2530,485 @@ here they are `rakun.management.endpoints.web.base-path`, `rakun.management.endp
 `rakun.management.health.<id>.timeout` and `rakun.info.*`.
 
 
+## Packaging and release — `modules/rakun-release/` (front 81)
+
+Generates files; changes no running code. Sidecar `rakun_release.erl` (term
+rendering, a deterministic ustar writer, `deterministic` beam compiles, tree
+hashes, module facts).
+
+- **Layout** of `<name>-<version>.tar` (`buildTarball`): `bin/<name>` (the
+  boot script: `foreground | start | stop`), `lib/<app>-<vsn>/ebin/*.beam`,
+  `releases/<vsn>/{<name>.rel, vm.args, sys.config}` — entries sorted, mtime
+  0, so two builds of one commit are the same bytes. No source, no
+  `.botopinkbuild/`. An application without a directory fails the build.
+  Booting it waits on the toolchain row "a built erlang program cannot load
+  its `.erl` sidecars".
+- **Renders**: `renderRel` (kernel, stdlib first; a duplicate refused),
+  `renderVmArgs` (`-mode embedded`; the cookie is `${<cookieEnv>}`),
+  `renderSysConfig` (erlang term; `rakun.web.static.use-last-modified=false`
+  always).
+- **Layer split** (`renderDockerfile`, `layerHashes`): four `COPY
+  --from=builder` in change-rate order — `erts`, `otp`, `framework`,
+  `application` — into a non-root runtime whose entry point is the boot
+  script.
+- **systemd** (`renderSystemdUnit`: `foreground`, `Restart=on-failure`) and
+  **Kubernetes** (`renderDeployment`: front 76's `livenessPath()` /
+  `readinessPath()`, a grace period that must exceed front 07's drain).
+- **Upgrades** (`upgradeInstructions`, `renderAppup`): `load_module` for a
+  body change, `update … supervisor`, `update … {advanced, []}` for a
+  gen_server whose `state` record changed and exports `code_change/3` — else
+  refused naming the module.
+- **SBOM** (`sbom.bp`): CycloneDX 1.5 over front 73's resolved dependencies,
+  path dependencies with a SHA-256 of their tree; `registerSbomEndpoint(file)`
+  serves it at `sbom`.
+
+## SOAP web services — `modules/rakun-ws/` (front 93)
+
+Not WebSocket (that is rakun-web's `websocket`). `src/sidecars/rakun_ws.erl`
+over xmerl reads envelopes by namespace URI and local name (any prefix):
+`soapEnvelope` / `soapBody` (1.1 and 1.2), `parseFault` (`?SoapFault`, both
+shapes, raw detail), `wrappedElement`, `xmlEscape`. `wsCall(client, action,
+body)` over front 13's client: 1.1 `SOAPAction`, 1.2 the Content-Type
+`action`; a fault is `Error(fault)`, anything else failing is `Error` with
+code `transport`. WS-Security UsernameToken (PasswordText, fresh Nonce,
+Created) when the client has a username; plain `http://` is refused unless
+`rakun.ws.security.allow-plain-http=true` — DEVELOPMENT ONLY.
+`publishEndpoint(path, wsdl, operations, version)`: POST dispatches on the
+wrapped element, GET serves the WSDL; no operation / malformed → Client
+fault, a raise → Server fault; `rakun.ws.security.{username,password,
+nonce-window-ms}` verifies incoming tokens and rejects a replayed nonce. The
+WSDL/XSD generator is not written.
+
+## RSocket — `modules/rakun-rsocket/` (front 92)
+
+`src/sidecars/rakun_rsocket.erl` is the wire (no byte type in botopink): the
+codec for the twelve frame types (24-bit length on TCP, metadata split,
+composite routing metadata `0x7E`), the responder (its own port, one process
+per stream; RESUME answered UNSUPPORTED_SETUP; a missed keep-alive past the
+SETUP's max lifetime closes; LEASE when `rakun.rsocket.server.lease` is set;
+closing kills the stream processes) and the requester (SETUP + keep-alives,
+the lease counted locally). `rsocket.bp`: `rsocketRoute(route, kind, handler)`
+(`fnf` — a raise is a Reject, dead-lettered with front 86's envelope to
+`<route>.dlq`; `request-response`; `stream` — items `\n`-joined, emitted
+against REQUEST_N credit) registers the route in front 15's registry under
+`rsocket`; `startRSocketServer()` on `rakun.rsocket.server.port`
+(`transport=websocket` refused: front 20's mount is not wired);
+`rsocketRequester("tcp://…")`, `requestResponse` (`@Task<string>`, eager —
+concurrency by thunks), `fireAndForget`, `requestStream` / `request` / `next`
+/ `cancelStream`.
+
+## Stream pipelines — `modules/rakun-stream/` (front 89)
+
+GenStage / Broadway's shape over front 15's arms, no Elixir library.
+`Pipeline(name, source, stages, sink)` is a value; `Stage` is `Transform`,
+`Filter`, `Split`, `Aggregate`, `Route` (Spring Integration's transformer,
+filter, splitter, aggregator, router) over string payloads.
+
+- `pipeline.bp` (pure): `runStages`, `pipelineProblem` (unique stage names),
+  `windowStart` / `windowKey` / `slidingStarts`, `graphOf`.
+- `runtime.bp` + `rakun_stream.erl`: `startPipeline(p, demand, stateDs)` —
+  one process per stage, registered `rakun_stream__<p>__<i>`, accepting an
+  event only while it holds fewer than `demand`; offers block, so demand flows
+  back to the source (a front 15 listener on the pipeline's container, whose
+  prefetch comes from `Queue(prefetch)`). A keeper restarts a dead stage alone.
+  A raising step is dead-lettered with front 86's envelope to
+  `<destination>.dlq`, reason `stage <name>: …`. `Aggregate` keeps a running
+  count per key per tumbling window in the state store (no watermark / late
+  branch). Sinks: `Collect` (`collected(name)`), `Publish` (on
+  `rakun.stream.<p>.publish-arm`, default amqp).
+- Pollers: `pollOnce` / `startPoller` keep the cursor in
+  `rakun_stream_cursor`; the row is the lease (conditional UPDATE on the old
+  owner); the cursor moves only after every output reached the sink; `everyMs`
+  is a fixed DELAY after a pass (Spring's `poller.fixed-delay`).
+- `state.bp`: `StateStore` — `EtsState` (lost on restart/rebalance, logged at
+  creation) and `SqlState` (`rakun_stream_state`, survives); keys prefixed by
+  pipeline; `lookup` answers null.
+- `mountStreamGraph()` registers `integrationgraph` (front 76 exposes it).
+
+## CLI — `modules/rakun-cli/` (front 88)
+
+`runCli(args) -> i32` is the whole CLI (an escript's `main` calls it). Exit
+codes: 0 done · 1 the work failed · 2 usage · 3 the project did not compile.
+The table (`builtinCommands()` + plugin rows) is data; `rakun help` renders it
+and names onze as the CLI of a full-stack project.
+
+- `new <name> [--template plain|full-stack|library]` copies
+  `templates/<variant>/` substituting `@@name@@` and `@@rakun@@` (the path of
+  `modules/rakun` the project depends on); refuses a non-empty directory;
+  `full-stack` needs onze (`rakun.cli.onze`, else `onze` on PATH).
+- `test` / `build` are front ends: `botopink test --target erlang
+  [--filter]`, and `botopink build` then rakun-release's `buildTarball`
+  (`.rakun/release/<name>-<vsn>.tar`). Every invocation is recorded
+  (`cliInvocations()`).
+- `routes`, `beans`, `config` inspect without starting: the project is copied
+  to `.rakun-cli/inspect-<n>/` with one generated test importing the entry
+  module's first `pub fn` (so the registrations run), which prints the route
+  and scan registries or the loaded configuration with each key's source
+  (command line, environment, application file); secrets are masked with
+  front 76's `sanitizePatterns()`. No listener, pool or broker starts.
+- `run [--profile] [--port] [--watch]` passes `RAKUN_PROFILES_ACTIVE` /
+  `RAKUN_SERVER_PORT` to `botopink run`; `--watch` needs rakun-devtools among
+  the project's dependencies.
+- Plugin commands: `#[cliCommand(name, summary)]` on a method of a
+  `#[cliCommands]` type (with a stereotype) — emits `rkCliRegister`; a name
+  registered twice is refused naming both.
+- Settings: `rakun.cli.{botopink, templates, rakun, onze}` or the
+  `RAKUN_CLI_*` variables.
+
+## Mail — `modules/rakun-mail/` (front 85)
+
+**Transport decision, front 04's cowboy seam again.** The SMTP client is
+written in `src/sidecars/rakun_mail.erl` over `gen_tcp` and OTP `ssl` (both in
+the standard distribution): a sidecar loads with no code path beyond the
+output directory, so `gen_smtp_client` would compile and be `undef` wherever
+it is not installed. `rakun.mail.transport=gen_smtp` names the adapter
+`rakun_mail_gen_smtp` and refuses the boot when it is not loadable — no
+fallback.
+
+- `mail.bp`: `Mail` (`sender`, not `from` — a keyword cannot name a field),
+  `Attachment` (a path, read by the host), `MailServer` / `TlsMode` from
+  `rakun.mail.{host, port, username, password, tls, ssl.bundle,
+  connection-timeout, timeout, write-timeout}`. `composeMessage` (MIME shape
+  from content; QP text, base64 attachments, RFC 2047, a checked boundary,
+  plain generated from HTML), `deliverNow` (synchronous: `""` or
+  `permanent|retryable\t<reason>`), `send` (composes, queues, opens no
+  socket). `configureMail()` validates (transport, the health timeout shorter
+  than every send timeout) and hands the queue its server and policy
+  (`queue.concurrency` 2, `retry.max-attempts` 3, `retry.backoff-ms` 1000
+  doubled). Dead letters: `mailDeadLetters()`.
+- The durable path is front 83's outbox: `publishMailAfterCommit(ds, m)` and
+  the relay publisher `mailRelayPublisher()` (delivers directly, not through
+  the queue). No second durable queue here.
+- `mailHealth()` / `mountMail()`: EHLO (+ STARTTLS) and QUIT, never a send,
+  within `rakun.mail.health.timeout-ms` (1000); details host, port, tls.
+- The DATA body is written in 64 KiB chunks: the driver queues one write
+  whole, so only chunked writes can meet `send_timeout`.
+- Tests run against `rakun_mail_fixture.erl` (`fixture.bp`): an SMTP server on
+  an ephemeral port that records commands and DATA bytes, with STARTTLS,
+  implicit TLS, AUTH, `fail=<VERB>:<code>`, `silent`, `slow-data`.
+
+## Distributed transactions — `modules/rakun-tx/` (front 83)
+
+**Boundary with front 08: one resource is front 08, more than one is here.**
+`#[transactional]` around statements against one database stays in
+rakun-data; the moment a broker, a second database or an external service is
+involved, the mechanism is here. Tables (`rakun_outbox`, `rakun_inbox`,
+`rakun_saga`, `rakun_2pc`) are created by `installOutbox` / `installSagas` /
+`install2pc` on a datasource. Keys: `rakun.tx.datasource` (default
+`default`), `rakun.tx.outbox.max-attempts` (5), `rakun.tx.outbox.backoff-ms`
+(100, doubled per attempt), `rakun.tx.2pc.max-retries` (50),
+`rakun.tx.broker-transactions`.
+
+- **Outbox** (`outbox.bp`): `publishAfterCommit[On]` inserts into the
+  caller's transaction and refuses outside one (`rakun_sql:tx_open`); `seq`
+  increases per aggregate. `relayTick(ds, publisher)` claims one due row per
+  aggregate with a conditional UPDATE (03r-x — the portable `SKIP LOCKED`),
+  skips an aggregate with a claimed row, marks `sent`; a failed publish goes
+  back to `pending` with a backoff, `failed` past max-attempts. A relay killed
+  after publishing leaves `claimed`; `reclaimStale` makes it pending —
+  at-least-once. `pruneSent` is bounded per call.
+- **Inbox**: `consumeOnce(ds, group, id, handler)` inserts `(group, id)` and
+  runs the handler in one transaction — `duplicate` without running on a
+  redelivery; a raise rolls back both. `pruneInbox` refuses a retention not
+  longer than the broker's redelivery window.
+- **Path choice**: `publishTransactional` takes the broker path when
+  `rakun.tx.broker-transactions=true`, else the outbox; counted
+  (`rakun.tx.path.<name>`) and logged.
+- **Saga** (`saga.bp`): a `Saga` value of `SagaStep(run, compensate)` pairs
+  (a decorator cannot read a body). Every transition is persisted before the
+  next step; `resumeSagas(ds, defs)` continues each `running` saga from its
+  persisted step (the in-flight step re-runs: steps must be idempotent).
+  Compensations run in reverse, each retried `retries` times, then the saga is
+  `needs_attention` with its history.
+- **2PC** (`twopc.bp`): begin logged, all prepare, the decision logged BEFORE
+  any participant hears it, delivery retried until acknowledged, then `done`.
+  `recover2pc` delivers a logged decision again and aborts a transaction
+  without one. Between a participant's prepare and the decision reaching it,
+  the participant blocks — prefer the outbox.
+
+## DevTools — `modules/rakun-devtools/` (front 80)
+
+Dev-profile only (`dev` or `development` resolved). Sidecar
+`rakun_devtools.erl`.
+
+- **Settings** (`settings()`): defaults (roots `src`, poll 300 ms, enabled, no
+  trigger file, no remote secret, no db console) < `$HOME/.config/rakun/
+  devtools.yaml` (`key: value`; malformed → a warning, defaults stand) <
+  `rakun.devtools.<key>` < `RAKUN_DEVTOOLS_<KEY>`.
+- **Watcher** (`startWatcher(projectDir, onChange)`): a polling process under a
+  keeper (killed → restarted, re-snapshotting, no reload); glob excludes; with
+  a trigger file, changes accumulate until it moves; one `onChange` per cycle.
+  mtime + size, so an edit that keeps both within one second is missed.
+- **Reload** (`reloadProject(projectDir)`): the botopink CLI
+  (`rakun.devtools.compiler`, else `BOTOPINK_BIN`, else `botopink`) builds
+  `.rakun-devtools/out`; a compile error prints the compiler's text and loads
+  nothing. Each module whose code changed: its routes (handler funs defined in
+  it), singletons and scan entries (`<module>@@<Type>`) dropped
+  (`rkDevDropModule`), the new code loaded, `_botopink_init/0` re-run. The old
+  version is soft-purged: a process still in it keeps it and the answer
+  counts it (`ok <loaded>|<deferred>`). A component holding an injected
+  singleton keeps that instance until its own module reloads.
+- **Dev defaults** (`installDevDefaults()`): the six keys, only where unset.
+- **Database console** (`db_console.bp`, `installDbConsole()`): `GET
+  /devtools/db?sql=…`, SELECT/WITH only (the parsed first keyword), rows capped
+  (`…db-console.max-rows`, 100), bounded (`…timeout-ms`, 5000).
+- **Remote loading** (`remoteLoad(module, secret, overTls)`): dev profile,
+  a configured `rakun.devtools.remote.secret`, TLS, a constant-time match —
+  then `nl/1`. No key bypasses a guard.
+- **Tracing** (`traceCalls(module, function, limit)`): `dbg` with a required,
+  positive limit; the trace stops itself.
+- **Debugging a live node**: start it named with a cookie (`erl -sname app
+  -setcookie <cookie>`, or `-name app@host`; the release's `vm.args` carries
+  the same two), then `erl -sname dbg -setcookie <cookie> -remsh app@<host>`.
+  The attached shell is a REPL inside the node: `dbg`, `recon_trace` (when
+  present) and `rakun_metrics:snapshot()` run there.
+
+## Audit and HTTP exchanges — `modules/rakun-actuator/src/{audit,exchanges}/` (front 87)
+
+**Audit.** `AuditEvent(atMs, principal, kind, data: pairs)`; kinds keep
+Spring's names. `AuditRepository` has two arms. `memoryAuditRepository(capacity)`
+is an ETS ring, one table per repository, owned by a keeper process (a dead
+recorder loses nothing), dropping the oldest and counting it — **in-memory
+audit is not audit**: it dies with the node; it is the default because a
+default that needs a database does not work. `sqlAuditRepository(table)` runs
+through the executor the application installs (`installAuditSql(query,
+update)`, normally over front 08's SqlTemplate — rakun-data depends on this
+module, so it cannot be imported here); it never creates its table
+(`auditSchemaSql(table)` is the front 77 migration), pushes principal, kind and
+instant into the WHERE, reports `dropped()` 0 because the table is unbounded —
+retention is the caller's decision, e.g. a front 16 `#[scheduled]` DELETE on
+`at_ms` — and logs and counts a failed write (`auditWriteFailures()`) instead
+of raising it: an unavailable audit database must not take the application
+down, at the price of an unrecorded event the counter shows. `installAudit`
+makes a repository active and installs rakun-actuator-api's sink, so front
+10's `rkAudit(kind, principal, data)` (a no-op with no sink) lands here — the
+arrow runs security → actuator-api, never security → actuator.
+`mountAudit()` (capacity `rakun.management.auditevents.capacity`, 1000; 0
+refuses) registers `auditevents` (`?principal=&after=&type=`; `repository`,
+`capacity`, `dropped`, `events`; data through `sanitizeEntries`).
+
+**HTTP exchanges.** Off unless `rakun.management.httpexchanges.recording.
+enabled=true`; then `installExchangeRecording()` adds the chain entry
+`httpexchanges` at -500 (outermost) recording method, URI, status and time
+taken into a ring of `…httpexchanges.capacity` (100; 0 refuses), a raise as
+500 (then re-raised). `…recording.include` adds `request-headers` (never
+`authorization`/`cookie`), `response-headers` (never `set-cookie`),
+`cookie-headers`, `authorization-header`, `principal` (front 10's slot),
+`remote-address`, `session-id`; an unknown name refuses the boot.
+`mountExchanges()` registers `httpexchanges` (newest first, with the capacity,
+through `sanitizeEntries`).
+
+## Actuator access and probes — `modules/rakun-actuator/src/management.bp` (front 76)
+
+`installManagement()` — after `mountActuator()` and after every module has
+registered its endpoints and indicators — installs the exposure decision, the
+response filter, the write routes and the groups, validates the configuration
+(a problem refuses the boot) and starts the management listener. Sidecar
+`rakun_probes.erl` holds readiness/liveness, the listener role and the
+sanitizer. Keys are all `rakun.management.*` (03r-t).
+
+- **Gates, in order** — listener (with `rakun.management.server.port` set,
+  `-1` included, the actuator answers only on the management listener), exposure
+  (`…endpoints.web.exposure.include`, default `health`, `*`; `.exclude` wins;
+  read at request time; an include naming an unregistered id refuses the boot),
+  access (`…endpoint.<id>.access`, else `…endpoints.access.default`, else
+  `read-only`; `shutdown` defaults to `none`; capped by
+  `…endpoints.access.max-permitted`). A failed gate is front 11's unknown-id
+  404, byte for byte. `read-only` 405s POST/DELETE (`<base>/:endpoint` write
+  routes); `shutdown` runs `setShutdownRunner`'s function 50 ms after it
+  answers (default `init:stop()`).
+- **Management listener** — `rakun_runtime:serve_management/2`, a second
+  `rakun_sup` child (`rakun_management_listener`) with its own
+  `rakun.management.server.address` and `.ssl.bundle`; its dispatcher marks
+  the connection process `management` and 404s everything outside the base
+  path. One route table serves both listeners.
+- **Sanitization** — one filter for `env` (all properties) and `configprops`:
+  `{"key","value"}` objects show the key and, per `…endpoint.<id>.show-values`
+  (never | when-authorized with `.roles` | always — which logs a warning at
+  boot), the value or `******`; a key matching `password, secret, key, token,
+  credentials, vcap_services, sun.java.command` or
+  `…endpoint.sanitize.additional-keys` is always `******`. Applied by front
+  11's host after the cache (`filtered`). `sanitizeEntries(id, body)` is the
+  same rule for another endpoint's entries (front 84's `quartz`).
+- **Groups** — `…endpoint.health.group.<name>.include` / `.show-details` /
+  `.roles` / `.additional-path=server:/path` at `<base>/health/<name>`; a
+  group runs only its own indicators. Empty or unknown-indicator groups refuse
+  the boot.
+- **Probes** — `…endpoint.health.probes.enabled=true` registers
+  `livenessState` / `readinessState`, the `liveness` / `readiness` groups and
+  `/livez`, `/readyz` on the application listener. Liveness may include only
+  `livenessState`, `ping`, `diskSpace`. Readiness is refusing until
+  `ApplicationReady` and from `rakun_probes:readiness_drained/0` — front 07's
+  first shutdown step — which holds `rakun.lifecycle.pre-drain-period` (default
+  5000 ms) in full; `0` is correct only where the balancer reacts
+  synchronously. `setReadiness` / `setLiveness` publish `AvailabilityChange`.
+- **Report** — the `access` endpoint (gated like the rest, hidden by
+  default): per id, exposed, configured and effective level, listener.
+
+## OAuth2, OIDC, LDAP and SAML — `modules/rakun-security/src/{oauth2,ldap,saml2}/` (front 79)
+
+Host cells: `rakun_oauth2.erl` (random, PKCE S256, the single-use state
+store, the JWKS cache, RS256 verification, claim checks, token caches, single
+flight, test IdP key material) through the root-level `src/oauth2_host.bp`,
+and `rakun_ldap.erl` (eldap bind-and-search, handle accounting, an in-node
+test directory) through `src/ldap_host.bp`.
+
+- **Providers** (`oauth2/provider.bp`) — `registerProvider` at boot: OIDC
+  discovery once per issuer (issuer mismatch refuses naming both), or the
+  explicit `authorizationUri`/`tokenUri`/`jwksUri`; duplicate id and a public
+  client without PKCE refused.
+- **Login** (`oauth2/flow.bp`, `installOAuth2Login()`) —
+  `/oauth2/authorization/:id` (state, nonce, 43-char verifier, S256; the
+  return path server-side, `safeReturnTo`) and `/login/oauth2/code/:id`
+  (state taken before anything, `error=` → 403, code exchange through
+  rakun-client, ID token RS256 + `iss`/`aud`/`nonce`/`exp` within
+  `rakun.security.oauth2.clock-skew`, one JWKS re-fetch per
+  `jwks-refetch-window` for an unknown kid, front 18's `authenticateSession`,
+  302 to the return path). `accessToken(provider)` refreshes within
+  `refresh-margin`; `invalid_grant` ends the session.
+- **Resource server** (`oauth2/resource.bp`) — `installResourceServer(id,
+  audience)` installs front 10's bearer verifier seam
+  (`installBearerVerifier` in `security_filter.bp`): `scope` → `SCOPE_*`,
+  `roles` → `ROLE_*`; a bad bearer is 401 with `Bearer error="invalid_token"`.
+- **Client credentials** (`oauth2/client_credentials.bp`) —
+  `registerClientCredentials`, `clientCredentialsToken(id)` (cached, single
+  flight), `withClientToken(id, call)` (one retry on 401).
+- **LDAP** (`ldap/ldap.bp`) — `ldapAuthenticate(config, user, password)` →
+  authenticated (DN subject, `memberOf` authorities) | rejected (one answer for
+  unknown user and bad password) | unavailable; `registerLdapHealth`.
+- **SAML 2.0** (`saml2/saml2.bp`) — metadata and the Redirect-binding
+  `AuthnRequest`; `/saml2/acs` answers 501: no exc-c14n, no verification.
+
+The front-10 boundary: front 10 owns the chain entry, the context, the
+policy, HS256 and Basic; front 79 plugs in only through
+`installBearerVerifier` and front 18's session.
+
+## Entities and derived queries — `modules/rakun-data/src/orm/` (front 78)
+
+- **`#[entity("table")]`** (`orm/entity.bp`) on a record emits into its module
+  `__rkEntity_<T>_table/_columns/_fromRow/_params`, the writes
+  `_insert/_update/_delete` (each in a transaction; `…In(tx, …)` twins),
+  `_byId`, `<T>Columns` + `<T>Col()` (column-name constants) and `<T>Meta()`
+  (an `EntityMeta`, registered with `rakun_orm` for front 77). Fields:
+  `#[id]` (one), `#[generated]` (`INSERT … RETURNING`), `#[column("x")]`
+  (else snake_case), `#[version]` (i32, `WHERE … AND version = :v`, a stale
+  write raises naming table, id and both versions), `#[createdAt]` /
+  `#[updatedAt]` (ISO µs), `#[createdBy]` / `#[updatedBy]` (front 10's
+  principal, `""` outside a request), `#[transient]`. Types: string, i32,
+  bool. `#[revisions]` adds `<table>_revisions` (one row per write, same
+  transaction) and exactly three reads: `_revisionsOf`, `_revisionAt`,
+  `_revisionNumbers`.
+- **`#[entityRepository("T")]` + `#[derived]`** (`orm/repository.bp`, the
+  comptime half: no `Param` import there) parse the method name
+  (find/findAll/findFirst/findTop/count/exists/delete, Distinct, And/Or left to
+  right, the operator keywords, IgnoringCase / AllIgnoringCase, OrderBy) and
+  emit `__rkDerivedSql_<Repo>_<m>()` and `__rkDerived_<Repo>_<m>(sql, …)`,
+  checking the parameter count and the return type; columns are read through
+  `<T>Col()`, so an unknown field fails the build there. A trailing
+  `Pageable` with `Page<T>` (page + count) or `Slice<T>` (size + 1).
+  `#[belongsTo("Owner", "field", "Target", "field")]` on a record of the two
+  (`?Target` for a left join) emits `__rkJoin_<R>_sql()` / `_fromRow`.
+- **Run time** (`orm/query.bp`): `Sort`, `Pageable`, `Page<T>`, `Slice<T>`,
+  `pagedSql` (sort fields validated against the columns, size 0 refused), and
+  the typed builder `queryOf(<T>Meta()).where(<T>Col().x, Op.Eq, v)…toSql()` /
+  `.fetch(sql)` — the same bytes a derived query produces.
+- The ETS arm (front 08's `rakun_sql.erl`) grew what the suite runs:
+  `< > <= >=`, `BETWEEN`, `IS [NOT] NULL`, `[NOT] LIKE`, `[NOT] IN`,
+  `lower()`, `OFFSET`, `DISTINCT`, `INSERT … RETURNING` (next integer id).
+  No JOIN.
+
+## Schema migrations — `modules/rakun-data/src/migration/migrate.bp` (front 77)
+
+`migrationBoot()` at boot: refuses a bad `rakun.migration.ddl-auto`, registers
+the `migrations` endpoint, and — when migrations are on — runs them (or, with
+`dry-run=true`, halts with the dry run's code: 1 pending, 0 not). Sidecar
+`rakun_migration.erl`: the lock, the statement splitter, the version order.
+
+- **Files** — `V<version>__<desc>.sql` (components compared as integers) and
+  `R__<desc>.sql` in `rakun.migration.locations` (default `db/migration`); any
+  other `.sql` name or a duplicate version refuses the boot. No file and
+  `enabled` unset: off; `enabled=true`: a refusal.
+- **Run** — under OTP `global` lock `{rakun_migration, <ds>}`
+  (`rakun.migration.lock-timeout`, default 30000 ms; the holder's death frees
+  it; a standalone node warns once per driver), `rakun_schema_history` is
+  created, checksums (`hash.sha256`) validated (`validate-on-migrate=false`
+  is development-only), `baseline-on-migrate` / `baseline-version` /
+  `out-of-order` applied, then each pending file and its history row commit
+  in one transaction (`-- rakun:no-transaction` opts out). A failure records
+  `success=false`, stops and raises. Repeatables follow the versioned ones and
+  re-run when their checksum changes. `repairMigration(script)` is the only
+  rewrite of a recorded checksum.
+- **ddl-auto** — `create`/`create-drop` refused under
+  `rakun.migration.production-profiles` (default `prod,production`) and beside
+  migration files; `validate` allowed everywhere. `ddlAutoOn(ds)`: `validate`
+  diffs every entity table (front 78's metadata) against the live columns
+  (`schemaDiff`: missing table, missing / extra column, type where the arm
+  reports one); `create` drops and creates them; `create-drop` also drops them
+  in a `#[preDestroy]`-time lifecycle hook.
+- Host cells live in the ROOT-LEVEL `src/migration_host.bp` (and front 78's in
+  `src/orm_host.bp`): a sidecar called only from a module in a folder is
+  never shipped (language-gaps.md).
+- Tests: `test/migration_test.bp` (ETS arm; each test its own datasource).
+
+## Observability — `modules/rakun-metrics/` (front 75)
+
+Sidecars `rakun_metrics.erl` (the registry, the renderers, the VM meters, the
+process diagnostics, the OTLP pusher) and `rakun_telemetry.erl` (the bus).
+`installMetrics()` is the boot entry.
+
+- **Registry** (`registry.bp`) — `counter`, `gauge` (a function read at
+  scrape time), `timer` (µs; count, total, max, histogram buckets),
+  `summary`, `timed(name, tags, { -> … })` (`outcome=ok|error`, a raise
+  re-raised). A meter is its name plus its tag SET (sorted in the host); a
+  handle carries the encoded tag key, so `increment` is one
+  `ets:update_counter/3`. At registration: `rakun.metrics.tags.*` common tags
+  (resolved once by `install`; a key a meter also carries refuses it),
+  `rakun.metrics.enable.<prefix>=false` (never registered, handle `!denied`),
+  `rakun.metrics.rename.<from>=<to>`, `rakun.metrics.distribution.slo.<name>`
+  (durations, sorted; a bad one refuses the boot naming it) and
+  `…percentiles-histogram.<name>=false` (no buckets). A name outside
+  `[A-Za-z][A-Za-z0-9_.]*` is refused naming the character. `MeterRegistry()`
+  is the injectable `#[component]`.
+- **Bus** (`bus.bp`) — `rakun_telemetry`: `attach/4`, `detach/1`,
+  `execute/3` over ETS, delegating to a loaded `telemetry`. An emitter never
+  imports rakun-metrics: the core router executes `[rakun, http, request,
+  stop]` (route = the REGISTERED pattern, `NOT_FOUND`, or `fallback`),
+  rakun-actuator-api forwards every span event, rakun-cache
+  `[rakun, cache, get|put|evict, stop]`, rakun-messaging
+  `[rakun, messaging, publish|consume, stop]` — each behind
+  `function_exported(rakun_telemetry, execute, 3)`. `installAutomaticMeters`
+  turns them into `http.server.requests`, `http.client.requests`,
+  `cache.*`, `messaging.*`. A raising handler is detached and logged once.
+- **VM** (`vm.bp`) — `beam.*` gauges (run queue, process / port / atom
+  counts and limits, memory by area, GC, `queue_max` sampled within
+  `rakun.metrics.beam.queue-sample-budget` ms);
+  `beam.schedulers.utilization` only with
+  `rakun.metrics.beam.scheduler-utilization=true` (turns
+  `scheduler_wall_time` on once). No `jvm.*` name.
+- **Endpoints** (`endpoints.bp`) — `prometheus` (text format 0.0.4:
+  `_total` counters, `_seconds` histograms with cumulative `le` buckets and
+  `+Inf`, label values escaped), `processes?sort=reductions|memory|message_queue_len&limit=N`
+  (asks each process for seven keys, never the whole info), `vm`. Front 11
+  registrations, default-denied until front 76 exposes them.
+- **Export** (`export.bp`) — OTLP/HTTP-JSON through rakun-client
+  (`rakun.metrics.export.otlp.endpoint`, `.step` ms — 0 stops the pusher,
+  `.ssl-bundle` for `https`): one metrics body and one traces body per push,
+  one logged failure per failed push, the span buffer capped at 2048. The
+  pusher's own client span is never sampled. StatsD over UDP
+  (`rakun.metrics.export.statsd.host` / `.port`), failures swallowed.
+- **Tracing** (`tracing.bp`) — front 11 continues the inbound `traceparent`
+  (flags included: `rkSpanFlags` / `rkSpanSetFlags` in rakun-actuator-api);
+  this module's chain entry at `orderMetrics() + 1` decides once, for a trace
+  minted here, against `rakun.tracing.sampling.probability` (default 0.1).
+  Sampled stop events are buffered as OTLP spans. `traceId`, `spanId`,
+  `parentSpanId`, `sampled`, `traceparent`, `adoptTraceparent`, `openSpan` /
+  `closeSpan` (not `startSpan` / `endSpan`: rakun-actuator-api exports those
+  names and the package import would be ambiguous), `exportedSpanCount`.
+- **Remote shell** — the BEAM's JMX: `erl -sname ops -setcookie "$(cat
+  ~/.erlang.cookie)" -remsh <node>@<host>` (the cookie must match the node's),
+  then `rakun_metrics:snapshot().` answers every series as a term, and
+  `observer` / `etop` run against the node.
+
 ## SQL data access — `modules/rakun-data/` (front 08)
 
 `modules/rakun-data/` is the member fronts 08, 09, 77 and 78 share. Front 08 owns
@@ -2819,10 +3523,16 @@ In-VM scheduling: three trigger markers, one registry, a supervised executor, th
 `scheduledtasks` endpoint and the `scheduling` health indicator. Depends on `rakun`,
 `rakun-web` (listed directly: `shutdownTimeout()` here, and a transitive of the host),
 `rakun-actuator-api` and `rakun-actuator` (the host: the POST route is gated by its
-`exposed()` decision and answers its `notFoundProblem`). `rakun-data` in `modules.md`'s
-row is front 84's (the durable job store, `src/jobstore/**`, behind this registry).
+`exposed()` decision and answers its `notFoundProblem`). `rakun-data` is front 84's
+dependency (the durable job store, `src/jobstore/**`).
 A task here lives in ONE node's memory; every node of a cluster runs its own copy —
 an application that cannot tolerate that takes front 84.
+
+**Two guarantees, two fronts.** Front 16 is AT MOST ONCE per node: a missed window
+is gone. Front 84's job store is AT LEAST ONCE across the cluster: a node that
+completes a job and dies before recording it has another node run it again after
+the lease, so a handler with side effects that must happen once enrols them in
+front 83's outbox.
 
 | File | Holds |
 |---|---|
@@ -2919,6 +3629,37 @@ Measured: `modules/rakun-scheduling` 0 → **67 / 0** (0 compile failures) —
 `build_test` 12, `cron_test` 15, `endpoint_test` 9, `executor_test` 16,
 `registry_test` 8, `schedule_test` 7 (the seven test-snap.md scenarios, rendered
 exactly as the snapshots). Suite ~35 s, most of it `build_test`'s fixture builds.
+
+### The durable job store — `src/jobstore/` (front 84)
+
+Keys `rakun.scheduling.jobstore.{datasource, lease-ms (60000), interval-ms
+(1000), misfire-threshold-ms (60000), fire-all-ceiling (10)}`,
+`rakun.scheduling.overwrite-existing-jobs`,
+`rakun.management.endpoint.quartz.max-executions` (20). Time is `jobClock()`
+(`setJobClock` pins it in tests). No sidecar: every host cell is an inline
+template (a sidecar called only from a folder is not shipped).
+
+- `store.bp`: the three tables (`installJobStore`), `JobDetail` / `Trigger` /
+  `MisfirePolicy`, `registerJob` / `registerTriggerOn` / `registerTrigger(t,
+  data)` (one row per name; a changed definition refuses unless
+  overwrite-existing-jobs), trigger checks (cron via `cron.bp`, end before
+  start, a cron that disagrees with the handler's `#[persistentJob]`),
+  per-node handlers (`registerJobHandler`), `orphanJobs`, querystring job data
+  (`jobData`, `jobField`, `jobFields`).
+- `scheduler.bp`: `tickOn(ds, node)` — takeover of an expired lease
+  (conditional UPDATE on the old owner, a `takeover` history row), the claim of
+  each due trigger (conditional UPDATE, 03r-x), the misfire policy, each window
+  through the handler with retries (stopped when the next window is due) and
+  lease renewal every `lease-ms / 3`, then back to `waiting` only if still the
+  owner. An unreachable store logs once per interval. `startJobScheduler` /
+  `stopJobScheduler`: the loop with a per-node jitter (`jitterMs`).
+  `executionsOf`, `historyOf`, `pruneHistory`.
+- `markers.bp`: `#[persistentJob(name, cron)]` (method; return `string`) and
+  `#[jobs]` (the type: checks `(self, data: string) -> string` and emits
+  `rkPersistentJob(name, cron, { data -> __rkMake_<T>().<fn>(data) })`).
+- `endpoint.bp`: `mountJobStore()` registers `quartz` (read-only) and `GET
+  <base>/quartz/:job`; data entries go through front 76's
+  `sanitizeEntries("quartz", …)`.
 
 ## Security — `modules/rakun-security/` (front 10)
 
@@ -3073,6 +3814,11 @@ profile active fails at boot); `rakun.security.password.encoder`;
 
 ### Compiler findings (minimal repros under `~/.cache/bp-rakun/front-10/`)
 
+Findings 1–3 are fixed in the compiler (the rakun language-gaps sweep): two
+`#[methodSecurity]` types may share a module, `import {security} from
+"rakun-security"` resolves, and an implementer converts to its behavior. The
+shapes below still build; `UserStore` and the flat imports stay as the seam.
+
 1. **A decorator-emitted type's `self.inner.m()` lowers to the wrong type** when the
    module has two decorated types: `LedgerSec.status` becomes
    `…@@Runbook:status(element(2, Self))` → `undef` (`repro_proxy_dispatch/`). The same
@@ -3096,17 +3842,12 @@ and ships no runner (tests are `test` blocks under `botopink test`).
   then `withParam` / `withQuery` / `withHeader` / `withCookie` / `withBody`, each
   a new value (a later call under the same name replaces the earlier). Accessors
   `paramOf` / `queryOf` / `headerOf` (case-insensitive) / `cookieOf` / `bodyOf`
-  answer `""` when absent. **`toRequest()`** is what a handler takes: the
-  runtime's own `Request`, built from the fields by the core's `rkMakeRequest`
+  answer `""` when absent. `FakeRequest` **implements `Request`**
+  (`param` / `query` / `header` / `body`), so a handler declaring `Request`
+  takes the double itself; **`toRequest()`** still answers the runtime's own
+  `Request`, built from the fields by the core's `rkMakeRequest`
   (`make_request/6`, the same map `request/6` builds for a socket request; the
-  cookies arrive as one `cookie` header). It does NOT `implement Request`, and
-  its accessors are not named `param`/`header`/…: an implementer does not
-  convert to its behavior at a call site, and on erlang a behavior method call
-  lowers to another type's same-named method, so a double declaring `header/2`
-  would reroute every `req.header(…)` of a test module importing it (both rows
-  in `specs/1.0.10-beta/language-gaps.md`). Annotate a local that holds a
-  `toRequest()` result (`val r: Request = …`) or pass it straight to a function;
-  an unannotated local in a `test` block lowers `r.header(…)` to a local call.
+  cookies arrive as one `cookie` header).
 - **Assertions** (`assertions.bp`) — `expectStatus`, `expectBodyEquals`,
   `expectBodyContains`, `expectJsonField`: `true`, or `assert … , message` with
   the expected value, the actual one and the status. `expectJsonField` is a
@@ -3192,6 +3933,279 @@ one connection per command).
   truncated to 8 characters), its own `DELETE <base>/sessions/:id` route behind
   the same `exposed("sessions")` check, and the `session` health indicator (DOWN
   naming the arm and the probe's reason).
+
+## Caching — `modules/rakun-cache/` (front 12)
+
+Depends on `rakun`, `rakun-session` (the private scope's session id and the
+Redis wire, `rkSessRedis`, reused rather than copied — no `rakun-client` edge),
+`rakun-actuator-api`, `rakun-actuator` and `rakun-web` (a test resets the chain);
+their own dependencies follow transitively (decision 143). Sidecar
+`rakun_cache.erl`: ONE ETS table for every cache keyed by `{name, key}` (no atom
+per cache name), owned by `rakun_cache_owner`; the names table (resolved
+settings), the customizers, single flight, background refresh, the monotonic
+clock with a test offset, the invalidation log and trace and a RESP double for
+the tests.
+
+- **One primitive** (`cache.bp`) — `cacheThrough(policy, keys, load)`;
+  `cacheFn(name, keys, life, tags, load)` (Next's `unstable_cache`),
+  `cacheWith(policy)` (a module's default policy, the file-level `'use cache'`
+  stand-in) and the twin's `cacheMethod` all call it. Policy:
+  `cachePolicy(CacheScope.Shared|Remote|Private, name, life, tags)`.
+- **Key** — `cacheKey(ns, parts)` = `ns + ":" + hash.strongCacheKey(parts)`
+  (length-framed parts, SHA-256 truncated to 32 hex: no part forges a boundary;
+  not `contentHash`, which collides on purpose). A private key is
+  `cacheKey(ns + "/private", [sessionId, parts…])`. Import `cacheKey` from
+  `"rakun-cache/cache"`: `from "rakun-cache"` is refused as ambiguous with std's
+  `hash.cacheKey`.
+- **Lifetimes** — `cacheLife(profile)` (the six Next profiles; unknown → 0/60/3600),
+  `cacheLifeOf(stale, revalidate, expire)`. `expire <= 0` inherits
+  `rakun.cache.<name>.ttl-seconds`, `revalidate <= 0` is the expiry. Freshness is
+  `freshness(ageMs, marked, life)`: ≥ expire miss · marked stale · < revalidate
+  fresh · < revalidate + stale stale · else miss. A stale read returns the row
+  and starts ONE background refresh per key (`drainRefreshes()` waits for them;
+  the loader then runs outside the request process).
+- **Single flight** — concurrent misses on one key run the loader once, in the
+  first caller's process; the others wait for its value (a raising leader lets
+  them retry).
+- **Providers** — `rakun.cache.type` = `none` (default) · `ets` · `redis`, per
+  cache `rakun.cache.<name>.type`, `.ttl-seconds` (3600), `.max-entries` (10000,
+  0 unbounded; the row just written is never the one evicted), `.eviction` (`lru`
+  · `lfu` · `ttl-only`), `rakun.cache.names`, `rakun.cache.redis.url`. `Remote`
+  is always Redis, `Private` always ETS; `none` beats every per-cache key and
+  every customizer (`registerCacheCustomizer(fn(name, settings) -> settings)`,
+  folded in registration order before the kill switch; `registerCustomizer(c)`
+  takes a `CacheCustomizer` value). Redis rows are `SET rakun:cache:<key> v EX <expire>`
+  plus a set per tag and per cache; Redis has no stale window, so on it
+  `revalidateTag` deletes; a Redis that does not answer runs the loader.
+  JCache, Hazelcast, Infinispan, Couchbase, Caffeine, Cache2k and Mnesia are
+  declined (the README records why).
+- **Private scope** — keyed on `optionalSession()` (rakun-session); a request with
+  no session runs the loader and stores nothing.
+- **Verbs** — `revalidateTag(tag)` (marks stale), `updateTag(tag)` (expires now:
+  read-your-own-writes), `revalidatePath(path)` (marks the rows tagged
+  `path:<path>`). Inside a server action (phase `action`) the first and the
+  third EXPIRE instead, so the action's re-render (front 24) reads the refilled
+  cache; and inside any request every verb also appends its tag or path to the
+  frame's `revalidated` slot, which front 24 echoes. `rkCachePhase()` reads front 62's phase (`none` outside a
+  request): render refuses all three, `updateTag` is legal only in `action`.
+  Seams: `revalidatedTags()`, `revalidatedPaths()` (call order, never cleared
+  implicitly), `clearRevalidated()`; `cacheTraceOn()` / `cacheTrace()`
+  (`miss|hit|revalidate|bypass|error key=<ns>:<parts> [tags]`); `resetCaches()`.
+- **The twin** (`cached.bp`) — `#[cached]` on a `behavior` emits
+  `Cached<Name>(inner) implement <Name>` and `cached<Name>(inner)` into the
+  behavior's module: `#[cacheable(name)]` methods go through `cacheMethod` (key
+  `[method, args…]`, non-string args `toString()`d, rows tagged with the cache
+  name, must return `string`), `#[cacheEvict(name, true)]` clears the cache and
+  `(name, false)` the rows `[m, args…]` of every `#[cacheable(name)]` method `m`
+  — both AFTER the delegate returns; unannotated methods delegate. The module
+  imports `cacheMethod`, `cacheEvictAll`, `cacheEvictKeys`; another module
+  imports the emitted `cached<Name>` like any `pub fn`. `test/fixtures/twin` is
+  the shape: the behavior, its implementation and the twin in one module, and
+  `#[configuration]` + `#[bean] … -> ProductCatalog { return
+  cachedProductCatalog(self.real); }` injecting the twin into every
+  `catalog: ProductCatalog` field.
+- **Endpoint and health** (`cache_endpoint.bp`) — `installCache()` refuses a bad
+  configuration naming the key (`cacheConfigProblem()`), creates the listed
+  caches and mounts `caches` (GET: name, provider, entries), its own `DELETE
+  <base>/caches` and `DELETE <base>/caches/:name` (204; unknown 404) behind
+  `exposed("caches")`, and the `cache` health indicator (UP listing the
+  providers, DOWN naming the first that does not answer).
+- **Imports** — the qualified form `import {cache} from "rakun-cache"` and the
+  bare form both resolve (`test/fixtures/imports`); `cacheKey` alone is imported
+  from `"rakun-cache/cache"`, since `from "rakun-cache"` is ambiguous with std's
+  `hash.cacheKey`.
+
+## Messaging — `modules/rakun-messaging/` (front 15)
+
+Depends on `rakun` and `rakun-actuator-api`. Sidecar `rakun_messaging.erl`: the
+listener registry, the IN-PROCESS broker (an append-only log per
+`{broker, destination}`; per consumer group a cursor, a redelivery list and the
+in-flight set, kept by `rakun_messaging_owner`, which monitors every worker), the
+containers, the arms' state, the published log and the startup log.
+
+- **One transport this milestone.** Every arm — `amqp`, `kafka`, `redis`,
+  `stream` — runs on the in-process broker (`rakun.messaging.<arm>.transport=memory`).
+  The real wires are OTP applications (`amqp_client`, `brod`,
+  `rabbitmq_stream_client`) a sidecar cannot load, so an address key
+  (`rakun.messaging.amqp.host` / `.addresses`, `.kafka.bootstrap-servers`,
+  `.redis.url`) without `transport=memory`, or any other transport value, REFUSES
+  the boot naming the driver. The arms differ only in how they read the log: a
+  queue is one shared cursor (`offset = -1`), a Kafka topic is read per group with
+  its offsets, a stream starts at `@first|@last|@next|@<n>` with its offsets,
+  Redis pub/sub starts at the end and never redelivers (a subscriber that was down
+  missed the message; one that crashes loses what it held).
+- **`Message`** (`message.bp`) — `broker, destination, key, payload, headersJson,
+  offset`, the same on every arm (`""` / `-1` where the arm has none; headers
+  `{"redelivered":true}` on a redelivery). `pub behavior MessageBroker`,
+  implemented by `InProcessBroker(arm)`. `ackMessage(msg)` / `nackMessage(msg)`
+  settle the message being handled (no-ops outside a container).
+- **Registry** (`registry.bp`) — `rkRegisterListener(broker, dest, group,
+  container, handler)` and the named `rkRegisterListenerAs(name, …)` `#[listener]`
+  emits; `rkListenerCount()`, `rkListenerDestinations()` (comma-joined, also
+  answered to the core's `contextSnapshot()` through the `rakun_listener_names`
+  persistent term); `rkDeliver(broker, dest, payload)` / `rkDeliverKeyed` call the
+  handler in the caller's process with no broker (an unknown destination raises).
+  A duplicate `{broker, destination}` is kept and the boot refuses it naming both.
+- **Markers** (`markers.bp`) — `#[listener]` on a stereotyped type emits
+  `val __rkListener_<T>_<m> = rkRegisterListenerAs("<T>.<m>", …, { msg ->
+  __rkMake_<T>().<m>(msg) })` per `#[amqpListener(queue)]` ·
+  `#[kafkaListener(topic, groupId)]` · `#[redisListener(channel)]` ·
+  `#[streamListener(stream, offset)]` method; the module imports
+  `rkRegisterListenerAs`. Refused at build: no marker, two markers on a method, a
+  handler not `(self, msg: Message) -> i32`, no stereotype, a marker off a method,
+  a stream offset other than `first`/`last`/`next`/decimal.
+- **Containers** (`container.bp`) — one per listener, NAMED AFTER ITS DESTINATION,
+  `rakun.messaging.listener.<destination>.concurrency` (1) · `.prefetch` (10) ·
+  `.ack-mode` (`auto`; `none` on redis, the only value redis accepts; refused on
+  amqp and kafka) · `.enabled` (true). `startMessaging()` refuses a bad
+  configuration, connects each configured arm with its
+  `rakun.messaging.<arm>.properties.*` keys verbatim (`armProperties(arm)`; the
+  startup log lists the key names or `(none)`), registers `messaging.<arm>`, and
+  starts a `simple_one_for_one` supervisor per enabled listener as a temporary
+  child of `rakun_sup`, with N permanent workers. The owner PUSHES each worker up
+  to `prefetch` unsettled messages; `auto` acks a non-raising return, `manual`
+  redelivers a handler that returned without `ackMessage`, and a raising handler
+  kills only its worker — the supervisor restarts it and its held messages are
+  redelivered first. `concurrency > 1` logs that ordering is not preserved.
+  `stopMessaging()` (containers + arms), `resetMessaging()` (everything, listeners
+  too), `stopBroker(arm)` / `startBroker(arm)` (an outage), `published(broker)` /
+  `clearPublished()` (the test seam: `destination|key|payload`).
+- **Templates** (`templates.bp`) — `AmqpTemplate.send(queue, payload)`,
+  `KafkaTemplate.send(topic, key, payload)`, `RedisPubSubTemplate.publish(channel,
+  payload)`, `StreamTemplate.append(stream, payload)`: 0, or non-zero with no
+  connection (never a raise). Injected through the hand-written
+  `__rkMake_<Template>()`, which a consumer imports.
+- **Health** (`messaging_health.bp`) — `messaging.<arm>` DOWN naming the arm when
+  not connected, DOWN naming the container when an enabled container has no live
+  worker; UP otherwise.
+- **Out of scope** (each its own front): JMS 90 · Pulsar 91 · RSocket 92 ·
+  Spring Integration and Kafka Streams 89 · retry and dead letters 86 (below) ·
+  exchange topology and audit 87 · transactional publish 83. Non-text payloads
+  wait on a byte type.
+
+### JMS brokers — `src/jms/` and `jms_host.bp` (front 90)
+
+ActiveMQ Classic / Artemis over STOMP 1.2: `src/sidecars/rakun_jms.erl` (the
+frame codec with STOMP escaping and content-length, a client with heart-beats,
+reconnect with backoff and re-subscription, handlers run in their own process
+so they may send on the connection, request/reply over a temporary queue and a
+correlation id). `amqp://` needs `amqp10_client` (not loadable by a sidecar)
+and refuses the boot. `rakun.jms.{url, user, password, ssl.bundle, client-id,
+heart-beat-ms}`; the URL is logged redacted. `jmsListen(name, Destination,
+ack, selector, durable, handler: Delivery -> Outcome)` subscribes and registers
+the listener in front 15's registry under broker `jms` (its container
+disabled; `rakun.messaging.jms.transport` is set to memory so the boot check
+passes); `Reject` dead-letters with front 86's envelope, `Retry` NACKs.
+Selectors are the broker's — no client-side fallback. Durable subscriptions
+need `client-id`. `jms` health indicator. Tests run against
+`rakun_jms_fixture.erl`, an in-process STOMP broker.
+
+### Pulsar — `src/pulsar/` and `pulsar_host.bp` (front 91)
+
+The byte half is `src/sidecars/rakun_pulsar.erl` (botopink has no byte type
+or bit operators): CRC32C (Castagnoli, table-driven), protobuf varints, the
+`BaseCommand` subset, the simple and payload frame envelopes, reassembly of a
+split frame and a size limit. `pulsar.bp`: `parseTopic` / `renderTopic`
+(`persistent://public/default/<t>` defaults; `non-persistent` kept), the
+subscription types, start positions (`earliest`, `latest`, `ledger:entry[:p]`)
+and auth settings (`none`, `token`, `oauth2` with issuer-url, private-key,
+audience) checked at boot, and the admin arm over front 13's client
+(`rakun.pulsar.admin-url`, `.admin.connect-timeout` / `.read-timeout`):
+`createTopic`, `subscriptionsOf`, `backlogOf`, each with its own reader that
+answers an error for another shape. The data plane (connection, LOOKUP,
+producers, consumers, readers, transactions) is not written — no Pulsar
+broker to capture frames from.
+
+### Reliability — `src/reliability/` (front 86)
+
+`reliableListener(name, broker, destination, group, handler)` registers a
+front 15 listener whose container is `name` and whose handler answers an
+`Outcome` (`Done`, `Retry(reason)`, `Reject(reason)`; a raise is
+`Retry("crashed: …")`). `policy.bp` is pure: `RetryPolicy` (integer
+`multiplierPercent`, 0 refused), `nextDelay`, `nextAction`, `DeadLetter`,
+`parseCount` (a copy of url.bp's private decimal walk). `dispatch.bp`:
+
+- **The attempt travels with the message** as `x-rakun-attempt` (and
+  `x-rakun-first-seen`). Front 15's in-process broker publishes no headers,
+  so a redelivery's headers ride in a payload prefix `\u{1e}rakun\u{1e}…\u{1e}`
+  that `deliveryOf` strips. A retry waits `nextDelay` with the original still
+  unsettled, publishes the redelivery, then settles the original — a crash in
+  between redelivers the original with its own count.
+- **Dead letters** go to `rakun.messaging.listener.<name>.dead-letter`
+  (default `<destination>.dlq`) as JSON with the ORIGINAL destination; the
+  original settles only when that publish answered 0, else it is requeued.
+  One warn line per dead letter (`reliabilityLog()`).
+- **Settings**: `retry.{initial-interval, multiplier-percent, max-interval,
+  max-attempts}` per listener, then `rakun.messaging.retry.*`;
+  `reliability.ack-mode` auto | manual (`ackDelivery(d)`; a `Done` without it
+  warns) | batch (`reliability.batch-size`; the container runs `ack-mode=manual`
+  with `prefetch` at least the size; the batch is settled through front 15's
+  owner every `size` messages — a stopped worker's held batch is redelivered,
+  not flushed). `startReliability()` refuses a bad setting at boot and
+  registers the `messaging` indicator (each reliable listener's arm).
+- **Concurrency sizes processes, not threads**: `concurrency` is the number of
+  consumer processes under the container's supervisor, `prefetch` the
+  per-process credit, so a large value is not the JVM's mistake.
+- Counters `rakun.messaging.deliveries`, `.retries`, `.dead_letters` and the
+  timer `rakun.messaging.handler.duration`, tagged `listener` (front 75; a
+  meter name takes no `-`).
+
+`transaction.bp`: `withProducerTransaction(prefix, body)` holds every
+`transactionalSend` until `body` returns (then appends them all) and drops
+them when it raises; `lastTransactionalId()` is `<prefix><n>`. An AMQP send in
+a transaction refuses: AMQP channel transactions are not offered, and front
+83's outbox is the mechanism for "publish if and only if this commits".
+
+## WebSocket — `modules/rakun-websocket/` (front 20)
+
+Depends on `rakun`, `rakun-web`, `rakun-security` (and, for it, `rakun-data`,
+`rakun-actuator-api`). A member of its own (`03-rakun/modules.md` splits it out of
+`rakun-web`), with flat test files. **Not one line of JavaScript**: the browser
+half is the browser's own `WebSocket` against the wire contract below.
+
+**The wire contract.**
+
+| Item | Value |
+|---|---|
+| Upgrade | `GET <path>` + `Upgrade: websocket`, `Connection: Upgrade`, `Sec-WebSocket-Key`, `Sec-WebSocket-Version: 13` |
+| Subprotocol | `rakun.v1`, echoed; omitted is accepted, any other offer is refused (400) |
+| Frame | text: `{"t":"<topic>","d":"<payload>"}` (topic), `{"t":"","d":"<payload>"}` (direct) |
+| Heartbeat | server ping every `rakun.websocket.heartbeat-seconds` (30); no frame for `idle-timeout-seconds` (90) closes with `1001` |
+| Close codes | `1000` normal · `1008` unauthorized · `1013` backpressure · `1011` handler error · `4001` session revoked · `1009` over `max-frame-bytes` (65536) · `1003` binary frame |
+
+- **Upgrade** — `installWebsocket()` refuses a duplicate path (naming both types),
+  installs the core's upgrade hook, registers one `GET <path>` route per endpoint
+  answering `101`, and registers the `websocket` indicator. The request goes
+  through the application's dispatcher first (front 07's chain, front 10's
+  security): `101` is a handshake, `401`/`403` on a registered path is a handshake
+  closed at once with `1008` (no handler runs), an unregistered path is 404,
+  `rakun.websocket.max-connections` (10000) answers 503 at the upgrade. The route
+  records the principal front 10 established; `WsSession(id, principal, path)`
+  carries it.
+- **Connection** — the connection process of front 04's `rakun_conn_sup` becomes
+  the WebSocket connection: one supervised process per connection. A raising
+  handler closes only its own connection with `1011`. Outbound frames are pushed
+  to the process's mailbox; `push` refuses and flags the connection once the
+  mailbox holds `rakun.websocket.max-outbound-queue` (1000) frames, and a
+  connection whose peer stopped reading (the socket driver holding unsent bytes)
+  waits, sees the flag and closes with `1013` — the mailbox never passes the cap.
+  The socket's high watermark is raised so a `send` never parks the process.
+- **Handlers** (`endpoint.bp`) — `#[wsEndpoint("/path")]` on a stereotyped
+  record type emits `val __rkWs_<T> = rkRegisterWsEndpoint(path, "<T>", open,
+  message, close)` into the type's module (which imports `rkRegisterWsEndpoint`
+  and `WsSession`); `onMessage(self, session, message) -> i32` is required,
+  `onOpen` / `onClose` default to no-ops; one component instance serves every
+  connection.
+- **Topics** — `subscribe` (idempotent), `unsubscribe`, `broadcast(topic, msg)`
+  (fire-and-forget, answers the count), `sessionsOn(topic)`, `revokeSession`
+  (`4001`), over OTP `pg` scope `rakun_ws` — a peer node's subscriber is reached
+  (`broadcast_test.bp` starts one with `peer`, or reports `skipped:`). A closing
+  connection leaves every group before its close frame goes out.
+- **Health** — `websocketHealth()`: `connections`, `topics`, `refusedByCap`; DOWN
+  while upgrades are not accepted (the hook uninstalled or front 04's listener not
+  running).
+- **Tests** use the sidecar's own client (`rkWsClientConnect` / `Send` / `Recv` /
+  `Pause` / `Autopong` / `Close`) against a listener on an ephemeral port.
 
 ## Static files — `modules/rakun-web/src/static.bp` (front 82)
 

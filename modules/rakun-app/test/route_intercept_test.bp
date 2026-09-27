@@ -1,0 +1,101 @@
+//// rakun-app — intercepting routes (front 61 steps 3–4).
+
+import {testing.asserts} from "std";
+import {rkDispatchHttp, beginRequest, endRequest, RequestScope, RequestPhase} from "rakun";
+import {table: {RouteEntry, parseTable}} from "routing";
+import {InterceptKind, Intercept, parseIntercept, resolveIntercept, interceptFor, isSoftNavigation, interceptProblem} from "route_intercept";
+
+fn kindOf(folder: string) -> string {
+    val i: ?Intercept = parseIntercept(folder);
+    if (i == null) return "null";
+    val m: Intercept = i ?? Intercept(kind: InterceptKind.Same, target: "", raw: "");
+    val k = case m.kind {
+        InterceptKind.Same -> "Same";
+        InterceptKind.Up1 -> "Up1";
+        InterceptKind.Up2 -> "Up2";
+        InterceptKind.Root -> "Root";
+    };
+    return k + "/" + m.target;
+}
+
+fn marker(kind: InterceptKind) -> Intercept {
+    return Intercept(kind: kind, target: "photo", raw: "(?)photo");
+}
+
+test "intercept: the four markers parse" {
+    assert kindOf("(.)photo") == "Same/photo";
+    assert kindOf("(..)photo") == "Up1/photo";
+    assert kindOf("(..)(..)photo") == "Up2/photo";
+    assert kindOf("(...)photo") == "Root/photo";
+}
+
+test "intercept: a route group and a plain folder are not interceptions" {
+    assert kindOf("(marketing)") == "null";
+    assert kindOf("photo") == "null";
+}
+
+test "intercept: an unrecognised marker raises naming the folder" {
+    try asserts.throwsWith({ -> kindOf("(....)photo").length() }, "`(....)photo` is not an interception marker");
+}
+
+test "intercept: resolution appends, climbs one, two, or starts at the root" {
+    assert resolveIntercept(marker(InterceptKind.Same), "/feed/[id]") == "/feed/[id]/photo";
+    assert resolveIntercept(marker(InterceptKind.Up1), "/feed/[id]") == "/feed/photo";
+    assert resolveIntercept(marker(InterceptKind.Up2), "/feed/[id]") == "/photo";
+    assert resolveIntercept(marker(InterceptKind.Root), "/feed/[id]") == "/photo";
+    assert resolveIntercept(marker(InterceptKind.Root), "/a/b/c/d") == "/photo";
+}
+
+test "intercept: climbing past the root raises" {
+    try asserts.throwsWith({ -> resolveIntercept(marker(InterceptKind.Up2), "/feed").length() }, "climbs past the root");
+}
+
+fn feed() -> RouteEntry[] {
+    return parseTable("P|/feed/[id]\nP|/feed/[id]/(.)photo/[photoId]\nP|/feed/[id]/photo/[photoId]");
+}
+
+test "intercept: soft answers the intercepting entry, hard answers null - one URL, both halves" {
+    val soft: ?RouteEntry = interceptFor(feed(), "/feed/[id]", "/feed/[id]/photo/[photoId]", true);
+    val hard: ?RouteEntry = interceptFor(feed(), "/feed/[id]", "/feed/[id]/photo/[photoId]", false);
+    val e: RouteEntry = soft ?? RouteEntry(kind: "", pattern: "none", slot: "", verb: "");
+    assert e.pattern == "/feed/[id]/(.)photo/[photoId]";
+    assert hard == null;
+}
+
+fn frame(headersWire: string) -> i64 {
+    return beginRequest(RequestScope(id: "nav", phase: RequestPhase.Handler, method: "GET", path: "/feed/1", query: "", headersWire: headersWire, strict: false));
+}
+
+test "intercept: only x-rakun-nav: soft is a soft navigation, the name compared case-insensitively" {
+    val _a = frame("");
+    val none = isSoftNavigation();
+    val _x = endRequest();
+    val _b = frame("x-rakun-nav\thard");
+    val hard = isSoftNavigation();
+    val _y = endRequest();
+    val _c = frame("X-Rakun-Nav\tsoft");
+    val soft = isSoftNavigation();
+    val _z = endRequest();
+    assert none == false && hard == false && soft;
+}
+
+test "intercept: the round trip - the same URL with and without the header picks two entries" {
+    var picked: string[] = [];
+    for (["x-rakun-nav\tsoft", ""]) { wire ->
+        val _f = frame(wire);
+        val chosen: ?RouteEntry = interceptFor(feed(), "/feed/[id]", "/feed/[id]/photo/[photoId]", isSoftNavigation());
+        val _e = endRequest();
+        val e: RouteEntry = chosen ?? RouteEntry(kind: "P", pattern: "/feed/[id]/photo/[photoId]", slot: "", verb: "");
+        picked.push(e.pattern);
+    };
+    assert picked.join(" ") == "/feed/[id]/(.)photo/[photoId] /feed/[id]/photo/[photoId]";
+}
+
+test "intercept: a target with no page, or two interceptions from one origin, fail the scan; two origins do not" {
+    assert interceptProblem(feed()) == "";
+    assert interceptProblem(parseTable("P|/feed/(.)photo")).contains("claims `/feed/photo`, which no page of the table serves");
+    val twoOrigins = parseTable("P|/photo/[id]\nP|/a/(...)photo/[id]\nP|/b/(...)photo/[id]");
+    assert interceptProblem(twoOrigins) == "";
+    val sameOrigin = parseTable("P|/photo/[id]\nP|/a/(...)photo/[id]\nP|/a/(..)(..)x/(...)photo/[id]");
+    assert interceptProblem(parseTable("P|/feed/photo\nP|/feed/(.)photo\nP|/feed/(.)photo")).contains("two interceptions from `/feed` claim `/feed/photo`");
+}

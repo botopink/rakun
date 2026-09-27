@@ -1,0 +1,84 @@
+//// rakun-app — what `#[serverAction]` refuses at BUILD time, and the
+//// revalidation ordering with rakun-cache, from consumer projects (front 24
+//// steps 1 and 5). Each cell writes a project depending on this member by
+//// path under `$BOTOPINK_TEST_TMPDIR/rakun-app-fixtures/` (rakun-scheduling's
+//// `build_test.bp` shape). The compiler is `$BOTOPINK_BIN`, else `botopink`
+//// on `PATH`, else the meta-repository's; with none the cells FAIL.
+
+import {testing.asserts} from "std";
+import {io: {fs, process, env}} from "std";
+
+// This run's own scratch directory, `""` outside `botopink test` (which names
+// it in `BOTOPINK_TEST_TMPDIR`, unique to the run and the target). Never a
+// path under the member: its cells run side by side with it as their cwd.
+fn root() -> string {
+    val tmp = env.read("BOTOPINK_TEST_TMPDIR").unwrapOr("");
+    if (tmp == "") @panic("BOTOPINK_TEST_TMPDIR is not set: run this suite under `botopink test`");
+    return tmp + "/rakun-app-fixtures";
+}
+
+fn compilerCommand() -> string {
+    return "B=\"$BOTOPINK_BIN\"; [ -n \"$B\" ] || B=\"$(command -v botopink)\"; [ -n \"$B\" ] || B=../../../botopink-lang/zig-out/bin/botopink; [ -x \"$B\" ] || { echo \"no botopink compiler: set BOTOPINK_BIN\"; exit 0; }; B=\"$(cd \"$(dirname \"$B\")\" && pwd)/$(basename \"$B\")\"; ";
+}
+
+fn dep(name: string, dir: string) -> string {
+    return "    \"" + name + "\": { \"path\": \"" + dir + "\" }";
+}
+
+fn manifest(name: string, members: Array<string>) -> string {
+    val here = process.cwd();
+    val deps = members.map({ m -> dep(m, if (m == "rakun-app") here else here + "/../" + m) });
+    return "{\n  \"name\": \"" + name + "\",\n  \"version\": \"0.0.1\",\n  \"src\": \"src/\",\n  \"entry\": \"root.bp\",\n  \"target\": \"erlang\",\n  \"targets\": [\"erlang\"],\n  \"dependencies\": {\n" + deps.join(",\n") + "\n  }\n}\n";
+}
+
+// What the fixtures import; the members' own dependencies follow
+// transitively (decision 143).
+fn chain() -> Array<string> {
+    return ["rakun", "rakun-cache", "rakun-app"];
+}
+
+fn buildSource(name: string, source: string) -> string {
+    val dir = root() + "/" + name;
+    val _m = process.runShell("rm -rf '" + dir + "' && mkdir -p '" + dir + "/src'");
+    val _j = fs.writeText(dir + "/botopink.json", manifest(name, chain()));
+    val _s = fs.writeText(dir + "/src/root.bp", source);
+    return process.runShell(compilerCommand() + "cd '" + dir + "' && \"$B\" build --target erlang --out out 2>&1 < /dev/null; echo \"exit=$?\"");
+}
+
+fn header() -> string {
+    return "import {FormData, ActionResult, serverAction, rkRegisterAction} from \"rakun-app/actions\";\n\n";
+}
+
+test "actions build: a well-formed action builds, and so does a fallible one" {
+    val out = buildSource("ok", header() + "#[serverAction]\npub fn save(form: FormData) -> @Task<ActionResult> {\n    return ActionResult.done();\n}\n\n#[serverAction]\npub fn risky(form: FormData) -> @Task<@Result<ActionResult, string>> {\n    return ActionResult.done();\n}\n");
+    try asserts.contains(out, "exit=0");
+}
+
+test "actions build: #[serverAction] on a type fails saying it must annotate a function" {
+    val out = buildSource("on-type", header() + "#[serverAction]\npub type Save(n: i32)\n");
+    try asserts.contains(out, "#[serverAction] must annotate a function");
+    try asserts.contains(out, "src/root.bp:");
+    try asserts.notContains(out, "exit=0");
+}
+
+test "actions build: an action whose return is not a @Task fails naming the required return type" {
+    val out = buildSource("bad-return", header() + "#[serverAction]\npub fn save(form: FormData) -> string {\n    return \"x\";\n}\n");
+    try asserts.contains(out, "#[serverAction] save returns `string` - an action returns @Task<ActionResult> or @Task<@Result<ActionResult, E>>");
+    try asserts.notContains(out, "exit=0");
+}
+
+test "actions build: a @Task of anything but ActionResult fails at build, naming it" {
+    val out = buildSource("task-i32", header() + "#[serverAction]\npub fn count(form: FormData) -> @Task<i32> {\n    return 1;\n}\n");
+    try asserts.contains(out, "#[serverAction] count returns `@Task<i32>` - an action returns @Task<ActionResult> or @Task<@Result<ActionResult, E>>");
+    try asserts.notContains(out, "exit=0");
+}
+
+test "actions build: with rakun-cache, the re-render sees the action's revalidation and the phase makes it legal" {
+    val dir = root() + "/actions-cache";
+    val src = process.cwd() + "/test/fixtures/actions-cache";
+    val _m = process.runShell("rm -rf '" + dir + "' && mkdir -p '" + dir + "' && cp -r '" + src + "/.' '" + dir + "/' && for f in $(find '" + dir + "' -name '*.fixture'); do mv \"$f\" \"$(echo \"$f\" | sed 's/[.]fixture$//')\"; done");
+    val _j = fs.writeText(dir + "/botopink.json", manifest("actions-cache", chain()));
+    val out = process.runShell(compilerCommand() + "cd '" + dir + "' && \"$B\" test 2>&1 < /dev/null; echo \"exit=$?\"");
+    try asserts.contains(out, "4 passed, 0 failed");
+    try asserts.notContains(out, "FAIL");
+}

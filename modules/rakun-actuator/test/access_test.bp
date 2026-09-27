@@ -1,0 +1,132 @@
+//// rakun-actuator — access levels, the ceiling, the shutdown endpoint and the
+//// access report (front 76 steps 2 and 7).
+
+import {Request, Response, rkDispatchHttp, rkSetProp} from "rakun";
+import {registerFilter, resetChain, orderCors, corsEntry, runChain, rkChainSetRunner, headerValue} from "rakun-web";
+import {mountActuator} from "actuator";
+import {installManagement, managementKeys, accessReport, setShutdownRunner, effectiveAccess} from "management";
+
+#[@External.Erlang("rakun_runtime", "prop")]
+declare fn prop(key: string) -> string;
+
+#[@External.Erlang("""(fun(__Ms) -> timer:sleep(__Ms), 0 end)($0)""")]
+declare fn sleep(ms: i32) -> i32;
+
+fn call(verb: string, path: string) -> Response {
+    return rkDispatchHttp(verb, path, "{}", "{}", "");
+}
+
+fn boot() -> i32 {
+    val _m = mountActuator();
+    return installManagement();
+}
+
+fn set(key: string, value: string) -> i32 {
+    return rkSetProp(key, value);
+}
+
+test "access: none answers 404, not 403" {
+    val _b = boot();
+    val _i = set("rakun.management.endpoints.web.exposure.include", "health,info");
+    val _a = set("rakun.management.endpoint.info.access", "none");
+    val info = call("GET", "/actuator/info").status;
+    val _u = set("rakun.management.endpoint.info.access", "");
+    val _v = set("rakun.management.endpoints.web.exposure.include", "");
+    assert info == 404;
+}
+
+test "access: read-only answers GET and 405s POST and DELETE" {
+    val _b = boot();
+    val _i = set("rakun.management.endpoints.web.exposure.include", "info");
+    val g = call("GET", "/actuator/info").status;
+    val p = call("POST", "/actuator/info");
+    val d = call("DELETE", "/actuator/info").status;
+    val _u = set("rakun.management.endpoints.web.exposure.include", "");
+    assert g == 200 && p.status == 405 && d == 405, p.body;
+}
+
+test "access: unrestricted on shutdown permits the POST" {
+    val _b = boot();
+    val _s = set("test.mgmt.shutdown", "");
+    val _r = setShutdownRunner({ -> set("test.mgmt.shutdown", "ran") });
+    val _i = set("rakun.management.endpoints.web.exposure.include", "shutdown");
+    val closed = call("POST", "/actuator/shutdown").status;
+    val _a = set("rakun.management.endpoint.shutdown.access", "unrestricted");
+    val res = call("POST", "/actuator/shutdown");
+    val _w = sleep(150);
+    val _u = set("rakun.management.endpoint.shutdown.access", "");
+    val _v = set("rakun.management.endpoints.web.exposure.include", "");
+    assert closed == 404;
+    assert res.status == 200 && res.body.contains("Shutting down"), res.body;
+    assert prop("test.mgmt.shutdown") == "ran";
+}
+
+test "access: max-permitted demotes unrestricted, and the report shows the effective level" {
+    val _b = boot();
+    val _i = set("rakun.management.endpoints.web.exposure.include", "shutdown,access");
+    val _a = set("rakun.management.endpoint.shutdown.access", "unrestricted");
+    val _m = set("rakun.management.endpoints.access.max-permitted", "read-only");
+    val post = call("POST", "/actuator/shutdown").status;
+    val report = accessReport();
+    val _u = set("rakun.management.endpoint.shutdown.access", "");
+    val _v = set("rakun.management.endpoints.access.max-permitted", "");
+    val _w = set("rakun.management.endpoints.web.exposure.include", "");
+    assert post == 405;
+    assert report.contains("{\"configured\":\"unrestricted\",\"effective\":\"read-only\",\"exposed\":true,\"id\":\"shutdown\",\"listener\":\"server\"}") || report.contains("\"id\":\"shutdown\",\"exposed\":true,\"configured\":\"unrestricted\",\"effective\":\"read-only\""), report;
+}
+
+test "access: no key this front reads raises an endpoint above the ceiling" {
+    val _b = boot();
+    val words = ["override", "force", "bypass", "escape", "unsafe", "allow-above"];
+    for (managementKeys()) { k -> for (words) { w -> assert k.contains(w) == false, k; }; };
+    val _m = set("rakun.management.endpoints.access.max-permitted", "none");
+    val _i = set("rakun.management.endpoints.web.exposure.include", "*");
+    val _a = set("rakun.management.endpoints.access.default", "unrestricted");
+    val _e = set("rakun.management.endpoint.info.access", "unrestricted");
+    val info = call("GET", "/actuator/info").status;
+    val eff = effectiveAccess("info");
+    val _u = set("rakun.management.endpoints.access.max-permitted", "");
+    val _v = set("rakun.management.endpoints.web.exposure.include", "");
+    val _w = set("rakun.management.endpoints.access.default", "");
+    val _x = set("rakun.management.endpoint.info.access", "");
+    assert info == 404 && eff == "none";
+}
+
+test "access: default none with one endpoint read-only is the reference's opt-in" {
+    val _b = boot();
+    val _i = set("rakun.management.endpoints.web.exposure.include", "*");
+    val _d = set("rakun.management.endpoints.access.default", "none");
+    val _e = set("rakun.management.endpoint.env.access", "read-only");
+    val env = call("GET", "/actuator/env").status;
+    val health = call("GET", "/actuator/health").status;
+    val info = call("GET", "/actuator/info").status;
+    val _u = set("rakun.management.endpoints.web.exposure.include", "");
+    val _v = set("rakun.management.endpoints.access.default", "");
+    val _w = set("rakun.management.endpoint.env.access", "");
+    assert env == 200 && health == 404 && info == 404;
+}
+
+// ── step 7 ──────────────────────────────────────────────────────────────────
+
+test "access: the access report lists every endpoint and is itself gated, hidden by default" {
+    val _b = boot();
+    val hidden = call("GET", "/actuator/access").status;
+    val _i = set("rakun.management.endpoints.web.exposure.include", "access,health");
+    val res = call("GET", "/actuator/access");
+    val _u = set("rakun.management.endpoints.web.exposure.include", "");
+    assert hidden == 404;
+    assert res.status == 200;
+    for (["health", "info", "env", "shutdown", "access"]) { id -> assert res.body.contains("\"id\":\"" + id + "\""), id; };
+    assert res.body.contains("\"effective\":") && res.body.contains("\"listener\":\"server\"") && res.body.contains("\"exposed\":");
+}
+
+test "access: with no allowed origins an actuator answer carries no CORS header" {
+    val _b = boot();
+    val _r = resetChain();
+    val _f = registerFilter("cors", orderCors(), { req, chain -> corsEntry(req, chain) });
+    val _c = rkChainSetRunner({ method, path, headersWire, queryWire, body -> runChain(method, path, headersWire, queryWire, body); });
+    val res = rkDispatchHttp("GET", "/actuator/health", "{\"Origin\":\"https://ops.example.com\"}", "{}", "");
+    val origin = headerValue("Access-Control-Allow-Origin");
+    val _x = resetChain();
+    assert res.status == 200 && origin == "", origin;
+}

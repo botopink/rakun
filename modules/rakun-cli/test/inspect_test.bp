@@ -1,0 +1,61 @@
+//// rakun-cli — `rakun routes`, `rakun beans`, `rakun config` (front 88 step
+//// 5): answered on a scaffolded project without starting it.
+
+import {testing.asserts} from "std";
+import {io: {fs, process, env}} from "std";
+import {rkSetProp} from "rakun";
+import {runCli, cliOutput, clearCliOutput, routeLines, maskConfigLine} from "cli";
+
+fn root() -> string {
+    val tmp: string = env.read("BOTOPINK_TEST_TMPDIR") ?? "";
+    if (tmp == "") @panic("BOTOPINK_TEST_TMPDIR is not set - run under botopink test");
+    return tmp + "/rakun-cli-inspect";
+}
+
+fn compiler() -> string {
+    val b: string = env.read("BOTOPINK_BIN") ?? "";
+    return if (b != "") b else process.cwd() + "/../../../botopink-lang/zig-out/bin/botopink";
+}
+
+fn project(name: string) -> string {
+    val _b = rkSetProp("rakun.cli.botopink", compiler());
+    val _r = rkSetProp("rakun.cli.rakun", process.cwd() + "/../rakun");
+    val _t = rkSetProp("rakun.cli.templates", process.cwd() + "/templates");
+    val _m = process.runShell("mkdir -p '" + root() + "'");
+    val _n = runCli(["new", name, "--dir", root()]);
+    val dir = root() + "/" + name;
+    val _y = fs.writeText(dir + "/application.yaml", "rakun:\n  application:\n    name: " + name + "\n  datasource:\n    url: postgres://nowhere.invalid:1/none\n    password: hunter2\n  server:\n    port: 8080\n");
+    val _c = clearCliOutput();
+    return dir;
+}
+
+test "inspect: route lines are verb, path and handler order sorted by path" {
+    assert routeLines("GET /b, POST /a, GET /a").join("|") == "POST /a|GET /a|GET /b" || routeLines("GET /b, POST /a, GET /a").join("|") == "GET /a|POST /a|GET /b";
+}
+
+test "inspect: routes and beans answer on a project whose database is unreachable, binding nothing" {
+    val dir = project("inspected");
+    val r = runCli(["routes", "--dir", dir]);
+    val routes = cliOutput();
+    val _c = clearCliOutput();
+    val b = runCli(["beans", "--dir", dir]);
+    val beans = cliOutput();
+    assert r == 0 && routes.join("|") == "GET /health|1 routes", routes.join("|");
+    assert b == 0 && beans.join("|").contains("HealthController") && (beans.at(beans.length - 1) ?? "") == "1 components", beans.join("|");
+}
+
+test "inspect: config prints the active profiles and each key's winning source, masking secrets" {
+    val dir = project("configured");
+    val status = runCli(["config", "--dir", dir, "--profile", "dev"]);
+    val lines = cliOutput();
+    val all = lines.join("\n");
+    assert status == 0 && all.contains("active profiles: dev") && all.contains("rakun.server.port=8080\tapplication file") && all.contains("rakun.profiles.active=dev\tcommand line"), all;
+    assert all.contains("hunter2") == false && all.contains("rakun.datasource.password=******\tapplication file"), all;
+    assert maskConfigLine("app.api-key=abc\tenvironment") == "app.api-key=******\tenvironment";
+}
+
+test "inspect: a project that does not compile is exit 3" {
+    val dir = project("uncompiled");
+    val _w = fs.writeText(dir + "/src/health.bp", "nonsense here");
+    assert runCli(["routes", "--dir", dir]) == 3;
+}

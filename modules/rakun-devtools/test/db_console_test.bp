@@ -1,0 +1,44 @@
+//// rakun-devtools — the database console (front 80 step 6) on the ETS arm.
+
+import {Response, rkSetProp, rkDispatchHttp} from "rakun";
+import {sqlTemplate, defaultDataSourceName, dataSourceBoot} from "rakun-data";
+import {statementKind, installDbConsole, consoleLimits} from "db_console";
+
+fn ask(sql: string) -> Response {
+    return rkDispatchHttp("GET", "/devtools/db", "{}", "{\"sql\":\"" + sql + "\"}", "");
+}
+
+test "console: outside a dev profile it does not exist" {
+    val _p = rkSetProp("rakun.profiles.resolved", "");
+    assert installDbConsole() == false;
+    assert ask("SELECT 1").status == 404;
+}
+
+test "console: a SELECT renders rows from the application's datasource, capped" {
+    val _u = rkSetProp("rakun.datasource.url", "ets:memory");
+    val _b = dataSourceBoot();
+    val t = sqlTemplate(defaultDataSourceName());
+    val _c = t.update("CREATE TABLE IF NOT EXISTS pets (id int, name text)", []);
+    val _i = t.update("INSERT INTO pets (id, name) VALUES (1, 'rex'), (2, 'tom'), (3, 'ana')", []);
+    val _p = rkSetProp("rakun.profiles.resolved", "dev");
+    val _r = installDbConsole();
+    val _m = rkSetProp("rakun.devtools.db-console.max-rows", "2");
+    val res = ask("SELECT id, name FROM pets ORDER BY id");
+    val _v = rkSetProp("rakun.devtools.db-console.max-rows", "");
+    val _q = rkSetProp("rakun.profiles.resolved", "");
+    assert res.status == 200 && res.body == "id\tname\n1\trex\n2\ttom", res.body;
+    assert consoleLimits() == "100|5000";
+}
+
+test "console: writes are refused naming the parsed kind" {
+    assert statementKind("INSERT INTO pets VALUES (4, 'x')") == "INSERT";
+    assert statementKind("/* hi */ update pets set name = 'y'") == "UPDATE";
+    assert statementKind("-- note\nDROP TABLE pets") == "DROP";
+    assert statementKind("(SELECT 1)") == "SELECT";
+    assert statementKind("select_count_from") == "SELECT_COUNT_FROM";
+    val _p = rkSetProp("rakun.profiles.resolved", "dev");
+    val _r = installDbConsole();
+    val res = ask("DELETE FROM pets");
+    val _q = rkSetProp("rakun.profiles.resolved", "");
+    assert res.status == 400 && res.body.contains("this statement is DELETE"), res.body;
+}

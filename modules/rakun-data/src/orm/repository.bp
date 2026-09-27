@@ -1,0 +1,272 @@
+//// rakun-data — derived queries, paging and the typed builder (front 78
+//// steps 2, 3, 5 and 6).
+////
+//// `#[entityRepository("City")]` on a repository type walks its `#[derived]`
+//// methods and, for each, parses the NAME and emits into the repository's
+//// module:
+////
+////     __rkDerivedSql_<Repo>_<method>() -> string      the statement
+////     __rkDerived_<Repo>_<method>(sql, <params>) -> <return>
+////
+//// which the method's one-line body forwards to (a method in a `type` body
+//// must have a body). The grammar:
+////
+////     (find|findAll|findFirst|findTop|count|exists|delete) [Distinct] By
+////     <term> ((And|Or) <term>)* [AllIgnoringCase] [OrderBy (<Field>(Asc|Desc)?)+]
+////     <term> = <Field> [Not|GreaterThan|LessThan|GreaterThanEqual|LessThanEqual|
+////              Between|In|NotIn|Like|NotLike|StartingWith|EndingWith|
+////              Containing|IsNull|IsNotNull|True|False] [IgnoringCase]
+////
+//// `And`/`Or` bind left to right with no precedence (each `Or` term opens a
+//// new group). The parameter count the terms consume must equal the method's
+//// (minus `self` and a trailing `Pageable`) — else the build fails naming
+//// both counts; the return type must fit the prefix. Every column is read
+//// through the entity's emitted `<Entity>Col`, so a field the entity does not
+//// have is a compile error at the emitted read. A `Pageable` last parameter
+//// makes a `Page<T>` (page + count statements) or a `Slice<T>` (size + 1
+//// rows); `Sort` fields are validated against the entity's columns at run
+//// time and never spliced otherwise.
+
+// ── comptime: the name grammar (this module's own helpers) ──────────────────
+
+// `NameAndState` → `["Name", "And", "State"]`.
+pub fn camelWords(s: string) -> string[] {
+    var out: string[] = [];
+    var cur = "";
+    for (s.split("")) { c ->
+        val upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".contains(c);
+        if (upper && cur != "") {
+            out.push(cur);
+            cur = c;
+        } else cur = cur + c;
+    };
+    if (cur != "") out.push(cur);
+    return out;
+}
+
+fn lowerFirst(s: string) -> string {
+    return if (s == "") s else s.slice(0, 1).toLower() + s.slice(1, s.length());
+}
+
+pub fn prefixOf(method: string) -> string {
+    for (["findAll", "findFirst", "findTop", "find", "count", "exists", "delete"]) { p ->
+        if (method.startsWith(p + "By") || method.startsWith(p + "DistinctBy")) return p;
+    };
+    return "";
+}
+
+fn operators() -> string[] {
+    return ["GreaterThanEqual", "LessThanEqual", "GreaterThan", "LessThan", "Between", "NotIn", "In", "NotLike", "Like", "StartingWith", "EndingWith", "Containing", "IsNotNull", "IsNull", "True", "False", "Not"];
+}
+
+pub fn operatorArity(op: string) -> i32 {
+    if (op == "Between") return 2;
+    if (op == "IsNull" || op == "IsNotNull" || op == "True" || op == "False") return 0;
+    return 1;
+}
+
+// A term `PopulationGreaterThanIgnoringCase` → `field|op|ignore`.
+pub fn parseTerm(term: string) -> string {
+    val ignore = term.endsWith("IgnoringCase") || term.endsWith("IgnoreCase");
+    val body = if (term.endsWith("IgnoringCase")) term.slice(0, term.length() - 12) else if (term.endsWith("IgnoreCase")) term.slice(0, term.length() - 10) else term;
+    var op = "";
+    for (operators()) { o ->
+        if (op == "" && body.endsWith(o) && body.length() > o.length()) op = o;
+    };
+    val field = lowerFirst(body.slice(0, body.length() - op.length()));
+    return field + "|" + op + "|" + (if (ignore) "1" else "0");
+}
+
+// The predicate between `By` and `OrderBy` (or the end).
+pub fn predicateOf(method: string) -> string {
+    val by = method.indexOf("By");
+    val rest = method.slice(by + 2, method.length());
+    val ob = rest.indexOf("OrderBy");
+    val pred = if (ob < 0) rest else rest.slice(0, ob);
+    return if (pred.endsWith("AllIgnoringCase")) pred.slice(0, pred.length() - 15) else pred;
+}
+
+pub fn allIgnoring(method: string) -> bool {
+    val rest = method.slice(method.indexOf("By") + 2, method.length());
+    val ob = rest.indexOf("OrderBy");
+    val pred = if (ob < 0) rest else rest.slice(0, ob);
+    return pred.endsWith("AllIgnoringCase");
+}
+
+// `and|Name` / `or|State` connective-tagged terms, left to right.
+pub fn termsOf(pred: string) -> string[] {
+    var out: string[] = [];
+    var cur = "";
+    var conn = "and";
+    for (camelWords(pred)) { w ->
+        if ((w == "And" || w == "Or") && cur != "") {
+            out.push(conn + "|" + cur);
+            cur = "";
+            conn = w.toLower();
+        } else cur = cur + w;
+    };
+    if (cur != "") out.push(conn + "|" + cur);
+    return out;
+}
+
+// `field|desc` for each OrderBy key.
+pub fn orderKeysOf(method: string) -> string[] {
+    val ob = method.indexOf("OrderBy");
+    if (ob < 0) return [];
+    val rest = method.slice(ob + 7, method.length());
+    var out: string[] = [];
+    var cur = "";
+    for (camelWords(rest)) { w ->
+        if (w == "Asc" || w == "Desc") {
+            out.push(lowerFirst(cur) + "|" + (if (w == "Desc") "1" else "0"));
+            cur = "";
+        } else cur = cur + w;
+    };
+    if (cur != "") out.push(lowerFirst(cur) + "|0");
+    return out;
+}
+
+fn field3(s: string, i: i32) -> string {
+    return s.split("|").at(i) ?? "";
+}
+
+// The SQL text of one term as a botopink string expression reading `<E>Col`.
+fn termExpr(entity: string, term: string, k: i32, ignoreAll: bool) -> string {
+    val field = field3(term, 0);
+    val op = field3(term, 1);
+    val ignore = ignoreAll || field3(term, 2) == "1";
+    val col = "\" + " + entity + "Col()." + field + " + \"";
+    val lhs = if (ignore) "lower(" + col + ")" else col;
+    val p = ":p" + k.toString();
+    val rhs = if (ignore) "lower(" + p + ")" else p;
+    if (op == "") return lhs + " = " + rhs;
+    if (op == "Not") return lhs + " <> " + rhs;
+    if (op == "GreaterThan") return lhs + " > " + rhs;
+    if (op == "LessThan") return lhs + " < " + rhs;
+    if (op == "GreaterThanEqual") return lhs + " >= " + rhs;
+    if (op == "LessThanEqual") return lhs + " <= " + rhs;
+    if (op == "Between") return lhs + " between " + p + " and :p" + (k + 1).toString();
+    if (op == "In") return lhs + " in (" + p + ")";
+    if (op == "NotIn") return lhs + " not in (" + p + ")";
+    if (op == "NotLike") return lhs + " not like " + rhs;
+    if (op == "IsNull") return lhs + " is null";
+    if (op == "IsNotNull") return lhs + " is not null";
+    if (op == "True") return lhs + " = true";
+    if (op == "False") return lhs + " = false";
+    return lhs + " like " + rhs;
+}
+
+// How the k-th parameter becomes text: a pattern for StartingWith/EndingWith/
+// Containing, a joined list for In/NotIn, `toString` for a number.
+fn paramExpr(op: string, name: string, typeName: string) -> string {
+    val text = if (typeName == "string") name else if (typeName == "string[]" || typeName == "Array<string>") name + ".join(\",\")" else if (typeName == "bool") "(if (" + name + ") \"true\" else \"false\")" else if (typeName == "i32[]" || typeName == "Array<i32>") name + ".map({ x -> x.toString() }).join(\",\")" else name + ".toString()";
+    if (op == "StartingWith") return text + " + \"%\"";
+    if (op == "EndingWith") return "\"%\" + " + text;
+    if (op == "Containing") return "\"%\" + " + text + " + \"%\"";
+    return text;
+}
+
+// ── the decorators ──────────────────────────────────────────────────────────
+
+pub fn derived(comptime decl: @Decl) {
+    if (decl.kind != DeclKind.Method) decl.fail("#[derived] marks a method of an #[entityRepository] type");
+}
+
+pub fn entityRepository(comptime decl: @Decl, entity: string) {
+    val e = entity;
+    val repo = decl.name;
+    var problem = "";
+    for (decl.methods.filter({ m -> m.annotations.filter({ a -> a.name == "derived" }).length > 0 })) { m ->
+        val prefix = prefixOf(m.name);
+        val params = m.params.filter({ p -> p.name != "self" });
+        val pnames = params.map({ p -> p.name });
+        val ptypes = params.map({ p -> p.typeName });
+        val paged = params.length > 0 && (ptypes.at(params.length - 1) ?? "") == "Pageable";
+        val valueCount = if (paged) params.length - 1 else params.length;
+        val lastName = pnames.at(params.length - 1) ?? "";
+        val pred = predicateOf(m.name);
+        val terms = termsOf(pred);
+        val parsed = terms.map({ t -> parseTerm(t.slice(t.indexOf("|") + 1, t.length())) });
+        var arity = 0;
+        for (parsed) { t -> arity = arity + operatorArity(field3(t, 1)); };
+        val ignoreAll = allIgnoring(m.name);
+        var clauses: string[] = [];
+        var k = 0;
+        var i = 0;
+        for (terms) { t ->
+            val conn = t.slice(0, t.indexOf("|"));
+            val term = parsed.at(i) ?? "";
+            val text = termExpr(e, term, k, ignoreAll);
+            clauses.push(if (i == 0) text else conn + " " + text);
+            k = k + operatorArity(field3(term, 1));
+            i = i + 1;
+        };
+        val whereText = if (clauses.length == 0) "" else " where " + clauses.join(" ");
+        val order = orderKeysOf(m.name).map({ o -> "\" + " + e + "Col()." + field3(o, 0) + " + \"" + (if (field3(o, 1) == "1") " desc" else " asc") });
+        val orderText = if (order.length == 0) "" else " order by " + order.join(", ");
+        val distinct = if (m.name.contains("DistinctBy")) "distinct " else "";
+        val columns = "\" + " + e + "Meta().columns.replaceAll(\"|\", \", \") + \"";
+        val table = "\" + " + e + "Meta().table + \"";
+        val first = prefix == "findFirst" || prefix == "findTop";
+        val body = if (prefix == "count" || prefix == "exists") "select count(*) as n from " + table + whereText else if (prefix == "delete") "delete from " + table + whereText else "select " + distinct + columns + " from " + table + whereText + orderText + (if (first) " limit 1" else "");
+        var pexprs: string[] = [];
+        var j = 0;
+        var kk = 0;
+        for (parsed) { t ->
+            val op = field3(t, 1);
+            val ar = operatorArity(op);
+            var q = 0;
+            while (q < ar) {
+                pexprs.push("param(\"p" + kk.toString() + "\", " + paramExpr(op, pnames.at(j) ?? "", ptypes.at(j) ?? "") + ")");
+                j = j + 1;
+                kk = kk + 1;
+                q = q + 1;
+            };
+        };
+        val sig = params.map({ p -> p.name + ": " + p.typeName });
+        val head = "pub fn __rkDerived_" + repo + "_" + m.name + "(sql: SqlTemplate" + (if (sig.length > 0) ", " + sig.join(", ") else "") + ") -> " + m.returnType;
+        val ps = "val ps: Param[] = [" + pexprs.join(", ") + "];";
+        val sqlFn = "__rkDerivedSql_" + repo + "_" + m.name + "()";
+        val mapper = "{ r -> __rkEntity_" + e + "_fromRow(r) }";
+        val ret = m.returnType;
+        val pageRet = ret.startsWith("Page<");
+        val sliceRet = ret.startsWith("Slice<");
+        val impl = if (prefix == "count") ps + "\n    return countOf(sql.query(" + sqlFn + ", ps));" else if (prefix == "exists") ps + "\n    return countOf(sql.query(" + sqlFn + ", ps)) > 0;" else if (prefix == "delete") ps + "\n    return sql.update(" + sqlFn + ", ps);" else if (paged && pageRet) ps + "\n    val p = " + lastName + ";\n    val rows = sql.query(pagedSql(" + sqlFn + ", p, " + e + "Meta(), 0), pageParams(ps, p, 0));\n    val total = countOf(sql.query(__rkDerivedCount_" + repo + "_" + m.name + "(), ps));\n    return Page(content: rows.toList().map(" + mapper + "), page: p.page, size: p.size, totalElements: total);" else if (paged && sliceRet) ps + "\n    val p = " + lastName + ";\n    val rows = sql.query(pagedSql(" + sqlFn + ", p, " + e + "Meta(), 1), pageParams(ps, p, 1));\n    val all = rows.toList().map(" + mapper + ");\n    return Slice(content: all.slice(0, if (all.length > p.size) p.size else all.length), page: p.page, size: p.size, hasNext: all.length > p.size);" else if (first) ps + "\n    val rows = sql.query(" + sqlFn + ", ps);\n    if (rows.rowCount() == 0) return null;\n    return __rkEntity_" + e + "_fromRow(rows.first() ?? Row(columns: [], values: []));" else ps + "\n    return sql.query(" + sqlFn + ", ps).toList().map(" + mapper + ");";
+        @emit("pub fn " + sqlFn + " -> string { return \"" + body + "\"; }");
+        if (pageRet) {
+            @emit("pub fn __rkDerivedCount_" + repo + "_" + m.name + "() -> string { return \"select count(*) as n from " + table + whereText + "\"; }");
+        };
+        @emit(head + " {\n    " + impl + "\n}");
+        val want = if (prefix == "count" || prefix == "delete") "i32" else if (prefix == "exists") "bool" else if (first) "?" + e else if (paged) "" else e + "[]";
+        val okRet = want == "" || ret == want || (want == e + "[]" && ret == "Array<" + e + ">");
+        if (problem == "" && prefix == "") problem = "#[derived] " + repo + "." + m.name + " does not start with findBy, findAllBy, findFirstBy, findTopBy, countBy, existsBy or deleteBy";
+        if (problem == "" && arity != valueCount) problem = "#[derived] " + repo + "." + m.name + ": the predicate `" + pred + "` takes " + arity.toString() + " parameter(s) and the method declares " + valueCount.toString();
+        if (problem == "" && okRet == false) problem = "#[derived] " + repo + "." + m.name + " returns `" + ret + "` - a " + prefix + "By method returns `" + want + "`";
+        if (problem == "" && paged && pageRet == false && sliceRet == false) problem = "#[derived] " + repo + "." + m.name + " takes a Pageable and returns `" + ret + "` - a paged method returns Page<" + e + "> or Slice<" + e + ">";
+    };
+    if (decl.kind != DeclKind.Type) decl.fail("#[entityRepository] must annotate a repository type");
+    if (problem != "") decl.fail(problem);
+}
+
+// ── relations ───────────────────────────────────────────────────────────────
+
+// `#[belongsTo("Order", "customerId", "Customer", "id")]` on
+// `OrderWithCustomer(order: Order, customer: Customer)` — or `?Customer`, a
+// left join whose missing half is `null` — emits the one-statement join and
+// its mapper. The owner field and both entities are read through their
+// emitted `<Entity>Col` / `<Entity>Meta`, so a typo is a compile error there.
+pub fn belongsTo(comptime decl: @Decl, owner: string, ownerField: string, target: string, targetField: string) {
+    val n = decl.name;
+    val ownerName = decl.fields.filter({ f -> f.typeName == owner }).map({ f -> f.name }).at(0) ?? "";
+    val targets = decl.fields.filter({ f -> f.typeName == target || f.typeName == "?" + target });
+    val targetName = targets.map({ f -> f.name }).at(0) ?? "";
+    val left = (targets.map({ f -> f.typeName }).at(0) ?? "").startsWith("?");
+    val join = if (left) " left join " else " join ";
+    val cols = "\" + joinColumns(" + owner + "Meta(), \"a\") + \", \" + joinColumns(" + target + "Meta(), \"b\") + \"";
+    @emit("pub fn __rkJoin_" + n + "_sql() -> string { return \"select " + cols + " from \" + " + owner + "Meta().table + \" a" + join + "\" + " + target + "Meta().table + \" b on a.\" + " + owner + "Col()." + ownerField + " + \" = b.\" + " + target + "Col()." + targetField + "; }");
+    @emit("pub fn __rkJoin_" + n + "_fromRow(r: Row) -> " + n + " {\n    val a = __rkEntity_" + owner + "_fromRow(unprefixed(r, \"a\"));\n    " + (if (left) "val present = r.get(\"b__\" + " + target + "Meta().idColumn) != \"\";\n    val b: ?" + target + " = if (present) __rkEntity_" + target + "_fromRow(unprefixed(r, \"b\")) else null;" else "val b = __rkEntity_" + target + "_fromRow(unprefixed(r, \"b\"));") + "\n    return " + n + "(" + ownerName + ": a, " + targetName + ": b);\n}");
+    if (decl.kind != DeclKind.Type) decl.fail("#[belongsTo] must annotate a record holding the two entities");
+    if (ownerName == "") decl.fail("#[belongsTo] " + n + " has no field of type " + owner);
+    if (targetName == "") decl.fail("#[belongsTo] " + n + " has no field of type " + target + " or ?" + target);
+}
+

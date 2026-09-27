@@ -1,0 +1,244 @@
+//// rakun-release — the release, its tarball and its deployment files (front
+//// 81 steps 1–5 and 7).
+////
+//// Every render is a pure function of its input and deterministic: the
+//// `.rel` (kernel and stdlib first, a duplicate application refused), `vm.args`
+//// (`-mode embedded` unless asked otherwise; the cookie a REFERENCE to an
+//// environment variable, never its value), `sys.config` (the properties as an
+//// erlang term, `rakun.web.static.use-last-modified=false` always set), the
+//// tarball (sorted entries, mtime 0, beams compiled `deterministic`), the
+//// Dockerfile (four COPY layers ERTS → OTP → framework → application, a
+//// non-root user, the release script as the entry point), the systemd unit
+//// (`foreground`, `Restart=on-failure`) and the Kubernetes Deployment (front
+//// 76's probe paths, a grace period longer than front 07's drain — else the
+//// render refuses).
+
+import {toI32} from "rakun";
+import {shutdownTimeout} from "rakun-web";
+import {livenessPath, readinessPath} from "rakun-actuator/management";
+
+#[@External.Erlang("rakun_release", "term")]
+declare fn rkRelTerm(props: Array<#(string, string)>) -> string;
+#[@External.Erlang("rakun_release", "consult")]
+pub declare fn rkRelConsult(text: string) -> Array<#(string, string)>;
+#[@External.Erlang("rakun_release", "tar")]
+declare fn rkRelTar(outFile: string, entries: Array<#(string, string)>) -> i32;
+#[@External.Erlang("rakun_release", "compile_dir")]
+declare fn rkRelCompileDir(dir: string) -> Array<#(string, string)>;
+#[@External.Erlang("rakun_release", "tree_hash")]
+pub declare fn rkRelTreeHash(dir: string) -> string;
+#[@External.Erlang("rakun_release", "module_facts")]
+declare fn rkRelFacts(file: string) -> string;
+#[@External.Erlang("rakun_release", "read")]
+pub declare fn rkRelRead(file: string) -> string;
+#[@External.Erlang("rakun_release", "exists")]
+declare fn rkRelExists(path: string) -> bool;
+#[@External.Erlang("rakun_release", "list_files")]
+declare fn rkRelFiles(dir: string) -> string[];
+
+pub type VmArgs(
+    nodeName: string,
+    cookieEnv: string,
+    schedulers: i32,
+    maxProcesses: i32,
+    embedded: bool,
+)
+
+pub type Release(
+    name: string,
+    version: string,
+    erts: string,
+    applications: string[],
+    vmArgs: VmArgs,
+    configProfile: string,
+)
+
+// ── step 1 ──────────────────────────────────────────────────────────────────
+
+pub fn applicationsProblem(apps: string[]) -> string {
+    var seen: string[] = [];
+    var dup = "";
+    for (apps) { a ->
+        if (dup == "" && seen.indexOf(a) >= 0) dup = a;
+        seen.push(a);
+    };
+    return if (dup == "") "" else "rakun release: the application `" + dup + "` is listed twice";
+}
+
+// kernel, stdlib, then the rest in the order given.
+pub fn orderedApplications(apps: string[]) -> string[] {
+    val problem = applicationsProblem(apps);
+    if (problem != "") @panic(problem);
+    var out: string[] = ["kernel", "stdlib"];
+    for (apps) { a -> if (a != "kernel" && a != "stdlib") out.push(a); };
+    return out;
+}
+
+pub fn renderRel(r: Release) -> string {
+    val apps = orderedApplications(r.applications).map({ a -> "  {" + a + ", \"" + (if (a == "kernel" || a == "stdlib") "*" else r.version) + "\"}" });
+    return ["{release, {\"" + r.name + "\", \"" + r.version + "\"},", " {erts, \"" + r.erts + "\"},", " [", apps.join(",\n"), " ]}."].join("\n") + "\n";
+}
+
+pub fn renderVmArgs(r: Release) -> string {
+    val v = r.vmArgs;
+    var lines: string[] = ["-name " + v.nodeName, "-setcookie $" + "{" + v.cookieEnv + "}", "+S " + v.schedulers.toString(), "+P " + v.maxProcesses.toString()];
+    if (v.embedded) lines.push("-mode embedded");
+    return lines.join("\n") + "\n";
+}
+
+// The properties, plus the reproducibility default, as `sys.config`.
+pub fn renderSysConfig(r: Release, props: Array<#(string, string)>) -> string {
+    var all: Array<#(string, string)> = [#("rakun.profiles.active", r.configProfile), #("rakun.web.static.use-last-modified", "false")];
+    for (props) { p -> if (p._0 != "rakun.web.static.use-last-modified") all.push(p); };
+    return rkRelTerm(all);
+}
+
+// ── step 2: the tarball ─────────────────────────────────────────────────────
+
+pub fn bootScript(r: Release) -> string {
+    return ["#!/bin/sh", "# " + r.name + " " + r.version + " - boots the release: foreground | start | stop", "ROOT=\"$(cd \"$(dirname \"$0\")/..\" && pwd)\"", "exec erl -boot \"$ROOT/releases/" + r.version + "/start\" -config \"$ROOT/releases/" + r.version + "/sys\" -args_file \"$ROOT/releases/" + r.version + "/vm.args\" -noshell -noinput \"$@\""].join("\n") + "\n";
+}
+
+// Builds `<out>/<name>-<version>.tar` from each application's emitted
+// `.erl` directory; an application whose directory is missing fails the
+// build naming it. Answers the tar's size.
+pub fn buildTarball(r: Release, appDirs: Array<#(string, string)>, props: Array<#(string, string)>, outFile: string) -> i32 {
+    val missing = appDirs.filter({ a -> rkRelExists(a._1) == false }).map({ a -> a._0 });
+    if (missing.length > 0) @panic("rakun release: the application `" + (missing.at(0) ?? "") + "` is not on the code path - no directory " + (appDirs.filter({ a -> a._0 == (missing.at(0) ?? "") }).map({ a -> a._1 }).at(0) ?? ""));
+    var entries: Array<#(string, string)> = [];
+    entries.push(#("bin/" + r.name, bootScript(r)));
+    entries.push(#("releases/" + r.version + "/" + r.name + ".rel", renderRel(r)));
+    entries.push(#("releases/" + r.version + "/vm.args", renderVmArgs(r)));
+    entries.push(#("releases/" + r.version + "/sys.config", renderSysConfig(r, props)));
+    for (appDirs) { a ->
+        for (rkRelCompileDir(a._1)) { beam -> entries.push(#("lib/" + a._0 + "-" + r.version + "/ebin/" + beam._0, beam._1)); };
+    };
+    return rkRelTar(outFile, entries);
+}
+
+// ── step 3: the Dockerfile ──────────────────────────────────────────────────
+
+pub fn layerNames() -> string[] {
+    return ["erts", "otp", "framework", "application"];
+}
+
+pub fn renderDockerfile(r: Release, builderImage: string, runtimeImage: string, user: string) -> string {
+    return [
+        "# syntax=docker/dockerfile:1",
+        "FROM " + builderImage + " AS builder",
+        "WORKDIR /build",
+        "COPY . .",
+        "RUN botopink build --target erlang --out out && rakun release --out /release",
+        "",
+        "FROM " + runtimeImage,
+        "RUN addgroup --system " + user + " && adduser --system --ingroup " + user + " " + user,
+        "WORKDIR /opt/" + r.name,
+        "COPY --from=builder /release/erts /opt/" + r.name + "/erts",
+        "COPY --from=builder /release/otp /opt/" + r.name + "/lib",
+        "COPY --from=builder /release/framework /opt/" + r.name + "/lib",
+        "COPY --from=builder /release/application /opt/" + r.name,
+        "USER " + user,
+        "ENTRYPOINT [\"/opt/" + r.name + "/bin/" + r.name + "\", \"foreground\"]",
+    ].join("\n") + "\n";
+}
+
+// The content hash of each layer's directory, in layer order.
+pub fn layerHashes(dirs: Array<#(string, string)>) -> string[] {
+    return layerNames().map({ l -> rkRelTreeHash(dirs.filter({ d -> d._0 == l }).map({ d -> d._1 }).at(0) ?? "") });
+}
+
+// ── step 4: systemd and Kubernetes ──────────────────────────────────────────
+
+pub fn renderSystemdUnit(r: Release, user: string, group: string, restartSec: i32) -> string {
+    return [
+        "[Unit]",
+        "Description=" + r.name + " " + r.version,
+        "After=network.target",
+        "",
+        "[Service]",
+        "Type=simple",
+        "User=" + user,
+        "Group=" + group,
+        "WorkingDirectory=/opt/" + r.name,
+        "ExecStart=/opt/" + r.name + "/bin/" + r.name + " foreground",
+        "Restart=on-failure",
+        "RestartSec=" + restartSec.toString(),
+        "",
+        "[Install]",
+        "WantedBy=multi-user.target",
+    ].join("\n") + "\n";
+}
+
+pub fn graceProblem(graceSeconds: i32) -> string {
+    val drainMs = shutdownTimeout();
+    if (graceSeconds * 1000 <= drainMs) return "rakun release: terminationGracePeriodSeconds " + graceSeconds.toString() + " does not exceed the shutdown drain of " + drainMs.toString() + " ms (rakun.lifecycle.timeout-per-shutdown-phase) - Kubernetes would kill the pod mid-drain";
+    return "";
+}
+
+pub fn renderDeployment(r: Release, image: string, port: i32, graceSeconds: i32) -> string {
+    val problem = graceProblem(graceSeconds);
+    if (problem != "") @panic(problem);
+    return [
+        "apiVersion: apps/v1",
+        "kind: Deployment",
+        "metadata:",
+        "  name: " + r.name,
+        "spec:",
+        "  selector:",
+        "    matchLabels:",
+        "      app: " + r.name,
+        "  template:",
+        "    metadata:",
+        "      labels:",
+        "        app: " + r.name,
+        "    spec:",
+        "      terminationGracePeriodSeconds: " + graceSeconds.toString(),
+        "      containers:",
+        "        - name: " + r.name,
+        "          image: " + image,
+        "          ports:",
+        "            - containerPort: " + port.toString(),
+        "          livenessProbe:",
+        "            httpGet:",
+        "              path: " + livenessPath(),
+        "              port: " + port.toString(),
+        "          readinessProbe:",
+        "            httpGet:",
+        "              path: " + readinessPath(),
+        "              port: " + port.toString(),
+    ].join("\n") + "\n";
+}
+
+// ── step 5: the upgrade plan ────────────────────────────────────────────────
+
+// The appup instructions for the modules that changed between two emitted
+// `.erl` directories: `{load_module, M}` for a body change, `{update, M,
+// supervisor}` for a supervisor, `{update, M, {advanced, []}}` for a
+// gen_server whose state record changed AND exports `code_change/3`; a state
+// change without one refuses, naming the module.
+pub fn upgradeInstructions(oldDir: string, newDir: string) -> string[] {
+    var out: string[] = [];
+    for (rkRelFiles(newDir).filter({ f -> f.endsWith(".erl") })) { f ->
+        val before = rkRelRead(oldDir + "/" + f);
+        val after = rkRelRead(newDir + "/" + f);
+        val m = f.split("/").at(f.split("/").length - 1).unwrapOr("").replaceAll(".erl", "");
+        if (before != after) {
+            val nf = rkRelFacts(newDir + "/" + f).split("|");
+            val of = if (before == "") [""] else rkRelFacts(oldDir + "/" + f).split("|");
+            val behaviours = (nf.at(0) ?? "").split(",");
+            val stateChanged = (nf.at(1) ?? "") != (of.at(1) ?? "");
+            val hasCodeChange = (nf.at(2) ?? "").split(",").indexOf("code_change/3") >= 0;
+            if (behaviours.indexOf("supervisor") >= 0) out.push("{update, " + m + ", supervisor}")
+            else if (behaviours.indexOf("gen_server") >= 0 && stateChanged) {
+                if (hasCodeChange == false) @panic("rakun release: " + m + " changes its gen_server state and declares no code_change/3 - the upgrade would run new code on old state");
+                out.push("{update, " + m + ", {advanced, []}}");
+            } else out.push("{load_module, " + m + "}");
+        };
+    };
+    return out;
+}
+
+pub fn renderAppup(app: string, fromVersion: string, toVersion: string, instructions: string[]) -> string {
+    val up = "[" + instructions.join(", ") + "]";
+    return "{\"" + toVersion + "\",\n [{\"" + fromVersion + "\", " + up + "}],\n [{\"" + fromVersion + "\", " + up + "}]}.\n";
+}

@@ -1,0 +1,67 @@
+//// rakun — the version set (front 73 step 2), against every manifest in the
+//// repository: `modules/*` and `starters/*`, read through `io.fs`.
+
+import {io.fs} from "std";
+import {ModuleVersion, rakunVersion, moduleVersions, versionOf, versionSetProblems} from "version_set";
+import {manifestPackageName} from "autoconfig_registry";
+
+// The `"version"` of a manifest, sliced: this front's own files write it.
+fn manifestVersion(text: string) -> string {
+    val at = text.indexOf("\"version\"");
+    if (at < 0) return "";
+    val after = text.slice(at + 9, text.length());
+    val open = after.indexOf("\"");
+    val rest = after.slice(open + 1, after.length());
+    return rest.slice(0, rest.indexOf("\""));
+}
+
+fn manifestsUnder(dir: string) -> Array<#(string, string)> {
+    val names: string[] = fs.list(dir).unwrapOr([]);
+    var out: Array<#(string, string)> = [];
+    for (names) { n ->
+        val text: string = fs.readText(dir + "/" + n + "/botopink.json").unwrapOr("");
+        if (text != "") out.push(#(manifestPackageName(text), manifestVersion(text)));
+    };
+    return out;
+}
+
+fn onDisk() -> Array<#(string, string)> {
+    var all: Array<#(string, string)> = [];
+    for (manifestsUnder("../../modules")) { m -> all.push(m); };
+    for (manifestsUnder("../../starters")) { m -> all.push(m); };
+    return all;
+}
+
+test "version set: versionOf answers the manifest's version, and \"\" for a name nobody pinned" {
+    val text: string = fs.readText("../../modules/rakun-data/botopink.json").unwrapOr("");
+    assert versionOf("rakun-data") == manifestVersion(text);
+    assert versionOf("rakun-data") != "";
+    assert versionOf("nope") == "";
+}
+
+test "version set: every module and every starter has a row, and every row a directory" {
+    val disk = onDisk();
+    assert disk.length == moduleVersions().length, disk.length.toString();
+    assert disk.filter({ m -> m._0.startsWith("rakun-starter") }).length == 8;
+    val problems = versionSetProblems(disk);
+    assert problems.length == 0, problems.join("\n");
+}
+
+test "version set: an edited manifest version with the table unchanged is a problem" {
+    val edited = onDisk().map({ m -> if (m._0 == "rakun-data") #(m._0, "0.0.2") else m });
+    val problems = versionSetProblems(edited);
+    assert problems.join("\n") == "`rakun-data` is 0.0.2 in its manifest and 0.0.1 in the version set";
+}
+
+test "version set: a new module directory with no row, and a row with no directory, are problems" {
+    var more = onDisk();
+    more.push(#("rakun-new", "0.0.1"));
+    assert versionSetProblems(more).join("\n") == "`rakun-new` has a manifest and no row in the version set";
+    val fewer = onDisk().filter({ m -> m._0 != "rakun-web" });
+    assert versionSetProblems(fewer).join("\n") == "the version set pins `rakun-web`, which has no directory";
+}
+
+test "version set: rakunVersion is what the core's manifest carries" {
+    val text: string = fs.readText("botopink.json").unwrapOr("");
+    assert rakunVersion() == manifestVersion(text);
+}

@@ -1,0 +1,616 @@
+//// rakun-data — schema migrations (front 77).
+////
+//// FILES. `V<version>__<description>.sql` (versioned, applied once, in
+//// version order — components compared as integers, so V10 follows V9) and
+//// `R__<description>.sql` (repeatable, re-applied whenever its checksum
+//// changes, after every pending versioned one, in filename order) in
+//// `rakun.migration.locations` (comma-separated, default `db/migration`). Any
+//// other `.sql` name, or two files with one version, refuses the boot naming
+//// them. A missing or empty location with `rakun.migration.enabled` unset
+//// turns migrations off; `enabled=true` makes it a refusal.
+////
+//// HISTORY. `rakun_schema_history` (installed_rank, version, description,
+//// script, checksum — `hash.sha256` of the file, 64 hex —, installed_by,
+//// installed_on, execution_time ms, success), created inside the lock.
+////
+//// THE LOCK. `global` on `{rakun_migration, <datasource>}` (every connected
+//// node sees it; the holder's death frees it), waited for up to
+//// `rakun.migration.lock-timeout` (default 30000 ms) and then a refusal. A
+//// node that is not distributed logs, once, that the lock is node-local.
+////
+//// THE RUN. Each versioned migration and its history row commit in ONE
+//// transaction (front 08's `SqlTemplate.transaction`); a first line
+//// `-- rakun:no-transaction` runs the file outside one. A failure records
+//// `success=false`, stops the run and raises. Validation (checksums of every
+//// applied migration against the files, `validate-on-migrate`, default true —
+//// `false` is for development only) runs first; no key downgrades a mismatch,
+//// `repairMigration(script)` is the one explicit way to rewrite a row.
+//// `baseline-on-migrate` + `baseline-version` adopt a populated database,
+//// `out-of-order` admits a version below the highest applied, `dry-run`
+//// reports the plan under the lock and changes nothing.
+////
+//// DDL-AUTO. `rakun.migration.ddl-auto` ∈ none | validate | create |
+//// create-drop. `create`/`create-drop` are refused under any profile in
+//// `rakun.migration.production-profiles` (default `prod,production`) and
+//// beside migration files; no key lifts either refusal. `validate` is allowed
+//// everywhere.
+
+import {rkProp, rkSetProp, active} from "rakun";
+import {hash} from "std";
+import {io.fs} from "std";
+import {Param, param} from "sql/params";
+import {Row, Rows} from "sql/rows";
+import {SqlTemplate, Tx, sqlTemplate} from "sql/template";
+import {defaultDataSourceName, ensureDataSource} from "datasource";
+import {rkMigLiveColumns, rkMigWithLock, rkMigSplit, compareVersions, rkMigTry, rkMigTableCount, rkMigNowIso, rkMigNowMs, rkMigUnlockedWarning, rkMigWarnings, rkMigLockEvents} from "migration_host";
+import {Request, rkRegisterLifecycle} from "rakun";
+import {entityTables, entityColumns, entityColumnType} from "orm/entity";
+import {EndpointResponse, rkRegisterEndpoint} from "rakun-actuator-api";
+
+// Stable sorts by a comparator answering <0, 0 or >0 (std has none), one per
+// element type so the comparator's field reads are static.
+#[@External.Erlang("""(fun(__L, __F) -> lists:sort(fun(__A, __B) -> __F(__A, __B) =< 0 end, __L) end)($0, $1)""")]
+declare fn sortFiles(xs: MigrationFile[], cmp: fn(a: MigrationFile, b: MigrationFile) -> i32) -> MigrationFile[];
+
+#[@External.Erlang("""(fun(__L, __F) -> lists:sort(fun(__A, __B) -> __F(__A, __B) =< 0 end, __L) end)($0, $1)""")]
+declare fn sortMigrations(xs: Migration[], cmp: fn(a: Migration, b: Migration) -> i32) -> Migration[];
+
+#[@External.Erlang("""(fun(__L) -> lists:sort(__L) end)($0)""")]
+declare fn sortStrings(xs: string[]) -> string[];
+
+#[@External.Erlang("""(node() =:= 'nonode@nohost')""")]
+declare fn standalone() -> bool;
+
+#[@External.Erlang("""(fun(__S) -> try binary_to_integer(__S) catch _:_ -> 0 end end)($0)""")]
+declare fn toInt(s: string) -> i32;
+
+pub type Migration(
+    version: string,
+    description: string,
+    script: string,
+    checksum: string,
+    installedRank: i32,
+    installedOn: string,
+    executionMillis: i32,
+    success: bool,
+)
+
+pub type MigrationReport(
+    applied: i32,
+    skipped: i32,
+    failed: i32,
+    lockWaitMillis: i32,
+)
+
+// One discovered file.
+pub type MigrationFile(
+    version: string,
+    description: string,
+    script: string,
+    path: string,
+    text: string,
+    checksum: string,
+)
+
+// ── configuration ───────────────────────────────────────────────────────────
+
+fn csv(raw: string) -> string[] {
+    return raw.split(",").map({ s -> s.trim() }).filter({ s -> s != "" });
+}
+
+fn flag(key: string, dflt: bool) -> bool {
+    val v = rkProp(key).trim();
+    return if (v == "") dflt else v == "true";
+}
+
+pub fn migrationLocations() -> string[] {
+    val given = csv(rkProp("rakun.migration.locations"));
+    return if (given.length > 0) given else ["db/migration"];
+}
+
+pub fn lockTimeoutMillis() -> i32 {
+    val raw = rkProp("rakun.migration.lock-timeout").trim();
+    return if (raw == "") 30000 else toInt(raw);
+}
+
+pub fn migrationDataSource() -> string {
+    val raw = rkProp("rakun.migration.datasource").trim();
+    return if (raw == "") defaultDataSourceName() else raw;
+}
+
+// Every key this front reads. The refusals' lack of an escape hatch is
+// asserted against it.
+pub fn migrationKeys() -> string[] {
+    return [
+        "rakun.migration.enabled",
+        "rakun.migration.locations",
+        "rakun.migration.datasource",
+        "rakun.migration.lock-timeout",
+        "rakun.migration.validate-on-migrate",
+        "rakun.migration.baseline-on-migrate",
+        "rakun.migration.baseline-version",
+        "rakun.migration.out-of-order",
+        "rakun.migration.dry-run",
+        "rakun.migration.ddl-auto",
+        "rakun.migration.production-profiles",
+    ];
+}
+
+// ── step 1: discovery ───────────────────────────────────────────────────────
+
+pub fn nameProblem(file: string, dir: string) -> string {
+    return "rakun migration: `" + file + "` in `" + dir + "` is not a migration - name it V<version>__<description>.sql or R__<description>.sql";
+}
+
+fn validVersion(v: string) -> bool {
+    val parts = v.replaceAll("_", ".").split(".");
+    return v != "" && parts.filter({ p -> p == "" || p.split("").filter({ c -> "0123456789".contains(c) == false }).length > 0 }).length == 0;
+}
+
+// `version|description` for a migration file name, or `""` when the name is
+// neither shape. A repeatable has an empty version.
+pub fn parseName(file: string) -> string {
+    if (file.endsWith(".sql") == false) return "";
+    val stem = file.slice(0, file.length() - 4);
+    val sep = stem.split("__");
+    if (sep.length < 2) return "";
+    val head = sep.at(0) ?? "";
+    val desc = sep.slice(1, sep.length).join("__").replaceAll("_", " ");
+    if (desc.trim() == "") return "";
+    if (head == "R") return "|" + desc;
+    if (head.startsWith("V") == false) return "";
+    val v = head.slice(1, head.length());
+    if (validVersion(v) == false) return "";
+    return v + "|" + desc;
+}
+
+fn sqlFiles(dir: string) -> string[] {
+    val names: string[] = fs.list(dir).unwrapOr([]);
+    return sortStrings(names.filter({ n -> n.endsWith(".sql") }));
+}
+
+// Every migration file of every location, versioned in version order then
+// repeatables in filename order; the first discovery problem raises.
+pub fn discoverMigrations() -> MigrationFile[] {
+    var versioned: MigrationFile[] = [];
+    var repeatable: MigrationFile[] = [];
+    var problem = "";
+    for (migrationLocations()) { dir ->
+        for (sqlFiles(dir)) { file ->
+            val parsed = parseName(file);
+            if (parsed == "") {
+                if (problem == "") problem = nameProblem(file, dir);
+            } else {
+                val bar = parsed.indexOf("|");
+                val v = parsed.slice(0, bar);
+                val text: string = fs.readText(dir + "/" + file).unwrapOr("");
+                val f = MigrationFile(version: v, description: parsed.slice(bar + 1, parsed.length()), script: file, path: dir + "/" + file, text: text, checksum: hash.sha256(text));
+                if (v == "") repeatable.push(f) else {
+                    val clash = versioned.filter({ o -> compareVersions(o.version, v) == 0 });
+                    if (problem == "" && clash.length > 0) problem = "rakun migration: version " + v + " is declared twice - `" + (clash.at(0) ?? f).path + "` and `" + f.path + "`";
+                    versioned.push(f);
+                };
+            };
+        };
+    };
+    if (problem != "") @panic(problem);
+    val ordered = sortFiles(versioned, { a, b -> compareVersions(a.version, b.version) });
+    val reps = sortFiles(repeatable, { a, b -> if (a.script < b.script) -1 else if (a.script > b.script) 1 else 0 });
+    var all: MigrationFile[] = [];
+    for (ordered) { f -> all.push(f); };
+    for (reps) { f -> all.push(f); };
+    return all;
+}
+
+// Whether migrations run: `enabled` when set; otherwise whether any file exists.
+pub fn migrationEnabled() -> bool {
+    val raw = rkProp("rakun.migration.enabled").trim();
+    val files = discoverMigrations();
+    if (raw == "false") return false;
+    if (raw == "true" && files.length == 0) @panic("rakun migration: rakun.migration.enabled=true and no migration was found in " + migrationLocations().join(", "));
+    return files.length > 0;
+}
+
+// ── step 2: the history table ───────────────────────────────────────────────
+
+fn sql(ds: string) -> SqlTemplate {
+    return sqlTemplate(ds);
+}
+
+pub fn historyTable() -> string {
+    return "rakun_schema_history";
+}
+
+fn createHistory(ds: string) -> i32 {
+    return sql(ds).update("CREATE TABLE IF NOT EXISTS rakun_schema_history (installed_rank integer not null primary key, version varchar(50), description varchar(200) not null, script varchar(1000) not null, checksum varchar(64) not null, installed_by varchar(100) not null, installed_on timestamp not null, execution_time integer not null, success boolean not null)", []);
+}
+
+fn migrationOf(r: Row) -> Migration {
+    return Migration(
+        version: r.get("version"),
+        description: r.get("description"),
+        script: r.get("script"),
+        checksum: r.get("checksum"),
+        installedRank: toInt(r.get("installed_rank")),
+        installedOn: r.get("installed_on"),
+        executionMillis: toInt(r.get("execution_time")),
+        success: r.get("success") == "true",
+    );
+}
+
+// The history, in installed_rank order, read from the table every time.
+pub fn historyOn(ds: string) -> Migration[] {
+    val _c = createHistory(ds);
+    val rows: Rows = sql(ds).query("SELECT installed_rank, version, description, script, checksum, installed_on, execution_time, success FROM rakun_schema_history", []);
+    return sortMigrations(rows.toList().map({ r -> migrationOf(r) }), { a, b -> a.installedRank - b.installedRank });
+}
+
+fn nextRank(history: Migration[]) -> i32 {
+    var top = 0;
+    for (history) { m -> if (m.installedRank > top) top = m.installedRank; };
+    return top + 1;
+}
+
+fn record(t: Tx, rank: i32, f: MigrationFile, millis: i32, ok: bool) -> i32 {
+    return t.update("INSERT INTO rakun_schema_history (installed_rank, version, description, script, checksum, installed_by, installed_on, execution_time, success) VALUES (:rank, :version, :description, :script, :checksum, :by, :on, :millis, :success)", [
+        param("rank", rank.toString()),
+        param("version", f.version),
+        param("description", f.description),
+        param("script", f.script),
+        param("checksum", f.checksum),
+        param("by", "rakun"),
+        param("on", rkMigNowIso()),
+        param("millis", millis.toString()),
+        param("success", if (ok) "true" else "false"),
+    ]);
+}
+
+fn recordOutside(ds: string, rank: i32, f: MigrationFile, millis: i32, ok: bool) -> i32 {
+    return record(Tx(dataSourceName: ds), rank, f, millis, ok);
+}
+
+// ── validation ──────────────────────────────────────────────────────────────
+
+pub fn checksumProblem(script: string, recorded: string, current: string) -> string {
+    return "rakun migration: `" + script + "` was applied with checksum " + recorded + " and the file now hashes to " + current + " - an applied migration is never edited; add a new one, or run repairMigration(\"" + script + "\") for a genuinely mistaken row";
+}
+
+fn validate(files: MigrationFile[], history: Migration[]) -> string {
+    var problem = "";
+    for (history.filter({ m -> m.success && m.version != "" && m.checksum != "" })) { m ->
+        val f = files.filter({ x -> x.version != "" && compareVersions(x.version, m.version) == 0 });
+        val cur = (f.at(0) ?? MigrationFile(version: "", description: "", script: "", path: "", text: "", checksum: m.checksum)).checksum;
+        if (problem == "" && cur != m.checksum) problem = checksumProblem(m.script, m.checksum, cur);
+    };
+    return problem;
+}
+
+// ── planning ────────────────────────────────────────────────────────────────
+
+fn appliedVersion(history: Migration[], v: string) -> bool {
+    return history.filter({ m -> m.success && m.version != "" && compareVersions(m.version, v) == 0 }).length > 0;
+}
+
+fn highestApplied(history: Migration[]) -> string {
+    var top = "";
+    for (history.filter({ m -> m.success && m.version != "" })) { m ->
+        if (top == "" || compareVersions(m.version, top) > 0) top = m.version;
+    };
+    return top;
+}
+
+fn lastChecksum(history: Migration[], script: string) -> string {
+    var sum = "";
+    for (history.filter({ m -> m.success && m.version == "" && m.script == script })) { m -> sum = m.checksum; };
+    return sum;
+}
+
+// What will run, in order, given the files and the history.
+pub fn plan(files: MigrationFile[], history: Migration[]) -> MigrationFile[] {
+    val top = highestApplied(history);
+    var out: MigrationFile[] = [];
+    for (files) { f ->
+        if (f.version != "") {
+            if (appliedVersion(history, f.version) == false) {
+                if (top != "" && compareVersions(f.version, top) < 0 && flag("rakun.migration.out-of-order", false) == false) {
+                    @panic("rakun migration: `" + f.script + "` (version " + f.version + ") is below the highest applied version " + top + " - set rakun.migration.out-of-order=true to apply it");
+                };
+                out.push(f);
+            };
+        } else {
+            if (lastChecksum(history, f.script) != f.checksum) out.push(f);
+        };
+    };
+    return out;
+}
+
+// ── step 3: applying ────────────────────────────────────────────────────────
+
+fn statementsOf(f: MigrationFile) -> string[] {
+    return rkMigSplit(f.text);
+}
+
+fn noTransaction(f: MigrationFile) -> bool {
+    val first = f.text.split("\n").at(0) ?? "";
+    return first.trim() == "-- rakun:no-transaction";
+}
+
+fn runAll(t: Tx, f: MigrationFile) -> i32 {
+    for (statementsOf(f)) { s -> val _u = t.update(s, []); };
+    return 0;
+}
+
+fn applyInTx(ds: string, f: MigrationFile, rank: i32, started: i32) -> i32 {
+    return sql(ds).transaction({ t ->
+        val _r = runAll(t, f);
+        record(t, rank, f, rkMigNowMs() - started, true);
+    });
+}
+
+// Applies one file at `rank`; a failure records success=false and raises.
+// Not named `apply`: a module fn named like an auto-imported BIF hijacks the
+// codegen's own calls to it (language-gaps.md).
+fn applyFile(ds: string, f: MigrationFile, rank: i32) -> i32 {
+    val started = rkMigNowMs();
+    val err = if (noTransaction(f)) rkMigTry({ -> runAll(Tx(dataSourceName: ds), f) }) else rkMigTry({ -> applyInTx(ds, f, rank, started) });
+    if (err != "") {
+        val _f = recordOutside(ds, rank, f, rkMigNowMs() - started, false);
+        @panic("rakun migration: `" + f.script + "` failed and the run stopped - " + err);
+    };
+    if (noTransaction(f)) {
+        val _r = recordOutside(ds, rank, f, rkMigNowMs() - started, true);
+    };
+    return 1;
+}
+
+fn baseline(ds: string, files: MigrationFile[], history: Migration[]) -> Migration[] {
+    if (history.length > 0 || flag("rakun.migration.baseline-on-migrate", false) == false) return history;
+    if (rkMigTableCount(ds) == 0) @panic("rakun migration: rakun.migration.baseline-on-migrate=true against an empty database - baselining nothing is always a mistake; run the migrations instead");
+    val raw = rkProp("rakun.migration.baseline-version").trim();
+    val v = if (raw == "") "1" else raw;
+    val b = MigrationFile(version: v, description: "<< Baseline >>", script: "<< Baseline >>", path: "", text: "", checksum: "");
+    val _r = recordOutside(ds, 1, b, 0, true);
+    var rank = 2;
+    for (files.filter({ f -> f.version != "" && compareVersions(f.version, v) <= 0 })) { f ->
+        val skipped = MigrationFile(version: f.version, description: f.description, script: f.script, path: f.path, text: f.text, checksum: f.checksum);
+        val _s = recordOutside(ds, rank, skipped, 0, true);
+        rank = rank + 1;
+    };
+    return historyOn(ds);
+}
+
+// The migrations on `ds`, under the lock. Raises on any failure.
+pub fn migrateOn(ds: string) -> MigrationReport {
+    val _e = ensureDataSource(ds);
+    val files = discoverMigrations();
+    if (standalone()) {
+        val _w = rkMigUnlockedWarning(ds);
+    };
+    val asked = rkMigNowMs();
+    return rkMigWithLock(ds, lockTimeoutMillis(), { -> migrateLocked(ds, files, rkMigNowMs() - asked) });
+}
+
+fn migrateLocked(ds: string, files: MigrationFile[], waited: i32) -> MigrationReport {
+    val history0 = historyOn(ds);
+    val history = baseline(ds, files, history0);
+    if (flag("rakun.migration.validate-on-migrate", true)) {
+        val problem = validate(files, history);
+        if (problem != "") @panic(problem);
+    };
+    val todo = plan(files, history);
+    var rank = nextRank(history);
+    var applied = 0;
+    for (todo) { f ->
+        applied = applied + applyFile(ds, f, rank);
+        rank = rank + 1;
+    };
+    return MigrationReport(applied: applied, skipped: files.length - todo.length, failed: 0, lockWaitMillis: waited);
+}
+
+pub fn migrate() -> MigrationReport {
+    return migrateOn(migrationDataSource());
+}
+
+pub fn tryMigrate() -> @Result<MigrationReport, string> {
+    val err = rkMigTry({ -> keep(migrate()) });
+    if (err != "") throw err;
+    return lastReport();
+}
+
+#[@External.Erlang("""(fun(__R) -> put(rakun_migration_last, __R), 0 end)($0)""")]
+declare fn keep(r: MigrationReport) -> i32;
+
+#[@External.Erlang("""get(rakun_migration_last)""")]
+declare fn lastReport() -> MigrationReport;
+
+// ── dry run ─────────────────────────────────────────────────────────────────
+
+// The plan, computed under the lock (taken and released), printed, and the
+// exit code a CI gate branches on: 1 when anything is pending, else 0.
+pub fn dryRunOn(ds: string) -> i32 {
+    val _e = ensureDataSource(ds);
+    val files = discoverMigrations();
+    val pending = rkMigWithLock(ds, lockTimeoutMillis(), { -> planLines(ds, files) });
+    @print(if (pending.length == 0) "rakun migration: dry run - nothing to apply" else "rakun migration: dry run - would apply " + pending.join(", "));
+    return if (pending.length == 0) 0 else 1;
+}
+
+fn planLines(ds: string, files: MigrationFile[]) -> string[] {
+    return plan(files, historyOn(ds)).map({ f -> f.script });
+}
+
+// ── queries ─────────────────────────────────────────────────────────────────
+
+pub fn appliedMigrationsOn(ds: string) -> Migration[] {
+    return historyOn(ds).filter({ m -> m.success });
+}
+
+pub fn pendingMigrationsOn(ds: string) -> Migration[] {
+    return plan(discoverMigrations(), historyOn(ds)).map({ f -> Migration(version: f.version, description: f.description, script: f.script, checksum: f.checksum, installedRank: 0, installedOn: "", executionMillis: 0, success: false) });
+}
+
+pub fn appliedMigrations() -> Migration[] {
+    return appliedMigrationsOn(migrationDataSource());
+}
+
+pub fn pendingMigrations() -> Migration[] {
+    return pendingMigrationsOn(migrationDataSource());
+}
+
+// ── repair: the one explicit rewrite ────────────────────────────────────────
+
+// Rewrites the recorded checksum of `script` to the file's current one and
+// records a repair row. Never run by configuration.
+pub fn repairMigration(script: string) -> i32 {
+    val ds = migrationDataSource();
+    val files = discoverMigrations().filter({ f -> f.script == script });
+    if (files.length == 0) @panic("rakun migration: repair names `" + script + "`, which no location holds");
+    val f = files.at(0) ?? MigrationFile(version: "", description: "", script: "", path: "", text: "", checksum: "");
+    return rkMigWithLock(ds, lockTimeoutMillis(), { -> repairLocked(ds, f) });
+}
+
+fn repairLocked(ds: string, f: MigrationFile) -> i32 {
+    val n = sql(ds).update("UPDATE rakun_schema_history SET checksum = :sum WHERE script = :script", [param("sum", f.checksum), param("script", f.script)]);
+    val note = MigrationFile(version: "", description: "repair " + f.script, script: "<< Repair >> " + f.script, path: "", text: "", checksum: f.checksum);
+    val _r = recordOutside(ds, nextRank(historyOn(ds)), note, 0, true);
+    return n;
+}
+
+// ── step 7: ddl-auto ────────────────────────────────────────────────────────
+
+pub fn ddlAuto() -> string {
+    val raw = rkProp("rakun.migration.ddl-auto").trim();
+    val v = if (raw == "") "none" else raw;
+    if (["none", "validate", "create", "create-drop"].indexOf(v) < 0) @panic("rakun migration: rakun.migration.ddl-auto is `" + v + "` - the values are none, validate, create and create-drop");
+    return v;
+}
+
+pub fn productionProfiles() -> string[] {
+    val given = csv(rkProp("rakun.migration.production-profiles"));
+    return if (given.length > 0) given else ["prod", "production"];
+}
+
+// `""`, or the refusal the configured ddl-auto earns.
+pub fn ddlAutoProblem() -> string {
+    val mode = ddlAuto();
+    if (mode != "create" && mode != "create-drop") return "";
+    val prod = active().filter({ p -> productionProfiles().indexOf(p) >= 0 });
+    if (prod.length > 0) return "rakun migration: rakun.migration.ddl-auto=" + mode + " under the production profile `" + (prod.at(0) ?? "") + "` - dropping every entity table is refused there; use validate, or leave the profile";
+    val files = discoverMigrations();
+    if (files.length > 0) return "rakun migration: rakun.migration.ddl-auto=" + mode + " beside migration files (" + (files.at(0) ?? MigrationFile(version: "", description: "", script: "", path: "", text: "", checksum: "")).path + ") - one of them owns the schema, not both";
+    return "";
+}
+
+// The schema front 78's entities declare against the live one: `""`, or the
+// first difference — a missing table, a missing column, an extra column, or a
+// type that disagrees where the live side reports types (`col:type`).
+pub fn schemaDiff(table: string, expected: string, live: string) -> string {
+    if (live == "!missing") return "rakun migration: ddl-auto=validate - the table `" + table + "` does not exist";
+    val want = expected.split("|").filter({ c -> c != "" });
+    val have = live.split("|").filter({ c -> c != "" });
+    val haveNames = have.map({ c -> c.split(":").at(0) ?? "" });
+    val wantNames = want.map({ c -> c.split(":").at(0) ?? "" });
+    var problem = "";
+    for (want) { w ->
+        val name = w.split(":").at(0) ?? "";
+        val wt = w.split(":").at(1) ?? "";
+        val at = haveNames.indexOf(name);
+        if (problem == "" && at < 0) problem = "rakun migration: ddl-auto=validate - the table `" + table + "` has no column `" + name + "`";
+        val ht = (have.at(at) ?? "").split(":").at(1) ?? "";
+        if (problem == "" && at >= 0 && ht != "" && wt != "" && ht != wt) problem = "rakun migration: ddl-auto=validate - the column `" + table + "." + name + "` is " + ht + " and the entity declares " + wt;
+    };
+    for (haveNames) { h ->
+        if (problem == "" && wantNames.indexOf(h) < 0) problem = "rakun migration: ddl-auto=validate - the table `" + table + "` has a column `" + h + "` no entity declares";
+    };
+    return problem;
+}
+
+fn expectedOf(table: string) -> string {
+    return entityColumns(table).split("|").map({ c -> c + ":" + entityColumnType(table, c) }).join("|");
+}
+
+// `validate` against every entity table on `ds`.
+pub fn ddlValidateOn(ds: string) -> string {
+    var problem = "";
+    for (entityTables()) { t ->
+        if (problem == "") problem = schemaDiff(t, expectedOf(t), rkMigLiveColumns(ds, t));
+    };
+    return problem;
+}
+
+// `create`: every entity table dropped and created from the metadata.
+pub fn ddlCreateOn(ds: string) -> i32 {
+    var n = 0;
+    for (entityTables()) { t ->
+        val cols = entityColumns(t).split("|").map({ c -> c + " " + entityColumnType(t, c) });
+        val _d = sql(ds).update("DROP TABLE IF EXISTS " + t, []);
+        val _c = sql(ds).update("CREATE TABLE " + t + " (" + cols.join(", ") + ")", []);
+        n = n + 1;
+    };
+    return n;
+}
+
+pub fn ddlDropOn(ds: string) -> i32 {
+    for (entityTables()) { t -> val _d = sql(ds).update("DROP TABLE IF EXISTS " + t, []); };
+    return 0;
+}
+
+// Runs the configured ddl-auto on `ds` (after its refusals).
+pub fn ddlAutoOn(ds: string) -> i32 {
+    val problem = ddlAutoProblem();
+    if (problem != "") @panic(problem);
+    val mode = ddlAuto();
+    if (mode == "validate") {
+        val diff = ddlValidateOn(ds);
+        if (diff != "") @panic(diff);
+    };
+    if (mode == "create" || mode == "create-drop") {
+        val _c = ddlCreateOn(ds);
+    };
+    if (mode == "create-drop") {
+        val _l = rkRegisterLifecycle("rakun-data", "ddl-drop", "pre", 0, { -> ddlDropOn(ds) });
+    };
+    return 0;
+}
+
+// ── the actuator body ───────────────────────────────────────────────────────
+
+fn migrationJson(m: Migration, state: string) -> string {
+    return "{\"state\":\"" + state + "\",\"version\":\"" + m.version + "\",\"description\":\"" + m.description.replaceAll("\"", "\\\"") + "\",\"script\":\"" + m.script.replaceAll("\"", "\\\"") + "\",\"checksum\":\"" + m.checksum + "\",\"installedOn\":\"" + m.installedOn + "\",\"executionMillis\":" + m.executionMillis.toString() + "}";
+}
+
+pub fn migrationReportOn(ds: string) -> string {
+    val history = historyOn(ds);
+    val applied = history.filter({ m -> m.success }).map({ m -> migrationJson(m, "applied") });
+    val failed = history.filter({ m -> m.success == false }).map({ m -> migrationJson(m, "failed") });
+    val pending = plan(discoverMigrations(), history).map({ f -> migrationJson(Migration(version: f.version, description: f.description, script: f.script, checksum: f.checksum, installedRank: 0, installedOn: "", executionMillis: 0, success: false), "pending") });
+    return "{\"applied\":[" + applied.join(",") + "],\"pending\":[" + pending.join(",") + "],\"failed\":[" + failed.join(",") + "]}";
+}
+
+pub fn migrationReport() -> string {
+    return migrationReportOn(migrationDataSource());
+}
+
+// Front 11's `migrations` endpoint (not `flyway`: no Flyway is present). It
+// reads the history table on every request; exposure is front 76's.
+pub fn migrationsRead(req: Request) -> EndpointResponse {
+    return EndpointResponse(status: 200, contentType: "application/json", body: migrationReport());
+}
+
+pub fn registerMigrationsEndpoint() -> i32 {
+    return rkRegisterEndpoint("migrations", "rakun-data", "read", { req -> migrationsRead(req) });
+}
+
+#[@External.Erlang("""(fun(__C) -> erlang:halt(__C) end)($0)""")]
+declare fn halt(code: i32) -> i32;
+
+// The boot step: refuses a bad ddl-auto, then — when migrations are on —
+// either the dry run (the node exits with its code) or the run. Registers
+// the endpoint either way.
+pub fn migrationBoot() -> i32 {
+    val _e = registerMigrationsEndpoint();
+    val _d = ddlAutoOn(migrationDataSource());
+    if (migrationEnabled() == false) return 0;
+    if (flag("rakun.migration.dry-run", false)) return halt(dryRunOn(migrationDataSource()));
+    return migrate().applied;
+}

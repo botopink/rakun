@@ -1,0 +1,230 @@
+//// rakun-messaging — the arms, the containers and the boot. Front 15 steps 4–5.
+////
+//// ARMS. `amqp`, `kafka`, `redis`, `stream`. Each runs on the IN-PROCESS
+//// broker (`rakun.messaging.<arm>.transport=memory`) this milestone: the real
+//// wires are OTP applications (`amqp_client`, `brod`,
+//// `rabbitmq_stream_client`) a sidecar cannot load (`language-gaps.md`), so an
+//// address key (`rakun.messaging.amqp.host` / `.addresses`,
+//// `rakun.messaging.kafka.bootstrap-servers`, `rakun.messaging.redis.url`)
+//// without `transport=memory` REFUSES the boot naming it — never a silent
+//// in-process stand-in for a broker the application thinks it reaches.
+//// Every `rakun.messaging.<arm>.properties.*` key is handed to the arm
+//// verbatim (`armProperties(arm)`), and the startup log lists the keys.
+////
+//// CONTAINERS. One per listener, named after its destination, configured by
+//// `rakun.messaging.listener.<destination>.*`:
+////
+//// | Key | Default | |
+//// |---|---|---|
+//// | `concurrency` | `1` | worker processes under the container's supervisor |
+//// | `prefetch` | `10` | messages a worker holds unsettled |
+//// | `ack-mode` | `auto` (`none` on redis) | `auto` · `manual` · `none`; `none` is refused on amqp and kafka, and redis accepts nothing else |
+//// | `enabled` | `true` | `false`: the listener stays registered, no worker starts |
+////
+//// A container supervisor is a temporary child of rakun's `rakun_sup`; its
+//// workers are permanent children it restarts. A handler is never caught: it
+//// raises, its worker dies and restarts, and under `auto` / `manual` the
+//// messages it held are redelivered first. `concurrency > 1` logs that
+//// per-destination ordering is not preserved.
+
+import {rkProp, toI32} from "rakun";
+import {rkRegisterHealthIndicator} from "rakun-actuator-api";
+import {
+    rkMsgListeners, rkMsgDuplicates, rkMsgReset, rkMsgArmConnect, rkMsgArmDisconnect, rkMsgArmConnected,
+    rkMsgArmProperties, rkMsgPropsUnder, rkMsgPublished, rkMsgPublishedClear, rkMsgStartContainer,
+    rkMsgStopContainers, rkMsgContainerWorkers, rkMsgLogLine, rkMsgLogLines, rkMsgLogClear,
+} from "messaging_host";
+import {armHealth} from "messaging_health";
+
+pub fn arms() -> Array<string> {
+    return ["amqp", "kafka", "redis", "stream"];
+}
+
+pub type ContainerSettings(
+    name: string,
+    broker: string,
+    concurrency: i32,
+    prefetch: i32,
+    ackMode: string,
+    enabled: bool,
+)
+
+pub type Listener(
+    name: string,
+    broker: string,
+    destination: string,
+    group: string,
+    container: string,
+)
+
+pub fn registeredListeners() -> Array<Listener> {
+    return rkMsgListeners().map({ line ->
+        val f = line.split("|");
+        Listener(name: (f[0] ?? ""), broker: (f[1] ?? ""), destination: (f[2] ?? ""), group: (f[3] ?? ""), container: (f[4] ?? ""))
+    });
+}
+
+fn listenerKey(container: string, key: string) -> string {
+    return "rakun.messaging.listener." + container + "." + key;
+}
+
+fn intOr(key: string, fallback: i32) -> i32 {
+    val v = rkProp(key).trim();
+    if (v == "") return fallback;
+    val digits = v.split("").filter({ c -> "0123456789".contains(c) == false }).length == 0;
+    return if (digits) toI32(v) else -1;
+}
+
+pub fn containerSettings(container: string, broker: string) -> ContainerSettings {
+    val ack = rkProp(listenerKey(container, "ack-mode")).trim();
+    val enabled = rkProp(listenerKey(container, "enabled")).trim();
+    return ContainerSettings(
+        name: container,
+        broker: broker,
+        concurrency: intOr(listenerKey(container, "concurrency"), 1),
+        prefetch: intOr(listenerKey(container, "prefetch"), 10),
+        ackMode: if (ack == "") (if (broker == "redis") "none" else "auto") else ack,
+        enabled: enabled != "false",
+    );
+}
+
+pub fn transportOf(arm: string) -> string {
+    return rkProp("rakun.messaging." + arm + ".transport").trim();
+}
+
+pub fn armConfigured(arm: string) -> bool {
+    return transportOf(arm) == "memory";
+}
+
+fn addressKeys(arm: string) -> Array<string> {
+    val keys = case arm {
+        "amqp" -> ["rakun.messaging.amqp.host", "rakun.messaging.amqp.addresses"];
+        "kafka" -> ["rakun.messaging.kafka.bootstrap-servers"];
+        "redis" -> ["rakun.messaging.redis.url"];
+        _ -> [];
+    };
+    return keys;
+}
+
+fn driverOf(arm: string) -> string {
+    val d = case arm {
+        "amqp" -> "amqp_client";
+        "kafka" -> "brod";
+        "redis" -> "a Redis subscriber";
+        _ -> "rabbitmq_stream_client";
+    };
+    return d;
+}
+
+fn settingsProblem(s: ContainerSettings) -> string {
+    val c = "rakun.messaging.listener." + s.name;
+    if (s.concurrency < 1) return "rakun-messaging: " + c + ".concurrency must be a whole number of at least 1";
+    if (s.prefetch < 1) return "rakun-messaging: " + c + ".prefetch must be a whole number of at least 1";
+    if (s.ackMode != "auto" && s.ackMode != "manual" && s.ackMode != "none") return "rakun-messaging: " + c + ".ack-mode is `" + s.ackMode + "` - it must be auto, manual or none";
+    if (s.broker == "redis" && s.ackMode != "none") return "rakun-messaging: " + c + ".ack-mode is `" + s.ackMode + "` - Redis pub/sub has no acknowledgement and no redelivery, so a redis container runs with ack-mode none only";
+    if ((s.broker == "amqp" || s.broker == "kafka") && s.ackMode == "none") return "rakun-messaging: " + c + ".ack-mode none is refused for " + s.broker + " - a message would be settled before its handler ran; use auto or manual";
+    return "";
+}
+
+// `""` when the configuration boots; otherwise the first problem, naming it.
+pub fn messagingConfigProblem() -> string {
+    var problem = "";
+    for (arms()) { arm ->
+        val t = transportOf(arm);
+        if (problem == "" && t != "" && t != "memory") problem = "rakun-messaging: rakun.messaging." + arm + ".transport is `" + t + "` - the only transport this milestone is memory (the in-process broker)";
+        for (addressKeys(arm)) { k ->
+            if (problem == "" && rkProp(k) != "" && t != "memory") problem = "rakun-messaging: " + k + " is set, but the " + arm + " wire is not implemented - it needs " + driverOf(arm) + ", an OTP application a sidecar cannot load; set rakun.messaging." + arm + ".transport=memory for the in-process broker";
+        };
+    };
+    for (rkMsgDuplicates()) { d ->
+        val f = d.split("|");
+        if (problem == "") problem = "rakun-messaging: two listeners consume " + (f[0] ?? "") + " " + (f[1] ?? "") + ": " + (f[2] ?? "") + " and " + (f[3] ?? "") + " - one of them would never receive a message";
+    };
+    for (registeredListeners()) { l ->
+        if (problem == "" && armConfigured(l.broker) == false) problem = "rakun-messaging: " + l.name + " consumes " + l.broker + " " + l.destination + ", and no " + l.broker + " transport is configured (rakun.messaging." + l.broker + ".transport)";
+        val p = settingsProblem(containerSettings(l.container, l.broker));
+        if (problem == "" && p != "") problem = p;
+    };
+    return problem;
+}
+
+fn passthrough(arm: string) -> Array<string> {
+    val prefix = "rakun.messaging." + arm + ".properties.";
+    return rkMsgPropsUnder(prefix).map({ kv -> kv.slice(prefix.length(), kv.length()) });
+}
+
+// The boot: refuse a bad configuration, connect every configured arm with its
+// passthrough properties, register its health indicator, and start one
+// container per enabled listener. Answers how many containers started.
+pub fn startMessaging() -> i32 {
+    val problem = messagingConfigProblem();
+    if (problem != "") @panic(problem);
+    for (arms()) { arm ->
+        if (armConfigured(arm)) {
+            val props = passthrough(arm);
+            val _c = rkMsgArmConnect(arm, props);
+            val names = props.map({ kv -> (kv.split("=")[0] ?? "") });
+            val _l = rkMsgLogLine("passthrough " + arm + ": " + (if (names.length == 0) "(none)" else names.join(", ")));
+            val _h = rkRegisterHealthIndicator("messaging." + arm, "rakun-messaging", { -> armHealth(arm) });
+        };
+    };
+    var started = 0;
+    for (registeredListeners()) { l ->
+        val s = containerSettings(l.container, l.broker);
+        if (s.enabled) {
+            val _s = rkMsgStartContainer(l.container, l.broker, l.destination, l.group, s.concurrency, s.prefetch, s.ackMode);
+            started = started + 1;
+            if (s.concurrency > 1) {
+                val _o = rkMsgLogLine("container " + l.container + " runs " + s.concurrency.toString() + " workers - per-destination ordering is NOT preserved");
+            };
+        } else {
+            val _d = rkMsgLogLine("container " + l.container + " is disabled - " + l.name + " stays registered and idle");
+        };
+    };
+    return started;
+}
+
+// Stops every container and disconnects every arm; listeners stay registered.
+pub fn stopMessaging() -> i32 {
+    val _s = rkMsgStopContainers();
+    for (arms()) { arm -> val _d = rkMsgArmDisconnect(arm); };
+    val _p = rkMsgPublishedClear();
+    return rkMsgLogClear();
+}
+
+// Forgets everything, listeners included (a test that registers its own).
+pub fn resetMessaging() -> i32 {
+    return rkMsgReset();
+}
+
+// The in-process broker going away and coming back — what a broker outage
+// looks like to the arm (tests; an operator's drill).
+pub fn stopBroker(arm: string) -> i32 {
+    return rkMsgArmDisconnect(arm);
+}
+
+pub fn startBroker(arm: string) -> i32 {
+    return rkMsgArmConnect(arm, rkMsgArmProperties(arm));
+}
+
+pub fn armProperties(arm: string) -> Array<string> {
+    return rkMsgArmProperties(arm);
+}
+
+pub fn containerWorkers(container: string) -> i32 {
+    return rkMsgContainerWorkers(container);
+}
+
+pub fn messagingStartupLog() -> Array<string> {
+    return rkMsgLogLines();
+}
+
+// The test seam: `destination|key|payload` per publish on `broker`, in order.
+// It clears nothing; `clearPublished()` does.
+pub fn published(broker: string) -> Array<string> {
+    return rkMsgPublished(broker);
+}
+
+pub fn clearPublished() -> i32 {
+    return rkMsgPublishedClear();
+}

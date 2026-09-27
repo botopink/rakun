@@ -1,0 +1,82 @@
+//// rakun-actuator — exposure (front 76 step 1), driven through front 04's
+//// dispatcher against the booted registry. Every test puts back every key it
+//// set.
+
+import {testing.asserts} from "std";
+import {Request, Response, rkDispatchHttp, rkSetProp} from "rakun";
+import {EndpointResponse, rkRegisterEndpoint, rkApiEndpointRemove, endpointIds} from "rakun-actuator-api";
+import {mountActuator} from "actuator";
+import {installManagement} from "management";
+
+fn get(path: string) -> Response {
+    return rkDispatchHttp("GET", path, "{}", "{}", "");
+}
+
+fn boot() -> i32 {
+    val _m = mountActuator();
+    return installManagement();
+}
+
+fn body(text: string) -> EndpointResponse {
+    return EndpointResponse(status: 200, contentType: "application/json", body: text);
+}
+
+test "exposure: with no configuration only health answers, every other endpoint is 404" {
+    val _b = boot();
+    assert get("/actuator/health").status == 200;
+    var reached: string[] = [];
+    for (endpointIds()) { id -> if (id != "health" && get("/actuator/" + id).status != 404) reached.push(id); };
+    assert reached.length == 0, reached.join(",");
+    assert endpointIds().length >= 8;
+}
+
+test "exposure: include=* exposes every registered endpoint, a front 75 one included" {
+    val _b = boot();
+    val _r = rkRegisterEndpoint("prometheus", "rakun-metrics", "read", { req -> body("{}") });
+    val _i = rkSetProp("rakun.management.endpoints.web.exposure.include", "*");
+    val prom = get("/actuator/prometheus").status;
+    val beans = get("/actuator/beans").status;
+    val _u = rkSetProp("rakun.management.endpoints.web.exposure.include", "");
+    val _x = rkApiEndpointRemove("prometheus");
+    assert prom == 200 && beans == 200;
+}
+
+test "exposure: exclude wins over include, over * too" {
+    val _b = boot();
+    val _i = rkSetProp("rakun.management.endpoints.web.exposure.include", "*");
+    val _e = rkSetProp("rakun.management.endpoints.web.exposure.exclude", "beans");
+    val beans = get("/actuator/beans").status;
+    val info = get("/actuator/info").status;
+    val _n = rkSetProp("rakun.management.endpoints.web.exposure.include", "beans,info");
+    val named = get("/actuator/beans").status;
+    val _u = rkSetProp("rakun.management.endpoints.web.exposure.include", "");
+    val _v = rkSetProp("rakun.management.endpoints.web.exposure.exclude", "");
+    assert beans == 404 && named == 404 && info == 200;
+}
+
+test "exposure: an unexposed endpoint answers byte for byte what an absent one does" {
+    val _b = boot();
+    val _r = rkRegisterEndpoint("secretish", "test", "read", { req -> body("{\"x\":1}") });
+    val hidden = get("/actuator/secretish");
+    val _x = rkApiEndpointRemove("secretish");
+    val absent = get("/actuator/secretish");
+    assert hidden.status == 404 && absent.status == 404;
+    assert hidden.body == absent.body, hidden.body + " / " + absent.body;
+}
+
+test "exposure: an endpoint registered after boot is covered at request time" {
+    val _i = rkSetProp("rakun.management.endpoints.web.exposure.include", "*");
+    val _b = boot();
+    val _r = rkRegisterEndpoint("latecomer", "test", "read", { req -> body("{\"late\":true}") });
+    val res = get("/actuator/latecomer");
+    val _x = rkApiEndpointRemove("latecomer");
+    val _u = rkSetProp("rakun.management.endpoints.web.exposure.include", "");
+    assert res.status == 200 && res.body == "{\"late\":true}";
+}
+
+test "exposure: an include naming an unregistered endpoint refuses the boot, listing the registered ids" {
+    val _m = mountActuator();
+    val _i = rkSetProp("rakun.management.endpoints.web.exposure.include", "health,helth");
+    try asserts.throwsWith({ -> installManagement() }, "exposure.include names `helth`, which is not a registered endpoint - registered: ");
+    val _u = rkSetProp("rakun.management.endpoints.web.exposure.include", "");
+}

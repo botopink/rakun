@@ -1,0 +1,42 @@
+//// rakun-websocket — the `websocket` health indicator (front 20 step 5).
+
+import {rkSetProp, rkServe, rkDispatchHttp} from "rakun";
+import {Health, healthIndicatorIds} from "rakun-actuator-api";
+import {WsSession, rkRegisterWsEndpoint, installWebsocket, resetWebsocket, websocketHealth, subscribe} from "ws";
+import {rkWsClientConnect, rkWsClientRecv, rkWsClientSend, rkWsUninstall} from "ws_host";
+
+fn serve() -> i32 {
+    val _k = rkSetProp("rakun.main.keep-alive", "false");
+    return rkServe(0, { m, p, h, q, b -> rkDispatchHttp(m, p, h, q, b) });
+}
+
+test "health: the report carries open connections, topics and upgrades refused by the cap" {
+    val _r = resetWebsocket();
+    val _e = rkRegisterWsEndpoint("/ws/h", "H", { id, principal, path -> subscribe(WsSession(id: id, principal: principal, path: path), "room") }, { id, principal, path, message -> 0 }, { id, principal, path, code, reason -> 0 });
+    val _i = installWebsocket();
+    val port = serve();
+    val _m = rkSetProp("rakun.websocket.max-connections", "2");
+    val a = rkWsClientConnect(port, "/ws/h", []);
+    val b = rkWsClientConnect(port, "/ws/h", []);
+    val c = rkWsClientConnect(port, "/ws/h", []);
+    val h: Health = websocketHealth();
+    val _z = rkSetProp("rakun.websocket.max-connections", "");
+    assert c == "503|";
+    assert h.status == "UP";
+    assert h.details == "{\"connections\":2,\"topics\":1,\"refusedByCap\":1}", h.details;
+    assert healthIndicatorIds().filter({ i -> i == "websocket" }).length == 1;
+}
+
+test "health: DOWN while upgrades are not accepted, UP again once they are" {
+    val _r = resetWebsocket();
+    val _i = installWebsocket();
+    val port = serve();
+    val up: Health = websocketHealth();
+    val _u = rkWsUninstall();
+    val down: Health = websocketHealth();
+    val _j = installWebsocket();
+    val back: Health = websocketHealth();
+    assert up.status == "UP";
+    assert down.status == "DOWN";
+    assert back.status == "UP";
+}

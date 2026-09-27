@@ -1,0 +1,275 @@
+//// rakun-messaging — the reliable dispatcher (front 86 steps 3, 4, 5 and 8).
+////
+//// `reliableListener(name, broker, destination, group, handler)` registers a
+//// front 15 listener (container `name`, so every `rakun.messaging.listener.
+//// <name>.*` key applies) whose handler answers an `Outcome`, not a crash:
+////
+////   Done          the message is settled (auto: by the worker; manual: the
+////                 handler acks with `ackDelivery`, and a `Done` without it
+////                 logs a warning naming the listener; batch: every `size`th)
+////   Retry(reason) below `maxAttempts`: wait `nextDelay(policy, attempt)`,
+////                 publish a redelivery carrying `x-rakun-attempt` one higher,
+////                 then settle the original; at `maxAttempts`: dead-letter
+////   Reject(reason) dead-letter now, whatever the attempt
+////   a raise       treated as `Retry("crashed: " + reason)`
+////
+//// THE ATTEMPT TRAVELS WITH THE MESSAGE. The count is a header of the
+//// redelivered message, so it survives the consumer process, the container
+//// and the node: the broker is what persists it. Front 15's in-process
+//// broker publishes no per-message headers, so a redelivery's headers ride in
+//// a prefix of the payload (`\u{1e}rakun\u{1e}<k=v&…>\u{1e}`) that this
+//// dispatcher strips before the handler sees the `Delivery`. While the
+//// backoff runs the original is still unsettled, so a crash during it
+//// redelivers the original with its own count — never a reset one.
+////
+//// DEAD LETTERS. `DeadLetter` (the ORIGINAL destination, body, reason,
+//// attempt, first-seen instant) is published as JSON to
+//// `rakun.messaging.listener.<name>.dead-letter`, default `<destination>.dlq`,
+//// and the original is settled only when that publish answered 0; a failed
+//// publish requeues the original. One warn log line per dead letter.
+////
+//// CONFIGURATION, per listener, then module-wide (`rakun.messaging.retry.*`),
+//// then the defaults: `retry.initial-interval` (1000), `retry.multiplier-percent`
+//// (200), `retry.max-interval` (10000), `retry.max-attempts` (3);
+//// `reliability.ack-mode` auto | manual | batch with `reliability.batch-size`.
+//// A batch listener runs its front 15 container with `ack-mode=manual` and
+//// `prefetch` at least the batch size. `reliabilityConfigProblem()` refuses
+//// anything else at boot, naming the key.
+////
+//// Counters (front 75): `rakun.messaging.deliveries`, `.retries`,
+//// `.dead-letters` and the timer `rakun.messaging.handler.duration`, tagged
+//// `listener`. The `messaging` health indicator reports each reliable
+//// listener's arm connection.
+
+import {rkProp, toI32} from "rakun";
+import {Message} from "message";
+import {rkRegisterListenerAs} from "registry";
+import {rkMsgPublish, rkMsgAck, rkMsgNack, rkMsgArmConnected} from "messaging_host";
+import {Health, rkRegisterHealthIndicator} from "rakun-actuator-api";
+import {counter, timer, Tag} from "rakun-metrics";
+import {RetryPolicy, Outcome, AckMode, DeadLetter, retryPolicyProblem, nextDelay, nextAction, reasonOf, deadLetterName, deadLetterJson, parseCount} from "reliability/policy";
+
+#[@External.Erlang("""(fun(__Ms) -> timer:sleep(__Ms), 0 end)($0)""")]
+declare fn pause(ms: i32) -> i32;
+#[@External.Erlang("""erlang:system_time(millisecond)""")]
+declare fn nowMs() -> i32;
+#[@External.Erlang("""erlang:monotonic_time(microsecond)""")]
+declare fn nowMicros() -> i32;
+#[@External.Erlang("""(fun(__F, __D) -> try {ok, __F(__D)} catch _:{panic, __R} when is_binary(__R) -> {error, __R}; _:__R -> {error, iolist_to_binary(io_lib:format("~p", [__R]))} end end)($0, $1)""")]
+declare fn guarded(handler: fn(d: Delivery) -> Outcome, d: Delivery) -> @Result<Outcome, string>;
+#[@External.Erlang("""(fun(__N, __D) -> __L = persistent_term:get(rakun_rel_listeners, []), case lists:keymember(__N, 1, __L) of true -> ok; false -> persistent_term:put(rakun_rel_listeners, __L ++ [{__N, __D}]) end, 0 end)($0, $1)""")]
+declare fn remember(name: string, broker: string) -> i32;
+#[@External.Erlang("""[<<__N/binary, "|", __B/binary>> || {__N, __B} <- persistent_term:get(rakun_rel_listeners, [])]""")]
+declare fn remembered() -> string[];
+#[@External.Erlang("""(fun() -> persistent_term:erase(rakun_rel_listeners), persistent_term:erase(rakun_rel_log), persistent_term:erase(rakun_rel_seen_bad), 0 end)()""")]
+declare fn forgetAll() -> i32;
+#[@External.Erlang("""(fun(__T) -> logger:warning("~ts", [__T]), persistent_term:put(rakun_rel_log, persistent_term:get(rakun_rel_log, []) ++ [__T]), 0 end)($0)""")]
+declare fn warn(line: string) -> i32;
+#[@External.Erlang("""persistent_term:get(rakun_rel_log, [])""")]
+pub declare fn reliabilityLog() -> string[];
+#[@External.Erlang("""(fun(__V) -> __S = persistent_term:get(rakun_rel_seen_bad, []), case lists:member(__V, __S) of true -> false; false -> persistent_term:put(rakun_rel_seen_bad, [__V | __S]), true end end)($0)""")]
+declare fn firstSighting(value: string) -> bool;
+#[@External.Erlang("""(fun() -> get(rakun_msg_settled) =/= undefined end)()""")]
+declare fn settledByHandler() -> bool;
+// Batch: defer this message's settlement (front 15's worker then leaves it),
+// and settle every deferred tag through the owner once `size` are held.
+#[@External.Erlang("""(fun(__Size) -> case get(rakun_msg_tag) of undefined -> 0; direct -> 0; __T -> put(rakun_msg_settled, deferred), __L = [__T | case get(rakun_rel_batch) of undefined -> []; __X -> __X end], case length(__L) >= __Size of true -> [begin __R = make_ref(), rakun_messaging_owner ! {call, self(), __R, {settle, __Tg, ack}}, receive {__R, _} -> ok after 5000 -> ok end end || __Tg <- lists:reverse(__L)], put(rakun_rel_batch, []), length(__L); false -> put(rakun_rel_batch, __L), 0 end end end)($0)""")]
+declare fn deferAck(size: i32) -> i32;
+
+pub type Delivery(message: Message, headers: Array<#(string, string)>, body: string) {
+    pub fn header(self: Self, name: string) -> string {
+        val hit = self.headers.filter({ h -> h._0 == name }).map({ h -> h._1 });
+        return hit.at(0) ?? "";
+    }
+}
+
+fn marker() -> string {
+    return "\u{1e}rakun\u{1e}";
+}
+
+// The payload a redelivery is published with.
+pub fn redeliveryPayload(attempt: i32, firstSeenMs: i32, body: string) -> string {
+    return marker() + "x-rakun-attempt=" + attempt.toString() + "&x-rakun-first-seen=" + firstSeenMs.toString() + "\u{1e}" + body;
+}
+
+pub fn deliveryOf(msg: Message) -> Delivery {
+    var headers: Array<#(string, string)> = [];
+    if (msg.headersJson.contains("\"redelivered\":true")) headers.push(#("redelivered", "true"));
+    val m = marker();
+    if (msg.payload.startsWith(m) == false) return Delivery(message: msg, headers: headers, body: msg.payload);
+    val rest = msg.payload.slice(m.length(), msg.payload.length());
+    val stop = rest.indexOf("\u{1e}");
+    if (stop < 0) return Delivery(message: msg, headers: headers, body: msg.payload);
+    for (rest.slice(0, stop).split("&")) { kv ->
+        val eq = kv.indexOf("=");
+        if (eq > 0) headers.push(#(kv.slice(0, eq), kv.slice(eq + 1, kv.length())));
+    };
+    return Delivery(message: msg, headers: headers, body: rest.slice(stop + 1, rest.length()));
+}
+
+// The delivery's attempt: `x-rakun-attempt`, 1 when absent; a value that is
+// not a number counts as 1 and is logged the first time it is seen.
+pub fn attemptOf(d: Delivery) -> i32 {
+    val raw = d.header("x-rakun-attempt");
+    if (raw == "") return 1;
+    val n = parseCount(raw, -1);
+    if (n >= 1) return n;
+    if (firstSighting(raw)) {
+        val _w = warn("rakun-messaging: x-rakun-attempt `" + raw + "` on " + d.message.destination + " is not a number - counted as attempt 1");
+    };
+    return 1;
+}
+
+// ── configuration ───────────────────────────────────────────────────────────
+
+fn key(name: string, leaf: string) -> string {
+    return "rakun.messaging.listener." + name + "." + leaf;
+}
+
+fn intSetting(name: string, leaf: string, fallback: i32) -> i32 {
+    val own = rkProp(key(name, leaf)).trim();
+    val shared = rkProp("rakun.messaging." + leaf).trim();
+    val raw = if (own != "") own else shared;
+    return if (raw == "") fallback else parseCount(raw, -1);
+}
+
+pub fn policyFor(name: string) -> RetryPolicy {
+    return RetryPolicy(
+        initialMs: intSetting(name, "retry.initial-interval", 1000),
+        multiplierPercent: intSetting(name, "retry.multiplier-percent", 200),
+        maxMs: intSetting(name, "retry.max-interval", 10000),
+        maxAttempts: intSetting(name, "retry.max-attempts", 3),
+    );
+}
+
+pub fn deadLetterFor(name: string, destination: string) -> string {
+    val configured = rkProp(key(name, "dead-letter")).trim();
+    return if (configured == "") deadLetterName(destination) else configured;
+}
+
+pub fn ackModeProblem(name: string) -> string {
+    val raw = rkProp(key(name, "reliability.ack-mode")).trim();
+    if (raw == "" || raw == "auto" || raw == "manual") return "";
+    if (raw != "batch") return "rakun-messaging: " + key(name, "reliability.ack-mode") + " is `" + raw + "` - it must be auto, manual or batch";
+    val size = intSetting(name, "reliability.batch-size", -1);
+    if (size < 1) return "rakun-messaging: " + key(name, "reliability.batch-size") + " must be a whole number of at least 1 for a batch listener";
+    if (rkProp(key(name, "ack-mode")).trim() != "manual") return "rakun-messaging: " + name + " acknowledges in batches, so its container runs with " + key(name, "ack-mode") + "=manual";
+    if (intSetting(name, "prefetch", 10) < size) return "rakun-messaging: " + key(name, "prefetch") + " must be at least the batch size " + size.toString() + " - a batch is held unacknowledged";
+    return "";
+}
+
+pub fn ackModeFor(name: string) -> AckMode {
+    val raw = rkProp(key(name, "reliability.ack-mode")).trim();
+    if (raw == "manual") return AckMode.Manual;
+    if (raw == "batch") return AckMode.Batch(size: intSetting(name, "reliability.batch-size", 1));
+    return AckMode.Auto;
+}
+
+// "" when every reliable listener's settings boot; else the first problem.
+pub fn reliabilityConfigProblem() -> string {
+    var problem = "";
+    for (remembered()) { entry ->
+        val name = entry.split("|").at(0) ?? "";
+        val p = policyFor(name);
+        val pp = retryPolicyProblem(p.initialMs, p.multiplierPercent, p.maxMs, p.maxAttempts);
+        if (problem == "" && pp != "") problem = pp + " (listener " + name + ")";
+        val ap = ackModeProblem(name);
+        if (problem == "" && ap != "") problem = ap;
+    };
+    return problem;
+}
+
+// At boot, before front 15's `startMessaging()`.
+pub fn startReliability() -> i32 {
+    val problem = reliabilityConfigProblem();
+    if (problem != "") @panic(problem);
+    return rkRegisterHealthIndicator("messaging", "rakun-messaging", { -> messagingHealth() });
+}
+
+pub fn resetReliability() -> i32 {
+    return forgetAll();
+}
+
+// ── the dispatcher ──────────────────────────────────────────────────────────
+
+fn tags(name: string) -> Tag[] {
+    return [Tag(key: "listener", value: name)];
+}
+
+fn settle(mode: AckMode) -> i32 {
+    return case mode {
+        Auto -> 0;
+        Manual -> rkMsgAck();
+        Batch(size) -> deferAck(size);
+    };
+}
+
+fn handleReliably(name: string, msg: Message, handler: fn(d: Delivery) -> Outcome, publisher: fn(broker: string, destination: string, key: string, payload: string) -> i32) -> i32 {
+    val d = deliveryOf(msg);
+    val attempt = attemptOf(d);
+    val seen = d.header("x-rakun-first-seen");
+    val firstSeen = if (seen == "") nowMs() else parseCount(seen, nowMs());
+    val policy = policyFor(name);
+    val mode = ackModeFor(name);
+    val _c = counter("rakun.messaging.deliveries", tags(name)).increment(1);
+    val started = nowMicros();
+    val r = guarded(handler, d);
+    val _t = timer("rakun.messaging.handler.duration", tags(name)).record(nowMicros() - started);
+    val outcome: Outcome = case r {
+        Ok(o) -> o;
+        Error(e) -> Outcome.Retry(reason: "crashed: " + e);
+    };
+    val action = nextAction(outcome, policy, attempt);
+    if (action == "ack") {
+        val isManual = case mode { Manual -> true; _ -> false; };
+        if (isManual && settledByHandler() == false) {
+            val _w = warn("rakun-messaging: listener " + name + " returned Done without acking - the message is redelivered (ack-mode manual acks through ackDelivery)");
+            return 0;
+        };
+        return if (isManual) 0 else settle(mode);
+    };
+    if (action == "retry") {
+        val _r = counter("rakun.messaging.retries", tags(name)).increment(1);
+        val _p = pause(nextDelay(policy, attempt));
+        val sent = publisher(msg.broker, msg.destination, msg.key, redeliveryPayload(attempt + 1, firstSeen, d.body));
+        if (sent != 0) return rkMsgNack();
+        return settle(mode);
+    };
+    val letter = DeadLetter(destination: msg.destination, body: d.body, reason: reasonOf(outcome), attempt: attempt, firstSeenMs: firstSeen);
+    val dlq = deadLetterFor(name, msg.destination);
+    val published = publisher(msg.broker, dlq, msg.key, deadLetterJson(letter));
+    if (published != 0) return rkMsgNack();
+    val _d = counter("rakun.messaging.dead_letters", tags(name)).increment(1);
+    val _w = warn("rakun-messaging: listener " + name + " dead-lettered a message from " + msg.destination + " to " + dlq + " after attempt " + attempt.toString() + " - " + letter.reason);
+    return settle(mode);
+}
+
+// Acknowledges the delivery in hand (ack-mode manual).
+pub fn ackDelivery(d: Delivery) -> i32 {
+    return rkMsgAck();
+}
+
+pub fn reliableListenerWith(name: string, broker: string, destination: string, group: string, handler: fn(d: Delivery) -> Outcome, publisher: fn(broker: string, destination: string, key: string, payload: string) -> i32) -> i32 {
+    val _r = remember(name, broker);
+    return rkRegisterListenerAs(name, broker, destination, group, name, { msg -> handleReliably(name, msg, handler, publisher) });
+}
+
+pub fn reliableListener(name: string, broker: string, destination: string, group: string, handler: fn(d: Delivery) -> Outcome) -> i32 {
+    return reliableListenerWith(name, broker, destination, group, handler, { b, dest, k, payload -> rkMsgPublish(b, dest, k, payload) });
+}
+
+// ── health ──────────────────────────────────────────────────────────────────
+
+pub fn messagingHealth() -> Health {
+    var down: string[] = [];
+    var parts: string[] = [];
+    for (remembered()) { entry ->
+        val f = entry.split("|");
+        val name = f.at(0) ?? "";
+        val arm = f.at(1) ?? "";
+        val up = rkMsgArmConnected(arm);
+        if (up == false) down.push(name);
+        parts.push("\"" + name + "\":\"" + (if (up) "UP" else "DOWN") + "\"");
+    };
+    return Health(status: if (down.length == 0) "UP" else "DOWN", details: "{\"listeners\":{" + parts.join(",") + "}}");
+}

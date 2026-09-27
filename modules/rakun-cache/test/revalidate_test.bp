@@ -1,0 +1,160 @@
+//// rakun-cache — tags, the three revalidation verbs and where each is legal
+//// (front 12 step 5), with the test seams front 24 asserts through.
+
+import {testing.asserts} from "std";
+import {rkSetProp, rkPropInt, beginRequest, endRequest, RequestScope, RequestPhase, rkReqSlot} from "rakun";
+import {CacheScope, cachePolicy, cacheLife, cacheLifeOf, cacheThrough, resetCaches, drainRefreshes, revalidateTag, updateTag, revalidatePath, revalidatedPaths, revalidatedTags, clearRevalidated, rkCachePhase, cacheTraceOn, cacheTrace} from "cache";
+
+fn boot() -> i32 {
+    val _t = rkSetProp("rakun.cache.type", "ets");
+    val _l = rkSetProp("rv.loads", "0");
+    return resetCaches();
+}
+
+fn load() -> string {
+    val n = rkPropInt("rv.loads") + 1;
+    val _s = rkSetProp("rv.loads", n.toString());
+    return "v" + n.toString();
+}
+
+fn open(phase: RequestPhase) -> i64 {
+    return beginRequest(RequestScope(id: "rv", phase: phase, method: "POST", path: "/x", query: "", headersWire: "", strict: false));
+}
+
+fn products() -> string {
+    val policy = cachePolicy(CacheScope.Shared, "rv-products", cacheLife("hours"), ["products", "catalog"]);
+    return cacheThrough(policy, ["productsJson", "1"], { -> load() });
+}
+
+// ── the legality table, one cell per verb and phase ─────────────────────────
+
+test "revalidate: in a server action all three verbs are legal" {
+    val _b = boot();
+    val _o = open(RequestPhase.Action);
+    assert rkCachePhase() == "action";
+    val t = revalidateTag("t");
+    val p = revalidatePath("/p");
+    val u = updateTag("t");
+    val _e = endRequest();
+    assert t == 0 && p == 0 && u == 0;
+}
+
+test "revalidate: in a route handler revalidateTag and revalidatePath are legal and updateTag raises" {
+    val _b = boot();
+    val _o = open(RequestPhase.Handler);
+    val t = revalidateTag("t");
+    val p = revalidatePath("/p");
+    val r = asserts.throwsWith({ -> updateTag("t") }, "updateTag is legal only inside a server action (the phase is handler)");
+    val _e = endRequest();
+    assert t == 0 && p == 0;
+    assert r.isOk();
+}
+
+test "revalidate: during render all three verbs raise" {
+    val _b = boot();
+    val _o = open(RequestPhase.Render);
+    val t = asserts.throwsWith({ -> revalidateTag("t") }, "revalidateTag is not legal during render");
+    val p = asserts.throwsWith({ -> revalidatePath("/p") }, "revalidatePath is not legal during render");
+    val u = asserts.throwsWith({ -> updateTag("t") }, "updateTag is legal only inside a server action (the phase is render)");
+    val _e = endRequest();
+    assert t.isOk() && p.isOk() && u.isOk();
+    assert revalidatedTags().length == 0 && revalidatedPaths().length == 0;
+}
+
+test "revalidate: outside a request updateTag raises and the other two are legal" {
+    val _b = boot();
+    assert rkCachePhase() == "none";
+    assert revalidateTag("t") == 0;
+    assert revalidatePath("/p") == 0;
+    try asserts.throwsWith({ -> updateTag("t") }, "the phase is none");
+}
+
+// ── behaviour ───────────────────────────────────────────────────────────────
+
+test "revalidate: after updateTag a read in the same request runs the loader" {
+    val _b = boot();
+    val _o = open(RequestPhase.Action);
+    assert products() == "v1";
+    assert products() == "v1";
+    val n = updateTag("products");
+    val after = products();
+    val _e = endRequest();
+    assert n == 1;
+    assert after == "v2";
+}
+
+test "revalidate: revalidateTag serves the stale value once, refreshes, and the read after that is fresh" {
+    val _b = boot();
+    val _t = cacheTraceOn();
+    assert products() == "v1";
+    assert revalidateTag("products") == 1;
+    assert products() == "v1";
+    val _d = drainRefreshes();
+    assert products() == "v2";
+    assert rkPropInt("rv.loads") == 2;
+    assert cacheTrace().join("\n") == "miss key=rv-products:productsJson,1 [products,catalog]\nrevalidate key=* [products]\nrevalidate key=rv-products:productsJson,1 [products,catalog]\nhit key=rv-products:productsJson,1 [products,catalog]";
+}
+
+test "revalidate: an entry carrying two tags is invalidated by either" {
+    val _b = boot();
+    assert products() == "v1";
+    assert revalidateTag("catalog") == 1;
+    assert products() == "v1";
+    val _d = drainRefreshes();
+    assert products() == "v2";
+    assert revalidateTag("products") == 1;
+    assert products() == "v2";
+    val _e = drainRefreshes();
+    assert products() == "v3";
+}
+
+test "revalidate: revalidatePath marks the rows tagged with that path" {
+    val _b = boot();
+    val page = cachePolicy(CacheScope.Shared, "rv-pages", cacheLifeOf(0, 600, 600), ["path:/products/42"]);
+    assert cacheThrough(page, ["page"], { -> load() }) == "v1";
+    assert revalidatePath("/products/42") == 1;
+    assert revalidatePath("/products/43") == 0;
+}
+
+test "revalidate: the seams report what was invalidated, in call order, and clear only on request" {
+    val _b = boot();
+    val _c = clearRevalidated();
+    val _o = open(RequestPhase.Action);
+    val _u = updateTag("price-42");
+    val _r = revalidateTag("products");
+    val _p = revalidatePath("/products/42");
+    val _q = revalidatePath("/products");
+    val _e = endRequest();
+    assert revalidatedTags().join(",") == "price-42,products";
+    assert revalidatedPaths().join(",") == "/products/42,/products";
+    assert revalidatedTags().join(",") == "price-42,products";
+    val _z = clearRevalidated();
+    assert revalidatedTags().length == 0 && revalidatedPaths().length == 0;
+}
+
+test "revalidate: inside a request every invalidation is also noted on the frame, in call order" {
+    val _b = boot();
+    val _o = open(RequestPhase.Action);
+    val _u = updateTag("price-42");
+    val _p = revalidatePath("/blog");
+    val _t = revalidateTag("products");
+    val noted = rkReqSlot("revalidated");
+    val _e = endRequest();
+    assert noted == "price-42\n/blog\nproducts";
+}
+
+test "revalidate: inside a server action revalidateTag and revalidatePath expire, so the next read is fresh" {
+    val _b = boot();
+    assert products() == "v1";
+    val page = cachePolicy(CacheScope.Shared, "rv-action-page", cacheLifeOf(0, 600, 600), ["path:/blog"]);
+    assert cacheThrough(page, ["doc"], { -> "doc-" + load() }) == "doc-v2";
+    val _o = open(RequestPhase.Action);
+    val t = revalidateTag("products");
+    val p = revalidatePath("/blog");
+    val afterTag = products();
+    val afterPath = cacheThrough(page, ["doc"], { -> "doc-" + load() });
+    val _e = endRequest();
+    assert t == 1 && p == 1;
+    assert afterTag == "v3";
+    assert afterPath == "doc-v4";
+}

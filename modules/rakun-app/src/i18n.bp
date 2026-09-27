@@ -1,0 +1,357 @@
+//// rakun-app — locale routing (front 64): the closed locale set, the
+//// `Accept-Language` negotiation, locale-prefixed paths, the redirect filter
+//// on front 07's chain, the open-set dictionary blob, alternates and
+//// `<html lang>`.
+////
+//// THE SET is registered once (`registerLocales`), closed and normalised
+//// (`pt-br` → `pt-BR`); a default outside it, an empty list, a malformed tag
+//// or `_` as the separator raise at boot.
+////
+//// NEGOTIATION (`negotiate(set, acceptLanguage, cookieValue)`), in order: a
+//// cookie naming a supported locale; the highest-q supported tag of the
+//// header (q in per-mille integers; `q=0` is NOT acceptable and never picked;
+//// a malformed q is 0; `pt-PT` WIDENS to a declared `pt`, `pt` never narrows
+//// to `pt-BR`); the default.
+////
+//// THE FILTER (`installLocaleFilter(set)`, first in the chain) redirects 307 a
+//// path that carries no locale to `withLocale(negotiated, path)`, the query
+//// rebuilt from the chain's wire (each part percent-encoded), and passes a locale-prefixed path through, noting its
+//// locale for `localeOf()`. It never touches a path under `rakun.i18n.exclude`
+//// — `/api`, `/sitemap.xml` and `/robots.txt` by default, plus whatever an
+//// orchestrator appends at boot; this module spells no other package's path.
+////
+//// DICTIONARIES are the app's records (a new field fails every locale that has
+//// not supplied it, at compile time): the library needs no call for them.
+//// `dictionaryBlob(locale)` is the open-set fallback, read by the registered
+//// loader and kept in front 12's framework cache `rakun.i18n`.
+////
+//// The route table is unchanged: `[locale]` is an ordinary dynamic segment.
+
+import {encoding, io.fs} from "std";
+import {Request, Response, rkProp, demandRequest, requestLive, rkReqSlot, rkReqPutSlot, cookies, cookieDefaults} from "rakun";
+import {WebRequest, Chain, registerFilter, withHeader} from "rakun-web";
+import {CacheScope, CachePeek, CachePolicy, cachePolicy, cacheLifeOf, cacheStore, cachePeek} from "rakun-cache/cache";
+
+pub type LocaleSet(locales: string[], defaultLocale: string)
+
+pub type LocaleQ(tag: string, q: i32)
+
+pub type Alternate(hreflang: string, href: string)
+
+#[@External.Erlang("""(fun(__S) -> persistent_term:put(rakun_i18n_locales, __S), 0 end)($0)""")]
+declare fn rkI18nPut(set: LocaleSet) -> i32;
+
+#[@External.Erlang("""persistent_term:get(rakun_i18n_locales, undefined)""")]
+declare fn rkI18nGet() -> ?LocaleSet;
+
+#[@External.Erlang("""(fun() -> _ = persistent_term:erase(rakun_i18n_locales), _ = persistent_term:erase(rakun_i18n_loader), 0 end)()""")]
+declare fn rkI18nClear() -> i32;
+
+#[@External.Erlang("""(fun(__F) -> persistent_term:put(rakun_i18n_loader, __F), 0 end)($0)""")]
+declare fn rkI18nPutLoader(load: fn(locale: string) -> string) -> i32;
+
+#[@External.Erlang("""persistent_term:get(rakun_i18n_loader, undefined)""")]
+declare fn rkI18nLoader() -> ?fn(locale: string) -> string;
+
+// ── step 1 — the locale set ─────────────────────────────────────────────────
+
+fn letters(s: string) -> bool {
+    return s.length() > 0 && s.split("").filter({ c -> "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ".contains(c) == false }).length == 0;
+}
+
+fn digits(s: string) -> bool {
+    return s.length() > 0 && s.split("").filter({ c -> "0123456789".contains(c) == false }).length == 0;
+}
+
+// `ll` or `lll`, optionally `-RR` (two letters) or `-999` (three digits).
+pub fn wellFormedTag(tag: string) -> bool {
+    val parts = tag.split("-");
+    val lang: string = parts.at(0) ?? "";
+    val langOk = letters(lang) && (lang.length() == 2 || lang.length() == 3);
+    if (parts.length == 1) return langOk;
+    if (parts.length != 2) return false;
+    val region: string = parts.at(1) ?? "";
+    val regionOk = (letters(region) && region.length() == 2) || (digits(region) && region.length() == 3);
+    return langOk && regionOk;
+}
+
+pub fn normalizeTag(tag: string) -> string {
+    val parts = tag.trim().split("-");
+    val lang: string = parts.at(0) ?? "";
+    if (parts.length < 2) return lang.toLower();
+    val region: string = parts.at(1) ?? "";
+    return lang.toLower() + "-" + region.toUpper();
+}
+
+pub fn localesProblem(set: LocaleSet) -> string {
+    if (set.locales.length == 0) return "rakun i18n: the locale set is empty - declare at least the default locale";
+    for (set.locales) { t ->
+        if (t.contains("_")) @panic("rakun i18n: `" + t + "` separates with `_` - a locale tag separates with `-` (pt-BR)");
+        if (wellFormedTag(t) == false) @panic("rakun i18n: `" + t + "` is not a language tag (`pt`, `pt-BR`, `es-419`)");
+    };
+    val normalized = set.locales.map({ t -> normalizeTag(t) });
+    if (normalized.filter({ t -> t == normalizeTag(set.defaultLocale) }).length == 0) return "rakun i18n: the default locale `" + set.defaultLocale + "` is not in the set [" + set.locales.join(", ") + "]";
+    return "";
+}
+
+pub fn registerLocales(set: LocaleSet) -> i32 {
+    val problem = localesProblem(set);
+    if (problem != "") @panic(problem);
+    if (rkI18nGet() != null) @panic("rakun i18n: the locale set is already registered - one application, one set");
+    return rkI18nPut(LocaleSet(locales: set.locales.map({ t -> normalizeTag(t) }), defaultLocale: normalizeTag(set.defaultLocale)));
+}
+
+// Forgets the set and the dictionary loader (tests; a re-boot).
+pub fn clearLocales() -> i32 {
+    return rkI18nClear();
+}
+
+pub fn locales() -> LocaleSet {
+    val found: ?LocaleSet = rkI18nGet();
+    if (found == null) @panic("rakun i18n: no locale set is registered - call registerLocales at boot");
+    return found ?? LocaleSet(locales: [], defaultLocale: "");
+}
+
+pub fn isSupported(set: LocaleSet, tag: string) -> bool {
+    val n = normalizeTag(tag);
+    return set.locales.filter({ t -> normalizeTag(t) == n }).length > 0;
+}
+
+// ── step 2 — Accept-Language and negotiation ────────────────────────────────
+
+// `q` in per-mille: `1` → 1000, `0.8` → 800, `0.125` → 125. Anything else —
+// `abc`, ``, `1.2.3`, `2`, four decimals — is 0: a header is attacker input
+// and must not fail the request.
+pub fn qPerMille(text: string) -> i32 {
+    val t = text.trim();
+    val parts = t.split(".");
+    if (parts.length > 2) return 0;
+    val whole: string = parts.at(0) ?? "";
+    val frac: string = if (parts.length == 2) parts.at(1) ?? "" else "";
+    if (whole != "0" && whole != "1") return 0;
+    if (frac.length() > 3 || (parts.length == 2 && frac.length() > 0 && digits(frac) == false)) return 0;
+    val padded = (frac + "000").slice(0, 3);
+    val value = if (whole == "1") 1000 + toI32Local(padded) else toI32Local(padded);
+    return if (value > 1000) 0 else value;
+}
+
+fn toI32Local(s: string) -> i32 {
+    var n = 0;
+    for (s.split("")) { c -> n = n * 10 + "0123456789".indexOf(c); };
+    return n;
+}
+
+fn entryOf(part: string) -> LocaleQ {
+    val fields = part.split(";");
+    val tag: string = (fields.at(0) ?? "").trim();
+    var q = 1000;
+    for (fields.slice(1, fields.length)) { f ->
+        val kv = f.trim();
+        if (kv.startsWith("q=")) q = qPerMille(kv.slice(2, kv.length()));
+    };
+    return LocaleQ(tag: tag, q: q);
+}
+
+// Highest q first; equal q keep the header's order.
+pub fn parseAcceptLanguage(header: string) -> LocaleQ[] {
+    val entries = header.split(",").map({ p -> p.trim() }).filter({ p -> p != "" }).map({ p -> entryOf(p) });
+    var out: LocaleQ[] = [];
+    var level = 1000;
+    while (level >= 0) {
+        for (entries) { e -> if (e.q == level) out.push(e); };
+        level = level - 1;
+    };
+    return out;
+}
+
+fn languageOf(tag: string) -> string {
+    return tag.split("-").at(0) ?? "";
+}
+
+pub fn negotiate(set: LocaleSet, acceptLanguage: string, cookieValue: string) -> string {
+    if (cookieValue != "" && isSupported(set, cookieValue)) return normalizeTag(cookieValue);
+    var chosen = "";
+    for (parseAcceptLanguage(acceptLanguage)) { e ->
+        if (chosen == "" && e.q > 0 && e.tag != "*") {
+            if (isSupported(set, e.tag)) chosen = normalizeTag(e.tag);
+            val lang = languageOf(normalizeTag(e.tag));
+            if (chosen == "" && e.tag.contains("-") && isSupported(set, lang)) chosen = lang;
+        };
+    };
+    return if (chosen == "") set.defaultLocale else chosen;
+}
+
+// ── step 3 — paths ──────────────────────────────────────────────────────────
+
+fn segs(pathname: string) -> string[] {
+    return pathname.split("/").filter({ s -> s != "" });
+}
+
+pub fn localeOfPath(set: LocaleSet, pathname: string) -> ?string {
+    val first: string = segs(pathname).at(0) ?? "";
+    if (first == "" || isSupported(set, first) == false) return null;
+    return normalizeTag(first);
+}
+
+pub fn stripLocale(set: LocaleSet, pathname: string) -> string {
+    if (localeOfPath(set, pathname) == null) return pathname;
+    val rest = segs(pathname).slice(1, 99999);
+    return "/" + rest.join("/");
+}
+
+pub fn withLocale(set: LocaleSet, locale: string, pathname: string) -> string {
+    val bare = stripLocale(set, pathname);
+    val encoded = segs(bare).map({ s -> encoding.percentEncode(decodedOrSelf(s)) });
+    val tag = normalizeTag(locale);
+    return if (encoded.length == 0) "/" + tag else "/" + tag + "/" + encoded.join("/");
+}
+
+// A segment already percent-encoded is encoded once, not twice.
+fn decodedOrSelf(s: string) -> string {
+    val d = encoding.percentDecode(s);
+    return d.unwrapOr(s);
+}
+
+// ── step 4 — the filter ─────────────────────────────────────────────────────
+
+pub fn defaultExcludes() -> string[] {
+    return ["/api", "/sitemap.xml", "/robots.txt"];
+}
+
+// The default list plus every prefix `rakun.i18n.exclude` names (comma
+// separated) — an orchestrator appends its own there at boot.
+pub fn excludes() -> string[] {
+    var out: string[] = defaultExcludes();
+    for (rkProp("rakun.i18n.exclude").split(",").map({ p -> p.trim() }).filter({ p -> p != "" })) { p -> out.push(p); };
+    return out;
+}
+
+pub fn excluded(pathname: string) -> bool {
+    return excludes().filter({ p -> pathname == p || pathname.startsWith(p + "/") || (p.contains(".") && pathname.startsWith(p)) }).length > 0;
+}
+
+pub fn localeCookieName() -> string {
+    val n = rkProp("rakun.i18n.cookie");
+    return if (n == "") "RAKUN_LOCALE" else n;
+}
+
+fn cookieFrom(header: string, name: string) -> string {
+    var found = "";
+    for (header.split(";")) { part ->
+        val kv = part.trim();
+        if (found == "" && kv.startsWith(name + "=")) found = kv.slice(name.length() + 1, kv.length());
+    };
+    return found;
+}
+
+pub fn orderLocale() -> i32 {
+    return -450;
+}
+
+fn localeEntry(set: LocaleSet, req: WebRequest, chain: Chain) -> Response {
+    val path = req.path;
+    if (excluded(path)) return chain.next(req);
+    val prefixed: ?string = localeOfPath(set, path);
+    if (prefixed != null) {
+        val _n = if (requestLive()) rkReqPutSlot("locale", prefixed ?? "") else 0;
+        return chain.next(req);
+    };
+    val chosen = negotiate(set, req.header("accept-language"), cookieFrom(req.header("cookie"), localeCookieName()));
+    val query = queryOf(req.queryWire);
+    return withHeader(Response.withStatus(307, ""), "Location", withLocale(set, chosen, path) + query);
+}
+
+// The request's query rebuilt from the chain's wire (`name\tvalue` lines), each
+// part percent-encoded: `?x=1&y=%20`, `""` with none.
+pub fn queryOf(queryWire: string) -> string {
+    val pairs = queryWire.split("\n").filter({ l -> l != "" }).map({ l -> encodePair(l) });
+    return if (pairs.length == 0) "" else "?" + pairs.join("&");
+}
+
+fn encodePair(line: string) -> string {
+    val tab = line.indexOf("\t");
+    if (tab < 0) return encoding.percentEncode(line);
+    return encoding.percentEncode(line.slice(0, tab)) + "=" + encoding.percentEncode(line.slice(tab + 1, line.length()));
+}
+
+pub fn installLocaleFilter(set: LocaleSet) -> i32 {
+    return registerFilter("locale", orderLocale(), { req, chain -> localeEntry(set, req, chain) });
+}
+
+// The locale of the request in flight: the one the filter noted, else the
+// path's, else the default. Front 62's rule: it raises outside a request.
+pub fn localeOf() -> string {
+    val _d = demandRequest("localeOf()");
+    val noted = rkReqSlot("locale");
+    if (noted != "") return noted;
+    val set = locales();
+    val fromPath: ?string = localeOfPath(set, rkReqSlot("path"));
+    return fromPath ?? set.defaultLocale;
+}
+
+// Writes the locale cookie `negotiate` prefers on the next request; raising
+// during a render is front 62's phase rule.
+pub fn setLocaleCookie(locale: string) -> i32 {
+    return cookies().set(localeCookieName(), normalizeTag(locale), cookieDefaults());
+}
+
+// ── step 5 — dictionaries ───────────────────────────────────────────────────
+
+pub fn registerDictionaryLoader(load: fn(locale: string) -> string) -> i32 {
+    return rkI18nPutLoader(load);
+}
+
+fn dictionaryPolicy() -> CachePolicy {
+    return cachePolicy(CacheScope.Shared, "rakun.i18n", cacheLifeOf(0, 60, 60), []);
+}
+
+pub fn dictionaryBlob(locale: string) -> string {
+    val set = locales();
+    if (isSupported(set, locale) == false) @panic("rakun i18n: `" + locale + "` is not a declared locale [" + set.locales.join(", ") + "]");
+    val tag = normalizeTag(locale);
+    val peek: CachePeek = cachePeek(dictionaryPolicy(), [tag]);
+    if (peek.found) return peek.value;
+    val loader: ?fn(locale: string) -> string = rkI18nLoader();
+    if (loader == null) @panic("rakun i18n: no dictionary loader is registered - call registerDictionaryLoader");
+    val load: fn(locale: string) -> string = loader ?? { l -> "" };
+    val text = load(tag);
+    val _s = cacheStore(dictionaryPolicy(), [tag], text);
+    return text;
+}
+
+pub fn declaredLocaleFiles(appDir: string) -> string[] {
+    return fs.glob("**/dictionaries/*.bp", appDir).unwrapOr([]);
+}
+
+fn localeOfFile(file: string) -> string {
+    val base: string = file.split("/").at(-1) ?? file;
+    return base.slice(0, base.length() - ".bp".length());
+}
+
+// The build-time check: `""`, or the first declared locale with no file, or
+// the first file naming an undeclared locale.
+pub fn dictionaryProblem(set: LocaleSet, files: string[]) -> string {
+    val named = files.map({ f -> localeOfFile(f) });
+    var problem = "";
+    for (set.locales) { l ->
+        if (problem == "" && named.filter({ n -> normalizeTag(n) == l }).length == 0) problem = "rakun i18n: the locale `" + l + "` has no dictionary file";
+    };
+    for (files) { f ->
+        if (problem == "" && isSupported(set, localeOfFile(f)) == false) problem = "rakun i18n: `" + f + "` names an undeclared locale";
+    };
+    return problem;
+}
+
+// ── step 6 — alternates and <html lang> ─────────────────────────────────────
+
+pub fn alternatesFor(set: LocaleSet, pathname: string) -> Alternate[] {
+    val origin = rkProp("rakun.i18n.origin");
+    val bare = stripLocale(set, pathname);
+    var out: Alternate[] = set.locales.map({ l -> Alternate(hreflang: l, href: origin + withLocale(set, l, bare)) });
+    out.push(Alternate(hreflang: "x-default", href: origin + withLocale(set, set.defaultLocale, bare)));
+    return out;
+}
+
+pub fn htmlLang() -> string {
+    return localeOf();
+}

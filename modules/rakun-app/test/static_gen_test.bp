@@ -1,0 +1,422 @@
+//// rakun-app — static generation (front 60 steps 2–5, 7). Step 6's codec is
+//// `routing`'s and asserted there on both targets; `routeKinds()` is here.
+
+import {testing.asserts} from "std";
+import {io: {fs, env}} from "std";
+import {Request, rkSetProp, rkProp, beginRequest, endRequest, RequestScope, RequestPhase, rkReqPutSlot, cookies} from "rakun";
+import {rkAppReset, rkAppRegisterPage, registerRoute} from "file_router";
+import {PageRenderer, ChunkWriter, writeTo} from "ssr";
+
+fn textBody(out: ChunkWriter, text: string) -> @Task<@Result<void, string>> {
+    await writeTo(out, text);
+    return;
+}
+import {route_kinds: {RouteKind, routeKindOf}} from "routing";
+import {CacheScope, cachePolicy, cacheLifeOf, cachePeek, revalidateTag} from "rakun-cache/cache";
+import {SegmentConfig, DynamicMode, FetchCache, defaultSegmentConfig, registerSegmentConfig} from "segment_config";
+import {
+    KindDecision, decideKind, kindLetter, ParamBinding, StaticParams, registerStaticParams, expandParams,
+    PrerenderEntry, PrerenderReport, prerenderAll, prerenderPath, lookupPrerendered, serveStatic, isStale,
+    regenerate, regenerationFailures, routeKinds, staticExport, exportFileOf, payloadFileName, prerenderPolicy,
+} from "static_gen";
+import {rkStaticReset, rkStaticBump, rkStaticCount, rkStaticGaugeEnter, rkStaticGaugeExit, rkStaticGaugeMax, rkStaticDrain, rkStaticRunBounded, rkStaticNowMs} from "static_host";
+
+#[@External.Erlang("""(fun(__Ms) -> receive after __Ms -> 0 end end)($0)""")]
+declare fn sleepMs(ms: i32) -> i32;
+
+// ── renderers ───────────────────────────────────────────────────────────────
+
+fn textPage(label: string) -> PageRenderer {
+    return { req, out -> textBody(out, label) };
+}
+
+fn propPage(key: string) -> PageRenderer {
+    return { req, out -> propBody(out, key) };
+}
+
+fn propBody(out: ChunkWriter, key: string) -> @Task<@Result<void, string>> {
+    val _c = rkStaticBump("renders:" + key);
+    if (rkProp(key + ".fail") == "1") @panic("regeneration failed on purpose");
+    val slow = rkProp(key + ".slow");
+    val _s = if (slow != "") sleepMs(3000) else 0;
+    await writeTo(out, "v=" + rkProp(key));
+    return;
+}
+
+fn cookiePage() -> PageRenderer {
+    return { req, out -> cookieBody(out) };
+}
+
+fn cookieBody(out: ChunkWriter) -> @Task<@Result<void, string>> {
+    val c = cookies().get("session");
+    await writeTo(out, "session");
+    return;
+}
+
+fn sleepyPage(ms: i32) -> PageRenderer {
+    return { req, out -> sleepyBody(out, ms) };
+}
+
+fn sleepyBody(out: ChunkWriter, ms: i32) -> @Task<@Result<void, string>> {
+    val _g = rkStaticGaugeEnter("renders");
+    val _s = sleepMs(ms);
+    val _x = rkStaticGaugeExit("renders");
+    await writeTo(out, "slept");
+    return;
+}
+
+fn fresh() -> i32 {
+    val _r = rkAppReset();
+    val _s = rkStaticReset();
+    val _t = rkSetProp("rakun.cache.type", "");
+    return rkSetProp("rakun.static.concurrency", "");
+}
+
+fn tmpRoot() -> string {
+    val dir: string = env.read("BOTOPINK_TEST_TMPDIR") ?? "";
+    if (dir == "") @panic("BOTOPINK_TEST_TMPDIR is not set - botopink test sets it, and a test writes nowhere else");
+    return dir;
+}
+
+fn row(name: string, value: string) -> StaticParams {
+    return StaticParams(bindings: [ParamBinding(name: name, value: value)]);
+}
+
+fn cfg(mode: DynamicMode, dynamicParams: bool, revalidate: i32) -> SegmentConfig {
+    return SegmentConfig(dynamic: mode, dynamicParams: dynamicParams, revalidate: revalidate, fetchCache: FetchCache.Auto);
+}
+
+// ── step 2 — the truth table ────────────────────────────────────────────────
+
+fn modeOf(name: string) -> DynamicMode {
+    if (name == "ForceStatic") return DynamicMode.ForceStatic;
+    if (name == "ForceDynamic") return DynamicMode.ForceDynamic;
+    if (name == "ErrorOnDynamic") return DynamicMode.ErrorOnDynamic;
+    return DynamicMode.Auto;
+}
+
+fn holds(line: string) -> bool {
+    val f = line.split("|");
+    val mode: string = f.at(0) ?? "";
+    val dp: string = f.at(1) ?? "";
+    val hp: string = f.at(2) ?? "";
+    val pd: string = f.at(3) ?? "";
+    val td: string = f.at(4) ?? "";
+    val k: string = f.at(5) ?? "";
+    val r: string = f.at(6) ?? "";
+    val d: KindDecision = decideKind(cfg(modeOf(mode), dp == "true", -1), hp == "true", pd == "true", td == "true", "cookies");
+    return kindLetter(d.kind) == k && d.reason == r;
+}
+
+test "static: the decision's full truth table, every row" {
+    val table = [
+        "Auto|true|true|true|true|D|cookies",
+        "Auto|true|true|true|false|S|",
+        "Auto|true|true|false|true|D|cookies",
+        "Auto|true|true|false|false|S|",
+        "Auto|true|false|true|true|D|dynamic segment without generateStaticParams",
+        "Auto|true|false|true|false|D|dynamic segment without generateStaticParams",
+        "Auto|true|false|false|true|D|cookies",
+        "Auto|true|false|false|false|S|",
+        "Auto|false|true|true|true|D|cookies",
+        "Auto|false|true|true|false|S|",
+        "Auto|false|true|false|true|D|cookies",
+        "Auto|false|true|false|false|S|",
+        "Auto|false|false|true|true|S|dynamicParams false: no path is enumerated",
+        "Auto|false|false|true|false|S|dynamicParams false: no path is enumerated",
+        "Auto|false|false|false|true|D|cookies",
+        "Auto|false|false|false|false|S|",
+        "ForceStatic|true|true|true|true|S|force-static over cookies",
+        "ForceStatic|true|true|true|false|S|force-static",
+        "ForceStatic|true|true|false|true|S|force-static over cookies",
+        "ForceStatic|true|true|false|false|S|force-static",
+        "ForceStatic|true|false|true|true|S|force-static over cookies",
+        "ForceStatic|true|false|true|false|S|force-static",
+        "ForceStatic|true|false|false|true|S|force-static over cookies",
+        "ForceStatic|true|false|false|false|S|force-static",
+        "ForceStatic|false|true|true|true|S|force-static over cookies",
+        "ForceStatic|false|true|true|false|S|force-static",
+        "ForceStatic|false|true|false|true|S|force-static over cookies",
+        "ForceStatic|false|true|false|false|S|force-static",
+        "ForceStatic|false|false|true|true|S|force-static over cookies",
+        "ForceStatic|false|false|true|false|S|force-static",
+        "ForceStatic|false|false|false|true|S|force-static over cookies",
+        "ForceStatic|false|false|false|false|S|force-static",
+        "ForceDynamic|true|true|true|true|D|force-dynamic",
+        "ForceDynamic|true|true|true|false|D|force-dynamic",
+        "ForceDynamic|true|true|false|true|D|force-dynamic",
+        "ForceDynamic|true|true|false|false|D|force-dynamic",
+        "ForceDynamic|true|false|true|true|D|force-dynamic",
+        "ForceDynamic|true|false|true|false|D|force-dynamic",
+        "ForceDynamic|true|false|false|true|D|force-dynamic",
+        "ForceDynamic|true|false|false|false|D|force-dynamic",
+        "ForceDynamic|false|true|true|true|D|force-dynamic",
+        "ForceDynamic|false|true|true|false|D|force-dynamic",
+        "ForceDynamic|false|true|false|true|D|force-dynamic",
+        "ForceDynamic|false|true|false|false|D|force-dynamic",
+        "ForceDynamic|false|false|true|true|D|force-dynamic",
+        "ForceDynamic|false|false|true|false|D|force-dynamic",
+        "ForceDynamic|false|false|false|true|D|force-dynamic",
+        "ForceDynamic|false|false|false|false|D|force-dynamic",
+        "ErrorOnDynamic|true|true|true|true|S|force-static over cookies",
+        "ErrorOnDynamic|true|true|true|false|S|force-static",
+        "ErrorOnDynamic|true|true|false|true|S|force-static over cookies",
+        "ErrorOnDynamic|true|true|false|false|S|force-static",
+        "ErrorOnDynamic|true|false|true|true|S|force-static over cookies",
+        "ErrorOnDynamic|true|false|true|false|S|force-static",
+        "ErrorOnDynamic|true|false|false|true|S|force-static over cookies",
+        "ErrorOnDynamic|true|false|false|false|S|force-static",
+        "ErrorOnDynamic|false|true|true|true|S|force-static over cookies",
+        "ErrorOnDynamic|false|true|true|false|S|force-static",
+        "ErrorOnDynamic|false|true|false|true|S|force-static over cookies",
+        "ErrorOnDynamic|false|true|false|false|S|force-static",
+        "ErrorOnDynamic|false|false|true|true|S|force-static over cookies",
+        "ErrorOnDynamic|false|false|true|false|S|force-static",
+        "ErrorOnDynamic|false|false|false|true|S|force-static over cookies",
+        "ErrorOnDynamic|false|false|false|false|S|force-static",
+    ];
+    assert table.length == 64;
+    for (table) { line -> assert holds(line), line; };
+}
+
+test "static: ForceDynamic wins over generateStaticParams, and ForceStatic over a dynamic read names the conflict" {
+    assert kindLetter(decideKind(cfg(DynamicMode.ForceDynamic, true, -1), true, true, false, "").kind) == "D";
+    val s = decideKind(cfg(DynamicMode.ForceStatic, true, -1), false, false, true, "cookies");
+    assert kindLetter(s.kind) == "S" && s.reason == "force-static over cookies";
+}
+
+test "static: a dynamic pattern with no params and dynamicParams false is Static, and reason is empty only by rule 5" {
+    val d = decideKind(cfg(DynamicMode.Auto, false, -1), false, true, false, "");
+    assert kindLetter(d.kind) == "S" && d.reason != "";
+    assert decideKind(defaultSegmentConfig(), false, false, false, "").reason == "";
+}
+
+// ── step 3 — enumeration ────────────────────────────────────────────────────
+
+test "static: expandParams builds the paths of a segment, a catch-all and an optional catch-all" {
+    assert expandParams("/blog/[slug]", [row("slug", "hello")]).join(",") == "/blog/hello";
+    assert expandParams("/shop/[...slug]", [row("slug", "a/b")]).join(",") == "/shop/a/b";
+    assert expandParams("/docs/[[...slug]]", [row("slug", "")]).join(",") == "/docs";
+}
+
+test "static: a row missing a binding, carrying an extra one, or putting a slash in a segment is refused" {
+    try asserts.throwsWith({ -> expandParams("/blog/[slug]", [row("id", "1")]).length }, "binds no `slug`");
+    try asserts.throwsWith({ -> expandParams("/blog/[slug]", [StaticParams(bindings: [ParamBinding(name: "slug", value: "a"), ParamBinding(name: "extra", value: "b")])]).length }, "binds `extra`");
+    try asserts.throwsWith({ -> expandParams("/blog/[slug]", [row("slug", "a/b")]).length }, "holds a `/`");
+}
+
+test "static: two rows producing one path are refused, naming it" {
+    try asserts.throwsWith({ -> expandParams("/blog/[slug]", [row("slug", "x"), row("slug", "x")]).length }, "produce `/blog/x`");
+}
+
+// ── step 4 — the prerender pass ─────────────────────────────────────────────
+
+test "static: prerenderAll stores the static page and skips the cookie-reading one with its reason" {
+    val _f = fresh();
+    val _a = rkAppRegisterPage("about", textPage("about us"));
+    val _c = rkAppRegisterPage("account", cookiePage());
+    val report: PrerenderReport = prerenderAll(false);
+    assert report.stored == 1 && report.skippedDynamic == 1 && report.failed == 0, report.lines.join(";");
+    assert report.lines.filter({ l -> l.startsWith("skipped|/account|cookies") }).length == 1, report.lines.join(";");
+    assert routeKindOf(routeKinds(), "/about") == RouteKind.Static;
+    assert routeKindOf(routeKinds(), "/account") == RouteKind.Dynamic;
+}
+
+test "static: the fan-out renders concurrently, not one after another" {
+    val _f = fresh();
+    val names = ["r1", "r2", "r3", "r4", "r5", "r6"];
+    for (names) { n -> val _p = rkAppRegisterPage(n, sleepyPage(300)); };
+    val _k = rkSetProp("rakun.static.concurrency", "6");
+    val started = rkStaticNowMs();
+    val report = prerenderAll(false);
+    val took = rkStaticNowMs() - started;
+    assert report.stored == 6;
+    assert took < 1200, took.toString();
+}
+
+test "static: concurrency never exceeds rakun.static.concurrency" {
+    val _f = fresh();
+    for (["c1", "c2", "c3", "c4", "c5", "c6"]) { n -> val _p = rkAppRegisterPage(n, sleepyPage(100)); };
+    val _k = rkSetProp("rakun.static.concurrency", "2");
+    val report = prerenderAll(false);
+    assert report.stored == 6;
+    assert rkStaticGaugeMax("renders") <= 2;
+}
+
+test "static: prerendering a path no route answers raises, naming it" {
+    val _f = fresh();
+    try asserts.throwsWith({ -> prerenderPath("/missing", false).html.length() }, "`/missing`");
+}
+
+test "static: the build hash is stable for unchanged output and moves with one byte" {
+    val _f = fresh();
+    val _p = rkAppRegisterPage("hash", propPage("hash.value"));
+    val _v = rkSetProp("hash.value", "abc");
+    val a = prerenderPath("/hash", false);
+    val b = prerenderPath("/hash", false);
+    val _w = rkSetProp("hash.value", "abd");
+    val c = prerenderPath("/hash", false);
+    assert a.buildHash == b.buildHash;
+    assert a.buildHash != c.buildHash;
+}
+
+test "static: entries are read through front 12's store, shared scope, namespace rakun.prerender" {
+    val _f = fresh();
+    val _p = rkAppRegisterPage("stored", textPage("kept"));
+    val _e = prerenderPath("/stored", false);
+    val peek = cachePeek(cachePolicy(CacheScope.Shared, "rakun.prerender", cacheLifeOf(0, 31536000, 31536000), []), ["/stored"]);
+    assert peek.found;
+    assert peek.value.contains("\"html\":\"kept\"");
+}
+
+// ── step 5 — revalidation and single flight ─────────────────────────────────
+
+fn setupRevalidating(path: string, key: string, revalidate: i32) -> PrerenderEntry {
+    val _p = rkAppRegisterPage(path, propPage(key));
+    val _c = registerSegmentConfig(path, cfg(DynamicMode.Auto, true, revalidate));
+    val _v = rkSetProp(key, "old");
+    val _s = rkSetProp(key + ".slow", "");
+    val _x = rkSetProp(key + ".fail", "");
+    return prerenderPath("/" + path, false);
+}
+
+test "static: a fresh entry is served with no regeneration" {
+    val _f = fresh();
+    val _e = setupRevalidating("fresh", "fresh.v", 3600);
+    val before = rkStaticCount("renders:fresh.v");
+    val served: ?PrerenderEntry = serveStatic("/fresh");
+    assert served != null;
+    assert rkStaticDrain() == 0;
+    assert rkStaticCount("renders:fresh.v") == before;
+}
+
+test "static: a stale entry is served at once while one regeneration runs, and then the new one is served" {
+    val _f = fresh();
+    val _e = setupRevalidating("stale", "stale.v", 1);
+    val _w = sleepMs(1100);
+    val _v = rkSetProp("stale.v", "new");
+    val _s = rkSetProp("stale.v.slow", "1");
+    val started = rkStaticNowMs();
+    val served: ?PrerenderEntry = serveStatic("/stale");
+    val took = rkStaticNowMs() - started;
+    val html = (served ?? PrerenderEntry(path: "", html: "", payload: "", tags: [], revalidateAt: rkStaticNowMs(), buildHash: "")).html;
+    assert html == "v=old";
+    assert took < 1000, took.toString();
+    val _d = rkStaticDrain();
+    val after: ?PrerenderEntry = serveStatic("/stale");
+    val next = after ?? PrerenderEntry(path: "", html: "", payload: "", tags: [], revalidateAt: rkStaticNowMs(), buildHash: "");
+    assert next.html == "v=new";
+    assert isStale(next) == false;
+}
+
+test "static: fifty concurrent requests for one stale path start one regeneration" {
+    val _f = fresh();
+    val _e = setupRevalidating("flight", "flight.v", 3);
+    val _w = sleepMs(3100);
+    val before = rkStaticCount("renders:flight.v");
+    var thunks: Array<fn() -> string> = [];
+    for (Array.range(0, 50)) { i -> thunks.push({ -> serveOne("/flight") }); };
+    val results = rkStaticRunBounded(50, thunks);
+    val _d = rkStaticDrain();
+    val renders = rkStaticCount("renders:flight.v") - before;
+    val odd = results.filter({ r -> r != "v=old" });
+    assert odd.length == 0, odd.join(";");
+    assert renders == 1, renders.toString();
+}
+
+fn serveOne(path: string) -> string {
+    val e: ?PrerenderEntry = serveStatic(path);
+    val entry = e ?? PrerenderEntry(path: "", html: "none", payload: "", tags: [], revalidateAt: rkStaticNowMs(), buildHash: "");
+    return entry.html;
+}
+
+test "static: a regeneration that raises keeps the stale entry, is logged once, and a later one succeeds" {
+    val _f = fresh();
+    val _e = setupRevalidating("fails", "fails.v", 1);
+    val _w = sleepMs(1100);
+    val logged = regenerationFailures().length;
+    val _x = rkSetProp("fails.v.fail", "1");
+    val _s = regenerate("/fails");
+    val _d = rkStaticDrain();
+    assert serveOne("/fails") == "v=old";
+    val _dd = rkStaticDrain();
+    assert regenerationFailures().length >= logged + 1;
+    val _y = rkSetProp("fails.v.fail", "");
+    val _v = rkSetProp("fails.v", "fixed");
+    val _r = regenerate("/fails");
+    val _z = rkStaticDrain();
+    assert serveOne("/fails") == "v=fixed";
+}
+
+test "static: revalidateTag over a tag the entry carries marks it stale - one store" {
+    val _f = fresh();
+    val e = setupRevalidating("tagged", "tagged.v", 3600);
+    assert isStale(e) == false;
+    val _t = revalidateTag("path:/tagged");
+    assert isStale(e);
+}
+
+test "static: revalidate -1 never goes stale" {
+    val _f = fresh();
+    val _p = rkAppRegisterPage("forever", textPage("x"));
+    val e = prerenderPath("/forever", false);
+    assert e.revalidateAt == rkStaticNowMs() * 0 - 1;
+    assert isStale(e) == false;
+}
+
+test "static: a draft request bypasses serveStatic and stores nothing" {
+    val _f = fresh();
+    val _p = rkAppRegisterPage("draft", textPage("published"));
+    val _e = prerenderPath("/draft", false);
+    val _o = beginRequest(RequestScope(id: "d", phase: RequestPhase.Render, method: "GET", path: "/draft", query: "", headersWire: "", strict: false));
+    val _k = rkReqPutSlot("draft", "1");
+    val served: ?PrerenderEntry = serveStatic("/draft");
+    val _z = endRequest();
+    assert served == null;
+}
+
+// ── step 7 — static export ──────────────────────────────────────────────────
+
+fn exportDir(name: string) -> string {
+    return tmpRoot() + "/rakun-app-export/" + name;
+}
+
+test "static: the export writes index.html per path and the payload beside it, byte-identical on a re-run" {
+    val _f = fresh();
+    val _h = rkAppRegisterPage("", textPage("home"));
+    val _b = rkAppRegisterPage("blog/[slug]", propPage("export.v"));
+    val _v = rkSetProp("export.v", "post");
+    val _p = registerStaticParams("blog/[slug]", { -> helloRows() });
+    val out = exportDir("site");
+    val report = staticExport(out);
+    val home = fs.readText(out + "/index.html").unwrapOr("");
+    val post = fs.readText(out + "/blog/hello/index.html").unwrapOr("");
+    assert report.stored == 2, report.lines.join(";");
+    assert home == "home" && post == "v=post";
+    assert fs.exists(out + "/blog/hello/" + payloadFileName());
+    val _again = staticExport(out);
+    assert fs.readText(out + "/blog/hello/index.html").unwrapOr("") == post;
+}
+
+fn helloRows() -> @Task<StaticParams[]> {
+    val rows: StaticParams[] = [StaticParams(bindings: [ParamBinding(name: "slug", value: "hello")])];
+    return rows;
+}
+
+test "static: a route reaching cookies() fails the export with front 62's strict message" {
+    val _f = fresh();
+    val _c = rkAppRegisterPage("account", cookiePage());
+    try asserts.throwsWith({ -> staticExport(exportDir("strict")).stored }, "rakun request: cookies() read the in-flight request while prerendering");
+}
+
+test "static: a route handler fails the export, naming it" {
+    val _f = fresh();
+    val _r = registerRoute("GET", "api/data", "data", { req -> 0 });
+    try asserts.throwsWith({ -> staticExport(exportDir("handler")).stored }, "`/api/data` is a route handler");
+}
+
+test "static: the export refuses to write outside its directory" {
+    assert exportFileOf("/out", "/blog/x") == "/out/blog/x/index.html";
+    val src: string = fs.readText("src/static_gen.bp").unwrapOr("");
+    assert src.contains("path.isInside(outDir, file) == false");
+}

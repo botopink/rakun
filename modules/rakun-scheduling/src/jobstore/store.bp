@@ -1,0 +1,239 @@
+//// rakun-scheduling — the durable job store (front 84 steps 1 and 2).
+////
+//// Front 16 owns work that may be missed; this store owns work that may not.
+//// Jobs, triggers and every execution live in three tables
+//// (`rakun_job`, `rakun_job_trigger`, `rakun_job_history`) on
+//// `rakun.scheduling.jobstore.datasource` — a dedicated pool when set, the
+//// application's default datasource otherwise.
+////
+//// A job is a name, a group, a handler and its data; the handler is a
+//// function registered in the node (`registerJobHandler`, or the line
+//// `#[jobs]` emits for each `#[persistentJob]` method). Registering a job
+//// twice is one row: a CHANGED definition replaces the stored one only when
+//// `rakun.scheduling.overwrite-existing-jobs=true`, and otherwise refuses the
+//// boot naming the job — the old definition never runs silently. A trigger
+//// whose cron does not parse (front 16's parser: six fields, seconds first),
+//// or whose `endAt` precedes its `startAt`, refuses the boot.
+////
+//// Job data is a querystring (`jobData` / `jobField`): `std/json` has no
+//// structured value (contracts § 3).
+////
+//// Time is `jobClock()`: the wall clock in milliseconds, or the instant a test
+//// pinned with `setJobClock` — the scheduler never reads another clock.
+
+import {rkProp, toI32} from "rakun";
+import {param, Row, Rows, sqlTemplate, defaultDataSourceName} from "rakun-data";
+import {cronProblem, compileCron, nextFire, rkI64, rkFormatUtc} from "cron";
+
+pub type MisfirePolicy {
+    FireNow,
+    SkipToNext,
+    FireAll,
+}
+
+pub type JobDetail(
+    name: string,
+    group: string,
+    handler: string,
+    data: string,
+    durable: bool,
+)
+
+pub type Trigger(
+    name: string,
+    job: string,
+    cron: string,
+    startAt: i32,
+    endAt: i32,
+    misfire: MisfirePolicy,
+    retries: i32,
+    backoffMs: i32,
+)
+
+// ── the clock ───────────────────────────────────────────────────────────────
+
+#[@External.Erlang("""persistent_term:get(rakun_job_clock, erlang:system_time(millisecond))""")]
+pub declare fn jobClock() -> i32;
+#[@External.Erlang("""(fun(__T) -> persistent_term:put(rakun_job_clock, __T), __T end)($0)""")]
+pub declare fn setJobClock(ms: i32) -> i32;
+#[@External.Erlang("""(fun(__D) -> __T = persistent_term:get(rakun_job_clock, erlang:system_time(millisecond)) + __D, persistent_term:put(rakun_job_clock, __T), __T end)($0)""")]
+pub declare fn advanceJobClock(ms: i32) -> i32;
+#[@External.Erlang("""(fun() -> persistent_term:erase(rakun_job_clock), 0 end)()""")]
+pub declare fn clearJobClock() -> i32;
+#[@External.Erlang("""calendar:rfc3339_to_system_time(binary_to_list($0), [{unit, millisecond}])""")]
+pub declare fn instantOf(rfc3339: string) -> i32;
+#[@External.Erlang("""(fun(__X) -> __X end)($0)""")]
+pub declare fn msOf(x: i64) -> i32;
+
+pub fn formatInstant(ms: i32) -> string {
+    return rkFormatUtc(rkI64(ms));
+}
+
+// The first instant of `cron` strictly after `after` (UTC); -1 when none.
+pub fn cronAfter(cron: string, after: i32) -> i32 {
+    return msOf(nextFire(compileCron(cron), rkI64(after), 0));
+}
+
+// ── job data ────────────────────────────────────────────────────────────────
+
+#[@External.Erlang("""(fun(__Ps) -> unicode:characters_to_binary(uri_string:compose_query([{unicode:characters_to_list(__K), unicode:characters_to_list(__V)} || {__K, __V} <- __Ps], [{encoding, utf8}])) end)($0)""")]
+pub declare fn jobData(pairs: Array<#(string, string)>) -> string;
+#[@External.Erlang("""(fun(__D, __K) -> case uri_string:dissect_query(__D) of __L when is_list(__L) -> case [unicode:characters_to_binary(__V) || {__K2, __V} <- __L, unicode:characters_to_binary(__K2) =:= __K, __V =/= true] of [__V1 | _] -> __V1; [] -> <<>> end; _ -> <<>> end end)($0, $1)""")]
+pub declare fn jobField(data: string, key: string) -> string;
+#[@External.Erlang("""(fun(__D) -> case uri_string:dissect_query(__D) of __L when is_list(__L) -> [{unicode:characters_to_binary(__K), case __V of true -> <<>>; _ -> unicode:characters_to_binary(__V) end} || {__K, __V} <- __L]; _ -> [] end end)($0)""")]
+pub declare fn jobFields(data: string) -> Array<#(string, string)>;
+
+// ── handlers (per node) ─────────────────────────────────────────────────────
+
+#[@External.Erlang("""(fun(__N, __C, __F) -> persistent_term:put({rakun_job_handler, __N}, {__C, __F}), __L = persistent_term:get(rakun_job_handlers, []), case lists:member(__N, __L) of true -> ok; false -> persistent_term:put(rakun_job_handlers, __L ++ [__N]) end, 0 end)($0, $1, $2)""")]
+declare fn storeHandler(name: string, cron: string, run: fn(data: string) -> string) -> i32;
+#[@External.Erlang("""(fun(__N) -> case persistent_term:get({rakun_job_handler, __N}, undefined) of undefined -> false; _ -> true end end)($0)""")]
+pub declare fn hasJobHandler(name: string) -> bool;
+#[@External.Erlang("""(fun(__N) -> case persistent_term:get({rakun_job_handler, __N}, undefined) of undefined -> <<>>; {__C, _} -> __C end end)($0)""")]
+pub declare fn declaredCron(name: string) -> string;
+#[@External.Erlang("""(fun(__N, __D) -> case persistent_term:get({rakun_job_handler, __N}, undefined) of undefined -> erlang:error({panic, <<"rakun-scheduling: no handler is registered in this node for job `", __N/binary, "`">>}); {_, __F} -> __F(__D) end end)($0, $1)""")]
+pub declare fn runJobHandler(name: string, data: string) -> string;
+#[@External.Erlang("""persistent_term:get(rakun_job_handlers, [])""")]
+pub declare fn jobHandlerNames() -> string[];
+#[@External.Erlang("""(fun(__N) -> persistent_term:erase({rakun_job_handler, __N}), persistent_term:put(rakun_job_handlers, persistent_term:get(rakun_job_handlers, []) -- [__N]), 0 end)($0)""")]
+pub declare fn forgetJobHandler(name: string) -> i32;
+
+// `cron` is the schedule the handler declares ("" for none); a trigger for
+// this job must use it.
+pub fn registerJobHandler(name: string, cron: string, run: fn(data: string) -> string) -> i32 {
+    if (cron != "") {
+        val problem = cronProblem(cron);
+        if (problem != "") @panic("rakun-scheduling: job `" + name + "`: " + problem);
+    };
+    return storeHandler(name, cron, run);
+}
+
+// What the `#[jobs]` line calls.
+pub fn rkPersistentJob(name: string, cron: string, run: fn(data: string) -> string) -> i32 {
+    return registerJobHandler(name, cron, run);
+}
+
+// ── the schema ──────────────────────────────────────────────────────────────
+
+pub fn jobStoreDataSource() -> string {
+    val ds = rkProp("rakun.scheduling.jobstore.datasource").trim();
+    return if (ds == "") defaultDataSourceName() else ds;
+}
+
+pub fn jobStoreSchema() -> string[] {
+    return [
+        "CREATE TABLE IF NOT EXISTS rakun_job (name text, grp text, handler text, data text, durable text, state text)",
+        "CREATE TABLE IF NOT EXISTS rakun_job_trigger (name text, job text, cron text, start_at integer, end_at integer, misfire text, retries integer, backoff_ms integer, state text, owner text, lease_until integer, next_fire integer, prev_fire integer)",
+        "CREATE TABLE IF NOT EXISTS rakun_job_history (id integer, job text, trig text, node text, window_at integer, started integer, ended integer, outcome text, detail text)",
+    ];
+}
+
+pub fn installJobStore(ds: string) -> i32 {
+    for (jobStoreSchema()) { s -> val _u = sqlTemplate(ds).update(s, []); };
+    return 0;
+}
+
+fn overwrite() -> bool {
+    return rkProp("rakun.scheduling.overwrite-existing-jobs").trim() == "true";
+}
+
+pub fn misfireName(m: MisfirePolicy) -> string {
+    return case m { FireNow -> "FireNow"; SkipToNext -> "SkipToNext"; FireAll -> "FireAll"; };
+}
+
+pub fn triggerProblem(t: Trigger) -> string {
+    val c = cronProblem(t.cron);
+    if (c != "") return "rakun-scheduling: trigger `" + t.name + "` has a cron that does not parse - " + c;
+    if (t.endAt > 0 && t.endAt < t.startAt) return "rakun-scheduling: trigger `" + t.name + "` ends (" + t.endAt.toString() + ") before it starts (" + t.startAt.toString() + ")";
+    if (t.retries < 0 || t.backoffMs < 0) return "rakun-scheduling: trigger `" + t.name + "` has a negative retry count or backoff";
+    val declared = declaredCron(t.job);
+    if (declared != "" && declared != t.cron) return "rakun-scheduling: trigger `" + t.name + "` fires `" + t.cron + "`, and job `" + t.job + "` declares `" + declared + "` on its #[persistentJob]";
+    return "";
+}
+
+fn one(rows: Rows) -> ?Row {
+    return rows.first();
+}
+
+// Registers (or confirms) `job`; answers 1 when a row was written.
+pub fn registerJob(ds: string, job: JobDetail) -> i32 {
+    val sql = sqlTemplate(ds);
+    val found: ?Row = one(sql.query("SELECT name, grp, handler, data, durable, state FROM rakun_job WHERE name = :n AND grp = :g", [param("n", job.name), param("g", job.group)]));
+    val durable = if (job.durable) "true" else "false";
+    if (found == null) return sql.update("INSERT INTO rakun_job (name, grp, handler, data, durable, state) VALUES (:n, :g, :h, :d, :u, 'active')", [param("n", job.name), param("g", job.group), param("h", job.handler), param("d", job.data), param("u", durable)]);
+    val row = found ?? Row(columns: [], values: []);
+    val same = row.get("handler") == job.handler && row.get("data") == job.data && row.get("durable") == durable;
+    if (same) return sql.update("UPDATE rakun_job SET state = 'active' WHERE name = :n AND grp = :g AND state = 'orphaned'", [param("n", job.name), param("g", job.group)]);
+    if (overwrite() == false) @panic("rakun-scheduling: job `" + job.group + "." + job.name + "` is stored with a different definition - set rakun.scheduling.overwrite-existing-jobs=true to replace it, or rename the job");
+    return sql.update("UPDATE rakun_job SET handler = :h, data = :d, durable = :u, state = 'active' WHERE name = :n AND grp = :g", [param("n", job.name), param("g", job.group), param("h", job.handler), param("d", job.data), param("u", durable)]);
+}
+
+// Registers (or confirms) trigger `t`; its first fire is the first cron
+// instant at or after max(now, startAt).
+pub fn registerTriggerOn(ds: string, t: Trigger) -> i32 {
+    val problem = triggerProblem(t);
+    if (problem != "") @panic(problem);
+    val sql = sqlTemplate(ds);
+    val found: ?Row = one(sql.query("SELECT name, job, cron, start_at, end_at, misfire, retries, backoff_ms FROM rakun_job_trigger WHERE name = :n", [param("n", t.name)]));
+    val now = jobClock();
+    val origin = if (t.startAt > now) t.startAt - 1 else now;
+    val first = cronAfter(t.cron, origin);
+    if (found == null) return sql.update("INSERT INTO rakun_job_trigger (name, job, cron, start_at, end_at, misfire, retries, backoff_ms, state, owner, lease_until, next_fire, prev_fire) VALUES (:n, :j, :c, :s, :e, :m, :r, :b, 'waiting', '', 0, :f, 0)", [
+        param("n", t.name), param("j", t.job), param("c", t.cron), param("s", t.startAt.toString()), param("e", t.endAt.toString()),
+        param("m", misfireName(t.misfire)), param("r", t.retries.toString()), param("b", t.backoffMs.toString()), param("f", first.toString()),
+    ]);
+    val row = found ?? Row(columns: [], values: []);
+    val same = row.get("job") == t.job && row.get("cron") == t.cron && row.int("start_at") == t.startAt && row.int("end_at") == t.endAt && row.get("misfire") == misfireName(t.misfire) && row.int("retries") == t.retries && row.int("backoff_ms") == t.backoffMs;
+    if (same) return 0;
+    if (overwrite() == false) @panic("rakun-scheduling: trigger `" + t.name + "` is stored with a different definition - set rakun.scheduling.overwrite-existing-jobs=true to replace it, or rename the trigger");
+    return sql.update("UPDATE rakun_job_trigger SET job = :j, cron = :c, start_at = :s, end_at = :e, misfire = :m, retries = :r, backoff_ms = :b, next_fire = :f WHERE name = :n", [
+        param("n", t.name), param("j", t.job), param("c", t.cron), param("s", t.startAt.toString()), param("e", t.endAt.toString()),
+        param("m", misfireName(t.misfire)), param("r", t.retries.toString()), param("b", t.backoffMs.toString()), param("f", first.toString()),
+    ]);
+}
+
+// The job (group `DEFAULT`, handler = the job name) and its trigger, on the
+// job store's datasource. Answers how many rows were written.
+pub fn registerTrigger(t: Trigger, data: string) -> i32 {
+    val ds = jobStoreDataSource();
+    val _i = installJobStore(ds);
+    val j = registerJob(ds, JobDetail(name: t.job, group: "DEFAULT", handler: t.job, data: data, durable: true));
+    return j + registerTriggerOn(ds, t);
+}
+
+// At boot: every stored job whose handler this node does not register is
+// `orphaned` with its triggers — kept, with its history, and never fired.
+// Answers how many were orphaned.
+pub fn orphanJobs(ds: string) -> i32 {
+    val sql = sqlTemplate(ds);
+    val names = jobHandlerNames();
+    val rows: Rows = sql.query("SELECT name, handler, state FROM rakun_job", []);
+    var n = 0;
+    for (rows.toList()) { r ->
+        if (names.indexOf(r.get("handler")) < 0 && r.get("state") != "orphaned") {
+            val _j = sql.update("UPDATE rakun_job SET state = 'orphaned' WHERE name = :n", [param("n", r.get("name"))]);
+            val _t = sql.update("UPDATE rakun_job_trigger SET state = 'orphaned' WHERE job = :n", [param("n", r.get("name"))]);
+            n = n + 1;
+        };
+    };
+    return n;
+}
+
+// ── reads ───────────────────────────────────────────────────────────────────
+
+pub fn jobStatusOn(ds: string, trigger: string) -> string {
+    val r: ?Row = one(sqlTemplate(ds).query("SELECT state FROM rakun_job_trigger WHERE name = :n", [param("n", trigger)]));
+    val row = r ?? Row(columns: ["state"], values: [""]);
+    return row.get("state");
+}
+
+pub fn storedDataOn(ds: string, job: string) -> string {
+    val r: ?Row = one(sqlTemplate(ds).query("SELECT data FROM rakun_job WHERE name = :n", [param("n", job)]));
+    val row = r ?? Row(columns: ["data"], values: [""]);
+    return row.get("data");
+}
+
+pub fn countRows(ds: string, table: string, column: string, value: string) -> i32 {
+    val rows: Rows = sqlTemplate(ds).query("SELECT " + column + " FROM " + table + " WHERE " + column + " = :v", [param("v", value)]);
+    return rows.rowCount();
+}

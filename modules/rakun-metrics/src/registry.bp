@@ -1,0 +1,163 @@
+//// rakun-metrics — the meter registry (front 75 steps 1 and 6).
+////
+//// Four kinds: a counter only goes up, a gauge is a function sampled at
+//// scrape time (never on the hot path), a timer keeps count, total, max and
+//// histogram buckets in microseconds, and a distribution summary is a timer
+//// without the time unit. A meter is its name plus its tag SET: the host
+//// sorts the tags, so `[a, b]` and `[b, a]` are one series, and registering
+//// a meter twice answers the same one without resetting it.
+////
+//// `Counter` and `Timer` carry the encoded tag key, resolved once at
+//// registration: `increment` is one `ets:update_counter/3`. The common tags
+//// (`rakun.metrics.tags.*`), the denied prefixes
+//// (`rakun.metrics.enable.<prefix>=false` — never registered, every write a
+//// no-op), the renamed tag keys (`rakun.metrics.rename.<from>=<to>`) and the
+//// SLO buckets (`rakun.metrics.distribution.slo.<name>`) apply at
+//// registration, in the host (`rakun_metrics.erl`).
+////
+//// There is no `#[timed]`: a decorator cannot wrap the body it annotates, so
+//// explicit timing is the combinator `timed(name, tags, { -> … })`.
+
+import {component, rkScan, rkSingleton, rkEnter, rkDone} from "rakun";
+
+pub type Tag(key: string, value: string)
+
+#[@External.Erlang("rakun_metrics", "register")]
+pub declare fn rkMetricsRegister(kind: string, name: string, tags: Array<#(string, string)>) -> string;
+
+#[@External.Erlang("rakun_metrics", "counter_inc")]
+pub declare fn rkMetricsCounterInc(name: string, tagKey: string, delta: i32) -> i32;
+
+#[@External.Erlang("rakun_metrics", "counter_value")]
+pub declare fn rkMetricsCounterValue(name: string, tagKey: string) -> i32;
+
+#[@External.Erlang("rakun_metrics", "gauge")]
+pub declare fn rkMetricsGauge(name: string, tags: Array<#(string, string)>, read: fn() -> i32) -> i32;
+
+#[@External.Erlang("rakun_metrics", "timer_record")]
+pub declare fn rkMetricsTimerRecord(name: string, tagKey: string, value: i32) -> i32;
+
+#[@External.Erlang("rakun_metrics", "timer_stats")]
+pub declare fn rkMetricsTimerStats(name: string, tagKey: string) -> string;
+
+#[@External.Erlang("rakun_metrics", "timed")]
+pub declare fn rkMetricsTimed<T>(name: string, tags: Array<#(string, string)>, run: fn() -> T) -> T;
+
+#[@External.Erlang("rakun_metrics", "meter_names")]
+pub declare fn rkMetricsNames() -> string[];
+
+#[@External.Erlang("rakun_metrics", "prometheus")]
+pub declare fn rkMetricsPrometheus(prefix: string) -> string;
+
+#[@External.Erlang("rakun_metrics", "reset")]
+pub declare fn rkMetricsReset() -> i32;
+
+#[@External.Erlang("rakun_metrics", "install")]
+pub declare fn rkMetricsInstall() -> i32;
+
+#[@External.Erlang("rakun_metrics", "common_reload")]
+pub declare fn rkMetricsCommonReload() -> i32;
+
+#[@External.Erlang("rakun_metrics", "validate_distribution")]
+declare fn rkMetricsValidateDistribution() -> i32;
+
+fn pairs(tags: Tag[]) -> Array<#(string, string)> {
+    return tags.map({ t -> #(t.key, t.value) });
+}
+
+pub type Counter(name: string, tagKey: string) {
+    pub fn increment(self: Self, delta: i32) -> i32 {
+        return rkMetricsCounterInc(self.name, self.tagKey, delta);
+    }
+
+    pub fn count(self: Self) -> i32 {
+        return rkMetricsCounterValue(self.name, self.tagKey);
+    }
+}
+
+pub type Timer(name: string, tagKey: string) {
+    // A sample: microseconds for a timer, the summary's own unit for a summary.
+    pub fn record(self: Self, micros: i32) -> i32 {
+        return rkMetricsTimerRecord(self.name, self.tagKey, micros);
+    }
+
+    pub fn count(self: Self) -> i32 {
+        return toInt(stat(self, 0));
+    }
+
+    pub fn totalMicros(self: Self) -> i32 {
+        return toInt(stat(self, 1));
+    }
+
+    pub fn maxMicros(self: Self) -> i32 {
+        return toInt(stat(self, 2));
+    }
+}
+
+fn stat(t: Timer, i: i32) -> string {
+    val f: string[] = rkMetricsTimerStats(t.name, t.tagKey).split("\t");
+    return f.at(i) ?? "0";
+}
+
+#[@External.Erlang("""(fun(__S) -> try binary_to_integer(__S) catch _:_ -> 0 end end)($0)""")]
+declare fn toInt(s: string) -> i32;
+
+pub fn counter(name: string, tags: Tag[]) -> Counter {
+    return Counter(name: name, tagKey: rkMetricsRegister("counter", name, pairs(tags)));
+}
+
+// `read` is not called here — only when an exporter asks.
+pub fn gauge(name: string, tags: Tag[], read: fn() -> i32) -> i32 {
+    return rkMetricsGauge(name, pairs(tags), read);
+}
+
+pub fn timer(name: string, tags: Tag[]) -> Timer {
+    return Timer(name: name, tagKey: rkMetricsRegister("timer", name, pairs(tags)));
+}
+
+pub fn summary(name: string, tags: Tag[]) -> Timer {
+    return Timer(name: name, tagKey: rkMetricsRegister("summary", name, pairs(tags)));
+}
+
+// Runs `run`, recording its duration under `outcome=ok`, or `outcome=error`
+// when it raises — the raise then propagates.
+pub fn timed<T>(name: string, tags: Tag[], run: fn() -> T) -> T {
+    return rkMetricsTimed(name, pairs(tags), run);
+}
+
+pub fn meterNames() -> string[] {
+    return rkMetricsNames();
+}
+
+// The Prometheus text exposition of every series.
+pub fn prometheusText() -> string {
+    return rkMetricsPrometheus("");
+}
+
+// The same, restricted to the meters whose name starts with `prefix`.
+pub fn prometheusTextFor(prefix: string) -> string {
+    return rkMetricsPrometheus(prefix);
+}
+
+// Refuses a `rakun.metrics.distribution.slo.*` value that is not a list of
+// durations, naming the property and the value.
+pub fn validateDistribution() -> i32 {
+    return rkMetricsValidateDistribution();
+}
+
+// The injectable handle: a field of this type is wired by the container, the
+// analogue of Spring injecting a `MeterRegistry`.
+#[component]
+pub type MeterRegistry() {
+    pub fn counter(self: Self, name: string, tags: Tag[]) -> Counter {
+        return Counter(name: name, tagKey: rkMetricsRegister("counter", name, pairs(tags)));
+    }
+
+    pub fn timer(self: Self, name: string, tags: Tag[]) -> Timer {
+        return Timer(name: name, tagKey: rkMetricsRegister("timer", name, pairs(tags)));
+    }
+
+    pub fn gauge(self: Self, name: string, tags: Tag[], read: fn() -> i32) -> i32 {
+        return rkMetricsGauge(name, pairs(tags), read);
+    }
+}

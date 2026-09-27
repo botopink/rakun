@@ -1,0 +1,158 @@
+//// rakun-metrics — tracing (front 75 step 8).
+////
+//// PROPAGATION is front 11's: its chain entry at `orderMetrics()` continues an
+//// inbound `traceparent` (trace id, parent span id AND the trace-flags byte)
+//// or starts a trace, and every span id lives on the request process's stack.
+//// THE SAMPLING DECISION is made once, at the edge: this module's entry at
+//// `orderMetrics() + 1` — inside front 11's — leaves an adopted header's flag
+//// alone (a downstream service never re-decides) and, for a trace minted
+//// here, draws against `rakun.tracing.sampling.probability` (default 0.1).
+//// The flag travels in every outgoing `traceparent`.
+////
+//// EXPORT. A span stop event in a sampled trace is buffered (bounded — past
+//// the cap the oldest is dropped) as an OTLP span; `export.bp` pushes the
+//// buffer. `exportedSpanCount()` counts spans accepted for export.
+////
+//// CORRELATION: `traceId()` / `spanId()` are what front 17 reads; this module
+//// never formats a log line.
+
+import {Response, rkProp} from "rakun";
+import {WebRequest, Chain, registerFilter, orderMetrics, chainNames} from "rakun-web";
+import {
+    Span,
+    rkSpanCurrent,
+    rkSpanFreshTraceId,
+    rkSpanFreshSpanId,
+    rkSpanNowMicros,
+    rkSpanPush,
+    rkSpanPop,
+    rkSpanEmitStart,
+    rkSpanEmitStop,
+    rkSpanFlags,
+    rkSpanSetFlags,
+    rkSpanParent,
+    currentTraceparent,
+    continueTrace,
+    validTraceparent,
+    subscribeSpans,
+} from "rakun-actuator-api";
+
+#[@External.Erlang("rakun_metrics", "span_count")]
+pub declare fn rkMetricsSpanCount() -> i32;
+
+#[@External.Erlang("rakun_metrics", "span_take")]
+pub declare fn rkMetricsSpanTake() -> string;
+
+#[@External.Erlang("rakun_metrics", "span_buffered")]
+pub declare fn rkMetricsSpanBuffered() -> i32;
+
+#[@External.Erlang("rakun_metrics", "span_cap")]
+pub declare fn rkMetricsSpanCap() -> i32;
+
+#[@External.Erlang("rakun_metrics", "span_from_event")]
+declare fn rkMetricsSpanFromEvent(event: string, measurementsJson: string, metadataJson: string) -> i32;
+
+#[@External.Erlang("rakun_metrics", "span_subscribe_once")]
+declare fn rkMetricsSpanSubscribeOnce() -> bool;
+
+#[@External.Erlang("rakun_metrics", "sample")]
+declare fn rkMetricsSample(probability: string) -> bool;
+
+#[@External.Erlang("rakun_metrics", "open_span_put")]
+declare fn rkMetricsOpenSpanPut(id: string, span: Span) -> i32;
+
+#[@External.Erlang("rakun_metrics", "open_span_take")]
+declare fn rkMetricsOpenSpanTake(id: string) -> ?Span;
+
+fn current(i: i32) -> string {
+    val c: string = rkSpanCurrent();
+    if (c == "") return "";
+    val parts: string[] = c.split("\t");
+    return parts.at(i) ?? "";
+}
+
+// 32 hex characters; `""` outside a trace.
+pub fn traceId() -> string {
+    return current(0);
+}
+
+// 16 hex characters; `""` outside a trace.
+pub fn spanId() -> string {
+    return current(1);
+}
+
+// `""` when the current span is the root.
+pub fn parentSpanId() -> string {
+    return rkSpanParent();
+}
+
+pub fn sampled() -> bool {
+    return traceId() != "" && rkSpanFlags() == "01";
+}
+
+// The header to send onward; `""` outside a trace.
+pub fn traceparent() -> string {
+    return currentTraceparent();
+}
+
+// Continues a well-formed inbound header in this process (trace id, parent and
+// flag); a malformed one is ignored. Public because a test cannot build a
+// `Request` carrying a header.
+pub fn adoptTraceparent(header: string) -> bool {
+    return continueTrace(header);
+}
+
+// Opens a child of the current span (or a root) and answers its id. Spelled
+// `openSpan`, not the spec's `startSpan`: rakun-actuator-api exports a
+// `startSpan`, and a program holding both refuses the package-form import of
+// either (language-gaps.md).
+pub fn openSpan(name: string) -> string {
+    val inTrace = traceId() != "";
+    val trace = if (inTrace) traceId() else rkSpanFreshTraceId();
+    val parent = if (inTrace) spanId() else "";
+    val id: string = rkSpanFreshSpanId();
+    val _p = rkSpanPush(trace, id);
+    val span = Span(name: name, traceId: trace, spanId: id, parentId: parent, startedAt: rkSpanNowMicros(), attributes: "{}");
+    val _s = rkMetricsOpenSpanPut(id, span);
+    val _e = rkSpanEmitStart(name, trace, id, parent, "{}");
+    return id;
+}
+
+// Closes a span `openSpan` opened in this process; `0`, or `1` for an id it
+// does not know.
+pub fn closeSpan(span: string) -> i32 {
+    val open: ?Span = rkMetricsOpenSpanTake(span);
+    if (open == null) return 1;
+    val zero: i64 = 0;
+    val s = open ?? Span(name: "", traceId: "", spanId: "", parentId: "", startedAt: zero, attributes: "{}");
+    val _p = rkSpanPop(s.spanId);
+    val _e = rkSpanEmitStop(s.name, s.traceId, s.spanId, s.parentId, s.attributes, rkSpanNowMicros() - s.startedAt, "ok");
+    return 0;
+}
+
+pub fn exportedSpanCount() -> i32 {
+    return rkMetricsSpanCount();
+}
+
+pub fn probability() -> string {
+    val p = rkProp("rakun.tracing.sampling.probability");
+    return if (p == "") "0.1" else p;
+}
+
+// The edge decision for a trace this request minted.
+pub fn samplingEntry(req: WebRequest, chain: Chain) -> Response {
+    if (validTraceparent(req.header("traceparent")) == false) {
+        val _f = rkSpanSetFlags(if (rkMetricsSample(probability())) "01" else "00");
+    };
+    return chain.next(req);
+}
+
+pub fn samplingEntryName() -> string {
+    return "metrics-trace-sampling";
+}
+
+pub fn installTracing() -> i32 {
+    val _s = if (rkMetricsSpanSubscribeOnce()) subscribeSpans({ e, m, d -> rkMetricsSpanFromEvent(e, m, d) }) else 0;
+    if (chainNames().indexOf(samplingEntryName()) >= 0) return 0;
+    return registerFilter(samplingEntryName(), orderMetrics() + 1, { req, chain -> samplingEntry(req, chain) });
+}

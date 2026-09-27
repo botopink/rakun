@@ -1,0 +1,133 @@
+//// rakun-stream — keyed state and pollers (front 89 steps 3, 4 and 6) on
+//// rakun-data's ets:memory arm.
+
+import {testing.asserts} from "std";
+import {rkSetProp} from "rakun";
+import {startDataSource, sqlTemplate} from "rakun-data";
+import {rkMsgWaitUntil} from "rakun-messaging/messaging_host";
+import {Stage, Source, Sink, Pipeline} from "pipeline";
+import {EtsState, SqlState, etsState, sqlState, etsForget, stateSchemaSql, streamLogLines} from "state";
+import {startPipeline, stopPipeline, pushEvent, collected, clearCollected, PollBatch, pollOnce, startPoller, stopPoller, storedCursor} from "runtime";
+
+#[@External.Erlang("""(fun(__K) -> persistent_term:put({stp, __K}, persistent_term:get({stp, __K}, 0) + 1), persistent_term:get({stp, __K}) end)($0)""")]
+declare fn bump(key: string) -> i32;
+#[@External.Erlang("""(fun(__K) -> persistent_term:get({stp, __K}, 0) end)($0)""")]
+declare fn count(key: string) -> i32;
+#[@External.Erlang("""(fun(__K, __V) -> persistent_term:put({stp_t, __K}, persistent_term:get({stp_t, __K}, []) ++ [__V]), 0 end)($0, $1)""")]
+declare fn stamp(key: string, at: i32) -> i32;
+#[@External.Erlang("""(fun(__K) -> persistent_term:get({stp_t, __K}, []) end)($0)""")]
+declare fn stamps(key: string) -> Array<i32>;
+#[@External.Erlang("""erlang:monotonic_time(millisecond)""")]
+declare fn nowMs() -> i32;
+#[@External.Erlang("""(fun(__Ms) -> timer:sleep(__Ms), 0 end)($0)""")]
+declare fn pause(ms: i32) -> i32;
+
+fn db(name: string) -> string {
+    val _s = startDataSource(name, "ets:memory", 2, 5000, "eager");
+    val _t = sqlTemplate(name).update(stateSchemaSql(), []);
+    return name;
+}
+
+fn show(v: ?string) -> string {
+    return case v { null -> "null"; s -> s; };
+}
+
+// ── step 4 ──────────────────────────────────────────────────────────────────
+
+test "state: the SQL arm keeps a key across a restart, the ETS arm does not" {
+    val ds = db("st1");
+    val _a = sqlState("counts", ds).put("total", "7");
+    val _b = etsState("counts").put("total", "7");
+    val _r = etsForget("counts/");
+    assert show(sqlState("counts", ds).lookup("total")) == "7" && show(EtsState(pipeline: "counts").lookup("total")) == "null";
+}
+
+test "state: choosing ETS logs one line naming what a rebalance loses" {
+    val before = streamLogLines().filter({ l -> l.contains("pipeline logged keeps its state in ETS") }).length;
+    val _e = etsState("logged");
+    val after = streamLogLines().filter({ l -> l.contains("pipeline logged keeps its state in ETS - a restart or a rebalance that moves its partitions loses every key") }).length;
+    assert after == before + 1;
+}
+
+test "state: an absent key is null, not a sentinel string" {
+    val ds = db("st3");
+    assert show(sqlState("p", ds).lookup("missing")) == "null" && show(etsState("p").lookup("missing")) == "null";
+}
+
+test "state: keys are prefixed per pipeline" {
+    val _a = etsState("one").put("count", "1");
+    val _b = etsState("two").put("count", "2");
+    assert show(EtsState(pipeline: "one").lookup("count")) == "1" && show(EtsState(pipeline: "two").lookup("count")) == "2";
+    assert etsState("one").fold("", "", { acc, v -> acc + v }) == "1";
+}
+
+// ── step 6 ──────────────────────────────────────────────────────────────────
+
+test "rebalance: a new owner reading the SQL state continues the count" {
+    val ds = db("st5");
+    val p = Pipeline(name: "tally", source: Source.Poll(everyMs: 1000, cursor: ""), stages: [Stage.Aggregate(name: "count", key: { s -> s }, windowMs: 3600000)], sink: Sink.Collect(name: "tally-out"));
+    val _k = clearCollected("tally-out");
+    val _s = startPipeline(p, 2, ds);
+    val _1 = pushEvent("tally", "k");
+    val _2 = pushEvent("tally", "k");
+    val first = rkMsgWaitUntil(2000, { -> collected("tally-out").length == 2 });
+    val _x = stopPipeline("tally");
+    val _n = startPipeline(p, 2, ds);
+    val _3 = pushEvent("tally", "k");
+    val third = rkMsgWaitUntil(2000, { -> collected("tally-out").length == 3 });
+    val out = collected("tally-out").join(",");
+    val _y = stopPipeline("tally");
+    assert first && third && out == "k=1,k=2,k=3", out;
+}
+
+// ── step 3 ──────────────────────────────────────────────────────────────────
+
+fn feed(cursor: string) -> PollBatch {
+    val n = if (cursor == "") 0 else cursor.length();
+    return PollBatch(items: ["item" + n.toString()], next: cursor + "x");
+}
+
+fn poller(name: string, sink: Sink) -> Pipeline {
+    return Pipeline(name: name, source: Source.Poll(everyMs: 50, cursor: ""), stages: [Stage.Transform(name: "t", apply: { s -> s })], sink: sink);
+}
+
+test "poller: the cursor is written after the sink confirms, never before" {
+    val ds = db("st6");
+    val _r = rkSetProp("rakun.stream.refuse.publish-arm", "nowhere");
+    val refused = pollOnce(poller("refuse", Sink.Publish(destination: "gone")), ds, "n1", { c -> feed(c) });
+    val cursor = storedCursor(ds, "refuse");
+    val _u = rkSetProp("rakun.stream.refuse.publish-arm", "");
+    assert refused == -2 && cursor == "", cursor;
+}
+
+test "poller: a restarted poller resumes from the stored cursor" {
+    val ds = db("st7");
+    val _k = clearCollected("resume-out");
+    val _1 = pollOnce(poller("resume", Sink.Collect(name: "resume-out")), ds, "n1", { c -> feed(c) });
+    val _2 = pollOnce(poller("resume", Sink.Collect(name: "resume-out")), ds, "n1", { c -> feed(c) });
+    val _3 = pollOnce(poller("resume", Sink.Collect(name: "resume-out")), ds, "n1", { c -> feed(c) });
+    assert collected("resume-out").join(",") == "item0,item1,item2" && storedCursor(ds, "resume") == "xxx";
+}
+
+test "poller: two nodes do not both fetch - the cursor row is the lease" {
+    val ds = db("st8");
+    val _k = clearCollected("lease-out");
+    val a = pollOnce(poller("lease", Sink.Collect(name: "lease-out")), ds, "node-a", { c -> feed(c) });
+    val b = pollOnce(poller("lease", Sink.Collect(name: "lease-out")), ds, "node-b", { c -> feed(c) });
+    assert a == 1 && b == -1 && collected("lease-out").length == 1;
+}
+
+test "poller: everyMs is a fixed delay after each pass completes" {
+    val ds = db("st9");
+    val _k = clearCollected("delay-out");
+    val _s = startPoller(poller("delay", Sink.Collect(name: "delay-out")), ds, "n1", { c ->
+        val _t = stamp("delay", nowMs());
+        val _p = pause(100);
+        feed(c)
+    });
+    val _w = rkMsgWaitUntil(3000, { -> stamps("delay").length >= 3 });
+    val _x = stopPoller("delay");
+    val t = stamps("delay");
+    val gap = (t.at(1) ?? 0) - (t.at(0) ?? 0);
+    assert gap >= 150, gap.toString();
+}

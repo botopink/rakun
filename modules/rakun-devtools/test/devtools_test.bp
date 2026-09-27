@@ -1,0 +1,400 @@
+//// rakun-devtools — settings, the watcher, hot reload, registration
+//// invalidation, dev defaults, remote loading and tracing (front 80). Every
+//// file a test writes is under BOTOPINK_TEST_TMPDIR; every key it sets is put
+//// back.
+
+import {testing.asserts} from "std";
+import {async} from "std";
+import {io: {fs, env}} from "std";
+import {Request, Response, rkSetProp, rkProp, rkRouteCount, rkBuildCount, rkSingleton, rkRegisterRoute, rkServe, rkDispatchHttp} from "rakun";
+import {
+    DevtoolsSettings, settings, defaultSettings, devtoolsWarnings, startWatcher, rkDevWatchStop, rkDevWatcherPid, rkDevReloads,
+    rkDevDropModule, rkDevOwner, rkDevLoadDir, reloadProject, installDevDefaults, remoteLoad, traceCalls, rkDevTraceCount,
+    constantTimeEquals, devtoolsKeys,
+} from "devtools";
+
+#[@External.Erlang("""(fun(__P) -> ok = filelib:ensure_dir(__P), 0 end)($0)""")]
+declare fn ensureDir(file: string) -> i32;
+#[@External.Erlang("""(fun(__D) -> file:del_dir_r(__D), 0 end)($0)""")]
+declare fn removeTree(dir: string) -> i32;
+#[@External.Erlang("""(fun(__Ms) -> timer:sleep(__Ms), 0 end)($0)""")]
+declare fn sleep(ms: i32) -> i32;
+#[@External.Erlang("""(fun(__K, __V) -> case __V of <<>> -> os:unsetenv(binary_to_list(__K)); _ -> os:putenv(binary_to_list(__K), binary_to_list(__V)) end, 0 end)($0, $1)""")]
+declare fn setEnv(key: string, value: string) -> i32;
+#[@External.Erlang("""(fun() -> case whereis(rakun_devtools_watcher) of undefined -> 0; __P -> exit(__P, kill), timer:sleep(100), 1 end end)()""")]
+declare fn killWatcher() -> i32;
+
+fn tmp(name: string) -> string {
+    val dir: string = env.read("BOTOPINK_TEST_TMPDIR") ?? "";
+    if (dir == "") @panic("BOTOPINK_TEST_TMPDIR is not set - botopink test sets it");
+    return dir + "/rakun-devtools/" + name;
+}
+
+fn write(file: string, text: string) -> i32 {
+    val _d = ensureDir(file);
+    val _w = fs.writeText(file, text);
+    return 0;
+}
+
+fn clean() -> i32 {
+    for (devtoolsKeys()) { k -> val _u = rkSetProp(k, ""); };
+    val _p = rkSetProp("rakun.profiles.resolved", "");
+    return 0;
+}
+
+// ── step 1: settings ────────────────────────────────────────────────────────
+
+test "settings: with no file anywhere the documented defaults hold" {
+    val _g = rkSetProp("rakun.devtools.global-file", tmp("none/devtools.yaml"));
+    val s = settings();
+    val _c = clean();
+    assert s.roots.join(",") == "src" && s.pollMs == 300 && s.enabled && s.triggerFile == "" && s.remoteSecret == "" && s.dbConsole == false;
+}
+
+test "settings: global file < project < environment" {
+    val file = tmp("global/devtools.yaml");
+    val _w = write(file, "# mine\npoll-ms: 900\nexclude: *.tmp\n");
+    val _g = rkSetProp("rakun.devtools.global-file", file);
+    val onlyGlobal = settings();
+    val _p = rkSetProp("rakun.devtools.poll-ms", "500");
+    val project = settings();
+    val _e = setEnv("RAKUN_DEVTOOLS_POLL_MS", "700");
+    val fromEnv = settings();
+    val _u = setEnv("RAKUN_DEVTOOLS_POLL_MS", "");
+    val _c = clean();
+    assert onlyGlobal.pollMs == 900 && onlyGlobal.exclude.join(",") == "*.tmp";
+    assert project.pollMs == 500 && project.exclude.join(",") == "*.tmp";
+    assert fromEnv.pollMs == 700;
+}
+
+test "settings: a malformed global file is a named warning and the defaults stand" {
+    val file = tmp("bad/devtools.yaml");
+    val _w = write(file, "poll-ms 900 this is not yaml\n");
+    val _g = rkSetProp("rakun.devtools.global-file", file);
+    val s = settings();
+    val _c = clean();
+    assert s.pollMs == 300;
+    assert devtoolsWarnings().filter({ w -> w.contains(file + " is malformed") }).length >= 1;
+}
+
+// ── step 2: the watcher ─────────────────────────────────────────────────────
+
+#[@External.Erlang("""(fun(__T) -> persistent_term:put(rakun_devtools_test_seen, persistent_term:get(rakun_devtools_test_seen, []) ++ [__T]), 0 end)($0)""")]
+declare fn seen(changed: string) -> i32;
+#[@External.Erlang("""persistent_term:get(rakun_devtools_test_seen, [])""")]
+declare fn seenList() -> string[];
+#[@External.Erlang("""(fun() -> persistent_term:put(rakun_devtools_test_seen, []), 0 end)()""")]
+declare fn seenReset() -> i32;
+
+fn watch(dir: string) -> bool {
+    val _p = rkSetProp("rakun.profiles.resolved", "dev");
+    val _q = rkSetProp("rakun.devtools.poll-ms", "40");
+    val _g = rkSetProp("rakun.devtools.global-file", tmp("none/devtools.yaml"));
+    val _r = seenReset();
+    return startWatcher(dir, { changed -> seen(changed) });
+}
+
+test "watcher: one touched file is one reload; two in one interval are one cycle covering both" {
+    val dir = tmp("w1");
+    val _a = write(dir + "/src/a.bp", "a");
+    val _b = write(dir + "/src/b.bp", "b");
+    assert watch(dir);
+    val _t = write(dir + "/src/a.bp", "aa");
+    val _s = sleep(200);
+    val one = seenList().length;
+    val _u = write(dir + "/src/a.bp", "aaa");
+    val _v = write(dir + "/src/b.bp", "bbb");
+    val _w = sleep(200);
+    val _x = rkDevWatchStop();
+    val _c = clean();
+    assert one == 1, seenList().join("|");
+    assert seenList().length == 2;
+    val second = seenList().at(1) ?? "";
+    assert second.contains("/src/a.bp") && second.contains("/src/b.bp"), second;
+}
+
+test "watcher: an excluded file produces no reload" {
+    val dir = tmp("w2");
+    val _a = write(dir + "/src/a.bp", "a");
+    val _e = rkSetProp("rakun.devtools.exclude", "*.tmp");
+    assert watch(dir);
+    val _t = write(dir + "/src/scratch.tmp", "x");
+    val _s = sleep(200);
+    val _x = rkDevWatchStop();
+    val _c = clean();
+    assert seenList().length == 0, seenList().join("|");
+}
+
+test "watcher: with a trigger file changes wait for the trigger, then reload once covering all" {
+    val dir = tmp("w3");
+    val _a = write(dir + "/src/a.bp", "a");
+    val _b = write(dir + "/src/b.bp", "b");
+    val _t = write(dir + "/.reloadtrigger", "0");
+    val _r = rkSetProp("rakun.devtools.trigger-file", ".reloadtrigger");
+    val _o = rkSetProp("rakun.devtools.roots", "src");
+    assert watch(dir);
+    val _u = write(dir + "/src/a.bp", "aa");
+    val _v = sleep(120);
+    val _w = write(dir + "/src/b.bp", "bb");
+    val _s = sleep(150);
+    val before = seenList().length;
+    val _g = write(dir + "/.reloadtrigger", "11");
+    val _h = sleep(200);
+    val _x = rkDevWatchStop();
+    val _c = clean();
+    assert before == 0;
+    assert seenList().length == 1;
+    val all = seenList().at(0) ?? "";
+    assert all.contains("a.bp") && all.contains("b.bp"), all;
+}
+
+test "watcher: no dev profile, or enabled=false, runs no watcher" {
+    val dir = tmp("w4");
+    val _a = write(dir + "/src/a.bp", "a");
+    val _p = rkSetProp("rakun.profiles.resolved", "");
+    val none = startWatcher(dir, { changed -> seen(changed) });
+    val _e = rkSetProp("rakun.devtools.enabled", "false");
+    val _q = rkSetProp("rakun.profiles.resolved", "dev");
+    val off = startWatcher(dir, { changed -> seen(changed) });
+    val _c = clean();
+    assert none == false && off == false && rkDevWatcherPid() == "";
+}
+
+test "watcher: a killed watcher is restarted with no reload" {
+    val dir = tmp("w5");
+    val _a = write(dir + "/src/a.bp", "a");
+    assert watch(dir);
+    val first = rkDevWatcherPid();
+    val reloads = rkDevReloads();
+    val _k = killWatcher();
+    val _s = sleep(150);
+    val second = rkDevWatcherPid();
+    val _x = rkDevWatchStop();
+    val _c = clean();
+    assert second != "" && second != first;
+    assert rkDevReloads() == reloads && seenList().length == 0;
+}
+
+// ── step 3: compile and load ────────────────────────────────────────────────
+
+fn project(dir: string, version: string) -> i32 {
+    val _m = write(dir + "/botopink.json", "{\"name\":\"hot\",\"version\":\"0.0.1\",\"src\":\"src/\",\"entry\":\"main.bp\",\"target\":\"erlang\",\"targets\":[\"erlang\"]}");
+    return write(dir + "/src/main.bp", "#[@External.Erlang(\"\"\"(fun() -> timer:sleep(300), 0 end)()\"\"\")]\ndeclare fn pause() -> i32;\n\n#[@External.Erlang(\"\"\"(fun() -> receive stop -> 0 end end)()\"\"\")]\ndeclare fn park() -> i32;\n\npub fn greet() -> string {\n    return \"" + version + "\";\n}\n\npub fn slow() -> string {\n    val _p = pause();\n    return \"" + version + "-slow\";\n}\n\npub fn hold() -> i32 {\n    return park();\n}\n\npub fn main() {\n    @print(greet());\n}\n");
+}
+
+#[@External.Erlang("""(fun(__F) -> try iolist_to_binary(apply('hot@main', binary_to_atom(__F), [])) catch _:_ -> <<"undef">> end end)($0)""")]
+declare fn callHot(name: string) -> string;
+#[@External.Erlang("""(fun() -> spawn(fun() -> 'hot@main':hold() end), timer:sleep(50), 0 end)()""")]
+declare fn parkInHot() -> i32;
+#[@External.Erlang("""(fun() -> [__P ! stop || __P <- erlang:processes(), erlang:check_process_code(__P, 'hot@main')], 0 end)()""")]
+declare fn releaseParked() -> i32;
+
+fn compilerFound() -> bool {
+    return fs.exists("../../../botopink-lang/zig-out/bin/botopink") || (env.read("BOTOPINK_BIN") ?? "") != "";
+}
+
+fn useCompiler() -> i32 {
+    val here: string = env.read("PWD") ?? "";
+    return rkSetProp("rakun.devtools.compiler", if ((env.read("BOTOPINK_BIN") ?? "") != "") env.read("BOTOPINK_BIN") ?? "" else here + "/../../../botopink-lang/zig-out/bin/botopink");
+}
+
+fn slowCall() -> string {
+    return callHot("slow");
+}
+
+fn reloadAfter(ms: i32, dir: string) -> string {
+    val _s = sleep(ms);
+    val _p = project(dir, "v2");
+    return reloadProject(dir);
+}
+
+test "reload: an edit serves on the next call; a compile error keeps the old code and prints the compiler's text" {
+    assert compilerFound();
+    val _k = useCompiler();
+    val dir = tmp("p1");
+    val _p = project(dir, "v1");
+    val first = reloadProject(dir);
+    val v1 = callHot("greet");
+    val _q = project(dir, "v2");
+    val _r = reloadProject(dir);
+    val v2 = callHot("greet");
+    val _b = write(dir + "/src/main.bp", "pub fn greet( -> string {\n}\n");
+    val broken = reloadProject(dir);
+    val still = callHot("greet");
+    val _c = clean();
+    assert first.startsWith("ok "), first;
+    assert v1 == "v1" && v2 == "v2";
+    assert broken.startsWith("error ") && broken.contains("main.bp"), broken;
+    assert still == "v2";
+}
+
+test "reload: a call in flight finishes on the code it started with" {
+    assert compilerFound();
+    val _k = useCompiler();
+    val dir = tmp("p2");
+    val _p = project(dir, "v1");
+    val _r = reloadProject(dir);
+    val results = await async.runAll([
+        { -> async { slowCall() } },
+        { -> async { reloadAfter(100, dir) } },
+    ]);
+    val after = callHot("greet");
+    val _c = clean();
+    assert (results.at(0) ?? "") == "v1-slow", results.join("|");
+    assert after == "v2";
+}
+
+test "reload: a second reload while a process still runs the old code reports it instead of killing it" {
+    assert compilerFound();
+    val _k = useCompiler();
+    val dir = tmp("p3");
+    val _p = project(dir, "v1");
+    val _r = reloadProject(dir);
+    val _h = parkInHot();
+    val _q = project(dir, "v2");
+    val second = reloadProject(dir);
+    val _s = project(dir, "v3");
+    val third = reloadProject(dir);
+    val _x = releaseParked();
+    val _c = clean();
+    assert second.endsWith("|0"), second;
+    assert third.endsWith("|1"), third;
+}
+
+// ── step 4: invalidation ────────────────────────────────────────────────────
+
+// A controller whose handler answers `body` (a new body is a new module
+// version with the same route).
+fn controller(dir: string, path: string, body: string) -> i32 {
+    return write(dir + "/dev_ctl.erl", "-module(dev_ctl).\n-export(['_botopink_init'/0, handle/1]).\n'_botopink_init'() -> rakun_runtime:register_route(<<\"GET\">>, <<\"" + path + "\">>, fun handle/1).\nhandle(_) -> #{status => 200, body => <<\"" + body + "\">>}.\n");
+}
+
+fn service(dir: string, version: string) -> i32 {
+    return write(dir + "/dev_svc.erl", "-module(dev_svc).\n-export([make/0]).\nmake() -> {'dev_svc@@DevSvc', " + version + "}.\n");
+}
+
+// Resolves the singleton; its build counts itself (the emitted constructor's
+// `rkEnter`/`rkDone` would bump `rkBuildCount` the same way).
+#[@External.Erlang("""(fun() -> rakun_runtime:singleton(<<"DevSvc">>, fun() -> persistent_term:put(rakun_devsvc_builds, persistent_term:get(rakun_devsvc_builds, 0) + 1), dev_svc:make() end), 0 end)()""")]
+declare fn resolveDevSvc() -> i32;
+
+#[@External.Erlang("""persistent_term:get(rakun_devsvc_builds, 0)""")]
+declare fn devSvcBuilds() -> i32;
+
+test "reload: an unchanged controller reloaded twice keeps the route count; a moved route leaves only the new one" {
+    val dir = tmp("ctl");
+    val _a = controller(dir, "/dev/a", "one");
+    val _l = rkDevLoadDir(dir);
+    val count = rkRouteCount();
+    val _b = controller(dir, "/dev/a", "two");
+    val _m = rkDevLoadDir(dir);
+    val _d = controller(dir, "/dev/a", "three");
+    val _n = rkDevLoadDir(dir);
+    val same = rkRouteCount();
+    val _e = controller(dir, "/dev/b", "four");
+    val _o = rkDevLoadDir(dir);
+    val owned = rkDevOwner("dev_ctl");
+    assert same == count;
+    assert owned == "route GET /dev/b", owned;
+}
+
+test "reload: a reloaded service's singleton is discarded and rebuilt; dropping an idle module is 0" {
+    val dir = tmp("svc");
+    val _a = service(dir, "1");
+    val _l = rkDevLoadDir(dir);
+    val _r = resolveDevSvc();
+    val before = devSvcBuilds();
+    val owned = rkDevOwner("dev_svc");
+    val _b = service(dir, "2");
+    val _m = rkDevLoadDir(dir);
+    val _s = resolveDevSvc();
+    assert devSvcBuilds() == before + 1, owned + " / " + before.toString();
+    assert owned == "singleton DevSvc", owned;
+    assert rkDevDropModule("no_such_module") == 0;
+}
+
+// ── step 5: dev defaults ────────────────────────────────────────────────────
+
+test "defaults: a dev profile applies the six below everything else; no dev profile applies none" {
+    val _c0 = clean();
+    for (["rakun.cache.enabled", "rakun.web.static.cache-seconds", "rakun.web.error.include-message", "rakun.web.error.include-stacktrace", "rakun.observability.sampling"]) { k -> val _u = rkSetProp(k, ""); };
+    val none = installDevDefaults();
+    val _p = rkSetProp("rakun.profiles.resolved", "dev");
+    val _m = rkSetProp("rakun.web.error.include-message", "never");
+    val applied = installDevDefaults();
+    val message = rkProp("rakun.web.error.include-message");
+    val trace = rkProp("rakun.web.error.include-stacktrace");
+    for (["rakun.cache.enabled", "rakun.web.static.cache-seconds", "rakun.web.error.include-message", "rakun.web.error.include-stacktrace", "rakun.observability.sampling"]) { k -> val _u = rkSetProp(k, ""); };
+    val _c = clean();
+    assert none == 0;
+    assert applied == 5 && message == "never" && trace == "always";
+}
+
+// ── step 7: remote loading and tracing ──────────────────────────────────────
+
+test "remote: refused without a dev profile, without a secret, without TLS, with a wrong secret; no key bypasses" {
+    val _c0 = clean();
+    assert remoteLoad("lists", "s", true) == "refused: remote loading needs an active dev profile";
+    val _p = rkSetProp("rakun.profiles.resolved", "dev");
+    assert remoteLoad("lists", "s", true) == "refused: rakun.devtools.remote.secret is not set";
+    val _s = rkSetProp("rakun.devtools.remote.secret", "correct horse");
+    assert remoteLoad("lists", "correct horse", false) == "refused: remote loading is served over TLS only";
+    assert remoteLoad("lists", "correct hors3", true) == "refused: the secret does not match";
+    val _c = clean();
+    assert constantTimeEquals("abc", "abc") && constantTimeEquals("abc", "abd") == false && constantTimeEquals("abc", "ab") == false;
+    for (devtoolsKeys()) { k -> assert k.contains("insecure") == false && k.contains("bypass") == false && k.contains("allow") == false, k; };
+}
+
+#[@External.Erlang("""(fun(__N) -> [lists:reverse([__I]) || __I <- lists:seq(1, __N)], timer:sleep(200), 0 end)($0)""")]
+declare fn callReverse(times: i32) -> i32;
+
+test "trace: a trace stops by itself at its limit" {
+    val _t = traceCalls("lists", "reverse", 3);
+    val _c = callReverse(10);
+    assert rkDevTraceCount() == 3, rkDevTraceCount().toString();
+    try asserts.throwsWith({ -> traceCalls("lists", "reverse", 0) }, "traceCalls needs a positive limit");
+}
+
+// ── the listener across a reload, and the trace signature ───────────────────
+
+#[@External.Erlang("""(fun(__Port) -> {ok, __S} = gen_tcp:connect("127.0.0.1", __Port, [binary, {active, false}]), put(rakun_devtools_ka, __S), 0 end)($0)""")]
+declare fn openKeepAlive(port: i32) -> i32;
+
+#[@External.Erlang("""(fun(__Path) -> __S = get(rakun_devtools_ka), ok = gen_tcp:send(__S, [<<"GET ">>, __Path, <<" HTTP/1.1", 13, 10, "Host: x", 13, 10, 13, 10>>]), case gen_tcp:recv(__S, 0, 3000) of {ok, __B} -> [_, __St | _] = binary:split(__B, <<" ">>, [global]), __St; _ -> <<"closed">> end end)($0)""")]
+declare fn keepAliveGet(path: string) -> string;
+
+#[@External.Erlang("""(fun() -> gen_tcp:close(get(rakun_devtools_ka)), 0 end)()""")]
+declare fn closeKeepAlive() -> i32;
+
+fn pong(req: Request) -> Response {
+    return Response.ok("pong");
+}
+
+test "reload: an open keep-alive connection survives a reload" {
+    assert compilerFound();
+    val _k = useCompiler();
+    val _r = rkRegisterRoute("GET", "/dev/ping", { req -> pong(req) });
+    val _a = rkSetProp("rakun.main.keep-alive", "false");
+    val port = rkServe(0, { m, p, h, q, b -> rkDispatchHttp(m, p, h, q, b) });
+    val dir = tmp("p4");
+    val _p = project(dir, "v1");
+    val _o = openKeepAlive(port);
+    val before = keepAliveGet("/dev/ping");
+    val _l = reloadProject(dir);
+    val after = keepAliveGet("/dev/ping");
+    val _c = closeKeepAlive();
+    val _z = clean();
+    assert before == "200" && after == "200", before + "/" + after;
+}
+
+test "trace: a call without the limit does not compile" {
+    assert compilerFound();
+    val _k = useCompiler();
+    val dir = tmp("p5");
+    val here: string = env.read("PWD") ?? "";
+    val _m = write(dir + "/botopink.json", "{\"name\":\"tr\",\"version\":\"0.0.1\",\"src\":\"src/\",\"entry\":\"main.bp\",\"target\":\"erlang\",\"targets\":[\"erlang\"],\"dependencies\":{\"rakun-devtools\":{\"path\":\"" + here + "\"}}}");
+    val _s = write(dir + "/src/main.bp", "import {traceCalls} from \"rakun-devtools\";\n\npub fn main() {\n    @print(traceCalls(\"lists\", \"reverse\").toString());\n}\n");
+    val out = reloadProject(dir);
+    val _z = clean();
+    assert out.startsWith("error ") && out.contains("traceCalls"), out;
+}

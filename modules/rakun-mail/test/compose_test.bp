@@ -1,0 +1,132 @@
+//// rakun-mail — composition and encoding (front 85 steps 2 and 3), asserted
+//// on the composed bytes and, for what the wire changes (dot-stuffing, the
+//// envelope), on the bytes the fixture server captured.
+
+import {escape} from "std";
+import {Mail, MailServer, TlsMode, Attachment, composeMessage, deliverNow} from "mail";
+import {fixtureStart, fixtureStop, fixtureMessages} from "fixture";
+
+#[@External.Erlang("""(fun(__F, __B) -> ok = file:write_file(unicode:characters_to_list(__F), __B), __F end)($0, $1)""")]
+declare fn writeFile(file: string, bytes: string) -> string;
+#[@External.Erlang("""(fun() -> string:trim(unicode:characters_to_binary(os:cmd("mktemp -d"))) end)()""")]
+declare fn tempDir() -> string;
+#[@External.Erlang("""(fun(__C) -> unicode:characters_to_binary(os:cmd(unicode:characters_to_list(__C))) end)($0)""")]
+declare fn shell(cmd: string) -> string;
+#[@External.Erlang("""(fun(__B) -> lists:max([0 | [byte_size(__L) || __L <- binary:split(__B, <<13, 10>>, [global])]]) end)($0)""")]
+declare fn longestLine(message: string) -> i32;
+#[@External.Erlang("""(fun(__B) -> case re:run(__B, "boundary=\\"([^\\"]+)\\"", [{capture, all_but_first, binary}, global]) of {match, __Ms} -> [__X || [__X] <- __Ms]; _ -> [] end end)($0)""")]
+declare fn boundaries(message: string) -> string[];
+#[@External.Erlang("""(fun(__B, __N) -> length([__L || __L <- binary:split(__B, <<13, 10>>, [global]), binary:match(__L, __N) =/= nomatch, not (__L =:= <<"--", __N/binary>> orelse __L =:= <<"--", __N/binary, "--">> orelse binary:match(__L, <<"boundary=">>) =/= nomatch)]) end)($0, $1)""")]
+declare fn strayOccurrences(message: string, boundary: string) -> i32;
+
+fn mail(text: string, html: string, attachments: Attachment[]) -> Mail {
+    return Mail(sender: "App <app@example.com>", to: ["bob@example.com"], cc: [], bcc: [], replyTo: "", subject: "Hello", text: text, html: html, attachments: attachments, headers: []);
+}
+
+fn file(name: string, bytes: string) -> string {
+    return writeFile(tempDir() + "/" + name, bytes);
+}
+
+fn plainServer(port: i32) -> MailServer {
+    return MailServer(host: "localhost", port: port, username: "", password: "", tlsMode: TlsMode.None, bundle: "", connectTimeoutMs: 2000, readTimeoutMs: 2000, writeTimeoutMs: 2000);
+}
+
+// ── step 2 ──────────────────────────────────────────────────────────────────
+
+test "compose: text only is a single text/plain; charset=utf-8 part" {
+    val m = composeMessage(mail("hello", "", []));
+    assert m.contains("Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\nhello") && m.contains("multipart") == false, m;
+}
+
+test "compose: text plus HTML is multipart/alternative with plain first" {
+    val m = composeMessage(mail("plain body", "<p>html body</p>", []));
+    val plain = m.indexOf("text/plain");
+    val html = m.indexOf("text/html");
+    assert m.contains("Content-Type: multipart/alternative; boundary=") && plain > 0 && html > plain, m;
+}
+
+test "compose: an inline image is multipart/related with a Content-ID matching the cid" {
+    val png = file("logo.png", "\u{89}PNG-bytes");
+    val m = composeMessage(mail("t", "<img src=\"cid:logo\">", [Attachment(filename: "logo.png", contentType: "image/png", path: png, inline: true, cid: "logo")]));
+    assert m.contains("multipart/related") && m.contains("Content-ID: <logo>") && m.contains("cid:logo") && m.contains("Content-Disposition: inline"), m;
+}
+
+test "compose: an attachment wraps the whole message in multipart/mixed" {
+    val pdf = file("report.pdf", "%PDF-1.4 bytes");
+    val m = composeMessage(mail("t", "<p>h</p>", [Attachment(filename: "report.pdf", contentType: "application/pdf", path: pdf, inline: false, cid: "")]));
+    val mixed = m.indexOf("multipart/mixed");
+    assert mixed > 0 && mixed < m.indexOf("multipart/alternative") && m.contains("Content-Disposition: attachment; filename=\"report.pdf\"") && m.contains("Content-Transfer-Encoding: base64"), m;
+}
+
+test "compose: a non-ASCII subject is RFC 2047, an ASCII one is left alone" {
+    val ascii = composeMessage(mail("t", "", []));
+    val utf = composeMessage(Mail(sender: "app@example.com", to: ["bob@example.com"], cc: [], bcc: [], replyTo: "", subject: "Olá — relatório", text: "t", html: "", attachments: [], headers: []));
+    assert ascii.contains("\r\nSubject: Hello\r\n") && utf.contains("\r\nSubject: =?UTF-8?B?") && utf.contains("Olá") == false, utf;
+}
+
+test "compose: a display name with a comma or a quote is quoted and does not split the header" {
+    val m = composeMessage(Mail(sender: "\"Doe, John\" <john@example.com>", to: ["Say \"hi\" <s@example.com>", "plain@example.com"], cc: [], bcc: [], replyTo: "", subject: "s", text: "t", html: "", attachments: [], headers: []));
+    assert m.contains("\r\nFrom: \"Doe, John\" <john@example.com>\r\n") && m.contains("\r\nTo: \"Say \\\"hi\\\"\" <s@example.com>, plain@example.com\r\n"), m;
+}
+
+test "compose: every line is at most 998 bytes, a long unbroken word included" {
+    var word = "";
+    var i = 0;
+    while (i < 300) {
+        word = word + "abcdefghij";
+        i = i + 1;
+    };
+    val m = composeMessage(mail(word, "<p>" + word + "</p>", []));
+    assert longestLine(m) <= 998 && m.contains(word) == false, longestLine(m).toString();
+}
+
+test "compose: a body line beginning with a dot is dot-stuffed on the wire" {
+    val port = fixtureStart([]);
+    val r = deliverNow(plainServer(port), mail("first\n.hidden\nlast", "", []));
+    val captured = fixtureMessages(port).at(0) ?? "";
+    val _s = fixtureStop(port);
+    assert r == "" && captured.contains("\r\n..hidden\r\n"), captured;
+}
+
+test "compose: bcc recipients are in RCPT TO and in no header" {
+    val port = fixtureStart([]);
+    val m = Mail(sender: "app@example.com", to: ["bob@example.com"], cc: ["carol@example.com"], bcc: ["secret@example.com"], replyTo: "", subject: "s", text: "t", html: "", attachments: [], headers: []);
+    val r = deliverNow(plainServer(port), m);
+    val captured = fixtureMessages(port).at(0) ?? "";
+    val _s = fixtureStop(port);
+    val envelope = captured.split("\n").at(0) ?? "";
+    val body = captured.slice(envelope.length() + 1, captured.length());
+    assert r == "" && envelope == "app@example.com\tbob@example.com,carol@example.com,secret@example.com\tfalse", envelope;
+    assert body.contains("secret@example.com") == false && body.contains("Bcc") == false && body.contains("Cc: carol@example.com"), body;
+}
+
+test "compose: a boundary appears nowhere in any part's content" {
+    val att = file("notes.txt", "--=_rakun_ looks like a boundary\n");
+    val m = composeMessage(mail("--=_rakun_ in the text", "<p>--=_rakun_</p>", [Attachment(filename: "notes.txt", contentType: "text/plain", path: att, inline: false, cid: "")]));
+    val bs = boundaries(m);
+    assert bs.length == 2 && bs.filter({ b -> strayOccurrences(m, b) > 0 }).length == 0, bs.join(",");
+}
+
+// ── step 3 ──────────────────────────────────────────────────────────────────
+
+test "html: the HTML string is written byte for byte, never re-escaped" {
+    val html = "<p>Hi <b>there</b> &amp; welcome</p>";
+    val m = composeMessage(mail("t", html, []));
+    assert m.contains("Content-Type: text/html; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n" + html + "\r\n"), m;
+}
+
+test "html: a value the caller escaped arrives escaped in HTML and literal in the plain part it supplied" {
+    val name = "<script>alert(1)</script>";
+    val m = composeMessage(mail("Hello " + name, "<p>Hello " + escape.html(name) + "</p>", []));
+    assert m.contains("<p>Hello &lt;script&gt;alert(1)&lt;/script&gt;</p>") && m.contains("\r\n\r\nHello <script>alert(1)</script>"), m;
+}
+
+test "html: an HTML body without text gets a generated plain part" {
+    val m = composeMessage(mail("", "<h1>Reset</h1><p>Use <a href=\"x\">this link</a> &amp; go.</p>", []));
+    assert m.contains("multipart/alternative") && m.contains("text/plain") && m.contains("Reset\r\nUse this link & go."), m;
+}
+
+test "html: rakun-mail names no HTML library" {
+    val out = shell("grep -rn jhonstart src botopink.json | grep -v '^src/.*:.*////' | head -3");
+    assert out == "", out;
+}

@@ -1,0 +1,175 @@
+//// rakun — the starter lint (front 73 steps 1, 3 and 4). It reads every
+//// directory under `starters/` and asserts the shape: the directory is the
+//// manifest `name`, the name starts `rakun-starter`, every dependency is a
+//// known module, a known starter or on the out-of-repo allow-list, none is
+//// declared twice, and the root ships no code. A third-party starter is
+//// `<project>-rakun-starter` and lives outside `starters/`, so the prefix
+//// rule never sees it.
+
+import {testing.asserts} from "std";
+import {io: {fs, env}} from "std";
+import {moduleVersions} from "version_set";
+import {manifestDependencies, manifestDependencyNames, manifestPackageName, resolvedModuleListIn, dependencyManifest} from "autoconfig_registry";
+import {moduleVerdict} from "conditions";
+
+// The out-of-repo dependencies a starter may name — a literal list, so a new
+// one is a deliberate edit.
+fn allowList() -> string[] {
+    return ["onze"];
+}
+
+fn starterNames() -> string[] {
+    val names: string[] = fs.list("../../starters").unwrapOr([]);
+    return names.filter({ n -> fs.exists("../../starters/" + n + "/botopink.json") });
+}
+
+fn manifestOf(dir: string) -> string {
+    return fs.readText("../../starters/" + dir + "/botopink.json").unwrapOr("");
+}
+
+// Every problem the lint finds with one starter directory.
+fn starterProblems(dir: string, text: string) -> string[] {
+    var out: string[] = [];
+    val parsed = manifestDependencies(text);
+    if (parsed.isError()) {
+        val assert Error(e) = parsed;
+        return ["starter directory `" + dir + "`: " + e];
+    };
+    val name = manifestPackageName(text);
+    if (name != dir) out.push("starter directory `" + dir + "` holds a manifest named `" + name + "` - the two must agree");
+    if (name.startsWith("rakun-starter") == false) out.push("starter `" + name + "` must be named with the prefix `rakun-starter` (a third-party starter is `<project>-rakun-starter`, outside starters/)");
+    val known = moduleVersions().map({ m -> m.name });
+    val deps = manifestDependencyNames(text);
+    for (deps) { d ->
+        val ok = known.filter({ k -> k == d }).length > 0 || allowList().filter({ a -> a == d }).length > 0;
+        if (ok == false) out.push("starter `" + name + "` depends on unknown `" + d + "` - known: " + known.join(", ") + "; allowed out of repo: " + allowList().join(", "));
+    };
+    return out;
+}
+
+// The root file's lines that are neither blank nor a `//` comment.
+fn codeLines(root: string) -> string[] {
+    return root.split("\n").filter({ l -> l.trim() != "" && l.trim().startsWith("//") == false });
+}
+
+test "starters: eight starters, each passing the lint" {
+    val names = starterNames();
+    assert names.length == 8, names.join(",");
+    var all: string[] = [];
+    for (names) { n -> for (starterProblems(n, manifestOf(n))) { p -> all.push(p); }; };
+    assert all.length == 0, all.join("\n");
+}
+
+test "starters: a root declares no mod and ships no code" {
+    var shipping: string[] = [];
+    for (starterNames()) { n ->
+        val root: string = fs.readText("../../starters/" + n + "/src/root.bp").unwrapOr("missing");
+        if (codeLines(root).length > 0) shipping.push(n);
+    };
+    assert shipping.length == 0, shipping.join(",");
+    assert codeLines("//// doc\n\npub mod web;\n").join("") == "pub mod web;";
+}
+
+test "starters: every dependency resolves to a directory holding a botopink.json" {
+    var broken: string[] = [];
+    for (starterNames()) { n ->
+        val file = "../../starters/" + n + "/botopink.json";
+        val text = manifestOf(n);
+        for (manifestDependencyNames(text)) { d ->
+            val target = dependencyManifest(file, text, d);
+            if (target == "" || fs.exists(target) == false) broken.push(n + " -> " + d);
+        };
+    };
+    assert broken.length == 0, broken.join(",");
+}
+
+test "starters: rakun-starter-web resolves rakun, rakun-logging and rakun-web, and no bundled library" {
+    val resolved = resolvedModuleListIn("../../starters/rakun-starter-web/botopink.json");
+    for (["rakun-starter", "rakun", "rakun-logging", "rakun-web"]) { want ->
+        assert resolved.filter({ r -> r == want }).length == 1, want + " in " + resolved.join(",");
+    };
+    for (["validation", "routing", "actions"]) { lib ->
+        assert resolved.filter({ r -> r == lib }).length == 0, lib;
+    };
+}
+
+test "starters: a name and directory that disagree fail the lint, naming both" {
+    val text = "{\"name\": \"rakun-starter-webb\", \"dependencies\": {\"rakun\": {\"workspace\": true}}}";
+    assert starterProblems("rakun-starter-web", text).join("\n") == "starter directory `rakun-starter-web` holds a manifest named `rakun-starter-webb` - the two must agree";
+}
+
+test "starters: a wrong prefix fails the lint naming the prefix" {
+    val text = "{\"name\": \"web-starter\", \"dependencies\": {\"rakun\": {\"workspace\": true}}}";
+    val problems = starterProblems("web-starter", text);
+    assert problems.length == 1 && problems.join("").contains("the prefix `rakun-starter`");
+}
+
+test "starters: an unknown dependency fails, listing the known names; a duplicate fails" {
+    val text = "{\"name\": \"rakun-starter-x\", \"dependencies\": {\"rakun\": {\"workspace\": true}, \"spring\": {\"path\": \"../spring\"}}}";
+    val problems = starterProblems("rakun-starter-x", text).join("\n");
+    assert problems.contains("depends on unknown `spring` - known: rakun, rakun-actuator"), problems;
+    assert problems.contains("allowed out of repo: onze");
+    val twice = "{\"name\": \"rakun-starter-x\", \"dependencies\": {\"rakun\": {\"workspace\": true}, \"rakun\": {\"workspace\": true}}}";
+    val dup = starterProblems("rakun-starter-x", twice).join("\n");
+    assert dup.contains("duplicate member name `rakun`"), dup;
+}
+
+test "starters: the allow-list is a literal list" {
+    assert allowList().join(",") == "onze";
+    val src: string = fs.readText("test/starter_manifest_test.bp").unwrapOr("");
+    assert src.contains("return [\"onze\"];");
+}
+
+// ── step 4: one starter, one resolved set ───────────────────────────────────
+
+fn tmp() -> string {
+    val dir: string = env.read("BOTOPINK_TEST_TMPDIR") ?? "";
+    if (dir == "") @panic("BOTOPINK_TEST_TMPDIR is not set - botopink test sets it");
+    return dir + "/rakun-starters";
+}
+
+#[@External.Erlang("""(fun(__P) -> ok = filelib:ensure_dir(__P), {ok, __D} = file:get_cwd(), unicode:characters_to_binary(__D) end)($0)""")]
+declare fn ensureDirCwd(file: string) -> string;
+
+// An application whose manifest declares exactly `starter`, by path.
+fn appDeclaring(starter: string) -> string {
+    val file = tmp() + "/" + starter + "-app/botopink.json";
+    val cwd = ensureDirCwd(file);
+    val _w = fs.writeText(file, "{\"name\": \"app\", \"dependencies\": {\"" + starter + "\": {\"path\": \"" + cwd + "/../../starters/" + starter + "\"}}}");
+    return file;
+}
+
+test "starters: rakun-starter-data-sql alone makes conditionalOnModule(rakun-data) true" {
+    val resolved = resolvedModuleListIn(appDeclaring("rakun-starter-data-sql"));
+    assert moduleVerdict("M|rakun-data", resolved).ok, resolved.join(",");
+}
+
+test "starters: rakun-starter-web alone leaves it false, and the report names the resolved list" {
+    val resolved = resolvedModuleListIn(appDeclaring("rakun-starter-web"));
+    val v = moduleVerdict("M|rakun-data", resolved);
+    assert v.ok == false;
+    assert v.observed == "resolved dependencies: " + resolved.join(","), v.observed;
+    assert v.observed.contains("rakun-starter-web,rakun-starter,rakun-web");
+}
+
+test "starters: a transitive module counts, and so does the starter itself" {
+    val resolved = resolvedModuleListIn(appDeclaring("rakun-starter-web"));
+    assert moduleVerdict("M|rakun", resolved).ok;
+    assert moduleVerdict("M|rakun-starter-web", resolved).ok;
+}
+
+// ── step 5: starters/README.md ──────────────────────────────────────────────
+
+test "starters: the README's table rows are exactly the starter directories" {
+    val readme: string = fs.readText("../../starters/README.md").unwrapOr("");
+    val rows = readme.split("\n").filter({ l -> l.startsWith("| [`rakun-starter") });
+    assert rows.length == starterNames().length, rows.length.toString();
+    for (starterNames()) { n -> assert readme.contains("| [`" + n + "`](./" + n + "/) |"), n; };
+}
+
+test "starters: the README states the third-party form, the subdirectory limitation, bpmp and the lockfile" {
+    val readme: string = fs.readText("../../starters/README.md").unwrapOr("");
+    assert readme.contains("`acme-rakun-starter`");
+    assert readme.contains("no subdirectory field") && readme.contains("\"path\": \"../rakun/starters/rakun-starter-web\"") && readme.contains("`subdir` field");
+    assert readme.contains("`bpmp` resolves") && readme.contains("`botopink.lock.json` pins");
+}

@@ -1,0 +1,48 @@
+//// rakun-messaging — the listener registry and the direct delivery seam.
+//// Front 15 step 2.
+////
+//// A listener is a name, a broker (`amqp` · `kafka` · `redis` · `stream`), a
+//// destination, a group (Kafka's consumer group; a stream's start offset as
+//// `@<offset>`; `""` otherwise), a container name and a handler. `#[listener]`
+//// emits `rkRegisterListenerAs("<Type>.<method>", …)` per annotated method;
+//// the five-argument `rkRegisterListener` is the hand-written form. A
+//// duplicate `{broker, destination}` is recorded, not dropped, and the boot
+//// (`startMessaging`) refuses it naming both handlers.
+
+import {Message} from "message";
+import {rkMsgRegister, rkMsgListenerCount, rkMsgListenerDestinations, rkMsgInvokeDirect, rkMsgWide} from "messaging_host";
+
+fn invoker(handler: fn(msg: Message) -> i32) -> fn(broker: string, destination: string, key: string, payload: string, headersJson: string, offset: i64) -> i32 {
+    return { broker, destination, key, payload, headersJson, offset ->
+        handler(Message(broker: broker, destination: destination, key: key, payload: payload, headersJson: headersJson, offset: offset))
+    };
+}
+
+pub fn rkRegisterListenerAs(name: string, broker: string, destination: string, group: string, container: string, handler: fn(msg: Message) -> i32) -> i32 {
+    return rkMsgRegister(name, broker, destination, group, container, invoker(handler));
+}
+
+pub fn rkRegisterListener(broker: string, destination: string, group: string, container: string, handler: fn(msg: Message) -> i32) -> i32 {
+    return rkRegisterListenerAs(broker + ":" + destination, broker, destination, group, container, handler);
+}
+
+pub fn rkListenerCount() -> i32 {
+    return rkMsgListenerCount();
+}
+
+// The destinations in registration order, comma-separated.
+pub fn rkListenerDestinations() -> string {
+    return rkMsgListenerDestinations().join(",");
+}
+
+// Hands `payload` to the listener on `broker`/`destination` in THIS process,
+// with no broker and no container, and answers the handler's result. An
+// unknown destination raises naming it.
+pub fn rkDeliver(broker: string, destination: string, payload: string) -> i32 {
+    return rkMsgInvokeDirect(broker, destination, "", payload, "{}", rkMsgWide(-1));
+}
+
+// The same with a key (a Kafka record key).
+pub fn rkDeliverKeyed(broker: string, destination: string, key: string, payload: string) -> i32 {
+    return rkMsgInvokeDirect(broker, destination, key, payload, "{}", rkMsgWide(-1));
+}

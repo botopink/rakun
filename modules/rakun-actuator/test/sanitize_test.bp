@@ -1,0 +1,89 @@
+//// rakun-actuator — sanitization (front 76 step 4). `env` and `configprops`
+//// share one filter; a test that needs an authority sets it through the
+//// sidecar's test seam (front 10 is not in this build).
+
+import {Response, rkDispatchHttp, rkSetProp, rkRegisterConfigKeys} from "rakun";
+import {mountActuator} from "actuator";
+import {installManagement, sanitizeBody, managementKeys, builtinPatterns, sanitizePatterns, rkProbesWarnings} from "management";
+
+#[@External.Erlang("rakun_probes", "test_authorities")]
+declare fn asAuthorities(list: string[]) -> i32;
+
+fn boot() -> i32 {
+    val _m = mountActuator();
+    return installManagement();
+}
+
+fn env() -> Response {
+    val _i = rkSetProp("rakun.management.endpoints.web.exposure.include", "env,configprops");
+    val res = rkDispatchHttp("GET", "/actuator/env", "{}", "{}", "");
+    val _u = rkSetProp("rakun.management.endpoints.web.exposure.include", "");
+    return res;
+}
+
+test "sanitize: never shows every key with ****** as its value" {
+    val _b = boot();
+    val _p = rkSetProp("test.sanitize.plain", "hello");
+    val res = env();
+    val _u = rkSetProp("test.sanitize.plain", "");
+    assert res.status == 200;
+    assert res.body.contains("{\"key\":\"test.sanitize.plain\",\"value\":\"******\"}"), res.body;
+    assert res.body.contains("hello") == false;
+}
+
+test "sanitize: when-authorized shows values to a holder of the role and ****** to anyone else" {
+    val _b = boot();
+    val _p = rkSetProp("test.sanitize.plain", "hello");
+    val _m = rkSetProp("rakun.management.endpoint.env.show-values", "when-authorized");
+    val _r = rkSetProp("rakun.management.endpoint.env.roles", "admin");
+    val _a = asAuthorities(["admin"]);
+    val admin = env();
+    val _o = asAuthorities(["viewer"]);
+    val viewer = env();
+    val _z = asAuthorities([]);
+    val _u = rkSetProp("test.sanitize.plain", "");
+    val _v = rkSetProp("rakun.management.endpoint.env.show-values", "");
+    val _w = rkSetProp("rakun.management.endpoint.env.roles", "");
+    assert admin.body.contains("{\"key\":\"test.sanitize.plain\",\"value\":\"hello\"}"), admin.body;
+    assert viewer.body.contains("{\"key\":\"test.sanitize.plain\",\"value\":\"******\"}");
+}
+
+test "sanitize: always shows values, warns naming the endpoint, and still hides a sensitive key" {
+    val _m = rkSetProp("rakun.management.endpoint.env.show-values", "always");
+    val _b = boot();
+    val _p = rkSetProp("test.sanitize.plain", "hello");
+    val _s = rkSetProp("test.sanitize.db.password", "hunter2");
+    val res = env();
+    val _u = rkSetProp("test.sanitize.plain", "");
+    val _v = rkSetProp("test.sanitize.db.password", "");
+    val _w = rkSetProp("rakun.management.endpoint.env.show-values", "");
+    assert res.body.contains("{\"key\":\"test.sanitize.plain\",\"value\":\"hello\"}");
+    assert res.body.contains("{\"key\":\"test.sanitize.db.password\",\"value\":\"******\"}"), res.body;
+    assert rkProbesWarnings().filter({ w -> w.contains("rakun.management.endpoint.env.show-values=always") }).length == 1;
+}
+
+test "sanitize: additional keys only add patterns, and no key removes a built-in one" {
+    val _a = rkSetProp("rakun.management.endpoint.sanitize.additional-keys", "iban, pin");
+    val patterns = sanitizePatterns();
+    val _u = rkSetProp("rakun.management.endpoint.sanitize.additional-keys", "");
+    for (builtinPatterns()) { p -> assert patterns.indexOf(p) >= 0, p; };
+    assert patterns.indexOf("iban") >= 0 && patterns.indexOf("pin") >= 0;
+    assert managementKeys().filter({ k -> k.contains("sanitize") }).join(",") == "rakun.management.endpoint.sanitize.additional-keys";
+}
+
+test "sanitize: env and configprops go through the same filter" {
+    val _b = boot();
+    val raw = "{\"properties\":[{\"key\":\"a.password\",\"value\":\"p\"},{\"key\":\"a.name\",\"value\":\"n\"}]}";
+    for (["env", "configprops"]) { id ->
+        val out = sanitizeBody(id, raw);
+        assert out.contains("{\"key\":\"a.name\",\"value\":\"******\"}") && out.contains("{\"key\":\"a.password\",\"value\":\"******\"}"), id + ": " + out;
+    };
+    assert sanitizeBody("info", raw) == raw;
+    val _k = rkRegisterConfigKeys("vault", "token:string:x|name:string:y");
+    val _t = rkSetProp("vault.name", "acme");
+    val _i = rkSetProp("rakun.management.endpoints.web.exposure.include", "configprops");
+    val cp = rkDispatchHttp("GET", "/actuator/configprops", "{}", "{}", "");
+    val _u = rkSetProp("rakun.management.endpoints.web.exposure.include", "");
+    val _n = rkSetProp("vault.name", "");
+    assert cp.status == 200 && cp.body.contains("\"key\":\"vault.name\"") && cp.body.contains("acme") == false, cp.body;
+}

@@ -1,0 +1,154 @@
+//// rakun-app — parallel routes (front 61 steps 1, 2, 5, 6). The tables are
+//// written as records (`kind|pattern|slot|verb`); the end-to-end cells
+//// register through front 22 and render the default through its renderer.
+
+import {testing.asserts} from "std";
+import {io: {fs}} from "std";
+import {Request, rkMakeRequest} from "rakun";
+import {table: {RouteEntry, parseTable}, slot_states: {SlotState, writeSlotStates, parseSlotStates}} from "routing";
+import {rkAppReset, rkAppRegisterPage, rkAppStore, entryLine, rkAppRender} from "file_router";
+import {PageRenderer, ChunkWriter, writeTo, chunkWriter, rkSsrBegin, rkSsrBody} from "ssr";
+
+fn textBody(out: ChunkWriter, text: string) -> @Task<@Result<void, string>> {
+    await writeTo(out, text);
+    return;
+}
+import {SlotResolution, slotParam, slotsOf, tableForSlot, resolveSlot, resolveSlots, slotStateLines, defaultProblem, slotConflictProblem, appTableEntries} from "route_slots";
+
+fn t(wire: string) -> RouteEntry[] {
+    return parseTable(wire);
+}
+
+fn dashboard() -> RouteEntry[] {
+    return t("L|/\nL|/dashboard\nP|/dashboard\nP|/dashboard|analytics\nP|/dashboard/visitors|analytics\nD|/dashboard|analytics\nS|/dashboard|analytics\nP|/dashboard|team\nP|/dashboard/settings|team\nE|/dashboard|team\nS|/dashboard\nP|/other");
+}
+
+fn letter(s: SlotState) -> string {
+    return case s {
+        Matched -> "M";
+        Defaulted -> "D";
+        Unchanged -> "U";
+        Empty -> "E";
+    };
+}
+
+fn shape(r: SlotResolution) -> string {
+    val e: RouteEntry = r.entry ?? RouteEntry(kind: "", pattern: "", slot: "", verb: "");
+    return r.slot + ":" + letter(r.state) + ":" + e.kind + e.pattern;
+}
+
+// ── step 1 ──────────────────────────────────────────────────────────────────
+
+test "slots: slotsOf answers the layout's slots in registration order, not children" {
+    assert slotsOf(dashboard(), "/dashboard").join(",") == "analytics,team";
+    assert slotsOf(dashboard(), "/").length == 0;
+}
+
+test "slots: a slot whose subtree matches answers Matched with its params" {
+    val tbl = t("L|/\nL|/shop\nP|/shop/[item]|detail");
+    val r = resolveSlot(tbl, "detail", "/shop", "/shop/lamp", false);
+    assert letter(r.state) == "M";
+    assert slotParam(r, "item") == "lamp";
+}
+
+test "slots: unmatched on a hard request is Defaulted with a default and Empty without" {
+    val r = resolveSlot(dashboard(), "analytics", "/dashboard", "/dashboard/settings", false);
+    assert shape(r) == "analytics:D:D/dashboard";
+    val noDefault = resolveSlot(dashboard(), "team", "/dashboard", "/dashboard/visitors", false);
+    assert shape(noDefault) == "team:E:";
+}
+
+test "slots: unmatched on a soft navigation is Unchanged, default or not" {
+    assert shape(resolveSlot(dashboard(), "analytics", "/dashboard", "/dashboard/settings", true)) == "analytics:U:";
+    assert shape(resolveSlot(dashboard(), "team", "/dashboard", "/dashboard/visitors", true)) == "team:U:";
+}
+
+test "slots: two slots match independently in one resolveSlots call" {
+    val rs = resolveSlots(dashboard(), "/dashboard", "/dashboard/settings", false);
+    assert rs.map({ r -> shape(r) }).join(" ") == "analytics:D:D/dashboard team:M:P/dashboard/settings";
+}
+
+test "slots: a slot's own loading and error entries are in its view, not the children slot's" {
+    val team = tableForSlot(dashboard(), "team");
+    assert team.filter({ e -> e.kind == "E" }).length == 1;
+    assert team.filter({ e -> e.kind == "S" }).length == 0;
+    val analytics = tableForSlot(dashboard(), "analytics");
+    assert analytics.filter({ e -> e.kind == "S" }).length == 1;
+    assert analytics.filter({ e -> e.slot != "" }).length == 0;
+}
+
+test "slots: resolveSlots keeps declaration order" {
+    val rs = resolveSlots(dashboard(), "/dashboard", "/dashboard", false);
+    assert rs.map({ r -> r.slot }).join(",") == "analytics,team";
+}
+
+// ── step 2 ──────────────────────────────────────────────────────────────────
+
+test "slots: a default under @analytics is analytics' and not team's" {
+    val d = tableForSlot(dashboard(), "team").filter({ e -> e.kind == "D" });
+    assert d.length == 0;
+    assert tableForSlot(dashboard(), "analytics").filter({ e -> e.kind == "D" }).length == 1;
+}
+
+test "slots: a default outside any slot, or two under one slot, fail the scan" {
+    assert defaultProblem(dashboard()) == "";
+    assert defaultProblem(t("D|/dashboard")).contains("a default.bp at `/dashboard` sits outside any @slot");
+    assert defaultProblem(t("D|/dashboard|team\nD|/dashboard/x|team")).contains("@team has two default.bp entries");
+    val clash = slotConflictProblem(t("L|/d\nP|/d/x|a\nP|/d/x|a"));
+    assert clash.contains("@a has two pages claiming `/d/x`"), clash;
+    assert slotConflictProblem(dashboard()) == "";
+}
+
+fn textPage(label: string) -> PageRenderer {
+    return { req, out -> textBody(out, label) };
+}
+
+test "slots: a hard reload of /dashboard/settings renders analytics' default, not a hole" {
+    val _r = rkAppReset();
+    val _l = rkAppStore(entryLine("L", "dashboard", "", ""), 0);
+    val _p = rkAppRegisterPage("dashboard", textPage("dash"));
+    val _a = rkAppRegisterPage("dashboard/@analytics/visitors", textPage("visitors"));
+    val _d = rkAppStore(entryLine("D", "dashboard/@analytics", "", ""), textPage("analytics default"));
+    val _t = rkAppRegisterPage("dashboard/@team/settings", textPage("team settings"));
+    val rs = resolveSlots(appTableEntries(), "/dashboard", "/dashboard/settings", false);
+    val analytics: SlotResolution = rs.at(0) ?? resolveSlot(appTableEntries(), "analytics", "/dashboard", "/", false);
+    assert letter(analytics.state) == "D";
+    val e: RouteEntry = analytics.entry ?? RouteEntry(kind: "", pattern: "", slot: "", verb: "");
+    val render: PageRenderer = rkAppRender("D|" + e.pattern + "|analytics", textPage("missing"));
+    val _b = rkSsrBegin();
+    val _w = render(rkMakeRequest("GET", "/dashboard/settings", "{}", "{}", "{}", ""), chunkWriter());
+    assert rkSsrBody() == "analytics default";
+}
+
+// ── step 5 ──────────────────────────────────────────────────────────────────
+
+test "slots: the z section round-trips slot, pattern and state" {
+    val rs = resolveSlots(dashboard(), "/dashboard", "/dashboard/settings", true);
+    val back = parseSlotStates(writeSlotStates(slotStateLines(rs)));
+    assert back.length == 2;
+    val fields = back.map({ x -> x._0 + "|" + x._1 + "|" + letter(x._2) });
+    assert fields.join(";") == "analytics||U;team|/dashboard/settings|M", fields.join(";");
+}
+
+test "slots: a slot name holding a bar is refused at registration" {
+    val _r = rkAppReset();
+    try asserts.throws({ -> rkAppRegisterPage("dash/@te|am/x", textPage("x")) });
+}
+
+// ── step 6 ──────────────────────────────────────────────────────────────────
+
+test "slots: an Empty slot and an Unchanged slot are resolutions, so positions do not shift" {
+    val hard = resolveSlots(dashboard(), "/dashboard", "/dashboard/visitors", false);
+    assert hard.map({ r -> shape(r) }).join(" ") == "analytics:M:P/dashboard/visitors team:E:";
+    val soft = resolveSlots(dashboard(), "/dashboard", "/other", true);
+    assert soft.map({ r -> shape(r) }).join(" ") == "analytics:U: team:U:";
+    assert writeSlotStates(slotStateLines(soft)) == "analytics||U\nteam||U";
+}
+
+test "slots: the slot modules name no element and no LayoutProps" {
+    for (["src/route_slots.bp", "src/route_intercept.bp"]) { f ->
+        val src: string = fs.readText(f).unwrapOr("");
+        assert src != "";
+        assert src.contains("Element") == false && src.contains("LayoutProps") == false;
+    };
+}

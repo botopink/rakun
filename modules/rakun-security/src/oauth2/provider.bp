@@ -1,0 +1,107 @@
+//// rakun-security — OAuth2 providers: the registry and OIDC discovery (front
+//// 79 step 1).
+////
+//// An `OAuth2Provider` is registered at boot (`registerProvider`, usually
+//// from a `#[bean]` method). With an `issuerUri`, the OIDC discovery document
+//// (`<issuer>/.well-known/openid-configuration`, fetched ONCE per issuer per
+//// boot through front 13's client) supplies the endpoints, and a document
+//// whose `issuer` disagrees with the configured one refuses the boot, naming
+//// both. Without one, the four endpoints set on the provider are used and no
+//// request is made. Refused at registration: a second provider with one id,
+//// and a public client (empty secret) without PKCE.
+
+import {RestClient, ClientResponse} from "rakun-client";
+import {oauthClaim, oauthCounterBump, oauthCounter} from "oauth2_host";
+
+pub type OAuth2Provider(
+    id: string,
+    clientId: string,
+    clientSecret: string,
+    issuerUri: string,
+    scopes: string[],
+    pkce: bool,
+    redirectPath: string,
+    authorizationUri: string,
+    tokenUri: string,
+    userinfoUri: string,
+    jwksUri: string,
+)
+
+pub type ProviderEndpoints(
+    authorization: string,
+    token: string,
+    userinfo: string,
+    jwks: string,
+    issuer: string,
+)
+
+#[@External.Erlang("""(fun(__P) -> __Id = element(2, __P), __L = persistent_term:get(rakun_oauth2_ids, []), case lists:member(__Id, __L) of true -> 0; false -> persistent_term:put({rakun_oauth2_provider, __Id}, __P), persistent_term:put(rakun_oauth2_ids, __L ++ [__Id]), 1 end end)($0)""")]
+declare fn storeProvider(p: OAuth2Provider) -> i32;
+
+#[@External.Erlang("""(fun(__Id) -> case persistent_term:get({rakun_oauth2_provider, __Id}, undefined) of undefined -> undefined; __P -> __P end end)($0)""")]
+declare fn loadProvider(id: string) -> ?OAuth2Provider;
+
+#[@External.Erlang("""(fun() -> [persistent_term:erase({rakun_oauth2_provider, __I}) || __I <- persistent_term:get(rakun_oauth2_ids, [])], persistent_term:erase(rakun_oauth2_ids), [persistent_term:erase(__K) || {{rakun_oauth2_disc, _} = __K, _} <- persistent_term:get()], 0 end)()""")]
+pub declare fn clearProviders() -> i32;
+
+#[@External.Erlang("""(fun(__I, __E) -> persistent_term:put({rakun_oauth2_disc, __I}, __E), 0 end)($0, $1)""")]
+declare fn storeEndpoints(issuer: string, e: ProviderEndpoints) -> i32;
+
+#[@External.Erlang("""(fun(__I) -> persistent_term:get({rakun_oauth2_disc, __I}, undefined) end)($0)""")]
+declare fn cachedEndpoints(issuer: string) -> ?ProviderEndpoints;
+
+pub fn provider(id: string) -> ?OAuth2Provider {
+    return loadProvider(id);
+}
+
+fn trimmed(uri: string) -> string {
+    return if (uri.endsWith("/")) uri.slice(0, uri.length() - 1) else uri;
+}
+
+pub fn discoveryFetches(issuer: string) -> i32 {
+    return oauthCounter("discovery " + trimmed(issuer));
+}
+
+// The endpoints of `p`: the discovery document of its issuer (fetched once
+// per boot), or the four endpoints it sets.
+pub fn discover(p: OAuth2Provider) -> ProviderEndpoints {
+    val issuer = trimmed(p.issuerUri);
+    if (issuer == "") return ProviderEndpoints(authorization: p.authorizationUri, token: p.tokenUri, userinfo: p.userinfoUri, jwks: p.jwksUri, issuer: "");
+    val cached: ?ProviderEndpoints = cachedEndpoints(issuer);
+    if (cached != null) return cached ?? ProviderEndpoints(authorization: "", token: "", userinfo: "", jwks: "", issuer: "");
+    val _n = oauthCounterBump("discovery " + issuer);
+    val res: ClientResponse = RestClient.builder().build().get(issuer + "/.well-known/openid-configuration").retrieve();
+    if (res.isOk() == false) @panic("rakun oauth2: the discovery document of " + issuer + " could not be fetched (status " + res.status.toString() + ")");
+    val announced = trimmed(oauthClaim(res.body, "issuer"));
+    if (announced != issuer) @panic("rakun oauth2: the discovery document of provider `" + p.id + "` announces the issuer `" + announced + "`, and the configured issuerUri is `" + issuer + "`");
+    val e = ProviderEndpoints(
+        authorization: oauthClaim(res.body, "authorization_endpoint"),
+        token: oauthClaim(res.body, "token_endpoint"),
+        userinfo: oauthClaim(res.body, "userinfo_endpoint"),
+        jwks: oauthClaim(res.body, "jwks_uri"),
+        issuer: issuer,
+    );
+    val _s = storeEndpoints(issuer, e);
+    return e;
+}
+
+pub fn providerProblem(p: OAuth2Provider) -> string {
+    if (p.clientSecret == "" && p.pkce == false) return "rakun oauth2: provider `" + p.id + "` has no client secret and no PKCE - a public client without proof of possession is refused";
+    val explicit = p.authorizationUri != "" && p.tokenUri != "" && p.jwksUri != "";
+    if (p.issuerUri == "" && explicit == false) return "rakun oauth2: provider `" + p.id + "` has neither an issuerUri nor its authorization, token and JWKS endpoints";
+    return "";
+}
+
+// Registers `p` at boot, discovering its endpoints now so a wrong issuer
+// fails the boot rather than the first login.
+pub fn registerProvider(p: OAuth2Provider) -> i32 {
+    val problem = providerProblem(p);
+    if (problem != "") @panic(problem);
+    if (loadProvider(p.id) != null) @panic("rakun oauth2: a provider `" + p.id + "` is already registered - one id, one provider");
+    val _e = discover(p);
+    return storeProvider(p);
+}
+
+pub fn oidcProvider(id: string, clientId: string, clientSecret: string, issuerUri: string) -> OAuth2Provider {
+    return OAuth2Provider(id: id, clientId: clientId, clientSecret: clientSecret, issuerUri: issuerUri, scopes: ["openid", "profile"], pkce: true, redirectPath: "/login/oauth2/code/" + id, authorizationUri: "", tokenUri: "", userinfoUri: "", jwksUri: "");
+}

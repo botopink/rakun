@@ -14,9 +14,15 @@
 ////   · `otp`     — OTP release, ERTS version, online schedulers (Spring's `java` row);
 ////   · `os`      — family, name, version, architecture;
 ////   · `process` — OS PID, uptime in milliseconds, BEAM process count;
-////   · `env`     — every property under `rakun.info.*`, nested by its dots.
+////   · `env`     — every property under `rakun.info.*`, nested by its dots;
+////   · `rakun`   — the framework version and, for every rakun module or
+////                 starter the application resolves, the version front 73's
+////                 version set pins for it.
 
 import {Request, sub} from "rakun";
+import {rakunVersion, versionOf} from "rakun/version_set";
+import {moduleList, manifestName} from "rakun/autoconfig_registry";
+import {io.fs} from "std";
 import {json} from "std";
 import {
     EndpointResponse,
@@ -81,7 +87,17 @@ pub fn buildInfo() -> string {
     return json.object([#("build", json.object([#("name", json.quote(f.at(0) ?? "")), #("version", json.quote(f.at(1) ?? ""))]))]);
 }
 
+// `{"rakun": {"version": …, "modules": {<name>: <version>, …}}}` — the modules
+// are the resolved dependencies the version set pins, in resolution order.
+pub fn rakunInfo() -> string {
+    val resolved: string[] = if (fs.exists(manifestName())) moduleList() else [];
+    val pinned = resolved.filter({ n -> versionOf(n) != "" });
+    val modules = json.object(pinned.map({ n -> #(n, json.quote(versionOf(n))) }));
+    return json.object([#("rakun", json.object([#("version", json.quote(rakunVersion())), #("modules", modules)]))]);
+}
+
 pub fn registerInfoBuiltins() -> i32 {
+    val _r = rkRegisterInfoContributor("rakun", "rakun-actuator", { -> rakunInfo() });
     val _b = rkRegisterInfoContributor("build", "rakun-actuator", { -> buildInfo() });
     val _o = rkRegisterInfoContributor("otp", "rakun-actuator", { -> rkActuatorOtpFacts() });
     val _s = rkRegisterInfoContributor("os", "rakun-actuator", { -> rkActuatorOsFacts() });

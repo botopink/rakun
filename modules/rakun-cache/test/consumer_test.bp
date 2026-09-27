@@ -1,0 +1,114 @@
+//// rakun-cache — what a CONSUMER of the member sees (front 12 steps 4 and 5).
+////
+//// A test file of this member cannot import `from "rakun-cache"` (a package
+//// does not resolve its own name), so each cell here copies a project from
+//// `test/fixtures/<name>/` (files end in `.fixture` so the runner does not
+//// compile them here), writes a manifest depending on this member by path,
+//// runs the compiler on it and asserts its output. The projects are written
+//// under `$BOTOPINK_TEST_TMPDIR/rakun-cache-fixtures/` (the run's own).
+////
+//// The compiler is `$BOTOPINK_BIN`, else `botopink` on `PATH`, else the
+//// meta-repository's `repository/botopink-lang/zig-out/bin/botopink`. With
+//// none of them the cells FAIL saying so — they never pass vacuously.
+
+import {testing.asserts} from "std";
+import {io: {fs, process, env}} from "std";
+
+// This run's own scratch directory, `""` outside `botopink test` (which names
+// it in `BOTOPINK_TEST_TMPDIR`, unique to the run and the target). Never a
+// path under the member: its cells run side by side with it as their cwd.
+fn fixtureRoot() -> string {
+    val tmp = env.read("BOTOPINK_TEST_TMPDIR").unwrapOr("");
+    if (tmp == "") @panic("BOTOPINK_TEST_TMPDIR is not set: run this suite under `botopink test`");
+    return tmp + "/rakun-cache-fixtures";
+}
+
+fn compilerCommand() -> string {
+    return "B=\"$BOTOPINK_BIN\"; [ -n \"$B\" ] || B=\"$(command -v botopink)\"; [ -n \"$B\" ] || B=../../../botopink-lang/zig-out/bin/botopink; [ -x \"$B\" ] || { echo \"no botopink compiler: set BOTOPINK_BIN\"; exit 0; }; B=\"$(cd \"$(dirname \"$B\")\" && pwd)/$(basename \"$B\")\"; ";
+}
+
+fn dep(name: string, dir: string) -> string {
+    return "    \"" + name + "\": { \"path\": \"" + dir + "\" }";
+}
+
+// The fixture names what it imports; rakun-cache's own dependencies follow
+// transitively (decision 143).
+fn manifest(name: string) -> string {
+    val here = process.cwd();
+    val all = ["rakun", "rakun-cache"].map({ m -> dep(m, here + "/../" + m) });
+    return "{\n  \"name\": \"" + name + "\",\n  \"version\": \"0.0.1\",\n  \"src\": \"src/\",\n  \"entry\": \"root.bp\",\n  \"target\": \"erlang\",\n  \"targets\": [\"erlang\"],\n  \"dependencies\": {\n" + all.join(",\n") + "\n  }\n}\n";
+}
+
+fn prepare(name: string) -> string {
+    val dir = fixtureRoot() + "/" + name;
+    val src = process.cwd() + "/test/fixtures/" + name;
+    val _m = process.runShell("rm -rf '" + dir + "' && mkdir -p '" + dir + "' && cp -r '" + src + "/.' '" + dir + "/' && for f in $(find '" + dir + "' -name '*.fixture'); do mv \"$f\" \"$(echo \"$f\" | sed 's/[.]fixture$//')\"; done");
+    val _j = fs.writeText(dir + "/botopink.json", manifest("cache-" + name));
+    return dir;
+}
+
+// Runs `botopink test` in the fixture `name`: its output, then `exit=<status>`.
+fn testFixture(name: string) -> string {
+    val dir = prepare(name);
+    return process.runShell(compilerCommand() + "cd '" + dir + "' && \"$B\" test 2>&1 < /dev/null; echo \"exit=$?\"");
+}
+
+// Writes `source` as the root of a one-file project and builds it.
+fn buildSource(name: string, source: string) -> string {
+    val dir = fixtureRoot() + "/" + name;
+    val _m = process.runShell("rm -rf '" + dir + "' && mkdir -p '" + dir + "/src'");
+    val _j = fs.writeText(dir + "/botopink.json", manifest("cache-" + name));
+    val _s = fs.writeText(dir + "/src/root.bp", source);
+    return process.runShell(compilerCommand() + "cd '" + dir + "' && \"$B\" build --target erlang --out out 2>&1 < /dev/null; echo \"exit=$?\"");
+}
+
+fn header() -> string {
+    return "import {cached, cacheable, cacheEvict, cacheMethod, cacheEvictAll, cacheEvictKeys} from \"rakun-cache\";\n\n";
+}
+
+// ── the twin ────────────────────────────────────────────────────────────────
+
+test "consumer: the #[cached] twin - injection, delegation, eviction ordering, one store" {
+    val out = testFixture("twin");
+    try asserts.contains(out, "10 passed, 0 failed");
+    try asserts.contains(out, "ok   twin: a field declared ProductCatalog is injected with the caching twin");
+    try asserts.contains(out, "ok   twin: one store - cacheThrough reads the row the cacheable twin wrote");
+    try asserts.notContains(out, "FAIL");
+    try asserts.contains(out, "exit=0");
+}
+
+// ── the import spellings ────────────────────────────────────────────────────
+
+test "consumer: the qualified and the bare import forms both resolve" {
+    val out = testFixture("imports");
+    try asserts.contains(out, "ok   import: the qualified form");
+    try asserts.contains(out, "ok   import: the bare form");
+    try asserts.contains(out, "ok   import: cacheKey through its module");
+    try asserts.notContains(out, "FAIL");
+    try asserts.contains(out, "exit=0");
+}
+
+// ── placement ───────────────────────────────────────────────────────────────
+
+test "consumer: #[cacheable] and #[cacheEvict] anywhere but on a method fail with a located message" {
+    val onType = buildSource("cacheable-type", header() + "#[cacheable(\"x\")]\npub type Wrong(n: i32)\n");
+    try asserts.contains(onType, "#[cacheable] must annotate a method of a #[cached] behavior");
+    try asserts.contains(onType, "src/root.bp:");
+    try asserts.notContains(onType, "exit=0");
+    val onFn = buildSource("evict-fn", header() + "#[cacheEvict(\"x\", true)]\npub fn go() -> i32 {\n    return 0;\n}\n");
+    try asserts.contains(onFn, "#[cacheEvict] must annotate a method of a #[cached] behavior");
+    try asserts.contains(onFn, "src/root.bp:");
+    try asserts.notContains(onFn, "exit=0");
+}
+
+test "consumer: #[cached] on a type is refused naming the behavior it needs" {
+    val out = buildSource("cached-type", header() + "#[cached]\npub type Catalog() {\n    pub fn get(self: Self, id: string) -> string {\n        return id;\n    }\n}\n");
+    try asserts.contains(out, "#[cached] must annotate a behavior");
+    try asserts.notContains(out, "exit=0");
+}
+
+test "consumer: a #[cacheable] method that does not return string is refused" {
+    val out = buildSource("bad-return", header() + "#[cached]\npub behavior Counter {\n    #[cacheable(\"n\")]\n    fn count(self: Self, id: string) -> i32;\n}\n");
+    try asserts.contains(out, "#[cached]: Counter.count returns `i32` - a #[cacheable] method returns string");
+    try asserts.notContains(out, "exit=0");
+}

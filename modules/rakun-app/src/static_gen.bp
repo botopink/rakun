@@ -1,0 +1,471 @@
+//// rakun-app — static generation (front 60 steps 2–7).
+////
+//// THE DECISION (`decideKind`), in order:
+////
+//// 1. `ForceDynamic` → Dynamic (`force-dynamic`)
+//// 2. `ForceStatic` / `ErrorOnDynamic` → Static (`force-static`, or
+////    `force-static over <reason>` when the trial render touched a dynamic API;
+////    the raise for that is front 62's strict frame, not this function)
+//// 3. a dynamic pattern with no `generateStaticParams`: Dynamic when
+////    `dynamicParams` (`dynamic segment without generateStaticParams`), else
+////    Static with nothing enumerated (`dynamicParams false: no path is enumerated`)
+//// 4. the trial render touched a dynamic API → Dynamic, front 62's reason
+//// 5. otherwise Static, reason `""`
+////
+//// Rule 4 needs a render, so `prerenderAll` renders every candidate once in a
+//// front 62 frame and asks the frame afterwards; the fan-out runs the renders
+//// as unstarted thunks in at most `rakun.static.concurrency` processes (the
+//// scheduler count by default).
+////
+//// THE STORE is front 12's: a `PrerenderEntry` is written as JSON with
+//// `cacheStore` into the framework cache `rakun.prerender` (shared scope,
+//// keyed by path, tagged with the path's `path:<path>` and the entry's own
+//// tags), so front 12's `revalidateTag` / `revalidatePath` mark it stale — the
+//// two revalidations meet in one store. `revalidateAt` is an absolute epoch
+//// (ms), `-1` never; `buildHash` is std's `hash.contentHash(html + payload)`.
+////
+//// SERVING (`serveStatic`): a fresh entry as is; a stale one IMMEDIATELY, with
+//// ONE regeneration started per path (single flight in the sidecar); a
+//// regeneration that raises leaves the stale entry and is logged once to the
+//// node's standard error and `regenerationFailures()`. A draft request
+//// (front 62's `draftBypass`) gets nothing and renders fresh.
+////
+//// THE KIND BLOB (`routeKinds`) is `routing`'s `writeKinds` of the decisions,
+//// the `k` field onze hands jhonstart's payload.
+////
+//// THE EXPORT (`staticExport`) renders every page path with a STRICT frame and
+//// writes `<out>/<path>/index.html` and `payload.json` beside it; a route that
+//// reads a dynamic API, a handler route, a dynamic pattern without
+//// parameters, or a target outside `<out>` fails the export. No flag
+//// downgrades any of that.
+
+import {hash, path, io.fs, json.object, json.quote, json.decode, json.Json} from "std";
+import {route_kinds: {RouteKind, writeKinds}, table: {RouteEntry, parseTable}} from "routing";
+import {
+    Request, rkProp, rkMakeRequest, toI32, beginRequest, endRequest, RequestScope, RequestPhase,
+    isDynamic, dynamicReason, requestLive, draftBypass,
+} from "rakun";
+import {rkAppTable, rkAppRender} from "file_router";
+import {PageRenderer, ChunkWriter, chunkWriter, writeTo, matchPage, PageMatch, rkSsrBegin, rkSsrBody, rkSsrStatus, rkSsrGuard, rkSsrPageRequest} from "ssr";
+import {CacheScope, CachePolicy, CachePeek, cachePolicy, cacheLifeOf, cacheStore, cachePeek} from "rakun-cache/cache";
+import {SegmentConfig, DynamicMode, modeName, configFor, normalizePattern, patternInTable, unknownPatternProblem} from "segment_config";
+import {
+    rkStaticParamsPut, rkStaticParamsGet, rkStaticKindPut, rkStaticKinds, rkStaticRunBounded,
+    rkStaticRegenerate, rkStaticLogged, rkStaticSchedulers, rkStaticEnsureDir, rkStaticNowMs, rkStaticWide,
+} from "static_host";
+
+// ── step 2 — the decision ───────────────────────────────────────────────────
+
+pub type KindDecision(kind: RouteKind, reason: string)
+
+pub fn kindLetter(k: RouteKind) -> string {
+    val l = case k {
+        RouteKind.Static -> "S";
+        RouteKind.Dynamic -> "D";
+    };
+    return l;
+}
+
+pub fn decideKind(config: SegmentConfig, hasParams: bool, patternIsDynamic: bool, touchedDynamic: bool, touchedReason: string) -> KindDecision {
+    val mode = modeName(config.dynamic);
+    if (mode == "force-dynamic") return KindDecision(kind: RouteKind.Dynamic, reason: "force-dynamic");
+    if (mode == "force-static" || mode == "error") {
+        val why = if (touchedDynamic) "force-static over " + touchedReason else "force-static";
+        return KindDecision(kind: RouteKind.Static, reason: why);
+    };
+    if (patternIsDynamic && hasParams == false) {
+        if (config.dynamicParams) return KindDecision(kind: RouteKind.Dynamic, reason: "dynamic segment without generateStaticParams");
+        return KindDecision(kind: RouteKind.Static, reason: "dynamicParams false: no path is enumerated");
+    };
+    if (touchedDynamic) return KindDecision(kind: RouteKind.Dynamic, reason: touchedReason);
+    return KindDecision(kind: RouteKind.Static, reason: "");
+}
+
+// ── step 3 — enumeration ────────────────────────────────────────────────────
+
+pub type ParamBinding(name: string, value: string)
+
+pub type StaticParams(bindings: Array<ParamBinding>)
+
+pub fn duplicateParamsProblem(pattern: string) -> string {
+    return "rakun static: `" + pattern + "` already has a generateStaticParams";
+}
+
+pub fn registerStaticParams(seg: string, produce: fn() -> @Task<StaticParams[]>) -> i32 {
+    val pattern = normalizePattern(seg);
+    if (patternInTable(pattern) == false) @panic(unknownPatternProblem(pattern));
+    if (rkStaticParamsPut(pattern, produce) == 0) @panic(duplicateParamsProblem(pattern));
+    return 1;
+}
+
+// `@Task` is eager on the BEAM: applying the producer IS running it.
+#[@External.Erlang("""(fun(__F) -> __F() end)($0)""")]
+declare fn rkStaticProduce(produce: fn() -> @Task<StaticParams[]>) -> StaticParams[];
+
+fn segmentName(seg: string) -> string {
+    return seg.replaceAll("[", "").replaceAll("]", "").replaceAll("...", "");
+}
+
+pub fn isDynamicPattern(pattern: string) -> bool {
+    return pattern.contains("[");
+}
+
+fn bound(row: StaticParams, name: string) -> ?string {
+    val hit = row.bindings.filter({ b -> b.name == name });
+    if (hit.length == 0) return null;
+    val first: ParamBinding = hit.at(0) ?? ParamBinding(name: "", value: "");
+    return first.value;
+}
+
+fn expandRow(pattern: string, row: StaticParams) -> string {
+    val segs = pattern.split("/").filter({ s -> s != "" });
+    var names: Array<string> = [];
+    var parts: Array<string> = [];
+    for (segs) { s ->
+        val group = s.startsWith("(") && s.endsWith(")");
+        val slot = s.startsWith("@");
+        if (group == false && slot == false) {
+            if (s.startsWith("[")) {
+                val name = segmentName(s);
+                names.push(name);
+                val optional = s.startsWith("[[");
+                val catchAll = s.contains("...");
+                val v: ?string = bound(row, name);
+                if (v == null) @panic("rakun static: a generateStaticParams row for `" + pattern + "` binds no `" + name + "`");
+                val value: string = v ?? "";
+                if (catchAll == false && value.contains("/")) @panic("rakun static: `" + name + "` of `" + pattern + "` is bound to `" + value + "`, which holds a `/` - only a catch-all segment spans several");
+                if (value == "" && optional == false) @panic("rakun static: `" + name + "` of `" + pattern + "` is bound to the empty string");
+                if (value != "") parts.push(value);
+            } else parts.push(s);
+        };
+    };
+    for (row.bindings) { b ->
+        if (names.filter({ n -> n == b.name }).length == 0) @panic("rakun static: a generateStaticParams row for `" + pattern + "` binds `" + b.name + "`, which the pattern does not have");
+    };
+    return "/" + parts.join("/");
+}
+
+pub fn expandParams(pattern: string, rows: StaticParams[]) -> string[] {
+    var out: string[] = [];
+    for (rows) { row ->
+        val p = expandRow(pattern, row);
+        if (out.filter({ q -> q == p }).length > 0) @panic("rakun static: two generateStaticParams rows for `" + pattern + "` produce `" + p + "`");
+        out.push(p);
+    };
+    return out;
+}
+
+// ── step 4 — the prerender pass ─────────────────────────────────────────────
+
+pub type PrerenderEntry(
+    path: string,
+    html: string,
+    payload: string,
+    tags: Array<string>,
+    revalidateAt: i64,
+    buildHash: string,
+)
+
+pub type PrerenderReport(
+    stored: i32,
+    skippedDynamic: i32,
+    failed: i32,
+    lines: string[],
+)
+
+pub fn prerenderPolicy(path: string, tags: Array<string>) -> CachePolicy {
+    var all: Array<string> = ["path:" + path];
+    for (tags) { t -> all.push(t); };
+    return cachePolicy(CacheScope.Shared, "rakun.prerender", cacheLifeOf(0, 31536000, 31536000), all);
+}
+
+pub fn encodeEntry(e: PrerenderEntry) -> string {
+    return object([
+        #("path", quote(e.path)),
+        #("html", quote(e.html)),
+        #("payload", quote(e.payload)),
+        #("tags", "[" + e.tags.map({ t -> quote(t) }).join(",") + "]"),
+        #("revalidateAt", quote(e.revalidateAt.toString())),
+        #("buildHash", quote(e.buildHash)),
+    ]);
+}
+
+fn member(members: Array<#(string, Json)>, key: string) -> Json {
+    var out = Json.Null;
+    for (members) { m -> if (m._0 == key) out = m._1; };
+    return out;
+}
+
+fn text(j: Json) -> string {
+    return case j {
+        Str(value: s) -> s;
+        _ -> "";
+    };
+}
+
+fn texts(j: Json) -> Array<string> {
+    return case j {
+        Arr(items: xs) -> xs.map({ x -> text(x) });
+        _ -> [];
+    };
+}
+
+#[@External.Erlang("""(fun(__S) -> try binary_to_integer(__S) catch _:_ -> -1 end end)($0)""")]
+declare fn rkStaticI64(text: string) -> i64;
+
+pub fn decodeEntry(s: string) -> ?PrerenderEntry {
+    val parsed = decode(s);
+    if (parsed.isError()) return null;
+    val j: Json = parsed.unwrapOr(Json.Null);
+    val members: Array<#(string, Json)> = case j {
+        Obj(members: m) -> m;
+        _ -> [];
+    };
+    if (members.length == 0) return null;
+    return PrerenderEntry(
+        path: text(member(members, "path")),
+        html: text(member(members, "html")),
+        payload: text(member(members, "payload")),
+        tags: texts(member(members, "tags")),
+        revalidateAt: rkStaticI64(text(member(members, "revalidateAt"))),
+        buildHash: text(member(members, "buildHash")),
+    );
+}
+
+fn writeNothing(out: ChunkWriter) -> @Task<@Result<void, string>> {
+    await writeTo(out, "");
+    return;
+}
+
+// The renderer's refusal as the failure text, "" when it rendered.
+fn outcomeOf(render: PageRenderer, req: Request, out: ChunkWriter) -> @Task<string> {
+    val r: @Result<void, string> = await render(req, out);
+    return case r {
+        Ok(_) -> "";
+        Error(msg) -> msg;
+    };
+}
+
+fn noRenderer() -> PageRenderer {
+    return { req, out -> writeNothing(out) };
+}
+
+// One render of `path` in its own front 62 frame: `<status>\t<touched>\t<reason>\t<failure>`
+// on the first line, the body after it.
+pub type Rendered(status: i32, touched: bool, reason: string, failure: string, body: string)
+
+pub fn renderOnce(path: string, strict: bool) -> Rendered {
+    val found: PageMatch = matchPage(path);
+    if (found.record == "") @panic("rakun static: no page answers `" + path + "`");
+    val render: PageRenderer = rkAppRender(found.record, noRenderer());
+    val _f = beginRequest(RequestScope(id: "prerender", phase: RequestPhase.Render, method: "GET", path: path, query: "", headersWire: "", strict: strict));
+    val _b = rkSsrBegin();
+    val pageReq: Request = rkSsrPageRequest(rkMakeRequest("GET", path, "{}", "{}", "{}", ""), found.params);
+    val failure: string = rkStaticHidden({ -> rkSsrGuard({ -> outcomeOf(render, pageReq, chunkWriter()) }) });
+    val touched = isDynamic();
+    val reason = dynamicReason();
+    val _e = endRequest();
+    return Rendered(status: rkSsrStatus(), touched: touched, reason: reason, failure: failure, body: rkSsrBody());
+}
+
+// Runs `work` with the connection's socket hidden from the chunk writer.
+#[@External.Erlang("""(fun(__W) -> __S = erase(rakun_conn_socket), try __W() after case __S of undefined -> ok; _ -> put(rakun_conn_socket, __S) end end end)($0)""")]
+declare fn rkStaticHidden<T>(work: fn() -> T) -> T;
+
+fn revalidateAtFor(config: SegmentConfig) -> i64 {
+    if (config.revalidate <= 0) return rkStaticWide(-1);
+    return rkStaticNowMs() + rkStaticWide(config.revalidate) * 1000;
+}
+
+fn patternOfPath(path: string) -> string {
+    val m: PageMatch = matchPage(path);
+    val f = m.record.split("|");
+    val pattern: string = f.at(1) ?? "";
+    return pattern;
+}
+
+// Renders `path` (not strict) and stores its entry; answers it. Raises when
+// no page answers `path` or the render raised.
+pub fn prerenderPath(path: string, strict: bool) -> PrerenderEntry {
+    val r: Rendered = renderOnce(path, strict);
+    if (r.failure != "") @panic("rakun static: prerendering `" + path + "` raised: " + r.failure);
+    val config: SegmentConfig = configFor(patternOfPath(path));
+    val entry = PrerenderEntry(path: path, html: r.body, payload: "", tags: [], revalidateAt: revalidateAtFor(config), buildHash: hash.contentHash(r.body));
+    val _s = cacheStore(prerenderPolicy(path, entry.tags), [path], encodeEntry(entry));
+    return entry;
+}
+
+pub fn lookupPrerendered(path: string) -> ?PrerenderEntry {
+    val peek: CachePeek = cachePeek(prerenderPolicy(path, []), [path]);
+    if (peek.found == false) return null;
+    return decodeEntry(peek.value);
+}
+
+pub fn concurrency() -> i32 {
+    val raw = rkProp("rakun.static.concurrency").trim();
+    if (raw == "") return rkStaticSchedulers();
+    val n = toI32(raw);
+    return if (n < 1) 1 else n;
+}
+
+// The candidate paths of every page pattern, with what the decision needs.
+pub type Candidate(pattern: string, path: string, hasParams: bool, patternDynamic: bool)
+
+fn pagePatterns() -> Array<string> {
+    val entries: RouteEntry[] = parseTable(rkAppTable());
+    return entries.filter({ e -> e.kind == "P" }).map({ e -> e.pattern });
+}
+
+fn candidatesOf(pattern: string) -> Array<Candidate> {
+    val dynamicPattern = isDynamicPattern(pattern);
+    if (dynamicPattern == false) return [Candidate(pattern: pattern, path: pattern, hasParams: false, patternDynamic: false)];
+    val produce: ?fn() -> @Task<StaticParams[]> = rkStaticParamsGet(pattern);
+    if (produce == null) return [];
+    val rows: StaticParams[] = rkStaticProduce(produce ?? { -> noRows() });
+    return expandParams(pattern, rows).map({ p -> Candidate(pattern: pattern, path: p, hasParams: true, patternDynamic: true) });
+}
+
+fn noRows() -> @Task<StaticParams[]> {
+    val none: StaticParams[] = [];
+    return none;
+}
+
+fn prerenderOne(c: Candidate, strict: bool) -> string {
+    val config: SegmentConfig = configFor(c.pattern);
+    val r: Rendered = renderOnce(c.path, strict);
+    if (r.failure != "") return "failed|" + c.path + "|" + r.failure;
+    val d: KindDecision = decideKind(config, c.hasParams, c.patternDynamic, r.touched, r.reason);
+    val _k = rkStaticKindPut(c.pattern, kindLetter(d.kind), d.reason);
+    if (kindLetter(d.kind) == "D") return "skipped|" + c.path + "|" + d.reason;
+    val entry = PrerenderEntry(path: c.path, html: r.body, payload: "", tags: [], revalidateAt: revalidateAtFor(config), buildHash: hash.contentHash(r.body));
+    val _s = cacheStore(prerenderPolicy(c.path, entry.tags), [c.path], encodeEntry(entry));
+    return "stored|" + c.path;
+}
+
+pub fn prerenderAll(strict: bool) -> PrerenderReport {
+    var thunks: Array<fn() -> string> = [];
+    var lines: string[] = [];
+    var skipped = 0;
+    for (pagePatterns()) { pattern ->
+        val config: SegmentConfig = configFor(pattern);
+        val dynamicPattern = isDynamicPattern(pattern);
+        val hasParams = rkStaticParamsGet(pattern) != null;
+        if (dynamicPattern && hasParams == false) {
+            val d: KindDecision = decideKind(config, false, true, false, "");
+            val _k = rkStaticKindPut(pattern, kindLetter(d.kind), d.reason);
+            if (kindLetter(d.kind) == "D") {
+                skipped = skipped + 1;
+                lines.push("skipped|" + pattern + "|" + d.reason);
+            };
+        } else {
+            for (candidatesOf(pattern)) { c -> thunks.push({ -> prerenderOne(c, strict) }); };
+        };
+    };
+    val results: string[] = rkStaticRunBounded(concurrency(), thunks);
+    var stored = 0;
+    var failed = 0;
+    for (results) { r ->
+        if (r.startsWith("stored|")) stored = stored + 1;
+        if (r.startsWith("skipped|")) skipped = skipped + 1;
+        if (r.startsWith("failed|") || r.startsWith("raised|")) failed = failed + 1;
+        lines.push(r);
+    };
+    return PrerenderReport(stored: stored, skippedDynamic: skipped, failed: failed, lines: lines);
+}
+
+// ── step 5 — revalidation and single flight ─────────────────────────────────
+
+pub fn isStale(entry: PrerenderEntry) -> bool {
+    val expired = entry.revalidateAt >= rkStaticWide(0) && rkStaticNowMs() >= entry.revalidateAt;
+    if (expired) return true;
+    val peek: CachePeek = cachePeek(prerenderPolicy(entry.path, entry.tags), [entry.path]);
+    return peek.stale;
+}
+
+// Starts at most one regeneration of `path`: 1 when this call started it.
+pub fn regenerate(path: string) -> i32 {
+    return rkStaticRegenerate(path, { -> regenerateNow(path) });
+}
+
+// A request that read the old entry just before another regeneration stored
+// the new one would start a second render: the worker re-reads the store and
+// renders only while the entry is still stale.
+fn regenerateNow(path: string) -> i32 {
+    val current: ?PrerenderEntry = lookupPrerendered(path);
+    val entry: PrerenderEntry = current ?? PrerenderEntry(path: path, html: "", payload: "", tags: [], revalidateAt: rkStaticWide(0), buildHash: "");
+    val stillStale = current == null || isStale(entry);
+    if (stillStale == false) return 0;
+    val _e: PrerenderEntry = prerenderPath(path, false);
+    return 1;
+}
+
+pub fn serveStatic(path: string) -> ?PrerenderEntry {
+    if (requestLive() && draftBypass()) return null;
+    val found: ?PrerenderEntry = lookupPrerendered(path);
+    if (found == null) return null;
+    val entry: PrerenderEntry = found ?? PrerenderEntry(path: path, html: "", payload: "", tags: [], revalidateAt: rkStaticWide(-1), buildHash: "");
+    if (isStale(entry)) {
+        val _r = regenerate(path);
+    };
+    return found;
+}
+
+pub fn regenerationFailures() -> Array<string> {
+    return rkStaticLogged();
+}
+
+// ── step 6 — the route-kind blob ────────────────────────────────────────────
+
+fn kindOfLine(line: string) -> #(string, RouteKind) {
+    val f = line.split("|");
+    val pattern: string = f.at(0) ?? "";
+    val letter: string = f.at(1) ?? "D";
+    return #(pattern, if (letter == "S") RouteKind.Static else RouteKind.Dynamic);
+}
+
+pub fn routeKinds() -> string {
+    var kinds: Array<#(string, RouteKind)> = [];
+    for (rkStaticKinds()) { line -> kinds.push(kindOfLine(line)); };
+    return writeKinds(kinds);
+}
+
+// ── step 7 — static export ──────────────────────────────────────────────────
+
+pub fn exportFileOf(outDir: string, pagePath: string) -> string {
+    return if (pagePath == "/") outDir + "/index.html" else outDir + pagePath + "/index.html";
+}
+
+pub fn payloadFileName() -> string {
+    return "payload.json";
+}
+
+fn writeInside(outDir: string, file: string, contents: string) -> i32 {
+    if (path.isInside(outDir, file) == false) @panic("rakun static: the export refuses to write `" + file + "` outside `" + outDir + "`");
+    val _d = rkStaticEnsureDir(file);
+    val w = fs.writeText(file, contents);
+    if (w.isError()) @panic("rakun static: cannot write `" + file + "`");
+    return 1;
+}
+
+pub fn staticExport(outDir: string) -> PrerenderReport {
+    val entries: RouteEntry[] = parseTable(rkAppTable());
+    for (entries) { e ->
+        if (e.kind == "R") @panic("rakun static: `" + e.pattern + "` is a route handler (route.bp) - an endpoint cannot be exported as a file");
+    };
+    var lines: string[] = [];
+    var stored = 0;
+    for (pagePatterns()) { pattern ->
+        if (isDynamicPattern(pattern) && rkStaticParamsGet(pattern) == null) @panic("rakun static: `" + pattern + "` is dynamic and has no generateStaticParams - the export cannot enumerate its paths");
+        for (candidatesOf(pattern)) { c ->
+            val r: Rendered = renderOnce(c.path, true);
+            if (r.failure != "") @panic("rakun static: the export of `" + c.path + "` failed: " + r.failure);
+            val html = exportFileOf(outDir, c.path);
+            val payload = html.slice(0, html.length() - "index.html".length()) + payloadFileName();
+            val _h = writeInside(outDir, html, r.body);
+            val _p = writeInside(outDir, payload, "");
+            stored = stored + 1;
+            lines.push("exported|" + c.path);
+        };
+    };
+    return PrerenderReport(stored: stored, skippedDynamic: 0, failed: 0, lines: lines);
+}

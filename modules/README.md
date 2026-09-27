@@ -12,7 +12,7 @@ to a sibling or to the umbrella is a located error.
 
 ## Members today
 
-Fourteen members exist. The ten remaining scaffolds are **kept under their names** by the reconciliation
+Fifteen members exist (`rakun-websocket` was created by front 20). The ten remaining scaffolds are **kept under their names** by the reconciliation
 table of `03-rakun/modules.md` § Verdicts (no rename applied to a scaffold); each is a two-comment
 `src/root.bp` until its front lands, and its manifest lists `files: ["root.bp"]` so it ships one module
 rather than nothing. `targets` follows `03-rakun/modules.md` § Targets. Three members hold real code
@@ -24,20 +24,30 @@ refusal is the core's `config_check.bp`.
 
 | Member | `files` | `targets` | Spring Boot 4 | Front(s) | State |
 |---|---|---|---|---|---|
-| [rakun](./rakun/) (core) | root · http · runtime · decorators · bootstrap · rakun.d · … | erlang | `spring-boot-starter` | 04 · 05 · 06 · 62 · 72 · 74 | real code, 347 tests |
-| [rakun-app](./rakun-app/) | root · file_router · ssr · route_handler | erlang | (Next.js `app/` router, server half) | 22 · 23 · 24 · 25 · 60 · 61 · 63 · 64 · 66 | real code, 53 tests |
-| [rakun-actuator-api](./rakun-actuator-api/) | root · contract · registration · span | erlang | `spring-boot-actuator` (the API half) | 11 (Step 0) | real code, 10 tests |
-| [rakun-actuator](./rakun-actuator/) | root · endpoint_host · health · info · registry_endpoints · instrumentation · actuator | erlang | `-actuator` (host) | 11 · 76 · 87 | real code, 38 tests |
-| [rakun-cache](./rakun-cache/) | root | erlang | `-cache` | 12 | scaffold |
+| [rakun](./rakun/) (core) | root · http · runtime · decorators · bootstrap · rakun.d · … | erlang | `spring-boot-starter` | 04 · 05 · 06 · 62 · 72 · 73 · 74 | real code, 374 tests |
+| [rakun-app](./rakun-app/) | root · file_router · ssr · navigation · route_handler · actions · static_host · segment_config · static_gen · route_slots · route_intercept · i18n · metadata_routes | erlang | (Next.js `app/` router, server half) | 22 · 23 · 24 · 25 · 60 · 61 · 63 · 64 · 66 | real code, 204 tests |
+| [rakun-actuator-api](./rakun-actuator-api/) | root · contract · registration · span · audit_seam | erlang | `spring-boot-actuator` (the API half) | 11 (Step 0) · 87 (the audit seam) | real code, 10 tests |
+| [rakun-actuator](./rakun-actuator/) | root · endpoint_host · health · info · registry_endpoints · instrumentation · management · actuator | erlang | `-actuator` (host) | 11 · 76 · 87 | real code, 77 tests |
+| [rakun-cache](./rakun-cache/) | root · cache_host · cache · cached · cache_endpoint | erlang | `-cache` | 12 | real code, 55 tests |
+| [rakun-cli](./rakun-cli/) | root · args · plugins · cli (+ `templates/`) | erlang | Spring Boot CLI, `spring-boot:run` / `bootRun` | 88 | real code, 25 tests |
 | [rakun-client](./rakun-client/) | root · address · settings · response · cache · transport · health · client · request · exchange | erlang | `RestClient` / `WebClient` | 13 | real code, 70 tests |
-| [rakun-data](./rakun-data/) | root · datasource · sql | erlang | `-data-jpa` / `-data-jdbc` / `-data-mongodb` / `-data-redis` | 08 · 09 · 77 · 78 | real code, 77 tests |
+| [rakun-data](./rakun-data/) | root · datasource · sql · orm_host · migration_host · orm · migration | erlang | `-data-jpa` / `-data-jdbc` / `-data-mongodb` / `-data-redis` | 08 · 09 · 77 · 78 | real code, 128 tests |
+| [rakun-devtools](./rakun-devtools/) | root · devtools · db_console | erlang | `spring-boot-devtools` | 80 | real code, 21 tests |
 | [rakun-hateoas](./rakun-hateoas/) | root · hal | erlang | `-hateoas` | 21 | real code, 14 tests |
 | [rakun-logging](./rakun-logging/) | root · cells · levels · formats · correlation · logging · digest · setup · endpoints | erlang | `-logging` | 17 | real code, 54 tests |
-| [rakun-messaging](./rakun-messaging/) | root | erlang | `-amqp` / `-kafka` / `-activemq` / `-artemis` | 15 · 86 · 90 | scaffold |
-| [rakun-scheduling](./rakun-scheduling/) | root · cron · registry · markers · executor · endpoint | erlang | `@Scheduled` / `-quartz` | 16 · 84 | real code, 67 tests |
-| [rakun-security](./rakun-security/) | root · principal · policy · jwt · password · users · users_sql · basic · csrf · method_security · security_filter · security | erlang | `-security`, `-oauth2-client`, `-saml2` | 10 · 79 | real code, 73 tests |
+| [rakun-mail](./rakun-mail/) | root · mail · fixture | erlang | `-mail` | 85 | real code, 32 tests |
+| [rakun-metrics](./rakun-metrics/) | root · registry · bus · vm · tracing · export · endpoints · install | erlang | Micrometer + `-actuator` (prometheus) + tracing | 75 | real code, 41 tests |
+| [rakun-messaging](./rakun-messaging/) | root · messaging_host · message · registry · markers · messaging_health · container · templates · jms_host · pulsar_host · reliability (policy · dispatch · transaction) · jms · pulsar | erlang | `-amqp` / `-kafka` / `-activemq` / `-artemis` | 15 · 86 · 90 · 91 | real code (in-process broker; JMS over STOMP; Pulsar admin and codec), 91 tests |
+| [rakun-release](./rakun-release/) | root · release · sbom | erlang | packaging (`spring-boot-maven-plugin`, buildpacks) | 81 | real code, 12 tests |
+| [rakun-rsocket](./rakun-rsocket/) | root · rsocket_host · rsocket | erlang | `-rsocket` | 92 | real code (TCP), 16 tests |
+| [rakun-scheduling](./rakun-scheduling/) | root · cron · registry · markers · executor · endpoint · jobstore (store · scheduler · markers · endpoint) | erlang | `@Scheduled` / `-quartz` | 16 · 84 | real code, 100 tests |
+| [rakun-security](./rakun-security/) | root · principal · policy · jwt · password · users · users_sql · basic · csrf · method_security · security_filter · security · oauth2_host · oauth2 · saml2 · ldap_host · ldap | erlang | `-security`, `-oauth2-client`, `-saml2` | 10 · 79 · 87 (audit events) | real code, 100 tests |
 | [rakun-session](./rakun-session/) | root · host · session · signing · session_config · session_cookie · store_ets · store_sql · store_redis · session_filter · session_endpoint | erlang | `spring-session-jdbc` / `-data-redis` | 18 | real code, 36 tests |
-| [rakun-test](./rakun-test/) | root | erlang | `-test` | 19 | FakeRequest + toRequest, expect* assertions, MockMvc, resetSingletons/resetContext/contextSnapshot; 26 tests |
+| [rakun-stream](./rakun-stream/) | root · pipeline · state · runtime | erlang | Spring Integration / Kafka Streams | 89 | real code, 24 tests |
+| [rakun-test](./rakun-test/) | root | erlang | `-test` | 19 | FakeRequest (implements Request) + toRequest, expect* assertions, MockMvc, resetSingletons/resetContext/contextSnapshot; 27 tests |
+| [rakun-websocket](./rakun-websocket/) | root · ws_host · ws · endpoint | erlang | `-websocket` | 20 | real code, 27 tests (no JavaScript) |
+| [rakun-tx](./rakun-tx/) | root · outbox · saga · twopc | erlang | JTA (`spring-boot-starter-jta-*`), Kafka/Pulsar transactions | 83 | real code, 32 tests |
+| [rakun-ws](./rakun-ws/) | root · ws | erlang | `-web-services` (SOAP — not WebSocket) | 93 | real code, 13 tests |
 | [rakun-web](./rakun-web/) | root · filter · negotiation · error · middleware · cors · compression · customizer · apiversion · shutdown · convention · tls · rules · static | erlang | `-webmvc` (websocket is `rakun-websocket`) | 07 · 65 · 82 | real code, 209 tests |
 
 `modules/rakun-web/` stopped being a scaffold with front 07: it carries the filter chain, CORS and
@@ -86,16 +96,13 @@ which owns its `botopink.json` — several of them name members that do not exis
 | `rakun-app` | 22 (+ 23 · 24 · 25 · 60 · 61 · 63 · 64 · 66) | split from core — the `app/` router, SSR, actions; depends on `jhonstart`, `emilia` |
 | `rakun-websocket` | 20 | split from `rakun-web` |
 | `rakun-tx` | 83 | keep, separate |
-| `rakun-metrics` | 75 | keep, one name (`rakun-observability` dropped as alias) |
-| `rakun-devtools` | 80 | keep, separate |
-| `rakun-release` | 81 | keep, separate |
 | `rakun-cli` | 88 | keep, separate |
 | `rakun-stream` | 89 | keep, separate |
 | `rakun-pulsar` | 91 | split from `rakun-messaging` |
 | `rakun-rsocket` | 92 | keep, separate |
 | `rakun-mail` | 85 | keep, separate |
 | `rakun-soap` | 93 | rename of the 1.0.9 `rakun-ws` (never scaffolded — nothing to move) |
-| `../starters/rakun-starter-*` | 73 | manifests beside `modules/`, not a module (`rakun-starters` dropped) |
+| [`../starters/rakun-starter-*`](../starters/) | 73 | eight workspace members beside `modules/` — manifests and a docblock-only root, no code; the version set is `rakun/version_set` |
 
 Twenty-seven members in all when every front has landed, plus `starters/`. `rakun-core` and
 `rakun-observability` are aliases the cut drops.

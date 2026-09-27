@@ -1,0 +1,118 @@
+//// rakun-websocket — backpressure, heartbeats, limits and every close code of
+//// the wire contract (front 20 step 4). The contract's literals are asserted
+//// here as literals, so a client written against them can assert the same.
+
+import {io: {fs}} from "std";
+import {rkSetProp, rkServe, rkDispatchHttp} from "rakun";
+import {WsSession, rkRegisterWsEndpoint, installWebsocket, resetWebsocket, revokeSession, directFrame, topicFrame} from "ws";
+import {rkWsClientConnect, rkWsClientRecv, rkWsClientSend, rkWsClientSendBinary, rkWsClientPause, rkWsClientAutopong, rkWsClientClose, rkWsSessionIds, rkWsMaxQueueSeen, rkWsClosedWith, rkWsSend} from "ws_host";
+
+fn serve() -> i32 {
+    val _k = rkSetProp("rakun.main.keep-alive", "false");
+    return rkServe(0, { m, p, h, q, b -> rkDispatchHttp(m, p, h, q, b) });
+}
+
+fn boot() -> i32 {
+    val _r = resetWebsocket();
+    val _e = rkRegisterWsEndpoint("/ws/limits", "Limits", { id, principal, path -> 0 }, { id, principal, path, message ->
+        if (message == "raise") @panic("handler failed");
+        if (message == "revoke") revokeSession(WsSession(id: id, principal: principal, path: path)) else WsSession(id: id, principal: principal, path: path).send("ok");
+    }, { id, principal, path, code, reason -> 0 });
+    val _i = installWebsocket();
+    return serve();
+}
+
+fn connect(port: i32) -> string {
+    val r = rkWsClientConnect(port, "/ws/limits", []);
+    return r.slice(4, r.length());
+}
+
+fn repeat(unit: string, n: i32) -> string {
+    return Array.range(0, n).map({ i -> unit }).join("");
+}
+
+test "limits: a connection that stops reading is closed with 1013, its queue never past the cap" {
+    val port = boot();
+    val _c = rkSetProp("rakun.websocket.max-outbound-queue", "50");
+    val c = connect(port);
+    val _p = rkWsClientPause(c);
+    val id = rkWsSessionIds()[0] ?? "";
+    val chunk = repeat("x", 4096);
+    var queued = 0;
+    for (Array.range(0, 3000)) { i -> queued = queued + rkWsSend(id, directFrame(chunk)); };
+    val _w = rkWsClientRecv(c, 3000);
+    val code = rkWsClosedWith(id);
+    val maxQueue = rkWsMaxQueueSeen();
+    val _z = rkSetProp("rakun.websocket.max-outbound-queue", "");
+    assert code == 1013, code.toString();
+    assert maxQueue <= 50, maxQueue.toString();
+    assert queued < 3000;
+}
+
+test "limits: a connection that does not answer a ping is closed after the idle timeout" {
+    val port = boot();
+    val _h = rkSetProp("rakun.websocket.heartbeat-seconds", "1");
+    val _i = rkSetProp("rakun.websocket.idle-timeout-seconds", "2");
+    val quiet = connect(port);
+    val lively = connect(port);
+    val _a = rkWsClientAutopong(quiet, false);
+    val got = rkWsClientRecv(quiet, 5000);
+    val other = rkWsClientRecv(lively, 100);
+    val _s = rkWsClientSend(lively, "still");
+    val alive = rkWsClientRecv(lively, 2000);
+    val _y = rkSetProp("rakun.websocket.heartbeat-seconds", "");
+    val _x = rkSetProp("rakun.websocket.idle-timeout-seconds", "");
+    assert got == "close:1001:idle timeout", got;
+    assert alive == "text:{\"t\":\"\",\"d\":\"ok\"}", alive;
+}
+
+test "limits: a frame over max-frame-bytes closes with 1009" {
+    val port = boot();
+    val _m = rkSetProp("rakun.websocket.max-frame-bytes", "1024");
+    val c = connect(port);
+    val _s = rkWsClientSend(c, repeat("y", 2000));
+    val got = rkWsClientRecv(c, 2000);
+    val _z = rkSetProp("rakun.websocket.max-frame-bytes", "");
+    assert got == "close:1009:frame over max-frame-bytes";
+}
+
+test "limits: a binary frame is refused with a named error, not decoded" {
+    val port = boot();
+    val c = connect(port);
+    val _s = rkWsClientSendBinary(c, "binary");
+    assert rkWsClientRecv(c, 2000) == "close:1003:binary frames are refused: rakun.v1 carries text only";
+}
+
+test "limits: every close code of the wire contract is produced by its condition" {
+    val port = boot();
+    val normal = connect(port);
+    val _n = rkWsClientClose(normal, 1000);
+    assert rkWsClientRecv(normal, 2000) == "close:1000:";
+    val failing = connect(port);
+    val _f = rkWsClientSend(failing, "raise");
+    assert rkWsClientRecv(failing, 2000) == "close:1011:handler error";
+    val revoked = connect(port);
+    val _v = rkWsClientSend(revoked, "revoke");
+    assert rkWsClientRecv(revoked, 2000) == "close:4001:session revoked";
+}
+
+test "limits: the wire contract's literals" {
+    assert directFrame("hi \"there\"") == "{\"t\":\"\",\"d\":\"hi \\\"there\\\"\"}";
+    assert topicFrame("prices", "up") == "{\"t\":\"prices\",\"d\":\"up\"}";
+    val src: string = fs.readText("src/sidecars/rakun_websocket.erl").unwrapOr("");
+    assert src.contains("<<\"rakun.v1\">>");
+    assert src.contains("setting(<<\"heartbeat-seconds\">>, 30)");
+    assert src.contains("setting(<<\"idle-timeout-seconds\">>, 90)");
+    assert src.contains("setting(<<\"max-frame-bytes\">>, 65536)");
+    assert src.contains("setting(<<\"max-outbound-queue\">>, 1000)");
+}
+
+test "limits: the module ships no JavaScript and no Node cell" {
+    for (["root.bp", "ws_host.bp", "ws.bp", "endpoint.bp"]) { f ->
+        val text: string = fs.readText("src/" + f).unwrapOr("");
+        assert text != "";
+        assert text.contains("External.Node") == false;
+    };
+    val listing: string = fs.readText("botopink.json").unwrapOr("");
+    assert listing.contains(".mjs") == false && listing.contains(".js\"") == false;
+}

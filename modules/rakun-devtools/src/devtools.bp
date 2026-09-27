@@ -1,0 +1,209 @@
+//// rakun-devtools — settings, the watcher, the reload, dev defaults, remote
+//// loading and tracing (front 80 steps 1–5 and 7).
+////
+//// SETTINGS merge lowest first: the defaults (roots `src`, poll 300 ms,
+//// enabled, no trigger file, no remote secret, no db console), the global
+//// file `$HOME/.config/rakun/devtools.yaml` (`key: value` lines; a malformed
+//// one is a named warning, never a boot failure), the project's
+//// `rakun.devtools.<key>`, then the environment's `RAKUN_DEVTOOLS_<KEY>`.
+////
+//// THE WATCHER (`startWatcher`) runs only in a dev profile (`dev` or
+//// `development`) with `enabled`; it polls, excludes by glob, honours the
+//// trigger file, and calls `reloadProject` once per cycle. THE RELOAD
+//// compiles the project with the botopink CLI and loads what changed,
+//// dropping each changed module's routes, singletons and scan entries first
+//// and re-running its registrations after. A compile error is reported with
+//// the compiler's own text and the running code stays as it was. A
+//// component that holds an injected singleton keeps its instance until its
+//// own module reloads: the container resolves once, at construction.
+
+import {rkProp, rkSetProp, active, toI32} from "rakun";
+import {io: {fs, env}} from "std";
+import {hash} from "std";
+
+#[@External.Erlang("rakun_devtools", "watch_start")]
+declare fn rkDevWatchStart(roots: string[], excludes: string[], trigger: string, pollMs: i32, onChange: fn(changed: string) -> i32) -> string;
+#[@External.Erlang("rakun_devtools", "watch_stop")]
+pub declare fn rkDevWatchStop() -> i32;
+#[@External.Erlang("rakun_devtools", "watch_pid")]
+pub declare fn rkDevWatcherPid() -> string;
+#[@External.Erlang("rakun_devtools", "reloads")]
+pub declare fn rkDevReloads() -> i32;
+#[@External.Erlang("rakun_devtools", "drop_module")]
+pub declare fn rkDevDropModule(module: string) -> i32;
+#[@External.Erlang("rakun_devtools", "owner")]
+pub declare fn rkDevOwner(module: string) -> string;
+#[@External.Erlang("rakun_devtools", "load_dir")]
+pub declare fn rkDevLoadDir(dir: string) -> string;
+#[@External.Erlang("rakun_devtools", "compile_project")]
+declare fn rkDevCompile(compiler: string, projectDir: string) -> string;
+#[@External.Erlang("rakun_devtools", "remote_load")]
+declare fn rkDevRemoteLoad(module: string, devActive: bool, configured: string, presented: #(string, bool)) -> string;
+#[@External.Erlang("rakun_devtools", "trace_calls")]
+declare fn rkDevTraceCalls(module: string, function: string, limit: i32) -> i32;
+#[@External.Erlang("rakun_devtools", "trace_count")]
+pub declare fn rkDevTraceCount() -> i32;
+#[@External.Erlang("rakun_devtools", "constant_eq")]
+pub declare fn constantTimeEquals(a: string, b: string) -> bool;
+#[@External.Erlang("""(fun(__T) -> logger:warning("~ts", [__T]), persistent_term:put(rakun_devtools_warnings, persistent_term:get(rakun_devtools_warnings, []) ++ [__T]), 0 end)($0)""")]
+declare fn warn(text: string) -> i32;
+#[@External.Erlang("""persistent_term:get(rakun_devtools_warnings, [])""")]
+pub declare fn devtoolsWarnings() -> string[];
+
+pub type DevtoolsSettings(
+    roots: string[],
+    exclude: string[],
+    triggerFile: string,
+    pollMs: i32,
+    enabled: bool,
+    remoteSecret: string,
+    dbConsole: bool,
+)
+
+pub fn defaultSettings() -> DevtoolsSettings {
+    return DevtoolsSettings(roots: ["src"], exclude: [], triggerFile: "", pollMs: 300, enabled: true, remoteSecret: "", dbConsole: false);
+}
+
+pub fn globalFile() -> string {
+    val home: string = env.read("HOME") ?? "";
+    val given = rkProp("rakun.devtools.global-file").trim();
+    return if (given != "") given else home + "/.config/rakun/devtools.yaml";
+}
+
+// `key: value` lines of the global file; `[]` with a warning when a line is
+// neither blank, a comment nor `key: value`.
+pub fn globalEntries(file: string) -> Array<#(string, string)> {
+    val text: string = fs.readText(file).unwrapOr("");
+    var out: Array<#(string, string)> = [];
+    var bad = "";
+    for (text.split("\n")) { raw ->
+        val line = raw.trim();
+        if (line != "" && line.startsWith("#") == false) {
+            val at = line.indexOf(":");
+            if (at <= 0) {
+                if (bad == "") bad = line;
+            } else out.push(#(line.slice(0, at).trim(), line.slice(at + 1, line.length()).trim()));
+        };
+    };
+    if (bad != "") {
+        val _w = warn("rakun devtools: " + file + " is malformed at `" + bad + "` - it is ignored and the defaults stand");
+        return [];
+    };
+    return out;
+}
+
+fn envName(key: string) -> string {
+    return "RAKUN_DEVTOOLS_" + key.toUpper().replaceAll("-", "_");
+}
+
+// One setting through the four sources: env > project > global > default.
+pub fn settingOf(key: string, globals: Array<#(string, string)>, dflt: string) -> string {
+    val e: string = env.read(envName(key)) ?? "";
+    if (e != "") return e;
+    val p = rkProp("rakun.devtools." + key).trim();
+    if (p != "") return p;
+    val g = globals.filter({ x -> x._0 == key }).map({ x -> x._1 }).at(0) ?? "";
+    return if (g != "") g else dflt;
+}
+
+fn list(v: string) -> string[] {
+    return v.split(",").map({ s -> s.trim() }).filter({ s -> s != "" });
+}
+
+pub fn settings() -> DevtoolsSettings {
+    val g = globalEntries(globalFile());
+    val d = defaultSettings();
+    return DevtoolsSettings(
+        roots: list(settingOf("roots", g, d.roots.join(","))),
+        exclude: list(settingOf("exclude", g, "")),
+        triggerFile: settingOf("trigger-file", g, ""),
+        pollMs: toI32(settingOf("poll-ms", g, d.pollMs.toString())),
+        enabled: settingOf("enabled", g, "true") == "true",
+        remoteSecret: settingOf("remote.secret", g, ""),
+        dbConsole: settingOf("db-console.enabled", g, "false") == "true",
+    );
+}
+
+pub fn devProfileActive() -> bool {
+    return active().filter({ p -> p == "dev" || p == "development" }).length > 0;
+}
+
+// ── the watcher and the reload ──────────────────────────────────────────────
+
+pub fn compilerPath() -> string {
+    val given: string = env.read("BOTOPINK_BIN") ?? "";
+    val prop = rkProp("rakun.devtools.compiler").trim();
+    return if (prop != "") prop else if (given != "") given else "botopink";
+}
+
+// `ok <loaded>|<deferred>` or `error <the compiler's text>`.
+pub fn reloadProject(projectDir: string) -> string {
+    val c = rkDevCompile(compilerPath(), projectDir);
+    if (c.startsWith("error\t")) {
+        val text = c.slice(6, c.length());
+        @print(text);
+        return "error " + text;
+    };
+    return "ok " + rkDevLoadDir(c.slice(3, c.length()));
+}
+
+// Starts the watcher over `projectDir` when a dev profile is active and the
+// settings enable it; answers whether one runs.
+pub fn startWatcher(projectDir: string, onChange: fn(changed: string) -> i32) -> bool {
+    val s = settings();
+    if (devProfileActive() == false || s.enabled == false) {
+        val _s = rkDevWatchStop();
+        return false;
+    };
+    val roots = s.roots.map({ r -> if (r.startsWith("/")) r else projectDir + "/" + r });
+    val trigger = if (s.triggerFile == "") "" else if (s.triggerFile.startsWith("/")) s.triggerFile else projectDir + "/" + s.triggerFile;
+    val _w = rkDevWatchStart(roots, s.exclude, trigger, s.pollMs, onChange);
+    return rkDevWatcherPid() != "";
+}
+
+// ── dev defaults ────────────────────────────────────────────────────────────
+
+pub fn devDefaults() -> Array<#(string, string)> {
+    return [
+        #("rakun.cache.enabled", "false"),
+        #("rakun.devtools.db-console.enabled", "true"),
+        #("rakun.web.static.cache-seconds", "0"),
+        #("rakun.web.error.include-message", "always"),
+        #("rakun.web.error.include-stacktrace", "always"),
+        #("rakun.observability.sampling", "1.0"),
+    ];
+}
+
+// Below every other source: a key already set keeps its value. Only in a
+// dev profile; answers how many defaults were applied.
+pub fn installDevDefaults() -> i32 {
+    if (devProfileActive() == false) return 0;
+    var n = 0;
+    for (devDefaults()) { d ->
+        if (rkProp(d._0) == "") {
+            val _s = rkSetProp(d._0, d._1);
+            n = n + 1;
+        };
+    };
+    return n;
+}
+
+// ── remote loading and tracing ──────────────────────────────────────────────
+
+// Loads `module` on every connected node behind four guards: a dev profile,
+// a configured secret, a TLS transport and a constant-time secret match. No
+// key bypasses any of them.
+pub fn remoteLoad(module: string, presentedSecret: string, overTls: bool) -> string {
+    return rkDevRemoteLoad(module, devProfileActive(), settings().remoteSecret, #(presentedSecret, overTls));
+}
+
+// Traces calls to `module:function` and stops after `limit` messages; the limit is
+// a required argument, so an unbounded trace does not compile.
+pub fn traceCalls(module: string, function: string, limit: i32) -> i32 {
+    if (limit <= 0) @panic("rakun devtools: traceCalls needs a positive limit - an unbounded trace floods the node");
+    return rkDevTraceCalls(module, function, limit);
+}
+
+pub fn devtoolsKeys() -> string[] {
+    return ["rakun.devtools.roots", "rakun.devtools.exclude", "rakun.devtools.trigger-file", "rakun.devtools.poll-ms", "rakun.devtools.enabled", "rakun.devtools.remote.secret", "rakun.devtools.db-console.enabled", "rakun.devtools.db-console.max-rows", "rakun.devtools.db-console.timeout-ms", "rakun.devtools.global-file", "rakun.devtools.compiler"];
+}

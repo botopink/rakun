@@ -1,0 +1,454 @@
+//// rakun-app — server actions (front 24): the marker, the ids, `actionIdOf`,
+//// the dispatcher and its checks, the envelope, redirect and notFound, the
+//// phase, cookies, the JSON-RPC entry point and `router.refresh()`.
+////
+//// The actions are declared with `#[serverAction]`, so their registrations are
+//// this module's top-level vals and run once at load. The pages are plain-text
+//// renderers (rakun builds no HTML). The first half dispatches without a
+//// socket (`rkDispatchHttp`); the body hook's cells go over front 04's
+//// listener with a raw client, because the hook runs before a body is read.
+
+import {testing.asserts} from "std";
+import {io: {fs, process}} from "std";
+import {json.object, json.quote, json.decode} from "std";
+import {Request, Response, rkSetProp, rkProp, rkDispatchHttp, rkServe, toI32} from "rakun";
+import {cookies, cookieDefaults, requestPhase, phaseName} from "rakun/request_context";
+import {rkAppReset, rkAppRegisterPage} from "file_router";
+import {PageRenderer, ChunkWriter, writeTo, rkSsrHeader, buildId} from "ssr";
+
+fn textBody(out: ChunkWriter, text: string) -> @Task<@Result<void, string>> {
+    await writeTo(out, text);
+    return;
+}
+import {redirect, notFound} from "navigation";
+import {serveApp} from "route_handler";
+import {
+    FormData, ActionResult, formValue, serverAction, rkRegisterAction, rkActionsRegistered,
+    actionId, actionIdOf, resolveAction, actionsConfigProblem, serveActions, dispatchAction,
+    ActionOutcome, rkActionsAdmitted, preBodyRefusal,
+} from "actions";
+
+// ── the actions ─────────────────────────────────────────────────────────────
+
+#[serverAction]
+pub fn createPost(form: FormData) -> @Task<ActionResult> {
+    val title = formValue(form, "title");
+    if (title.length() < 3) return ActionResult.invalid("title", "Too short");
+    val _s = rkSetProp("blog.posts", rkProp("blog.posts") + title + ";");
+    val _p = rkSetProp("blog.phase", phaseName(requestPhase()));
+    return ActionResult.saying("created " + title);
+}
+
+#[serverAction]
+pub fn failingPost(form: FormData) -> @Task<@Result<ActionResult, string>> {
+    throw "database down";
+}
+
+#[serverAction]
+pub fn raisingPost(form: FormData) -> @Task<ActionResult> {
+    @panic("exploded");
+    return ActionResult.done();
+}
+
+#[serverAction]
+pub fn redirectPost(form: FormData) -> @Task<ActionResult> {
+    val _r = redirect(formValue(form, "to"));
+    return ActionResult.done();
+}
+
+#[serverAction]
+pub fn missingPost(form: FormData) -> @Task<ActionResult> {
+    val _n = notFound();
+    return ActionResult.done();
+}
+
+#[serverAction]
+pub fn cookiePost(form: FormData) -> @Task<ActionResult> {
+    val _c = cookies().set("flash", "saved", cookieDefaults());
+    return ActionResult.done();
+}
+
+// A `pub fn` with the action shape and no marker: never reachable.
+pub fn unmarkedPost(form: FormData) -> @Task<ActionResult> {
+    return ActionResult.saying("should never run");
+}
+
+// ── the pages ───────────────────────────────────────────────────────────────
+
+fn blogPage() -> PageRenderer {
+    return { req, out -> textBody(out, "posts=" + rkProp("blog.posts") + " phase=" + phaseName(requestPhase())) };
+}
+
+fn cookieInRender() -> PageRenderer {
+    return { req, out -> renderWithCookie(out) };
+}
+
+fn renderWithCookie(out: ChunkWriter) -> @Task<@Result<void, string>> {
+    val _c = cookies().set("late", "x", cookieDefaults());
+    await writeTo(out, "unreachable");
+    return;
+}
+
+// ── the harness ─────────────────────────────────────────────────────────────
+
+fn configure() -> i32 {
+    val _f = rkSetProp("rakun.actions.field", "__bp_action");
+    val _h = rkSetProp("rakun.actions.header", "X-Bp-Action");
+    val _s = rkSetProp("rakun.actions.secret", "front-24-secret-0123456789abcdef-xyz");
+    return rkSetProp("rakun.actions.bodyLimit", "");
+}
+
+fn boot() -> i32 {
+    val _c = configure();
+    val _p = rkSetProp("blog.posts", "");
+    val _r = rkAppReset();
+    val _b = rkAppRegisterPage("blog", blogPage());
+    val _l = rkAppRegisterPage("login", blogPage());
+    val _k = rkAppRegisterPage("cookie-page", cookieInRender());
+    val _a = serveApp();
+    return serveActions();
+}
+
+fn headers(origin: string, contentType: string, extra: Array<#(string, string)>) -> string {
+    var pairs: Array<#(string, string)> = [#("host", quote("localhost:8080")), #("content-type", quote(contentType))];
+    if (origin != "") pairs.push(#("origin", quote(origin)));
+    for (extra) { e -> pairs.push(#(e._0, quote(e._1))); };
+    return object(pairs);
+}
+
+fn form(body: string) -> Response {
+    return rkDispatchHttp("POST", "/blog", headers("http://localhost:8080", "application/x-www-form-urlencoded", []), "{}", body);
+}
+
+fn scripted(id: string, body: string) -> Response {
+    return rkDispatchHttp("POST", "/blog", headers("http://localhost:8080", "application/x-www-form-urlencoded", [#("x-bp-action", id)]), "{}", body);
+}
+
+fn rpc(body: string) -> Response {
+    return rkDispatchHttp("POST", "/blog", headers("http://localhost:8080", "application/json", [#("x-bp-action", "rpc")]), "{}", body);
+}
+
+// ── step 1 — the marker ─────────────────────────────────────────────────────
+
+test "actions: #[serverAction] registers a @Task<ActionResult> fn and a fallible one, and nothing unmarked" {
+    val entries = rkActionsRegistered().map({ e -> e.split("|").at(1) ?? "" });
+    assert entries.filter({ n -> n == "createPost" }).length == 1;
+    assert entries.filter({ n -> n == "failingPost" }).length == 1;
+    assert entries.filter({ n -> n == "unmarkedPost" }).length == 0;
+}
+
+test "actions: an unmarked pub fn is not reachable - POSTing its name or an id derived for it is 404" {
+    val _b = boot();
+    assert form("__bp_action=unmarkedPost&title=abc").status == 404;
+    val forged = actionId(rkActionsRegistered().at(0).unwrapOr("m|x").split("|").at(0) ?? "", "unmarkedPost", buildId());
+    assert form("__bp_action=" + forged + "&title=abc").status == 404;
+}
+
+// ── step 2 — ids ────────────────────────────────────────────────────────────
+
+test "actions: the id is deterministic, a_ plus 24 hex, and changes with the build id and the module" {
+    val _c = configure();
+    val a = actionId("app@posts", "createPost", "build-1");
+    assert a == actionId("app@posts", "createPost", "build-1");
+    assert a != actionId("app@posts", "createPost", "build-2");
+    assert a != actionId("app@drafts", "createPost", "build-1");
+    assert a.length() == 26 && a.startsWith("a_");
+    assert a.slice(2, 26).split("").filter({ c -> "0123456789abcdef".contains(c) == false }).length == 0;
+}
+
+test "actions: the function's name alone does not resolve" {
+    val _b = boot();
+    assert form("__bp_action=createPost&title=hello").status == 404;
+    assert rkProp("blog.posts") == "";
+}
+
+test "actions: with the field or the header unset the dispatcher refuses to start naming the key" {
+    val _c = configure();
+    val _f = rkSetProp("rakun.actions.field", "");
+    val noField = actionsConfigProblem();
+    val _g = rkSetProp("rakun.actions.field", "__bp_action");
+    val _h = rkSetProp("rakun.actions.header", "");
+    val noHeader = actionsConfigProblem();
+    val refused = asserts.throwsWith({ -> serveActions() }, "rakun.actions.header is not set");
+    val _z = configure();
+    assert noField.contains("rakun.actions.field is not set");
+    assert noHeader.contains("rakun.actions.header is not set");
+    assert refused.isOk();
+    val src: string = fs.readText("src/actions.bp").unwrapOr("");
+    assert src != "";
+    for (["__bp_action", "X-Bp-Action", "__onze", "X-Onze", "onze-action"]) { w -> assert src.contains(w) == false, w; };
+}
+
+test "actions: only the configured field name is read" {
+    val _b = boot();
+    val _f = rkSetProp("rakun.actions.field", "__x");
+    val id = actionIdOf("createPost");
+    val wrong = form("__bp_action=" + id + "&title=first");
+    val right = form("__x=" + id + "&title=second");
+    val _z = configure();
+    assert wrong.status == 404;
+    assert right.status == 200;
+    assert rkProp("blog.posts") == "second;";
+}
+
+// ── step 3 — the id a form carries ──────────────────────────────────────────
+
+test "actions: actionIdOf answers the id that dispatches, and an unknown name raises naming it" {
+    val _b = boot();
+    val id = actionIdOf("createPost");
+    assert resolveAction(id).endsWith("|createPost");
+    val res = form("__bp_action=" + id + "&title=hello");
+    assert res.status == 200, res.body;
+    assert rkProp("blog.posts") == "hello;";
+    try asserts.throwsWith({ -> actionIdOf("nothingHere").length() }, "nothingHere");
+}
+
+test "actions: this module builds no element and imports nothing from jhonstart" {
+    val src: string = fs.readText("src/actions.bp").unwrapOr("");
+    assert src.contains("jhonstart\"") == false;
+    assert src.contains("<form") == false && src.contains("<input") == false;
+}
+
+// ── step 4 — the checks ─────────────────────────────────────────────────────
+
+test "actions: an Origin whose host differs from Host is 403, and so is a POST with no Origin" {
+    val _b = boot();
+    val id = actionIdOf("createPost");
+    val cross = rkDispatchHttp("POST", "/blog", headers("http://evil.example", "application/x-www-form-urlencoded", []), "{}", "__bp_action=" + id + "&title=pwned");
+    val none = rkDispatchHttp("POST", "/blog", headers("", "application/x-www-form-urlencoded", []), "{}", "__bp_action=" + id + "&title=pwned");
+    val same = form("__bp_action=" + id + "&title=fine");
+    assert cross.status == 403 && cross.body == "";
+    assert none.status == 403;
+    assert same.status == 200;
+    assert rkProp("blog.posts") == "fine;";
+}
+
+test "actions: no configuration key reaches the Origin check" {
+    val src: string = fs.readText("src/actions.bp").unwrapOr("");
+    val keys = src.split("rkProp(\"").slice(1, 99).map({ k -> k.split("\"").at(0) ?? "" });
+    assert keys.filter({ k -> k.contains("origin") || k.contains("csrf") || k.contains("host") }).length == 0, keys.join(",");
+    assert preBodyRefusal("", "a", "application/x-www-form-urlencoded", 1) == "403\n";
+}
+
+test "actions: an unknown id is 404 with an empty body" {
+    val _b = boot();
+    val res = form("__bp_action=a_000000000000000000000000&title=x");
+    assert res.status == 404 && res.body == "";
+}
+
+test "actions: multipart/form-data is 415" {
+    val _b = boot();
+    val res = rkDispatchHttp("POST", "/blog", headers("http://localhost:8080", "multipart/form-data; boundary=x", []), "{}", "--x--");
+    assert res.status == 415;
+}
+
+test "actions: the body limit defaults to 1 MiB, is raisable, and cannot go below 4 KiB" {
+    val _c = configure();
+    assert preBodyRefusal("http://h", "h", "application/x-www-form-urlencoded", 1048576) == "";
+    assert preBodyRefusal("http://h", "h", "application/x-www-form-urlencoded", 1048577) == "413\n";
+    val _r = rkSetProp("rakun.actions.bodyLimit", "2097152");
+    val raised = preBodyRefusal("http://h", "h", "application/x-www-form-urlencoded", 1048577);
+    val _l = rkSetProp("rakun.actions.bodyLimit", "1024");
+    val low = actionsConfigProblem();
+    val _z = configure();
+    assert raised == "";
+    assert low.contains("rakun.actions.bodyLimit must be a whole number of bytes, at least 4096");
+}
+
+// ── step 5 — the envelope, revalidation and redirect ────────────────────────
+
+test "actions: a successful scripted action answers ok with its state" {
+    val _b = boot();
+    val res = scripted(actionIdOf("createPost"), "title=hello");
+    assert res.status == 200;
+    assert res.body == "{\"v\":1,\"ok\":true,\"state\":\"message=created%20hello\",\"revalidated\":[],\"redirect\":\"\",\"n\":\"\",\"payload\":\"\"}", res.body;
+    assert rkSsrHeader("content-type") == "application/json";
+}
+
+test "actions: a validation failure is state, and a throwing action is ok false with status 200" {
+    val _b = boot();
+    val invalid = scripted(actionIdOf("createPost"), "title=ab");
+    assert invalid.body.contains("\"ok\":true") && invalid.body.contains("\"state\":\"message=&f.title=Too%20short\"");
+    val failed = scripted(actionIdOf("failingPost"), "");
+    assert failed.status == 200;
+    assert failed.body.contains("\"ok\":false") && failed.body.contains("\"state\":\"message=database%20down\""), failed.body;
+    val raised = scripted(actionIdOf("raisingPost"), "");
+    assert raised.status == 200 && raised.body.contains("\"ok\":false") && raised.body.contains("exploded");
+}
+
+test "actions: the action runs in phase Action and the re-render in phase Render" {
+    val _b = boot();
+    val res = form("__bp_action=" + actionIdOf("createPost") + "&title=phased");
+    assert rkProp("blog.phase") == "action";
+    assert res.body == "posts=phased; phase=render", res.body;
+}
+
+test "actions: a cookie set inside an action reaches the response, and one set during the re-render raises" {
+    val _b = boot();
+    val res = form("__bp_action=" + actionIdOf("cookiePost"));
+    assert res.status == 200;
+    assert rkSsrHeader("set-cookie").startsWith("flash=saved"), rkSsrHeader("set-cookie");
+    val late = rkDispatchHttp("POST", "/cookie-page", headers("http://localhost:8080", "application/x-www-form-urlencoded", []), "{}", "__bp_action=" + actionIdOf("createPost") + "&title=later");
+    assert late.status == 500;
+}
+
+test "actions: on the progressive path the document is re-rendered after the mutation" {
+    val _b = boot();
+    val res = form("__bp_action=" + actionIdOf("createPost") + "&title=fresh");
+    assert res.status == 200;
+    assert res.body.startsWith("posts=fresh;");
+}
+
+test "actions: redirect is 303 with Location on the progressive path and n R|307 in the envelope, from one raise" {
+    val _b = boot();
+    val id = actionIdOf("redirectPost");
+    val progressive = form("__bp_action=" + id + "&to=%2Fblog");
+    assert progressive.status == 303;
+    assert rkSsrHeader("location") == "/blog";
+    val env = scripted(id, "to=%2Flogin");
+    assert env.body.contains("\"redirect\":\"/login\",\"n\":\"R|307|/login\""), env.body;
+}
+
+test "actions: notFound is n N in the envelope and 404 on the progressive path" {
+    val _b = boot();
+    val id = actionIdOf("missingPost");
+    assert form("__bp_action=" + id).status == 404;
+    assert scripted(id, "").body.contains("\"n\":\"N\"");
+}
+
+test "actions: a redirect target containing a bar reaches n unchanged" {
+    val _b = boot();
+    val _h = rkSetProp("rakun.navigation.allowedHosts", "x.example");
+    val env = scripted(actionIdOf("redirectPost"), "to=https%3A%2F%2Fx.example%2Fa%7Cb");
+    val _z = rkSetProp("rakun.navigation.allowedHosts", "");
+    assert env.body.contains("\"n\":\"R|307|https://x.example/a|b\""), env.body;
+}
+
+test "actions: no JSON is written by hand in actions.bp" {
+    val src: string = fs.readText("src/actions.bp").unwrapOr("");
+    assert src.contains("json.") == false;
+    assert src.contains("\"{\\\"v") == false;
+    assert src.contains("writeEnvelope(ActionEnvelope(");
+}
+
+// ── step 6 — JSON-RPC and refresh ───────────────────────────────────────────
+
+test "actions: an RPC body invokes the same action as the form POST and gives the same state" {
+    val _b = boot();
+    val id = actionIdOf("createPost");
+    val viaRpc = rpc("{\"v\":1,\"id\":\"" + id + "\",\"args\":[\"title=same\"]}");
+    val viaForm = scripted(id, "title=same");
+    assert viaRpc.status == 200;
+    assert viaRpc.body == viaForm.body, viaRpc.body;
+}
+
+test "actions: the RPC path meets the same Origin and multipart checks" {
+    val _b = boot();
+    val id = actionIdOf("createPost");
+    val body = "{\"v\":1,\"id\":\"" + id + "\",\"args\":[\"title=x\"]}";
+    val cross = rkDispatchHttp("POST", "/blog", headers("http://evil.example", "application/json", [#("x-bp-action", "rpc")]), "{}", body);
+    val none = rkDispatchHttp("POST", "/blog", headers("", "application/json", [#("x-bp-action", "rpc")]), "{}", body);
+    assert cross.status == 403 && none.status == 403;
+}
+
+test "actions: an RPC body parseRpcBody refuses is 400" {
+    val _b = boot();
+    assert rpc("not json").status == 400;
+    assert rpc("{\"v\":2,\"id\":\"a\"}").status == 400;
+    assert rpc("{\"v\":1}").status == 400;
+    assert rpc("{\"v\":1,\"id\":\"a\",\"args\":[1]}").status == 400;
+}
+
+test "actions: the refresh value re-renders the current route into the payload with an empty state" {
+    val _b = boot();
+    val _p = rkSetProp("blog.posts", "kept;");
+    val res = scripted("refresh", "");
+    assert res.status == 200;
+    val parsed = decode(res.body);
+    assert parsed.isOk();
+    assert res.body.contains("\"state\":\"\"");
+    assert res.body.contains("\"payload\":\"posts=kept; phase=render\""), res.body;
+}
+
+// ── the body hook, over the socket ──────────────────────────────────────────
+
+// Sends the head, then up to `bodyBytes` of body in 16 KiB pieces until the
+// server stops taking them; answers `<status line>|<bytes of body sent>`.
+#[@External.Erlang("""(fun(__Port, __Head, __N) -> {ok, __S} = gen_tcp:connect("127.0.0.1", __Port, [binary, {active, false}, {sndbuf, 16384}]), ok = gen_tcp:send(__S, __Head), __Me = self(), __Piece = binary:copy(<<"a">>, 16384), __Send = fun __Send(__Sent) -> case __Sent >= __N of true -> __Sent; false -> case gen_tcp:send(__S, __Piece) of ok -> __Send(__Sent + 16384); _ -> __Sent end end end, _ = spawn(fun() -> __Me ! {sent, __Send(0)} end), __Resp = case gen_tcp:recv(__S, 0, 3000) of {ok, __R} -> __R; _ -> <<>> end, __Sent = receive {sent, __X} -> __X after 5000 -> -1 end, gen_tcp:close(__S), [__Line | _] = binary:split(__Resp, <<13, 10>>), iolist_to_binary([__Line, "|", integer_to_binary(__Sent)]) end)($0, $1, $2)""")]
+declare fn rawPost(port: i32, head: string, bodyBytes: i32) -> string;
+
+fn serve() -> i32 {
+    val _k = rkSetProp("rakun.main.keep-alive", "false");
+    return rkServe(0, { m, p, h, q, b -> rkDispatchHttp(m, p, h, q, b) });
+}
+
+fn head(origin: string, length: i32) -> string {
+    val o = if (origin == "") "" else "Origin: " + origin + "\r\n";
+    return "POST /blog HTTP/1.1\r\nHost: localhost\r\n" + o + "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: " + length.toString() + "\r\n\r\n";
+}
+
+test "actions: over the socket a cross-origin POST is 403 and its body is never read" {
+    val _b = boot();
+    val port = serve();
+    val before = rkActionsAdmitted();
+    val out = rawPost(port, head("http://evil.example", 10), 0);
+    assert out.startsWith("HTTP/1.1 403 Forbidden|"), out;
+    assert rkActionsAdmitted() == before;
+}
+
+test "actions: a body over the limit is refused at the limit, the connection closed within limit plus 8 KiB" {
+    val _b = boot();
+    val port = serve();
+    val out = rawPost(port, head("http://localhost", 4194304), 4194304);
+    val received = rkProp("rakun.server.last-refused-bytes");
+    assert out.startsWith("HTTP/1.1 413 Content Too Large|"), out;
+    assert received != "";
+    assert toI32(received) <= 1048576 + 8192, received;
+}
+
+test "actions: no onze. key is read anywhere in rakun" {
+    val out = process.runShell("grep -rn '\"onze\\.' ../.. --include=*.bp --include=*.erl --include=*.json | grep -v botopinkbuild | wc -l");
+    assert out.trim() == "0", out;
+}
+
+test "actions: the id from a request is compared with the constant-time compare, never with ==" {
+    val src: string = fs.readText("src/actions.bp").unwrapOr("");
+    val body = src.split("pub fn resolveAction(id: string) -> string {").at(1).unwrapOr("").split("\n}").at(0).unwrapOr("");
+    assert body.contains("hash.equalsConstantTime(");
+    assert body.contains("== id") == false && body.contains("id ==") == false;
+}
+
+fn formBody(id: string, size: i32) -> string {
+    return "__bp_action=" + id + "&title=" + Array.range(0, size).map({ i -> "a" }).join("");
+}
+
+fn rpcBody(id: string, size: i32) -> string {
+    return "{\"v\":1,\"id\":\"" + id + "\",\"args\":[\"title=" + Array.range(0, size).map({ i -> "a" }).join("") + "\"]}";
+}
+
+fn bodyOf(encoding: string, id: string, n: i32) -> string {
+    return if (encoding == "rpc") rpcBody(id, n) else formBody(id, n);
+}
+
+fn sendAs(encoding: string, origin: string, body: string) -> i32 {
+    val contentType = if (encoding == "rpc") "application/json" else "application/x-www-form-urlencoded";
+    val extra: Array<#(string, string)> = if (encoding == "rpc") [#("x-bp-action", "rpc")] else [];
+    return rkDispatchHttp("POST", "/blog", headers(origin, contentType, extra), "{}", body).status;
+}
+
+fn checksHold(encoding: string) -> bool {
+    val id = actionIdOf("createPost");
+    val _l = rkSetProp("rakun.actions.bodyLimit", "4096");
+    val cross = sendAs(encoding, "http://evil.example", bodyOf(encoding, id, 5));
+    val none = sendAs(encoding, "", bodyOf(encoding, id, 5));
+    val big = sendAs(encoding, "http://localhost:8080", bodyOf(encoding, id, 5000));
+    val fine = sendAs(encoding, "http://localhost:8080", bodyOf(encoding, id, 5));
+    val _z = rkSetProp("rakun.actions.bodyLimit", "");
+    return cross == 403 && none == 403 && big == 413 && fine == 200;
+}
+
+test "actions: both encodings meet the same Origin and size checks" {
+    val _b = boot();
+    assert checksHold("form");
+    assert checksHold("rpc");
+}

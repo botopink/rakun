@@ -33,7 +33,7 @@
          instrumentation_reset/0]).
 -export([table_facts/0]).
 -export([fresh_trace_id/0, fresh_span_id/0, now_micros/0,
-         span_current/0, span_push/2, span_pop/1, span_clear/0,
+         span_current/0, span_push/2, span_pop/1, span_clear/0, span_flags/0, span_set_flags/1, span_parent/0,
          emit/8, emit_start/5, emit_stop/7, subscribe/1, subscriber_count/0, unsubscribe_all/0,
          span_log_enable/0, span_log/0, span_log_reset/0]).
 -export([ensure/0, owner/1]).
@@ -282,7 +282,27 @@ drop_to(Span, [_ | Rest]) -> drop_to(Span, Rest).
 
 span_clear() ->
     erase(?STACK),
+    erase(rakun_trace_flags),
     0.
+
+%% The W3C trace-flags byte of the caller's trace: `01` (sampled) unless an
+%% inbound header or front 75's sampler said `00`.
+span_flags() ->
+    case get(rakun_trace_flags) of
+        undefined -> <<"01">>;
+        F -> F
+    end.
+
+span_set_flags(F) ->
+    put(rakun_trace_flags, F),
+    0.
+
+%% The span id under the current one on the stack — its parent — or `<<>>`.
+span_parent() ->
+    case get(?STACK) of
+        [_, {_, P} | _] -> P;
+        _ -> <<>>
+    end.
 
 %% `Phase` is `start` or `stop`. The `:telemetry` event name is `rakun` then the
 %% span name's segments, a trailing `request` dropped, then the phase:
@@ -290,7 +310,8 @@ span_clear() ->
 %% `[rakun, render, stop]`.
 emit(Phase, Name, Trace, SpanId, Parent, Attributes, DurationMicros, Outcome) ->
     Subs = persistent_term:get(?SUBS, []),
-    Tel = erlang:function_exported(telemetry, execute, 3),
+    Tel = erlang:function_exported(telemetry, execute, 3) orelse
+        erlang:function_exported(rakun_telemetry, execute, 3),
     case {Subs, Tel} of
         {[], false} -> 0;
         _ -> deliver(Subs, Tel, Phase, Name, Trace, SpanId, Parent, Attributes,
@@ -313,8 +334,9 @@ deliver(Subs, Tel, Phase, Name, Trace, SpanId, Parent, Attributes, Duration, Out
                    end,
     Metadata = #{name => Name, trace_id => Trace, span_id => SpanId,
                  parent_id => Parent, attributes => Attributes, outcome => Outcome},
-    _ = case Tel of
-            true -> catch apply(telemetry, execute, [EventAtoms, Measurements, Metadata]);
+    _ = case erlang:function_exported(rakun_telemetry, execute, 3) of
+            true -> (try rakun_telemetry:execute(EventAtoms, Measurements, Metadata) catch _:_ -> ok end);
+            false when Tel -> (try apply(telemetry, execute, [EventAtoms, Measurements, Metadata]) catch _:_ -> ok end);
             false -> ok
         end,
     MJson = iolist_to_binary(json:encode(Measurements)),

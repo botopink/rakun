@@ -1,0 +1,47 @@
+//// rakun-cli — argv and the command table (front 88 step 1).
+
+import {testing.asserts} from "std";
+import {commandOf, hasFlag, flagValue, positionals} from "args";
+import {Command, builtinCommands, commandTable, helpLines, runCli, cliOutput, clearCliOutput} from "cli";
+
+test "args: an empty argv is no command, and the CLI prints the table and exits 2" {
+    val _c = clearCliOutput();
+    val status = runCli([]);
+    assert commandOf([]) == "" && status == 2 && cliOutput().filter({ l -> l.contains("rakun new <name>") }).length == 1;
+}
+
+test "args: flagValue reads the value, falls back when absent, and refuses a trailing flag" {
+    assert flagValue(["run", "--profile", "dev"], "--profile", "default") == "dev";
+    assert flagValue(["run"], "--profile", "default") == "default";
+    try asserts.throwsWith({ -> flagValue(["run", "--profile"], "--profile", "default").length() }, "rakun-cli usage: --profile needs a value");
+    val _c = clearCliOutput();
+    assert runCli(["run", "--profile"]) == 2;
+}
+
+test "args: --profile=dev and --profile dev both parse" {
+    assert flagValue(["run", "--profile=dev"], "--profile", "x") == "dev" && flagValue(["run", "--profile", "dev"], "--profile", "x") == "dev";
+}
+
+test "args: hasFlag matches exactly - --watchdog is not --watch" {
+    assert hasFlag(["run", "--watch"], "--watch") && hasFlag(["run", "--watchdog"], "--watch") == false;
+    assert positionals(["new", "orders", "--template", "library"], ["--template"]).join(",") == "orders";
+}
+
+test "table: every command has a summary and a usage, names are unique, help renders them all" {
+    val table = builtinCommands();
+    val names = table.map({ c -> c.name });
+    assert names.join(",") == "new,run,build,test,routes,beans,config,help";
+    assert table.filter({ c -> c.summary == "" || c.usage == "" }).length == 0;
+    assert names.filter({ n -> names.filter({ m -> m == n }).length > 1 }).length == 0;
+    val help = helpLines().join("\n");
+    assert names.filter({ n -> help.contains("  " + n + " - ") == false }).length == 0, help;
+}
+
+test "table: an unknown command prints the table and exits 2" {
+    val _c = clearCliOutput();
+    assert runCli(["deploy"]) == 2 && cliOutput().filter({ l -> l.contains("unknown command `deploy`") }).length == 1;
+}
+
+test "boundary: help names the CLI of a full-stack project" {
+    assert helpLines().filter({ l -> l.contains("A full-stack project (server plus a client bundle) uses onze") }).length == 1;
+}

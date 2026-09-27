@@ -1,0 +1,184 @@
+//// rakun-ws — SOAP web services (front 93). NOT WebSocket: that is
+//// rakun-web's `websocket` (front 20); this is XML over HTTP.
+////
+//// The XML half is `rakun_ws.erl` over OTP's xmerl: envelopes for SOAP 1.1
+//// (`http://schemas.xmlsoap.org/soap/envelope/`) and 1.2
+//// (`http://www.w3.org/2003/05/soap-envelope`), read by namespace URI and
+//// local name — never by prefix. Leaf values are escaped once
+//// (`xmlEscape`).
+////
+//// CLIENT: `wsCall(client, action, bodyXml)` posts through front 13's client:
+//// 1.1 sends `SOAPAction` and `text/xml`, 1.2 folds the action into
+//// `application/soap+xml; action="…"`. A 2xx is `Ok(body)`; a fault body
+//// (at any status) is `Error` with the decoded fault; any other failure —
+//// no connection, a timeout, a 500 that is not a fault — is `Error` with the
+//// code `transport`, so the two are always told apart.
+//// WS-Security UsernameToken (PasswordText with a fresh Nonce and Created):
+//// a client with a username refuses a plain `http://` endpoint unless
+//// `rakun.ws.security.allow-plain-http=true` — a DEVELOPMENT-ONLY setting.
+////
+//// ENDPOINTS: `publishEndpoint(path, wsdl, operations, version)` mounts a
+//// POST route that dispatches on the wrapped element's local name and a GET
+//// that serves the WSDL unmodified (`<path>?wsdl`). No matching operation, a
+//// malformed envelope, or a raising operation answers a `soap:Fault`
+//// (Client/Sender for the first two, Server/Receiver for the third) — never a
+//// 404, never a dead handler. With `rakun.ws.security.username` set, an
+//// incoming UsernameToken must carry those credentials and a nonce not seen
+//// within `rakun.ws.security.nonce-window-ms` (300000).
+////
+//// Not here: WSDL/XSD code generation (the schema subset, its refusals and
+//// `rakun ws generate`).
+
+import {rkProp, rkRegisterRoute, Request, Response} from "rakun";
+import {RestClient, ClientResponse} from "rakun-client";
+
+#[@External.Erlang("rakun_ws", "envelope")]
+declare fn rkWsEnvelope(version: string, headerXml: string, bodyXml: string) -> string;
+#[@External.Erlang("""(fun(__X) -> case rakun_ws:body(__X) of error -> <<"\\x00">>; __B -> __B end end)($0)""")]
+declare fn rkWsBody(xml: string) -> string;
+#[@External.Erlang("rakun_ws", "version")]
+pub declare fn envelopeVersion(xml: string) -> string;
+#[@External.Erlang("rakun_ws", "wrapped")]
+pub declare fn wrappedElement(xml: string) -> string;
+#[@External.Erlang("rakun_ws", "escape")]
+pub declare fn xmlEscape(text: string) -> string;
+#[@External.Erlang("""(fun(__X) -> case rakun_ws:fault(__X) of none -> undefined; {__C, __R, __A, __D} -> {rakun_ws@ws@@SoapFault, __C, __R, __A, __D} end end)($0)""")]
+declare fn rkWsFault(xml: string) -> ?SoapFault;
+#[@External.Erlang("rakun_ws", "token_header")]
+declare fn rkWsTokenHeader(user: string, password: string, nonce: string, created: string) -> string;
+#[@External.Erlang("""(fun(__X) -> case rakun_ws:token_of(__X) of none -> []; {__U, __P, __N, __C} -> [__U, __P, __N, __C] end end)($0)""")]
+declare fn rkWsTokenOf(xml: string) -> string[];
+#[@External.Erlang("rakun_ws", "sha256")]
+pub declare fn contentHash(text: string) -> string;
+#[@External.Erlang("""base64:encode(crypto:strong_rand_bytes(16))""")]
+declare fn freshNonce() -> string;
+#[@External.Erlang("""list_to_binary(calendar:system_time_to_rfc3339(erlang:system_time(second), [{offset, "Z"}]))""")]
+declare fn nowCreated() -> string;
+#[@External.Erlang("""(fun(__N, __W) -> __Now = erlang:system_time(millisecond), __L = [{__K, __T} || {__K, __T} <- persistent_term:get(rakun_ws_nonces, []), __Now - __T < __W], case lists:keymember(__N, 1, __L) of true -> persistent_term:put(rakun_ws_nonces, __L), false; false -> persistent_term:put(rakun_ws_nonces, [{__N, __Now} | __L]), true end end)($0, $1)""")]
+declare fn nonceFresh(nonce: string, windowMs: i32) -> bool;
+#[@External.Erlang("""(fun(__T) -> persistent_term:put(rakun_ws_sent, persistent_term:get(rakun_ws_sent, []) ++ [__T]), 0 end)($0)""")]
+declare fn noteSent(envelope: string) -> i32;
+#[@External.Erlang("""persistent_term:get(rakun_ws_sent, [])""")]
+pub declare fn sentEnvelopes() -> string[];
+#[@External.Erlang("""(fun(__S) -> try binary_to_integer(__S) catch _:_ -> 0 end end)($0)""")]
+declare fn toInt(s: string) -> i32;
+
+pub type SoapFault(
+    code: string,
+    reason: string,
+    actor: string,
+    detail: string,
+)
+
+pub fn namespaceOf(version: string) -> string {
+    return if (version == "1.2") "http://www.w3.org/2003/05/soap-envelope" else "http://schemas.xmlsoap.org/soap/envelope/";
+}
+
+pub fn soapEnvelope(version: string, bodyXml: string) -> string {
+    return rkWsEnvelope(version, "", bodyXml);
+}
+
+// The Body's content; raises when `envelopeXml` is not a SOAP envelope.
+pub fn soapBody(envelopeXml: string) -> string {
+    val b = rkWsBody(envelopeXml);
+    if (b == "\u{0}") @panic("rakun ws: not a SOAP 1.1 or 1.2 envelope");
+    return b;
+}
+
+pub fn parseFault(envelopeXml: string) -> ?SoapFault {
+    return rkWsFault(envelopeXml);
+}
+
+// ── the client ──────────────────────────────────────────────────────────────
+
+pub type WsClient(endpoint: string, version: string, timeoutMs: i32, username: string, password: string)
+
+pub fn wsClient(endpoint: string, version: string, timeoutMs: i32) -> WsClient {
+    return WsClient(endpoint: endpoint, version: version, timeoutMs: timeoutMs, username: "", password: "");
+}
+
+pub fn wsClientProblem(c: WsClient) -> string {
+    if (c.version != "1.1" && c.version != "1.2") return "rakun ws: SOAP version `" + c.version + "` - 1.1 or 1.2";
+    val plain = c.endpoint.toLower().startsWith("http://");
+    val allowed = rkProp("rakun.ws.security.allow-plain-http").trim() == "true";
+    if (c.username != "" && plain && allowed == false) return "rakun ws: a UsernameToken with PasswordText would cross " + c.endpoint + " in the clear - use https:// (rakun.ws.security.allow-plain-http=true is for development only)";
+    return "";
+}
+
+fn transportFault(reason: string) -> SoapFault {
+    return SoapFault(code: "transport", reason: reason, actor: "", detail: "");
+}
+
+fn headerFor(c: WsClient) -> string {
+    return if (c.username == "") "" else rkWsTokenHeader(c.username, c.password, freshNonce(), nowCreated());
+}
+
+pub fn wsCall(c: WsClient, action: string, bodyXml: string) -> @Result<string, SoapFault> {
+    val problem = wsClientProblem(c);
+    if (problem != "") @panic(problem);
+    val envelope = rkWsEnvelope(c.version, headerFor(c), bodyXml);
+    val _n = noteSent(envelope);
+    val client = RestClient.builder().connectTimeout(c.timeoutMs).readTimeout(c.timeoutMs).build();
+    val spec = if (c.version == "1.2") client.post(c.endpoint, envelope).header("Content-Type", "application/soap+xml; charset=utf-8; action=\"" + action + "\"") else client.post(c.endpoint, envelope).header("Content-Type", "text/xml; charset=utf-8").header("SOAPAction", "\"" + action + "\"");
+    val res: ClientResponse = spec.retrieve();
+    if (res.status < 0) throw transportFault("no response from " + c.endpoint + " - " + res.body);
+    val fault: ?SoapFault = parseFault(res.body);
+    if (fault != null) throw fault ?? transportFault("");
+    if (res.isOk() == false) throw transportFault("HTTP " + res.status.toString() + " with a body that is not a SOAP fault");
+    val body = rkWsBody(res.body);
+    if (body == "\u{0}") throw transportFault("HTTP " + res.status.toString() + " with a body that is not a SOAP envelope");
+    return body;
+}
+
+// ── endpoints ───────────────────────────────────────────────────────────────
+
+pub fn faultEnvelope(version: string, client: bool, reason: string) -> string {
+    if (version == "1.2") return rkWsEnvelope("1.2", "", "<soapenv:Fault><soapenv:Code><soapenv:Value>soapenv:" + (if (client) "Sender" else "Receiver") + "</soapenv:Value></soapenv:Code><soapenv:Reason><soapenv:Text xml:lang=\"en\">" + xmlEscape(reason) + "</soapenv:Text></soapenv:Reason></soapenv:Fault>");
+    return rkWsEnvelope("1.1", "", "<soapenv:Fault><faultcode>soapenv:" + (if (client) "Client" else "Server") + "</faultcode><faultstring>" + xmlEscape(reason) + "</faultstring></soapenv:Fault>");
+}
+
+fn contentType(version: string) -> string {
+    return if (version == "1.2") "application/soap+xml; charset=utf-8" else "text/xml; charset=utf-8";
+}
+
+#[@External.Erlang("""(fun(__F, __X) -> try {ok, __F(__X)} catch _:{panic, __R} when is_binary(__R) -> {error, __R}; _:__R -> {error, iolist_to_binary(io_lib:format("~p", [__R]))} end end)($0, $1)""")]
+declare fn guarded(op: fn(bodyXml: string) -> string, bodyXml: string) -> @Result<string, string>;
+#[@External.Erlang("""(fun(__S, __B) -> rakun_runtime:set_reply_header(<<"Content-Type">>, __S), __B end)($0, $1)""")]
+declare fn withType(contentType: string, body: string) -> string;
+
+fn securityProblem(envelope: string) -> string {
+    val user = rkProp("rakun.ws.security.username").trim();
+    if (user == "") return "";
+    val t = rkWsTokenOf(envelope);
+    if (t.length == 0) return "a UsernameToken is required";
+    if ((t.at(0) ?? "") != user || (t.at(1) ?? "") != rkProp("rakun.ws.security.password")) return "the UsernameToken does not match";
+    val raw = rkProp("rakun.ws.security.nonce-window-ms").trim();
+    if (nonceFresh(t.at(2) ?? "", if (raw == "") 300000 else toInt(raw)) == false) return "the UsernameToken's nonce was already used";
+    return "";
+}
+
+fn identity() -> fn(bodyXml: string) -> string {
+    return { b -> b };
+}
+
+pub fn handleSoap(version: string, operations: Array<#(string, fn(bodyXml: string) -> string)>, envelope: string) -> Response {
+    val body = rkWsBody(envelope);
+    if (body == "\u{0}") return Response.withStatus(500, withType(contentType(version), faultEnvelope(version, true, "the request is not a well-formed SOAP envelope")));
+    val sec = securityProblem(envelope);
+    if (sec != "") return Response.withStatus(500, withType(contentType(version), faultEnvelope(version, true, sec)));
+    val name = wrappedElement(envelope);
+    val op = operations.filter({ o -> o._0 == name }).map({ o -> o._1 });
+    if (op.length == 0) return Response.withStatus(500, withType(contentType(version), faultEnvelope(version, true, "no operation takes the element `" + name + "`")));
+    val r = guarded(op.at(0) ?? identity(), body);
+    if (r.isError()) return Response.withStatus(500, withType(contentType(version), faultEnvelope(version, false, case r { Ok(v) -> ""; Error(e) -> e; })));
+    return Response.ok(withType(contentType(version), rkWsEnvelope(version, "", r.unwrapOr(""))));
+}
+
+fn bodyOf(req: Request) -> string {
+    return req.body();
+}
+
+pub fn publishEndpoint(path: string, wsdl: string, operations: Array<#(string, fn(bodyXml: string) -> string)>, version: string) -> i32 {
+    val _g = rkRegisterRoute("GET", path, { req -> Response.ok(withType("text/xml; charset=utf-8", wsdl)) });
+    return rkRegisterRoute("POST", path, { req -> handleSoap(version, operations, bodyOf(req)) });
+}

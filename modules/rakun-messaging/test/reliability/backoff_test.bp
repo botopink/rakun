@@ -1,0 +1,29 @@
+//// rakun-messaging — the retry policy's arithmetic (front 86 step 1): pure,
+//// no broker, no clock.
+
+import {testing.asserts} from "std";
+import {RetryPolicy, retryPolicy, nextDelay} from "reliability/policy";
+
+test "backoff: attempt 1 is initialMs, or maxMs when initialMs exceeds it" {
+    assert nextDelay(retryPolicy(2000, 200, 30000, 5), 1) == 2000;
+    assert nextDelay(retryPolicy(50, 150, 1000, 5), 1) == 50;
+    assert nextDelay(retryPolicy(5000, 200, 3000, 5), 1) == 3000;
+}
+
+test "backoff: doubling from 2000 under a 30000 ceiling is 2000, 4000, 8000, 16000, 30000" {
+    val p = retryPolicy(2000, 200, 30000, 6);
+    val series = [1, 2, 3, 4, 5].map({ a -> nextDelay(p, a).toString() }).join(",");
+    assert series == "2000,4000,8000,16000,30000", series;
+    assert nextDelay(p, 40) == 30000;
+}
+
+test "backoff: 100 percent is constant, and 0 is refused at construction" {
+    val p = retryPolicy(700, 100, 30000, 9);
+    assert nextDelay(p, 1) == 700 && nextDelay(p, 5) == 700 && nextDelay(p, 9) == 700;
+    try asserts.throwsWith({ -> retryPolicy(1000, 0, 5000, 3).maxAttempts }, "multiplierPercent is 0 - it must be at least 1");
+}
+
+test "backoff: nextDelay is a pure function of its two arguments" {
+    val p = RetryPolicy(initialMs: 300, multiplierPercent: 150, maxMs: 10000, maxAttempts: 4);
+    assert nextDelay(p, 3) == nextDelay(p, 3) && nextDelay(p, 3) == 675;
+}

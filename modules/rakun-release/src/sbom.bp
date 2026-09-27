@@ -1,0 +1,75 @@
+//// rakun-release — the CycloneDX 1.5 SBOM (front 81 step 6) over the
+//// application's transitively resolved dependencies (front 73's resolver):
+//// each component once, with name, version and source (`workspace`, `path`,
+//// `git` or `registry`); a path dependency carries the SHA-256 of its source
+//// tree. `registerSbomEndpoint(file)` serves the written document at front
+//// 11's `sbom` endpoint, unmodified, as `application/vnd.cyclonedx+json`.
+
+import {json} from "std";
+import {Request} from "rakun";
+import {resolvedModuleListIn, manifestPackageName, dependencySource, dependencyManifest, manifestDependencyNames} from "rakun/autoconfig_registry";
+import {EndpointResponse, rkRegisterEndpoint} from "rakun-actuator-api";
+import {rkRelTreeHash, rkRelRead} from "release";
+
+#[@External.Erlang("""(fun(__F) -> filename:dirname(__F) end)($0)""")]
+declare fn dirOf(file: string) -> string;
+
+fn versionOf(text: string) -> string {
+    val at = text.indexOf("\"version\"");
+    if (at < 0) return "";
+    val rest = text.slice(at + 9, text.length());
+    val open = rest.indexOf("\"");
+    val tail = rest.slice(open + 1, rest.length());
+    return tail.slice(0, tail.indexOf("\""));
+}
+
+pub type Component(name: string, version: string, source: string, hash: string)
+
+// Every dependency the manifest reaches, once, breadth first.
+pub fn components(manifest: string) -> Component[] {
+    var out: Component[] = [];
+    var queue: string[] = [manifest];
+    var i = 0;
+    while (i < queue.length) {
+        val file = queue.at(i) ?? "";
+        val text = rkRelRead(file);
+        for (manifestDependencyNames(text)) { d ->
+            if (out.filter({ c -> c.name == d }).length == 0) {
+                val src = dependencySource(text, d);
+                val target = dependencyManifest(file, text, d);
+                val depText = if (target == "") "" else rkRelRead(target);
+                val kind = if (src.startsWith("path:")) "path" else if (src == "workspace") "workspace" else if (text.contains("\"git\"")) "git" else "registry";
+                val hash = if (kind == "path" && target != "") rkRelTreeHash(dirOf(target)) else "";
+                out.push(Component(name: d, version: versionOf(depText), source: kind, hash: hash));
+                if (target != "") queue.push(target);
+            };
+        };
+        i = i + 1;
+    };
+    return out;
+}
+
+fn componentJson(c: Component) -> string {
+    var fields: Array<#(string, string)> = [#("type", json.quote("library")), #("name", json.quote(c.name)), #("version", json.quote(c.version)), #("properties", json.array([json.object([#("name", json.quote("rakun:source")), #("value", json.quote(c.source))])]))];
+    if (c.hash != "") fields.push(#("hashes", json.array([json.object([#("alg", json.quote("SHA-256")), #("content", json.quote(c.hash))])])));
+    return json.object(fields);
+}
+
+pub fn sbomDocument(appName: string, appVersion: string, manifest: string) -> string {
+    val comps = components(manifest).map({ c -> componentJson(c) });
+    return json.object([
+        #("bomFormat", json.quote("CycloneDX")),
+        #("specVersion", json.quote("1.5")),
+        #("version", "1"),
+        #("metadata", json.object([#("component", json.object([#("type", json.quote("application")), #("name", json.quote(appName)), #("version", json.quote(appVersion))]))])),
+        #("components", json.array(comps)),
+    ]);
+}
+
+pub fn sbomMediaType() -> string {
+    return "application/vnd.cyclonedx+json";
+}
+
+pub fn registerSbomEndpoint(file: string) -> i32 {
+    return rkRegisterEndpoint("sbom", "rakun-release", "read", { req -> EndpointResponse(status: 200, contentType: sbomMediaType(), body: rkRelRead(file)) });
+}

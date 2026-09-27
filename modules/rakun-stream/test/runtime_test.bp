@@ -1,0 +1,147 @@
+//// rakun-stream — running pipelines over front 15's in-process broker
+//// (front 89 steps 2 and 6, and the graph endpoint of step 7).
+
+import {testing.asserts} from "std";
+import {rkSetProp, rkProp, rkDispatchHttp} from "rakun";
+import {InProcessBroker} from "rakun-messaging/message";
+import {resetMessaging, stopMessaging, startMessaging, published} from "rakun-messaging/container";
+import {rkMsgWaitUntil, rkMsgInflight, rkMsgBump, rkMsgCount} from "rakun-messaging/messaging_host";
+import {endpointIds} from "rakun-actuator-api";
+import {mountActuator} from "rakun-actuator/actuator";
+import {installExposure, clearExposure} from "rakun-actuator/endpoint_host";
+import {Stage, Source, Sink, Pipeline} from "pipeline";
+import {startPipeline, stopPipeline, pushEvent, stagePids, killStage, stagePeaks, collected, clearCollected, streamCount, mountStreamGraph, forgetPipeline} from "runtime";
+
+#[@External.Erlang("""(fun(__Ms) -> timer:sleep(__Ms), 0 end)($0)""")]
+declare fn pause(ms: i32) -> i32;
+#[@External.Erlang("""(fun(__F) -> spawn(fun() -> __F() end), 0 end)($0)""")]
+declare fn inBackground(work: fn() -> i32) -> i32;
+
+fn clean() -> i32 {
+    val _s = stopMessaging();
+    for (["amqp", "kafka", "redis", "stream"]) { a -> val _t = rkSetProp("rakun.messaging." + a + ".transport", "memory"); };
+    return resetMessaging();
+}
+
+fn waitMs(ms: i32) -> bool {
+    return rkMsgWaitUntil(ms, { -> false });
+}
+
+fn gate(key: string, s: string) -> string {
+    val _w = rkMsgWaitUntil(5000, { -> rkProp(key) == "go" });
+    return s;
+}
+
+test "runtime: a slow stage is never offered more than its demand" {
+    val _c = clean();
+    val _g = rkSetProp("test.st.gate1", "");
+    val p = Pipeline(name: "slow", source: Source.Poll(everyMs: 1000, cursor: ""), stages: [
+        Stage.Transform(name: "fast", apply: { s -> s }),
+        Stage.Transform(name: "slow", apply: { s -> gate("test.st.gate1", s) }),
+    ], sink: Sink.Collect(name: "slow-out"));
+    val _k = clearCollected("slow-out");
+    val _s = startPipeline(p, 2, "");
+    val _b = inBackground({ ->
+        var i = 0;
+        while (i < 8) {
+            val _p = pushEvent("slow", "e" + i.toString());
+            i = i + 1;
+        };
+        0
+    });
+    val _w = waitMs(300);
+    val _go = rkSetProp("test.st.gate1", "go");
+    val all = rkMsgWaitUntil(5000, { -> collected("slow-out").length == 8 });
+    val peaks = stagePeaks("slow").join(",");
+    val _x = stopPipeline("slow");
+    val over = stagePeaks("slow").filter({ kv -> (kv.split("=").at(1) ?? "0") != "1" && (kv.split("=").at(1) ?? "0") != "2" }).length;
+    assert all && over == 0 && stagePeaks("slow").length == 2, peaks;
+}
+
+test "runtime: Collect accumulates into a named store, end to end from a queue" {
+    val _c = clean();
+    val p = Pipeline(name: "collector", source: Source.Queue(destination: "words", prefetch: 4), stages: [Stage.Transform(name: "upper", apply: { s -> s.toUpper() })], sink: Sink.Collect(name: "words-out"));
+    val _k = clearCollected("words-out");
+    val _s = startPipeline(p, 4, "");
+    val _m = startMessaging();
+    val b = InProcessBroker(arm: "amqp");
+    val _1 = b.publish("words", "", "hello");
+    val _2 = b.publish("words", "", "world");
+    val done = rkMsgWaitUntil(3000, { -> collected("words-out").length == 2 });
+    val out = collected("words-out").join(",");
+    val _x = stopPipeline("collector");
+    val _z = clean();
+    assert done && out == "HELLO,WORLD", out;
+}
+
+test "runtime: with prefetch 1 and a blocked pipeline, the broker holds the rest" {
+    val _c = clean();
+    val _g = rkSetProp("test.st.gate2", "");
+    val p = Pipeline(name: "blocked", source: Source.Queue(destination: "held", prefetch: 1), stages: [Stage.Transform(name: "wait", apply: { s -> gate("test.st.gate2", s) })], sink: Sink.Collect(name: "held-out"));
+    val _k = clearCollected("held-out");
+    val _s = startPipeline(p, 1, "");
+    val _m = startMessaging();
+    val b = InProcessBroker(arm: "amqp");
+    for (["1", "2", "3", "4"]) { x -> val _p = b.publish("held", "", x); };
+    val _w = waitMs(300);
+    val inflight = rkMsgInflight("blocked");
+    val _go = rkSetProp("test.st.gate2", "go");
+    val all = rkMsgWaitUntil(5000, { -> collected("held-out").length == 4 });
+    val _x = stopPipeline("blocked");
+    val _z = clean();
+    assert inflight == 1 && all, inflight.toString();
+}
+
+test "runtime: killing a middle stage restarts it alone and loses nothing already downstream" {
+    val _c = clean();
+    val p = Pipeline(name: "kill", source: Source.Poll(everyMs: 1000, cursor: ""), stages: [
+        Stage.Transform(name: "a", apply: { s -> s }),
+        Stage.Transform(name: "b", apply: { s -> s }),
+        Stage.Transform(name: "c", apply: { s -> s }),
+    ], sink: Sink.Collect(name: "kill-out"));
+    val _k = clearCollected("kill-out");
+    val _s = startPipeline(p, 4, "");
+    val _1 = pushEvent("kill", "before");
+    val arrived = rkMsgWaitUntil(2000, { -> collected("kill-out").length == 1 });
+    val before = stagePids("kill");
+    val killed = killStage("kill", 2);
+    val _w = waitMs(100);
+    val after = stagePids("kill");
+    val _2 = pushEvent("kill", "after");
+    val both = rkMsgWaitUntil(2000, { -> collected("kill-out").length == 2 });
+    val _x = stopPipeline("kill");
+    assert arrived && both && before.length == 3 && after.length == 3 && (before.at(0) ?? "") == (after.at(0) ?? "") && (before.at(1) ?? "") != (after.at(1) ?? "") && (before.at(2) ?? "") == (after.at(2) ?? "") && killed == (before.at(1) ?? "");
+}
+
+test "runtime: a poison event goes to the dead-letter destination with its stage, and the pipeline keeps running" {
+    val _c = clean();
+    val p = Pipeline(name: "poison", source: Source.Queue(destination: "orders", prefetch: 4), stages: [Stage.Transform(name: "parse", apply: { s ->
+        if (s == "bad") @panic("unparseable");
+        s
+    })], sink: Sink.Collect(name: "poison-out"));
+    val _k = clearCollected("poison-out");
+    val _s = startPipeline(p, 4, "");
+    val _m = startMessaging();
+    val b = InProcessBroker(arm: "amqp");
+    val _1 = b.publish("orders", "", "bad");
+    val _2 = b.publish("orders", "", "good");
+    val done = rkMsgWaitUntil(3000, { -> collected("poison-out").length == 1 });
+    val letter = published("amqp").filter({ l -> l.startsWith("orders.dlq|") }).at(0) ?? "";
+    val _x = stopPipeline("poison");
+    val _z = clean();
+    assert done && letter.contains("\"reason\":\"stage parse: unparseable\"") && letter.contains("\"body\":\"bad\""), letter;
+}
+
+test "graph endpoint: a registered pipeline appears at /actuator/integrationgraph, only when exposed" {
+    val p = Pipeline(name: "shown", source: Source.Queue(destination: "q", prefetch: 1), stages: [Stage.Transform(name: "t", apply: { s -> s })], sink: Sink.Collect(name: "o"));
+    val _s = startPipeline(p, 1, "");
+    val _a = mountActuator();
+    val _m = mountStreamGraph();
+    val hidden = rkDispatchHttp("GET", "/actuator/integrationgraph", "{}", "{}", "").status;
+    val _e = installExposure({ id -> id == "integrationgraph" || id == "health" });
+    val res = rkDispatchHttp("GET", "/actuator/integrationgraph", "{}", "{}", "");
+    val _y = clearExposure();
+    val _x = stopPipeline("shown");
+    val _f = forgetPipeline("shown");
+    assert hidden == 404 && res.status == 200 && res.body.contains("{\"from\":\"queue:q\",\"to\":\"t\"}") && res.body.contains("{\"from\":\"t\",\"to\":\"collect:o\"}"), res.body;
+}

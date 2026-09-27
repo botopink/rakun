@@ -1,0 +1,50 @@
+//// rakun-security — LDAP directory authentication (front 79 step 7).
+////
+//// `ldapAuthenticate(config, user, password)`: bind as the service account,
+//// search the user (`(<uidAttribute>=<user>)` under `base`) — or build the DN
+//// from `userDnPattern` (`uid={0},ou=people,dc=example`) — bind as that DN
+//// with the password, and read `memberOf` as authorities. `rejected` never
+//// says whether the user or the password was wrong; `unavailable` (the
+//// directory cannot be reached) is a different answer. Every `eldap` handle
+//// is closed on every path. `registerLdapHealth(config)` adds the `ldap`
+//// indicator to front 11: DOWN when the service-account bind fails, with no
+//// credential in its details.
+
+import {json} from "std";
+import {Health, healthDown, rkRegisterHealthIndicator} from "rakun-actuator-api";
+import {Principal} from "principal";
+import {ldapBind, ldapHealthWire} from "ldap_host";
+
+pub type LdapConfig(
+    host: string,
+    port: i32,
+    serviceDn: string,
+    servicePassword: string,
+    base: string,
+    uidAttribute: string,
+    userDnPattern: string,
+)
+
+pub type LdapResult(kind: string, principal: Principal, subject: string)
+
+fn nobody() -> Principal {
+    return Principal(name: "", authorities: []);
+}
+
+pub fn ldapAuthenticate(c: LdapConfig, user: string, password: string) -> LdapResult {
+    val wire = ldapBind(c.host, c.port, c.serviceDn, c.servicePassword, c.base, c.uidAttribute, c.userDnPattern, user, password);
+    if (wire.startsWith("authenticated\t") == false) return LdapResult(kind: wire, principal: nobody(), subject: "");
+    val f = wire.split("\t");
+    val groups = (f.at(2) ?? "").split("\n").filter({ g -> g != "" });
+    return LdapResult(kind: "authenticated", principal: Principal(name: user, authorities: groups), subject: f.at(1) ?? "");
+}
+
+pub fn ldapHealth(c: LdapConfig) -> Health {
+    val wire = ldapHealthWire(c.host, c.port, c.serviceDn, c.servicePassword);
+    if (wire == "UP") return Health(status: "UP", details: json.object([#("host", json.quote(c.host))]));
+    return healthDown(json.object([#("host", json.quote(c.host)), #("reason", json.quote(wire.slice(5, wire.length())))]));
+}
+
+pub fn registerLdapHealth(c: LdapConfig) -> i32 {
+    return rkRegisterHealthIndicator("ldap", "rakun-security", { -> ldapHealth(c) });
+}

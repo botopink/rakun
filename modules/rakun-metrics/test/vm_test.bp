@@ -1,0 +1,64 @@
+//// rakun-metrics — the BEAM VM meters (front 75 step 3).
+
+import {rkSetProp} from "rakun";
+import {vmMeterNames, installVmMetrics, rkMetricsGaugeRead, rkMetricsQueueMax, rkMetricsSwtEnables} from "vm";
+import {meterNames} from "registry";
+import {installMetrics} from "install";
+
+fn has(name: string) -> bool {
+    return meterNames().filter({ n -> n == name }).length == 1;
+}
+
+test "vm: utilization is absent unless asked for, and asking turns scheduler_wall_time on once" {
+    val _i = installVmMetrics();
+    assert has("beam.schedulers.utilization") == false;
+    assert rkMetricsSwtEnables() == 0;
+    val _p = rkSetProp("rakun.metrics.beam.scheduler-utilization", "true");
+    val _a = installVmMetrics();
+    val _b = installVmMetrics();
+    val _u = rkSetProp("rakun.metrics.beam.scheduler-utilization", "");
+    assert has("beam.schedulers.utilization");
+    assert rkMetricsSwtEnables() == 1;
+    assert rkMetricsGaugeRead("beam.schedulers.utilization") >= 0;
+}
+
+test "vm: every VM meter is present after boot with a plausible value" {
+    val _i = installVmMetrics();
+    for (vmMeterNames()) { n -> assert has(n), n; };
+    assert rkMetricsGaugeRead("beam.processes.count") > 0;
+    assert rkMetricsGaugeRead("beam.processes.limit") > rkMetricsGaugeRead("beam.processes.count");
+    assert rkMetricsGaugeRead("beam.ports.limit") > rkMetricsGaugeRead("beam.ports.count");
+    assert rkMetricsGaugeRead("beam.atoms.limit") > rkMetricsGaugeRead("beam.atoms.count");
+    assert rkMetricsGaugeRead("beam.memory.total") > rkMetricsGaugeRead("beam.memory.processes");
+    assert rkMetricsGaugeRead("beam.gc.count") > 0 && rkMetricsGaugeRead("beam.run_queue.missing") == -1;
+    assert rkMetricsGaugeRead("beam.schedulers.run_queue") >= 0 && rkMetricsGaugeRead("beam.messages.queue_max") >= 0;
+}
+
+#[@External.Erlang("""(fun() -> __M = erlang:memory(), __G = fun(K) -> proplists:get_value(K, __M) end, (__G(processes) + __G(system) =:= __G(total)) andalso (__G(atom) + __G(binary) + __G(code) + __G(ets) =< __G(system)) end)()""")]
+declare fn memoryAreasSum() -> bool;
+
+test "vm: the memory areas sum to the total OTP reports" {
+    assert memoryAreasSum();
+}
+
+#[@External.Erlang("""(fun(__N) -> __Ps = [spawn(fun() -> erlang:hibernate(erlang, exit, [normal]) end) || _ <- lists:seq(1, __N)], persistent_term:put(rakun_metrics_test_procs, __Ps), length(__Ps) end)($0)""")]
+declare fn spawnIdle(n: i32) -> i32;
+
+#[@External.Erlang("""(fun() -> [exit(__P, kill) || __P <- persistent_term:get(rakun_metrics_test_procs, [])], persistent_term:erase(rakun_metrics_test_procs), 0 end)()""")]
+declare fn killIdle() -> i32;
+
+#[@External.Erlang("""(fun(__B) -> __T0 = erlang:monotonic_time(millisecond), _ = rakun_metrics:queue_max(__B), erlang:monotonic_time(millisecond) - __T0 end)($0)""")]
+declare fn timedQueueMax(budget: i32) -> i32;
+
+test "vm: sampling 100 000 processes stays within the budget" {
+    val _s = spawnIdle(100000);
+    val took = timedQueueMax(20);
+    val _k = killIdle();
+    assert took <= 40, took.toString();
+}
+
+test "vm: no JVM-named meter exists" {
+    val _i = installMetrics();
+    assert meterNames().filter({ n -> n.startsWith("jvm.") }).length == 0;
+    assert has("beam.memory.total");
+}

@@ -62,7 +62,7 @@
 import {rkProp, rkScannedNames} from "runtime";
 import {active} from "profiles";
 import {rkBeanNames} from "context";
-import {rkModulePresent, moduleList} from "autoconfig_registry";
+import {moduleList} from "autoconfig_registry";
 
 // ── the record letters ──────────────────────────────────────────────────────
 
@@ -202,19 +202,23 @@ pub fn unknownRecordProblem(rec: string) -> string {
     return "rakun: '" + rec + "' is not a condition record - the letters are M (module), P (property), B (bean), X (missing bean) and F (profile)";
 }
 
+// An `M` record against a resolved dependency set: present, or refused with
+// the set it looked at as the observed value.
+pub fn moduleVerdict(rec: string, resolved: string[]) -> Verdict {
+    val name = recordField(rec, 1);
+    if (resolved.filter({ m -> m == name }).length > 0) return pass(rec);
+    val deps = resolved.join(",");
+    val seen = if (deps == "") "the manifest declares no dependencies" else "resolved dependencies: " + deps;
+    return refuse(rec, seen);
+}
+
 // ONE evaluator, compiled to both targets. A front that needs a new KIND of
 // condition adds a record letter and a branch HERE — not a second registry and
 // not a second copy in two host languages.
 pub fn evaluateRecord(rec: string, provided: string[]) -> Verdict {
     val kind = recordKind(rec);
     if (kind == moduleRecord()) {
-        val name = recordField(rec, 1);
-        if (rkModulePresent(name)) {
-            return pass(rec);
-        };
-        val deps = moduleList().join(",");
-        val seen = if (deps == "") "the manifest declares no dependencies" else "declared dependencies: " + deps;
-        return refuse(rec, seen);
+        return moduleVerdict(rec, moduleList());
     };
     if (kind == propertyRecord()) {
         val key = recordField(rec, 1);

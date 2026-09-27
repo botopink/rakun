@@ -1,0 +1,130 @@
+import {testing.asserts} from "std";
+import {configuration, bean, service, rkScan, rkSingleton, rkEnter, rkDone, rkSetProp, rkPropInt} from "rakun";
+import {cacheThrough, cachePolicy, cacheLife, CacheScope, cacheSize, resetCaches, revalidateTag, cacheTraceOn, cacheTrace} from "rakun-cache";
+import {ProductCatalog, SqlProductCatalog, __rkMake_SqlProductCatalog, cachedProductCatalog, readTwice} from "catalog";
+
+#[configuration]
+pub type CatalogConfig(real: SqlProductCatalog) {
+    #[bean]
+    pub fn productCatalog(self: Self) -> ProductCatalog {
+        return cachedProductCatalog(self.real);
+    }
+}
+
+#[service]
+pub type ProductPage(catalog: ProductCatalog) {
+    pub fn show(self: Self, id: string) -> string {
+        return self.catalog.productJson(id);
+    }
+}
+
+fn boot(provider: string) -> i32 {
+    val _t = rkSetProp("rakun.cache.type", provider);
+    for (["productJson", "listJson", "reprice", "forget", "slugFor"]) { m -> val _z = rkSetProp("calls." + m, "0"); };
+    return resetCaches();
+}
+
+fn calls(m: string) -> i32 {
+    return rkPropInt("calls." + m);
+}
+
+fn twin() -> ProductCatalog {
+    val c: ProductCatalog = cachedProductCatalog(SqlProductCatalog());
+    return c;
+}
+
+test "twin: a field declared ProductCatalog is injected with the caching twin" {
+    val _b = boot("ets");
+    val page = __rkMake_ProductPage();
+    assert page.show("7") == "{\"id\":\"7\",\"n\":1}";
+    assert page.show("7") == "{\"id\":\"7\",\"n\":1}";
+    assert calls("productJson") == 1;
+}
+
+test "twin: the behavior's own module reaches the emitted factory" {
+    val _b = boot("ets");
+    assert readTwice(SqlProductCatalog(), "1") == "{\"id\":\"1\",\"n\":1}";
+    assert calls("productJson") == 1;
+}
+
+test "twin: a method with no cache annotation is delegated and never touches the store" {
+    val _b = boot("ets");
+    val c = twin();
+    assert c.slugFor("7") == "product-7";
+    assert c.slugFor("7") == "product-7";
+    assert calls("slugFor") == 2;
+    assert cacheSize("products") == 0;
+}
+
+test "twin: a non-string argument is part of the key" {
+    val _b = boot("ets");
+    val c = twin();
+    val _a = c.listJson(1);
+    val _s = c.listJson(1);
+    val _t = c.listJson(2);
+    assert calls("listJson") == 2;
+}
+
+test "twin: cacheEvict(name, true) clears the whole cache after the delegate returns" {
+    val _b = boot("ets");
+    val c = twin();
+    val _a = c.productJson("7");
+    val _s = c.productJson("8");
+    assert cacheSize("products") == 2;
+    assert c.reprice("7", "{}") == "{\"id\":\"7\",\"repriced\":true}";
+    assert cacheSize("products") == 0;
+    val _t = c.productJson("7");
+    assert calls("productJson") == 3;
+}
+
+test "twin: cacheEvict(name, false) removes only the rows its arguments key" {
+    val _b = boot("ets");
+    val c = twin();
+    val _a = c.productJson("7");
+    val _s = c.productJson("8");
+    val _f = c.forget("7");
+    assert cacheSize("products") == 1;
+    val _t = c.productJson("8");
+    assert calls("productJson") == 2;
+    val _u = c.productJson("7");
+    assert calls("productJson") == 3;
+}
+
+test "twin: a delegate that raises leaves the cache alone" {
+    val _b = boot("ets");
+    val c = twin();
+    val _a = c.productJson("7");
+    val r = asserts.throwsWith({ ->
+        val _x = c.reprice("7", "boom");
+        0;
+    }, "reprice failed");
+    assert r.isOk();
+    assert cacheSize("products") == 1;
+}
+
+test "twin: with rakun.cache.type=none the twin delegates straight through" {
+    val _b = boot("none");
+    val c = twin();
+    val _a = c.productJson("7");
+    val _s = c.productJson("7");
+    assert calls("productJson") == 2;
+    assert cacheSize("products") == 0;
+}
+
+test "twin: one store - cacheThrough reads the row the cacheable twin wrote" {
+    val _b = boot("ets");
+    val _t = cacheTraceOn();
+    val c = twin();
+    val written = c.productJson("7");
+    val policy = cachePolicy(CacheScope.Shared, "products", cacheLife("hours"), []);
+    val read = cacheThrough(policy, ["productJson", "7"], { -> "loader ran" });
+    assert read == written;
+    assert cacheTrace().join("\n") == "miss key=products:productJson,7 [products]\nhit key=products:productJson,7 []";
+}
+
+test "twin: revalidateTag of the cache name reaches the twin's rows" {
+    val _b = boot("ets");
+    val c = twin();
+    val _a = c.productJson("7");
+    assert revalidateTag("products") == 1;
+}

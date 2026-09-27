@@ -1,0 +1,89 @@
+//// A consumer of rakun-app and rakun-cache: the action's revalidation is
+//// seen by its own re-render, and the phase is what makes it legal.
+
+import {testing.asserts} from "std";
+import {json.object, json.quote} from "std";
+import {Request, Response, rkSetProp, rkProp, rkDispatchHttp, beginRequest, endRequest, RequestScope, RequestPhase} from "rakun";
+import {rkAppReset, rkAppRegisterPage} from "rakun-app/file_router";
+import {PageRenderer, ChunkWriter, writeTo} from "rakun-app/ssr";
+import {serveApp} from "rakun-app/route_handler";
+import {FormData, ActionResult, formValue, serverAction, rkRegisterAction, serveActions, actionIdOf} from "rakun-app/actions";
+import {cachePolicy, cacheThrough, cacheLifeOf, CacheScope, revalidatePath, resetCaches} from "rakun-cache";
+
+#[serverAction]
+pub fn addAndRevalidate(form: FormData) -> @Task<ActionResult> {
+    val _s = rkSetProp("blog.posts", rkProp("blog.posts") + formValue(form, "title") + ";");
+    val _r = revalidatePath("/blog");
+    return ActionResult.done();
+}
+
+#[serverAction]
+pub fn addOnly(form: FormData) -> @Task<ActionResult> {
+    val _s = rkSetProp("blog.posts", rkProp("blog.posts") + formValue(form, "title") + ";");
+    return ActionResult.done();
+}
+
+fn blogBody(out: ChunkWriter) -> @Task<@Result<void, string>> {
+    val policy = cachePolicy(CacheScope.Shared, "pages", cacheLifeOf(0, 600, 600), ["path:/blog"]);
+    val posts = cacheThrough(policy, ["blog"], { -> rkProp("blog.posts") });
+    await writeTo(out, "posts=" + posts);
+    return;
+}
+
+fn blogPage() -> PageRenderer {
+    return { req, out -> blogBody(out) };
+}
+
+fn boot() -> i32 {
+    val _f = rkSetProp("rakun.actions.field", "__bp_action");
+    val _h = rkSetProp("rakun.actions.header", "X-Bp-Action");
+    val _s = rkSetProp("rakun.actions.secret", "fixture-secret-0123456789abcdef-xyz");
+    val _t = rkSetProp("rakun.cache.type", "ets");
+    val _c = resetCaches();
+    val _p = rkSetProp("blog.posts", "old;");
+    val _r = rkAppReset();
+    val _b = rkAppRegisterPage("blog", blogPage());
+    val _a = serveApp();
+    return serveActions();
+}
+
+fn headers(extra: Array<#(string, string)>) -> string {
+    var pairs: Array<#(string, string)> = [#("host", quote("localhost")), #("origin", quote("http://localhost")), #("content-type", quote("application/x-www-form-urlencoded"))];
+    for (extra) { e -> pairs.push(#(e._0, quote(e._1))); };
+    return object(pairs);
+}
+
+fn post(action: string, title: string) -> Response {
+    return rkDispatchHttp("POST", "/blog", headers([]), "{}", "__bp_action=" + actionIdOf(action) + "&title=" + title);
+}
+
+test "actions-cache: the re-render reads the refilled cache after revalidatePath" {
+    val _b = boot();
+    assert rkDispatchHttp("GET", "/blog", "{}", "{}", "").body == "posts=old;";
+    val res = post("addAndRevalidate", "new");
+    assert res.body == "posts=old;new;", res.body;
+}
+
+test "actions-cache: without revalidation the re-render reads the entry the mutation left stale" {
+    val _b = boot();
+    assert rkDispatchHttp("GET", "/blog", "{}", "{}", "").body == "posts=old;";
+    val res = post("addOnly", "new");
+    assert res.body == "posts=old;", res.body;
+}
+
+test "actions-cache: the envelope echoes what the action revalidated" {
+    val _b = boot();
+    val res = rkDispatchHttp("POST", "/blog", headers([#("x-bp-action", actionIdOf("addAndRevalidate"))]), "{}", "title=x");
+    assert res.body.contains("\"revalidated\":[\"/blog\"]"), res.body;
+}
+
+test "actions-cache: without phase Action the same action body raises at revalidatePath" {
+    val _b = boot();
+    val _o = beginRequest(RequestScope(id: "t", phase: RequestPhase.Render, method: "POST", path: "/blog", query: "", headersWire: "", strict: false));
+    val r = asserts.throwsWith({ ->
+        val _a = addAndRevalidate(FormData(fields: [#("title", "x")]));
+        0;
+    }, "revalidatePath is not legal during render");
+    val _e = endRequest();
+    assert r.isOk();
+}

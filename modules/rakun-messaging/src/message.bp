@@ -1,0 +1,65 @@
+//// rakun-messaging — the message shape and the broker behavior. Front 15 step 1.
+////
+//// One `Message` for every arm: an arm with no key sets `""`, one with no
+//// offset (AMQP, Redis) sets `-1`; Kafka and RabbitMQ Streams carry the log
+//// offset. `headersJson` is `{}`, or `{"redelivered":true}` on a redelivery.
+
+import {rkMsgPublish, rkMsgAck, rkMsgNack, rkMsgCurrentTag, rkMsgArmConnected} from "messaging_host";
+
+pub type Message(
+    broker: string,
+    destination: string,
+    key: string,
+    payload: string,
+    headersJson: string,
+    offset: i64,
+)
+
+pub behavior MessageBroker {
+    fn id(self: Self) -> string;
+    fn publish(self: Self, destination: string, key: string, payload: string) -> i32;
+    fn ack(self: Self, deliveryTag: string) -> i32;
+    fn nack(self: Self, deliveryTag: string) -> i32;
+}
+
+// The in-process broker every arm runs on this milestone (a real AMQP, Kafka
+// or Streams wire needs an OTP application a sidecar cannot load —
+// `language-gaps.md`). `ack`/`nack` settle the message being handled; the tag
+// is the one `currentDeliveryTag()` answers.
+pub type InProcessBroker(arm: string) implement MessageBroker {
+    pub fn id(self: Self) -> string {
+        return self.arm;
+    }
+
+    pub fn publish(self: Self, destination: string, key: string, payload: string) -> i32 {
+        return rkMsgPublish(self.arm, destination, key, payload);
+    }
+
+    pub fn ack(self: Self, deliveryTag: string) -> i32 {
+        return if (deliveryTag == rkMsgCurrentTag()) rkMsgAck() else 1;
+    }
+
+    pub fn nack(self: Self, deliveryTag: string) -> i32 {
+        return if (deliveryTag == rkMsgCurrentTag()) rkMsgNack() else 1;
+    }
+}
+
+// `broker|destination|group|offset` of the message this worker is handling,
+// `""` outside a container.
+pub fn currentDeliveryTag() -> string {
+    return rkMsgCurrentTag();
+}
+
+// `ack-mode = manual`: settle the message being handled. A handler that
+// returns without either is redelivered. Outside a container both are no-ops.
+pub fn ackMessage(msg: Message) -> i32 {
+    return rkMsgAck();
+}
+
+pub fn nackMessage(msg: Message) -> i32 {
+    return rkMsgNack();
+}
+
+pub fn armConnected(arm: string) -> bool {
+    return rkMsgArmConnected(arm);
+}

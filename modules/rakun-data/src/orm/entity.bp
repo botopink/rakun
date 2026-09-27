@@ -1,0 +1,247 @@
+//// rakun-data — `#[entity]`: the mapping, declared once (front 78 steps 1, 4,
+//// 7 and 8).
+////
+//// `#[entity("cities")]` on a record reads its fields and their annotations
+//// and emits, into the record's module (which imports `Row`, `Param`,
+//// `param`, `SqlTemplate`, `EntityMeta`, `Revision` and `rkRegisterEntity`):
+////
+////     __rkEntity_City_table() / _columns()     "cities" / "id|name|state_name"
+////     __rkEntity_City_fromRow(r: Row) -> City
+////     __rkEntity_City_params(c: City) -> Param[]
+////     __rkEntity_City_insert / _update / _delete / _byId (sql, …)
+////     pub type CityColumns(<field>: string, …)   pub fn CityCol() -> CityColumns
+////     pub fn CityMeta() -> EntityMeta            (registered for front 77)
+////
+//// `CityCol()` / `CityMeta()` are functions, not the spec's `pub val`s: an
+//// emitted `pub val` is visible to other emitted code only, never to the
+//// module's own source or an importer (language-gaps.md).
+////     with #[revisions]: __rkEntity_City_revisionsOf / _revisionAt / _revisionNumbers
+////
+//// Columns are `snake_case` of the field unless `#[column("x")]` says
+//// otherwise. `#[id]` (exactly one), `#[generated]` (the id comes back from
+//// the insert), `#[version]` (an `i32`: optimistic locking), `#[createdAt]` /
+//// `#[updatedAt]` (ISO timestamps written by the mapper), `#[createdBy]` /
+//// `#[updatedBy]` (front 10's principal, `""` outside a request) and
+//// `#[transient]` (not a column). A field's type is `string`, `i32` or `bool`.
+////
+//// Records are immutable: `insert` answers a NEW record with the generated
+//// id, `update` one with the incremented version; a stale version affects no
+//// row and raises naming the table, the id and both versions.
+
+import {rkPropIntOr} from "rakun";
+import {Param, param} from "sql/params";
+import {Row, Rows} from "sql/rows";
+import {SqlTemplate, Tx, sqlTemplate} from "sql/template";
+import {rkOrmRegister, rkOrmNames, rkOrmTable, rkOrmColumns, rkOrmColumnType, rkOrmTables, rkOrmNowCell, rkOrmPrincipalCell, rkOrmSortCell} from "orm_host";
+
+pub type EntityMeta(
+    entity: string,
+    table: string,
+    columns: string,
+    types: string,
+    idColumn: string,
+    generated: bool,
+    versionColumn: string,
+    revisions: bool,
+)
+
+// One row of a `#[revisions]` entity's history.
+pub type Revision<T>(
+    number: i32,
+    kind: string,
+    timestamp: string,
+    author: string,
+    entity: T,
+)
+
+pub fn rkRegisterEntity(meta: EntityMeta) -> i32 {
+    return rkOrmRegister(meta);
+}
+
+pub fn entityNames() -> string[] {
+    return rkOrmNames();
+}
+
+pub fn entityTable(entity: string) -> string {
+    return rkOrmTable(entity);
+}
+
+// The pipe-joined columns of `table`, `""` for a table nothing declared.
+pub fn entityColumns(table: string) -> string {
+    return rkOrmColumns(table);
+}
+
+pub fn entityColumnType(table: string, column: string) -> string {
+    return rkOrmColumnType(table, column);
+}
+
+pub fn entityTables() -> string[] {
+    return rkOrmTables();
+}
+
+pub fn rkOrmNow() -> string {
+    return rkOrmNowCell();
+}
+
+pub fn rkOrmPrincipal() -> string {
+    return rkOrmPrincipalCell();
+}
+
+// ── comptime helpers (this module's own, so the decorator body may call them)
+
+// `stateName` → `state_name`.
+pub fn snakeCase(name: string) -> string {
+    var out = "";
+    for (name.split("")) { c ->
+        val upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".contains(c);
+        out = out + (if (upper && out != "") "_" + c.toLower() else c.toLower());
+    };
+    return out;
+}
+
+fn marked(f: Field, name: string) -> bool {
+    return f.annotations.filter({ a -> a.name == name }).length > 0;
+}
+
+fn columnOf(f: Field) -> string {
+    val own = f.annotations.filter({ a -> a.name == "column" }).map({ a -> a.args.join("").replaceAll("\"", "").trim() });
+    return own.at(0) ?? snakeCase(f.name);
+}
+
+fn sqlType(t: string) -> string {
+    return if (t == "i32") "integer" else if (t == "bool") "boolean" else "text";
+}
+
+fn readOf(f: Field) -> string {
+    val c = columnOf(f);
+    return if (f.typeName == "i32") "r.int(\"" + c + "\")" else if (f.typeName == "bool") "r.bool(\"" + c + "\")" else "r.get(\"" + c + "\")";
+}
+
+fn defaultOf(f: Field) -> string {
+    return if (f.typeName == "i32") "0" else if (f.typeName == "bool") "false" else "\"\"";
+}
+
+fn textOf(f: Field, v: string) -> string {
+    return if (f.typeName == "string") v else if (f.typeName == "bool") "(if (" + v + ") \"true\" else \"false\")" else v + ".toString()";
+}
+
+fn columnsOf(fields: Field[]) -> Field[] {
+    return fields.filter({ f -> marked(f, "transient") == false });
+}
+
+// ── the decorator ───────────────────────────────────────────────────────────
+
+pub fn entity(comptime decl: @Decl, table: string) {
+    val cols = columnsOf(decl.fields);
+    val ids = decl.fields.filter({ f -> marked(f, "id") });
+    val idName = ids.map({ f -> f.name }).at(0) ?? "";
+    val idType = ids.map({ f -> f.typeName }).at(0) ?? "i32";
+    val idCol = ids.map({ f -> columnOf(f) }).at(0) ?? "";
+    val versions = decl.fields.filter({ f -> marked(f, "version") });
+    val verName = versions.map({ f -> f.name }).at(0) ?? "";
+    val verType = versions.map({ f -> f.typeName }).at(0) ?? "";
+    val verCol = versions.map({ f -> columnOf(f) }).at(0) ?? "";
+    val generated = ids.filter({ f -> marked(f, "generated") }).length > 0;
+    val audited = decl.annotations.filter({ a -> a.name == "revisions" }).length > 0;
+    val n = decl.name;
+    val badType = cols.filter({ f -> f.typeName != "string" && f.typeName != "i32" && f.typeName != "bool" });
+    val colNames = cols.map({ f -> columnOf(f) });
+    val types = cols.map({ f -> columnOf(f) + ":" + sqlType(f.typeName) });
+    val ctorFromRow = decl.fields.map({ f -> f.name + ": " + (if (marked(f, "transient")) defaultOf(f) else readOf(f)) });
+    val params = cols.map({ f -> "param(\"" + columnOf(f) + "\", " + textOf(f, "c." + f.name) + ")" });
+    val stamp = cols.map({ f ->
+        f.name + ": " + (if (marked(f, "createdAt") || marked(f, "updatedAt")) "now" else if (marked(f, "createdBy") || marked(f, "updatedBy")) "who" else if (verName == f.name) "0" else "c0." + f.name)
+    });
+    val insertCols = cols.filter({ f -> (generated && f.name == idName) == false });
+    val insertSql = "INSERT INTO " + table + " (" + insertCols.map({ f -> columnOf(f) }).join(", ") + ") VALUES (" + insertCols.map({ f -> ":" + columnOf(f) }).join(", ") + ")" + (if (generated) " RETURNING " + idCol else "");
+    val updCols = cols.filter({ f -> f.name != idName && marked(f, "createdAt") == false && marked(f, "createdBy") == false });
+    val updateSql = "UPDATE " + table + " SET " + updCols.map({ f -> columnOf(f) + " = :" + columnOf(f) }).join(", ") + " WHERE " + idCol + " = :__id" + (if (verCol != "") " AND " + verCol + " = :__version" else "");
+    val updStamp = decl.fields.map({ f ->
+        f.name + ": " + (if (marked(f, "updatedAt")) "now" else if (marked(f, "updatedBy")) "who" else if (verName == f.name) "c." + f.name + " + 1" else "c." + f.name)
+    });
+    val deleteSql = "DELETE FROM " + table + " WHERE " + idCol + " = :__id" + (if (verCol != "") " AND " + verCol + " = :__version" else "");
+    val selectSql = "SELECT " + colNames.join(", ") + " FROM " + table + " WHERE " + idCol + " = :__id";
+    val idText = if (idType == "string") "c." + idName else "c." + idName + ".toString()";
+    val idArgText = if (idType == "string") "id" else "id.toString()";
+    val revTable = table + "_revisions";
+    val revCols = colNames.join(", ") + ", revision_number, revision_type, revision_timestamp, revision_author";
+    val revParams = cols.map({ f -> "param(\"" + columnOf(f) + "\", " + textOf(f, "c." + f.name) + ")" });
+    val revInsert = "INSERT INTO " + revTable + " (" + revCols + ") VALUES (" + colNames.map({ c -> ":" + c }).join(", ") + ", :revision_number, :revision_type, :revision_timestamp, :revision_author)";
+    val revTypes = types.join("|") + "|revision_number:integer|revision_type:text|revision_timestamp:text|revision_author:text";
+    @emit("pub fn __rkEntity_" + n + "_table() -> string { return \"" + table + "\"; }");
+    @emit("pub fn __rkEntity_" + n + "_columns() -> string { return \"" + colNames.join("|") + "\"; }");
+    @emit("pub fn __rkEntity_" + n + "_fromRow(r: Row) -> " + n + " { return " + n + "(" + ctorFromRow.join(", ") + "); }");
+    @emit("pub fn __rkEntity_" + n + "_params(c: " + n + ") -> Param[] { val ps: Param[] = [" + params.join(", ") + "]; return ps; }");
+    @emit("pub type " + n + "Columns(" + cols.map({ f -> f.name + ": string" }).join(", ") + ")");
+    @emit("pub fn " + n + "Col() -> " + n + "Columns { return " + n + "Columns(" + cols.map({ f -> f.name + ": \"" + columnOf(f) + "\"" }).join(", ") + "); }");
+    @emit("pub fn " + n + "Meta() -> EntityMeta { return EntityMeta(entity: \"" + n + "\", table: \"" + table + "\", columns: \"" + colNames.join("|") + "\", types: \"" + types.join("|") + "\", idColumn: \"" + idCol + "\", generated: " + (if (generated) "true" else "false") + ", versionColumn: \"" + verCol + "\", revisions: " + (if (audited) "true" else "false") + "); }");
+    @emit("val __rkEntityReg_" + n + " = rkRegisterEntity(" + n + "Meta());");
+    @emit("pub fn __rkEntity_" + n + "_revise(t: Tx, c: " + n + ", kind: string) -> i32 {\n    " + (if (audited) "val seen = t.query(\"SELECT " + idCol + " FROM " + revTable + " WHERE " + idCol + " = :__id\", [param(\"__id\", " + idText + ")]).rowCount();\n    val ps: Param[] = [" + revParams.join(", ") + ", param(\"revision_number\", (seen + 1).toString()), param(\"revision_type\", kind), param(\"revision_timestamp\", rkOrmNow()), param(\"revision_author\", rkOrmPrincipal())];\n    return t.update(\"" + revInsert + "\", ps);" else "return 0;") + "\n}");
+    @emit("pub fn __rkEntity_" + n + "_insert(sql: SqlTemplate, c0: " + n + ") -> " + n + " {\n    val now = rkOrmNow();\n    val who = rkOrmPrincipal();\n    val c = " + n + "(" + stamp.join(", ") + (if (decl.fields.length > cols.length) ", " + decl.fields.filter({ f -> marked(f, "transient") }).map({ f -> f.name + ": c0." + f.name }).join(", ") else "") + ");\n    return sql.transaction({ t -> __rkEntity_" + n + "_insertIn(t, c) });\n}");
+    @emit("pub fn __rkEntity_" + n + "_insertIn(t: Tx, c: " + n + ") -> " + n + " {\n    val rows = t.query(\"" + insertSql + "\", __rkEntity_" + n + "_params(c).filter({ p -> \"" + insertCols.map({ f -> columnOf(f) }).join("|") + "\".split(\"|\").indexOf(p.name) >= 0 }));\n    val stored = " + (if (generated) n + "(" + decl.fields.map({ f -> f.name + ": " + (if (f.name == idName) "(rows.first() ?? Row(columns: [], values: [])).int(\"" + idCol + "\")" else "c." + f.name) }).join(", ") + ")" else "c") + ";\n    val _r = __rkEntity_" + n + "_revise(t, stored, \"insert\");\n    return stored;\n}");
+    @emit("pub fn __rkEntity_" + n + "_update(sql: SqlTemplate, c0: " + n + ") -> " + n + " {\n    val now = rkOrmNow();\n    val who = rkOrmPrincipal();\n    val c = c0;\n    val next = " + n + "(" + updStamp.join(", ") + ");\n    return sql.transaction({ t -> __rkEntity_" + n + "_updateIn(t, c, next) });\n}");
+    @emit("pub fn __rkEntity_" + n + "_updateIn(t: Tx, c: " + n + ", next: " + n + ") -> " + n + " {\n    var ps: Param[] = __rkEntity_" + n + "_params(next).filter({ p -> \"" + updCols.map({ f -> columnOf(f) }).join("|") + "\".split(\"|\").indexOf(p.name) >= 0 });\n    ps.push(param(\"__id\", " + idText + "));\n    " + (if (verCol != "") "ps.push(param(\"__version\", c." + verName + ".toString()));\n    " else "") + "val n = t.update(\"" + updateSql + "\", ps);\n    if (n == 0) @panic(__rkEntity_" + n + "_stale(t, c));\n    val _r = __rkEntity_" + n + "_revise(t, next, \"update\");\n    return next;\n}");
+    @emit("pub fn __rkEntity_" + n + "_stale(t: Tx, c: " + n + ") -> string {\n    val cur = t.query(\"" + selectSql + "\", [param(\"__id\", " + idText + ")]);\n    val stored = if (cur.rowCount() == 0) \"no row\" else " + (if (verCol != "") "(cur.first() ?? Row(columns: [], values: [])).get(\"" + verCol + "\")" else "\"present\"") + ";\n    return \"rakun-data: optimistic lock failure on " + table + " id \" + " + idText + " + \" - expected version \" + " + (if (verCol != "") "c." + verName + ".toString()" else "\"-\"") + " + \", stored \" + stored;\n}");
+    @emit("pub fn __rkEntity_" + n + "_delete(sql: SqlTemplate, c: " + n + ") -> i32 {\n    return sql.transaction({ t -> __rkEntity_" + n + "_deleteIn(t, c) });\n}");
+    @emit("pub fn __rkEntity_" + n + "_deleteIn(t: Tx, c: " + n + ") -> i32 {\n    var ps: Param[] = [param(\"__id\", " + idText + ")];\n    " + (if (verCol != "") "ps.push(param(\"__version\", c." + verName + ".toString()));\n    " else "") + "val n = t.update(\"" + deleteSql + "\", ps);\n    " + (if (verCol != "") "if (n == 0) @panic(__rkEntity_" + n + "_stale(t, c));\n    " else "") + "val _r = if (n > 0) __rkEntity_" + n + "_revise(t, c, \"delete\") else 0;\n    return n;\n}");
+    @emit("pub fn __rkEntity_" + n + "_byId(sql: SqlTemplate, id: " + idType + ") -> ?" + n + " {\n    val rows = sql.query(\"" + selectSql + "\", [param(\"__id\", " + idArgText + ")]);\n    if (rows.rowCount() == 0) return null;\n    return __rkEntity_" + n + "_fromRow(rows.first() ?? Row(columns: [], values: []));\n}");
+    if (audited) {
+        @emit("pub fn " + n + "RevisionMeta() -> EntityMeta { return EntityMeta(entity: \"" + n + "Revision\", table: \"" + revTable + "\", columns: \"" + colNames.join("|") + "|revision_number|revision_type|revision_timestamp|revision_author\", types: \"" + revTypes + "\", idColumn: \"" + idCol + "\", generated: false, versionColumn: \"\", revisions: false); }");
+        @emit("val __rkEntityRevReg_" + n + " = rkRegisterEntity(" + n + "RevisionMeta());");
+        @emit("pub fn __rkEntity_" + n + "_revisionsOf(sql: SqlTemplate, id: " + idType + ") -> Revision<" + n + ">[] {\n    val rows = sql.query(\"SELECT " + revCols + " FROM " + revTable + " WHERE " + idCol + " = :__id\", [param(\"__id\", " + idArgText + ")]);\n    val all: Revision<" + n + ">[] = rows.toList().map({ r -> Revision(number: r.int(\"revision_number\"), kind: r.get(\"revision_type\"), timestamp: r.get(\"revision_timestamp\"), author: r.get(\"revision_author\"), entity: __rkEntity_" + n + "_fromRow(r)) });\n    return rkOrmSortRevisions(all);\n}");
+        @emit("pub fn __rkEntity_" + n + "_revisionNumbers(sql: SqlTemplate, id: " + idType + ") -> i32[] {\n    return __rkEntity_" + n + "_revisionsOf(sql, id).map({ r -> r.number });\n}");
+        @emit("pub fn __rkEntity_" + n + "_revisionAt(sql: SqlTemplate, id: " + idType + ", timestamp: string) -> ?" + n + " {\n    val upTo = __rkEntity_" + n + "_revisionsOf(sql, id).filter({ r -> r.timestamp <= timestamp });\n    if (upTo.length == 0) return null;\n    val last = upTo.at(upTo.length - 1) ?? (upTo.at(0) ?? Revision(number: 0, kind: \"\", timestamp: \"\", author: \"\", entity: __rkEntity_" + n + "_fromRow(Row(columns: [], values: []))));\n    if (last.kind == \"delete\") return null;\n    return last.entity;\n}");
+    };
+    if (decl.kind != DeclKind.Type || decl.variants.length > 0) decl.fail("#[entity] must annotate a record type - its fields are the columns");
+    if (table.trim() == "") decl.fail("#[entity] on " + n + " names an empty table");
+    if (ids.length == 0) decl.fail("#[entity] " + n + " has no #[id] field - exactly one field is the primary key");
+    if (ids.length > 1) decl.fail("#[entity] " + n + " has " + ids.length.toString() + " #[id] fields (" + ids.map({ f -> f.name }).join(", ") + ") - exactly one field is the primary key");
+    if (verName != "" && verType != "i32") decl.fail("#[entity] " + n + ": the #[version] field " + verName + " is " + verType + " - a version is an i32");
+    if (badType.length > 0) decl.fail("#[entity] " + n + ": the field " + (badType.map({ f -> f.name + " is " + f.typeName }).at(0) ?? "") + " - a column is string, i32 or bool");
+}
+
+pub fn rkOrmSortRevisions<T>(xs: Revision<T>[]) -> Revision<T>[] {
+    return rkOrmSortCell(xs);
+}
+
+// ── the field markers ───────────────────────────────────────────────────────
+
+pub fn id(comptime decl: @Decl) {
+    if (decl.kind != DeclKind.Field) decl.fail("#[id] marks a field of an #[entity] record");
+}
+
+pub fn generated(comptime decl: @Decl) {
+    if (decl.kind != DeclKind.Field) decl.fail("#[generated] marks the #[id] field of an #[entity] record");
+}
+
+pub fn column(comptime decl: @Decl, name: string) {
+    if (decl.kind != DeclKind.Field) decl.fail("#[column] marks a field of an #[entity] record");
+}
+
+pub fn version(comptime decl: @Decl) {
+    if (decl.kind != DeclKind.Field) decl.fail("#[version] marks an i32 field of an #[entity] record");
+}
+
+pub fn createdAt(comptime decl: @Decl) {
+    if (decl.kind != DeclKind.Field) decl.fail("#[createdAt] marks a field of an #[entity] record");
+}
+
+pub fn updatedAt(comptime decl: @Decl) {
+    if (decl.kind != DeclKind.Field) decl.fail("#[updatedAt] marks a field of an #[entity] record");
+}
+
+pub fn createdBy(comptime decl: @Decl) {
+    if (decl.kind != DeclKind.Field) decl.fail("#[createdBy] marks a field of an #[entity] record");
+}
+
+pub fn updatedBy(comptime decl: @Decl) {
+    if (decl.kind != DeclKind.Field) decl.fail("#[updatedBy] marks a field of an #[entity] record");
+}
+
+pub fn transient(comptime decl: @Decl) {
+    if (decl.kind != DeclKind.Field) decl.fail("#[transient] marks a field of an #[entity] record");
+}
+
+pub fn revisions(comptime decl: @Decl) {
+    if (decl.kind != DeclKind.Type) decl.fail("#[revisions] marks an #[entity] record");
+}

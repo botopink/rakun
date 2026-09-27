@@ -1,0 +1,79 @@
+//// rakun-websocket — `#[wsEndpoint]` applied in this module (front 20 step 2).
+//// The registrations are this module's top-level vals and run once at load.
+
+import {testing.asserts} from "std";
+import {service, rkScan, rkSingleton, rkEnter, rkDone, rkBuildCount, rkSetProp, rkServe, rkDispatchHttp} from "rakun";
+import {wsEndpoint} from "endpoint";
+import {WsSession, rkRegisterWsEndpoint, installWebsocket, websocketConfigProblem} from "ws";
+import {rkWsClientConnect, rkWsClientRecv, rkWsClientSend, rkWsClientClose, rkWsEndpoints} from "ws_host";
+
+#[service]
+#[wsEndpoint("/ws/deco-chat")]
+pub type DecoChatEndpoint() {
+    pub fn onOpen(self: Self, session: WsSession) -> i32 {
+        return session.send("welcome");
+    }
+
+    pub fn onMessage(self: Self, session: WsSession, message: string) -> i32 {
+        return session.send("got " + message);
+    }
+
+    pub fn onClose(self: Self, session: WsSession, code: i32, reason: string) -> i32 {
+        return rkSetProp("deco.closed", code.toString());
+    }
+}
+
+#[service]
+#[wsEndpoint("/ws/deco-bare")]
+pub type DecoBareEndpoint() {
+    pub fn onMessage(self: Self, session: WsSession, message: string) -> i32 {
+        return session.send("bare " + message);
+    }
+}
+
+fn serve() -> i32 {
+    val _k = rkSetProp("rakun.main.keep-alive", "false");
+    return rkServe(0, { m, p, h, q, b -> rkDispatchHttp(m, p, h, q, b) });
+}
+
+fn client(result: string) -> string {
+    return result.slice(4, result.length());
+}
+
+test "endpoint: the decorator registers one endpoint per type and the handler methods run" {
+    assert rkWsEndpoints().join(",") == "/ws/deco-chat|DecoChatEndpoint,/ws/deco-bare|DecoBareEndpoint";
+    val _i = installWebsocket();
+    val port = serve();
+    val c = client(rkWsClientConnect(port, "/ws/deco-chat", []));
+    assert rkWsClientRecv(c, 2000) == "text:{\"t\":\"\",\"d\":\"welcome\"}";
+    val _s = rkWsClientSend(c, "x");
+    assert rkWsClientRecv(c, 2000) == "text:{\"t\":\"\",\"d\":\"got x\"}";
+    val _c = rkWsClientClose(c, 1000);
+    assert rkWsClientRecv(c, 2000) == "close:1000:";
+}
+
+test "endpoint: a missing onOpen and onClose are no-ops" {
+    val _i = installWebsocket();
+    val port = serve();
+    val c = client(rkWsClientConnect(port, "/ws/deco-bare", []));
+    val _s = rkWsClientSend(c, "y");
+    assert rkWsClientRecv(c, 2000) == "text:{\"t\":\"\",\"d\":\"bare y\"}";
+    val _c = rkWsClientClose(c, 1000);
+    assert rkWsClientRecv(c, 2000) == "close:1000:";
+}
+
+test "endpoint: one component instance serves every connection" {
+    val _i = installWebsocket();
+    val port = serve();
+    val a = client(rkWsClientConnect(port, "/ws/deco-chat", []));
+    val b = client(rkWsClientConnect(port, "/ws/deco-chat", []));
+    val _ra = rkWsClientRecv(a, 2000);
+    val _rb = rkWsClientRecv(b, 2000);
+    assert rkBuildCount("DecoChatEndpoint") == 1;
+}
+
+test "endpoint: two endpoints on one path are refused at boot naming both types" {
+    val _d = rkRegisterWsEndpoint("/ws/deco-chat", "ShadowEndpoint", { id, principal, path -> 0 }, { id, principal, path, message -> 0 }, { id, principal, path, code, reason -> 0 });
+    assert websocketConfigProblem() == "rakun-websocket: two endpoints serve /ws/deco-chat: DecoChatEndpoint and ShadowEndpoint - one path is one endpoint";
+    try asserts.throwsWith({ -> installWebsocket() }, "two endpoints serve /ws/deco-chat");
+}

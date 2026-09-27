@@ -1,0 +1,378 @@
+//// rakun-data — schema migrations (front 77) on the ETS arm. Each test owns
+//// a datasource and a migration directory under BOTOPINK_TEST_TMPDIR, and
+//// puts back every key it set.
+
+import {testing.asserts} from "std";
+import {async} from "std";
+import {io: {fs, env}} from "std";
+import {Response, rkSetProp, rkDispatchHttp} from "rakun";
+import {mountActuator} from "rakun-actuator/actuator";
+import {installExposure, clearExposure} from "rakun-actuator/endpoint_host";
+import {startDataSource} from "datasource";
+import {sqlTemplate} from "sql/template";
+import {Row, Rows} from "sql/rows";
+import {
+    Migration, MigrationReport, migrate, tryMigrate, discoverMigrations, parseName, migrationEnabled,
+    appliedMigrations, pendingMigrations, historyOn, repairMigration, dryRunOn, migrationKeys,
+    ddlAuto, ddlAutoProblem, migrationReport, registerMigrationsEndpoint,
+} from "migration/migrate";
+import {rkMigWarnings, rkMigLockEvents, compareVersions} from "migration_host";
+
+#[@External.Erlang("rakun_migration", "hold_lock")]
+declare fn holdLock(ds: string, unused: string) -> string;
+
+#[@External.Erlang("rakun_migration", "release_held")]
+declare fn releaseHeld() -> i32;
+
+#[@External.Erlang("""(fun(__P) -> ok = filelib:ensure_dir(__P), 0 end)($0)""")]
+declare fn ensureDir(file: string) -> i32;
+
+#[@External.Erlang("""(fun(__D) -> file:del_dir_r(__D), 0 end)($0)""")]
+declare fn removeTree(dir: string) -> i32;
+
+#[@External.Erlang("""(fun(__Ms) -> timer:sleep(__Ms), 0 end)($0)""")]
+declare fn sleep(ms: i32) -> i32;
+
+fn root(name: string) -> string {
+    val dir: string = env.read("BOTOPINK_TEST_TMPDIR") ?? "";
+    if (dir == "") @panic("BOTOPINK_TEST_TMPDIR is not set - botopink test sets it");
+    return dir + "/rakun-migration/" + name;
+}
+
+fn put(dir: string, file: string, text: string) -> i32 {
+    val _d = ensureDir(dir + "/" + file);
+    val _w = fs.writeText(dir + "/" + file, text);
+    return 0;
+}
+
+// A fresh datasource and directory; the migration keys point at them.
+fn fresh(name: string) -> string {
+    val dir = root(name);
+    val _r = removeTree(dir);
+    val _d = ensureDir(dir + "/x");
+    val _s = startDataSource(name, "ets:memory", 2, 5000, "eager");
+    val _a = rkSetProp("rakun.migration.datasource", name);
+    val _b = rkSetProp("rakun.migration.locations", dir);
+    return dir;
+}
+
+fn done() -> i32 {
+    for (migrationKeys()) { k -> val _u = rkSetProp(k, ""); };
+    return 0;
+}
+
+fn versions(ms: Migration[]) -> string {
+    return ms.map({ m -> if (m.version == "") "R:" + m.script else m.version }).join(",");
+}
+
+fn count(ds: string, table: string) -> i32 {
+    val rows: Rows = sqlTemplate(ds).query("SELECT id FROM " + table, []);
+    return rows.rowCount();
+}
+
+// ── step 1 ──────────────────────────────────────────────────────────────────
+
+test "migration: V1, V1.1, V2 then the repeatable, and V10 after V9" {
+    val dir = fresh("mig1");
+    val _a = put(dir, "V2__seed.sql", "INSERT INTO t (id) VALUES (2);");
+    val _b = put(dir, "V1.1__add_index.sql", "INSERT INTO t (id) VALUES (11);");
+    val _c = put(dir, "V1__init.sql", "CREATE TABLE t (id int);");
+    val _d = put(dir, "R__views.sql", "CREATE TABLE IF NOT EXISTS v (id int);");
+    val order = discoverMigrations().map({ f -> f.script }).join(",");
+    val _z = done();
+    assert order == "V1__init.sql,V1.1__add_index.sql,V2__seed.sql,R__views.sql", order;
+    assert compareVersions("10", "9") == 1 && compareVersions("1.1", "1.10") == -1 && compareVersions("2026_09_19", "2026.9.19") == 0;
+    assert parseName("V10__x.sql") == "10|x" && parseName("R__views.sql") == "|views" && parseName("init.sql") == "";
+}
+
+test "migration: a misnamed file and a duplicate version refuse the boot, naming them" {
+    val dir = fresh("mig2");
+    val _a = put(dir, "init.sql", "CREATE TABLE t (id int);");
+    try asserts.throwsWith({ -> discoverMigrations().length }, "`init.sql` in `" + dir + "` is not a migration - name it V<version>__<description>.sql or R__<description>.sql");
+    val _r = removeTree(dir);
+    val _b = put(dir, "V2__a.sql", "SELECT 1;");
+    val other = dir + "-more";
+    val _c = removeTree(other);
+    val _d = put(other, "V2__b.sql", "SELECT 1;");
+    val _l = rkSetProp("rakun.migration.locations", dir + "," + other);
+    try asserts.throwsWith({ -> discoverMigrations().length }, "version 2 is declared twice - `" + dir + "/V2__a.sql` and `" + other + "/V2__b.sql`");
+    val _z = done();
+}
+
+test "migration: an empty location disables migrations unless enabled=true, which refuses" {
+    val _d = fresh("mig3");
+    assert migrationEnabled() == false;
+    val _e = rkSetProp("rakun.migration.enabled", "true");
+    try asserts.throwsWith({ -> if (migrationEnabled()) 1 else 0 }, "rakun.migration.enabled=true and no migration was found");
+    val _z = done();
+}
+
+// ── step 2 ──────────────────────────────────────────────────────────────────
+
+fn run() -> string {
+    val r = migrate();
+    return r.applied.toString();
+}
+
+test "migration: two nodes booting together apply each migration once, and the history table once" {
+    val dir = fresh("mig4");
+    val _a = put(dir, "V1__init.sql", "CREATE TABLE t (id int);\nCALL rakun_sleep(50);");
+    val _b = put(dir, "V2__seed.sql", "INSERT INTO t (id) VALUES (1);");
+    val results = await async.runAll([
+        { -> async { run() } },
+        { -> async { run() } },
+    ]);
+    val hist = historyOn("mig4");
+    val rows = count("mig4", "t");
+    val _z = done();
+    assert ((results.at(0) ?? "") == "2" && (results.at(1) ?? "") == "0") || ((results.at(0) ?? "") == "0" && (results.at(1) ?? "") == "2"), results.join("/");
+    assert versions(hist) == "1,2" && rows == 1;
+}
+
+test "migration: a node that cannot take the lock in time refuses to boot naming the timeout" {
+    val dir = fresh("mig5");
+    val _a = put(dir, "V1__init.sql", "CREATE TABLE t (id int);");
+    val _h = holdLock("mig5", "");
+    val _t = rkSetProp("rakun.migration.lock-timeout", "100");
+    try asserts.throwsWith({ -> migrate().applied }, "could not take the migration lock for `mig5` within 100 ms (rakun.migration.lock-timeout)");
+    val _r = releaseHeld();
+    val after = migrate().applied;
+    val _z = done();
+    assert after == 1;
+}
+
+test "migration: the lock holder's death releases the lock" {
+    val dir = fresh("mig6");
+    val _a = put(dir, "V1__init.sql", "CREATE TABLE t (id int);");
+    val _h = holdLock("mig6", "");
+    val _k = releaseHeld();
+    val _t = rkSetProp("rakun.migration.lock-timeout", "500");
+    val r = migrate();
+    val _z = done();
+    assert r.applied == 1;
+}
+
+test "migration: a standalone node warns once, naming the driver, that the lock is node-local" {
+    val dir = fresh("mig7");
+    val _a = put(dir, "V1__init.sql", "CREATE TABLE t (id int);");
+    val _m = migrate();
+    val _n = migrate();
+    val _z = done();
+    val mine = rkMigWarnings().filter({ w -> w.contains("the ets driver has no advisory lock") });
+    assert mine.length == 1, rkMigWarnings().join("|");
+}
+
+test "migration: a replica that finds everything applied proceeds without waiting" {
+    val dir = fresh("mig8");
+    val _a = put(dir, "V1__init.sql", "CREATE TABLE t (id int);");
+    val _m = migrate();
+    val again = migrate();
+    val _z = done();
+    assert again.applied == 0 && again.lockWaitMillis < 100;
+}
+
+// ── step 3 ──────────────────────────────────────────────────────────────────
+
+test "migration: a failing migration records success=false, stops the run and raises" {
+    val dir = fresh("mig9");
+    val _a = put(dir, "V1__init.sql", "CREATE TABLE t (id int);");
+    val _b = put(dir, "V2__broken.sql", "CREATE TABLE u (id int);\nINSERT INTO nowhere (id) VALUES (1);");
+    val _c = put(dir, "V3__later.sql", "CREATE TABLE w (id int);");
+    val r = tryMigrate();
+    val hist = historyOn("mig9");
+    val _z = done();
+    assert r.isOk() == false;
+    assert hist.map({ m -> m.version + ":" + (if (m.success) "ok" else "failed") }).join(",") == "1:ok,2:failed";
+    try asserts.throwsWith({ -> count("mig9", "u") }, "no table 'u'");
+    try asserts.throwsWith({ -> count("mig9", "w") }, "no table 'w'");
+}
+
+test "migration: no-transaction runs outside a transaction and still records a row" {
+    val dir = fresh("mig10");
+    val _a = put(dir, "V1__index.sql", "-- rakun:no-transaction\nCREATE TABLE idx (id int);");
+    val _m = migrate();
+    val hist = historyOn("mig10");
+    val _z = done();
+    assert versions(hist) == "1" && (hist.at(0) ?? Migration(version: "", description: "", script: "", checksum: "", installedRank: 0, installedOn: "", executionMillis: 0, success: false)).success;
+}
+
+test "migration: execution time is recorded in milliseconds and ranks are contiguous" {
+    val dir = fresh("mig11");
+    val _a = put(dir, "V1__slow.sql", "CREATE TABLE t (id int);\nCALL rakun_sleep(20);");
+    val _b = put(dir, "V2__next.sql", "INSERT INTO t (id) VALUES (1);");
+    val _c = put(dir, "V3__last.sql", "INSERT INTO t (id) VALUES (2);");
+    val _m = migrate();
+    val hist = historyOn("mig11");
+    val _z = done();
+    assert (hist.at(0) ?? Migration(version: "", description: "", script: "", checksum: "", installedRank: 0, installedOn: "", executionMillis: 0, success: false)).executionMillis >= 20;
+    assert hist.map({ m -> m.installedRank.toString() }).join(",") == "1,2,3";
+}
+
+// ── step 4 ──────────────────────────────────────────────────────────────────
+
+test "migration: editing an applied migration fails the next boot naming the script and both checksums" {
+    val dir = fresh("mig12");
+    val _a = put(dir, "V1__init.sql", "CREATE TABLE t (id int);");
+    val _m = migrate();
+    val before = (historyOn("mig12").at(0) ?? Migration(version: "", description: "", script: "", checksum: "", installedRank: 0, installedOn: "", executionMillis: 0, success: false)).checksum;
+    val _b = put(dir, "V1__init.sql", "CREATE TABLE t (id int, name text);");
+    try asserts.throwsWith({ -> migrate().applied }, "`V1__init.sql` was applied with checksum " + before + " and the file now hashes to ");
+    val _v = rkSetProp("rakun.migration.validate-on-migrate", "false");
+    val dev = migrate().applied;
+    val _w = rkSetProp("rakun.migration.validate-on-migrate", "");
+    val _r = repairMigration("V1__init.sql");
+    val repaired = migrate().applied;
+    val hist = historyOn("mig12");
+    val _z = done();
+    assert before.length() == 64 && dev == 0 && repaired == 0;
+    assert hist.filter({ m -> m.description == "repair V1__init.sql" }).length == 1;
+}
+
+test "migration: no key downgrades a checksum mismatch" {
+    for (migrationKeys()) { k -> assert k.contains("ignore") == false && k.contains("allow") == false && k.contains("force") == false, k; };
+    assert migrationKeys().filter({ k -> k.contains("validate") }).join(",") == "rakun.migration.validate-on-migrate";
+}
+
+test "migration: a repeatable re-runs when its checksum changes, after the versioned ones" {
+    val dir = fresh("mig13");
+    val _a = put(dir, "R__views.sql", "INSERT INTO log (what) VALUES ('views');");
+    val _b = put(dir, "V1__init.sql", "CREATE TABLE log (what text);");
+    val first = migrate().applied;
+    val same = migrate().applied;
+    val _c = put(dir, "R__views.sql", "INSERT INTO log (what) VALUES ('views2');");
+    val changed = migrate().applied;
+    val hist = historyOn("mig13");
+    val _z = done();
+    assert first == 2 && same == 0 && changed == 1;
+    assert versions(hist) == "1,R:R__views.sql,R:R__views.sql";
+}
+
+// ── step 5 ──────────────────────────────────────────────────────────────────
+
+test "migration: baseline 3 marks 1-3 applied on a populated database and runs 4" {
+    val dir = fresh("mig14");
+    val _t = sqlTemplate("mig14").update("CREATE TABLE legacy (id int)", []);
+    for (["V1__a.sql", "V2__b.sql", "V3__c.sql"]) { f -> val _p = put(dir, f, "CREATE TABLE never_" + f.slice(1, 2) + " (id int);"); };
+    val _d = put(dir, "V4__d.sql", "CREATE TABLE four (id int);");
+    val _o = rkSetProp("rakun.migration.baseline-on-migrate", "true");
+    val _v = rkSetProp("rakun.migration.baseline-version", "3");
+    val r = migrate();
+    val _z = done();
+    assert r.applied == 1;
+    assert count("mig14", "four") == 0;
+    try asserts.throwsWith({ -> count("mig14", "never_1") }, "no table 'never_1'");
+}
+
+test "migration: baselining an empty database refuses the boot" {
+    val dir = fresh("mig15");
+    val _d = put(dir, "V1__a.sql", "CREATE TABLE a (id int);");
+    val _o = rkSetProp("rakun.migration.baseline-on-migrate", "true");
+    try asserts.throwsWith({ -> migrate().applied }, "baseline-on-migrate=true against an empty database");
+    val _z = done();
+}
+
+test "migration: a lower version after a higher one fails, or is applied in true order with out-of-order" {
+    val dir = fresh("mig16");
+    val _a = put(dir, "V2__b.sql", "CREATE TABLE b (id int);");
+    val _m = migrate();
+    val _b = put(dir, "V1__a.sql", "CREATE TABLE a (id int);");
+    try asserts.throwsWith({ -> migrate().applied }, "`V1__a.sql` (version 1) is below the highest applied version 2");
+    val _o = rkSetProp("rakun.migration.out-of-order", "true");
+    val r = migrate();
+    val hist = historyOn("mig16");
+    val _z = done();
+    assert r.applied == 1 && versions(hist) == "2,1";
+}
+
+test "migration: a dry run changes nothing, exits 1 with work pending and 0 without, under the lock" {
+    val dir = fresh("mig17");
+    val _a = put(dir, "V1__a.sql", "CREATE TABLE a (id int);");
+    val before = rkMigLockEvents().filter({ e -> e == "lock mig17" }).length;
+    val pending = dryRunOn("mig17");
+    val hist = historyOn("mig17");
+    val _m = migrate();
+    val clean = dryRunOn("mig17");
+    val locks = rkMigLockEvents().filter({ e -> e == "lock mig17" }).length - before;
+    val unlocks = rkMigLockEvents().filter({ e -> e == "unlock mig17" }).length;
+    val _z = done();
+    assert pending == 1 && hist.length == 0 && clean == 0;
+    assert locks == 3 && unlocks >= 3;
+}
+
+// ── step 6 ──────────────────────────────────────────────────────────────────
+
+test "migration: the report lists applied, pending and failed with full checksums, read from the table" {
+    val dir = fresh("mig18");
+    val _a = put(dir, "V1__init.sql", "CREATE TABLE t (id int);");
+    val _m = migrate();
+    val _b = put(dir, "V2__more.sql", "CREATE TABLE u (id int);");
+    val _i = sqlTemplate("mig18").update("INSERT INTO rakun_schema_history (installed_rank, version, description, script, checksum, installed_by, installed_on, execution_time, success) VALUES ('9', '0.5', 'elsewhere', 'V0.5__x.sql', 'abc', 'other-node', '2026-01-01T00:00:00Z', '1', 'false')", []);
+    val report = migrationReport();
+    val sum = (appliedMigrations().at(0) ?? Migration(version: "", description: "", script: "", checksum: "", installedRank: 0, installedOn: "", executionMillis: 0, success: false)).checksum;
+    val _z = done();
+    assert report.contains("\"applied\":[{\"state\":\"applied\",\"version\":\"1\",\"description\":\"init\",\"script\":\"V1__init.sql\",\"checksum\":\"" + sum + "\""), report;
+    assert report.contains("\"pending\":[{\"state\":\"pending\",\"version\":\"2\"");
+    assert report.contains("\"failed\":[{\"state\":\"failed\",\"version\":\"0.5\"");
+    assert sum.length() == 64 && report.contains("\"installedOn\":\"") && report.contains("\"executionMillis\":");
+}
+
+test "migration: the endpoint is default-denied and answers the history once exposed" {
+    val dir = fresh("mig21");
+    val _a = put(dir, "V1__init.sql", "CREATE TABLE t (id int);");
+    val _m = migrate();
+    val _h = mountActuator();
+    val _r = registerMigrationsEndpoint();
+    val hidden = rkDispatchHttp("GET", "/actuator/migrations", "{}", "{}", "");
+    val _x = installExposure({ id -> id == "migrations" });
+    val shown = rkDispatchHttp("GET", "/actuator/migrations", "{}", "{}", "");
+    val _c = clearExposure();
+    val _z = done();
+    assert hidden.status == 404;
+    assert shown.status == 200 && shown.body.contains("\"script\":\"V1__init.sql\""), shown.body;
+}
+
+#[@External.Erlang("""(fun(__F, __Ms) -> __P = spawn(fun() -> __F() end), timer:sleep(__Ms), exit(__P, kill), timer:sleep(600), 0 end)($0, $1)""")]
+declare fn runThenKill(work: fn() -> i32, afterMs: i32) -> i32;
+
+test "migration: killing the node between a migration and its history row leaves neither" {
+    val dir = fresh("mig22");
+    val _a = put(dir, "V1__slow.sql", "CREATE TABLE half (id int);\nINSERT INTO half (id) VALUES (1);\nCALL rakun_sleep(400);");
+    val _k = runThenKill({ -> migrate().applied }, 150);
+    val _t = rkSetProp("rakun.migration.lock-timeout", "1000");
+    val hist = historyOn("mig22");
+    val _z = done();
+    assert hist.length == 0, versions(hist);
+    try asserts.throwsWith({ -> count("mig22", "half") }, "no table 'half'");
+}
+
+// ── step 7 ──────────────────────────────────────────────────────────────────
+
+test "migration: ddl-auto create or create-drop under a production profile refuses the boot, naming all three" {
+    val _d = fresh("mig19");
+    val _p = rkSetProp("rakun.profiles.resolved", "prod");
+    val _c = rkSetProp("rakun.migration.ddl-auto", "create");
+    val prod = ddlAutoProblem();
+    val _s = rkSetProp("rakun.profiles.resolved", "staging");
+    val _q = rkSetProp("rakun.migration.production-profiles", "staging");
+    val _e = rkSetProp("rakun.migration.ddl-auto", "create-drop");
+    val staging = ddlAutoProblem();
+    val _u = rkSetProp("rakun.profiles.resolved", "");
+    val _z = done();
+    assert prod == "rakun migration: rakun.migration.ddl-auto=create under the production profile `prod` - dropping every entity table is refused there; use validate, or leave the profile";
+    assert staging.contains("ddl-auto=create-drop under the production profile `staging`");
+}
+
+test "migration: no key lifts the ddl-auto refusal, create beside migration files refuses, validate is allowed in prod" {
+    for (migrationKeys()) { k -> assert k.contains("allow") == false && k.contains("force") == false && k.contains("unsafe") == false, k; };
+    val dir = fresh("mig20");
+    val _a = put(dir, "V1__init.sql", "CREATE TABLE t (id int);");
+    val _c = rkSetProp("rakun.migration.ddl-auto", "create");
+    val beside = ddlAutoProblem();
+    val _p = rkSetProp("rakun.profiles.resolved", "prod");
+    val _v = rkSetProp("rakun.migration.ddl-auto", "validate");
+    val validate = ddlAutoProblem();
+    val _u = rkSetProp("rakun.profiles.resolved", "");
+    val _z = done();
+    assert beside.contains("ddl-auto=create beside migration files (" + dir + "/V1__init.sql)"), beside;
+    assert validate == "";
+}

@@ -80,7 +80,8 @@
          terminate/2, code_change/3]).
 
 %% ── supervised entry points ──────────────────────────────────────────────────
--export([start_registry/0, start_conn_sup/0, start_listener/3,
+-export([start_registry/0, start_conn_sup/0, start_listener/3, start_listener/5,
+         serve_management/2, management_port/0, stop_management/0,
          start_connection/3, connection/3, peer_subject/0]).
 
 -define(SCAN,     rakun_scan).        %% ordered_set: {Seq, Name}
@@ -466,12 +467,12 @@ match(Verb, Path) ->
 
 find_route(_Verb, _Want, []) ->
     nomatch;
-find_route(Verb, Want, [{_Seq, RVerb, _RPath, RSegs, Handler} | Rest]) ->
+find_route(Verb, Want, [{_Seq, RVerb, RPath, RSegs, Handler} | Rest]) ->
     case RVerb =:= Verb andalso length(RSegs) =:= length(Want) of
         false -> find_route(Verb, Want, Rest);
         true ->
             case bind(RSegs, Want, #{}) of
-                {ok, Params} -> {ok, Handler, Params};
+                {ok, Params} -> put(rakun_matched_route, RPath), {ok, Handler, Params};
                 nomatch -> find_route(Verb, Want, Rest)
             end
     end.
@@ -549,7 +550,44 @@ dispatch_http(Verb, Path, HeadersJson, QueryJson, Body) ->
         false -> handle(Verb, Path, HeadersJson, QueryJson, Body, undefined)
     end.
 
-handle(Verb, Path, HeadersJson, QueryJson, Body, _Chain) ->
+%% Every request the router answers executes `[rakun, http, request, stop]`
+%% (measurement `duration` in microseconds; metadata `method`, `route` — the
+%% REGISTERED pattern, never the concrete path — and `status`) on front 75's
+%% bus when rakun-metrics is in the build; a raise executes `…, exception` and
+%% propagates. Without the bus the cost is one `function_exported/3`.
+handle(Verb, Path, HeadersJson, QueryJson, Body, Chain) ->
+    case erlang:function_exported(rakun_telemetry, execute, 3) of
+        false -> handle_route(Verb, Path, HeadersJson, QueryJson, Body, Chain);
+        true ->
+            erase(rakun_matched_route),
+            T0 = erlang:monotonic_time(microsecond),
+            try handle_route(Verb, Path, HeadersJson, QueryJson, Body, Chain) of
+                Res ->
+                    Status = case Res of
+                                 #{status := S} -> S;
+                                 _ when is_tuple(Res), tuple_size(Res) >= 2, is_integer(element(2, Res)) -> element(2, Res);
+                                 _ -> 0
+                             end,
+                    Route = case get(rakun_matched_route) of
+                                undefined when Status =:= 404 -> <<"NOT_FOUND">>;
+                                undefined -> <<"fallback">>;
+                                R -> R
+                            end,
+                    _ = (try rakun_telemetry:execute([rakun, http, request, stop],
+                                                     #{duration => erlang:monotonic_time(microsecond) - T0},
+                                                     #{method => Verb, route => Route, status => Status})
+                         catch _:_ -> ok end),
+                    Res
+            catch C:E:St ->
+                _ = (try rakun_telemetry:execute([rakun, http, request, exception],
+                                                 #{duration => erlang:monotonic_time(microsecond) - T0},
+                                                 #{method => Verb, route => get(rakun_matched_route), kind => C})
+                     catch _:_ -> ok end),
+                erlang:raise(C, E, St)
+            end
+    end.
+
+handle_route(Verb, Path, HeadersJson, QueryJson, Body, _Chain) ->
     case match(Verb, Path) of
         nomatch ->
             case persistent_term:get(rakun_fallback, undefined) of
@@ -712,6 +750,10 @@ seed_failures() ->
           <<"`rakun.server.ssl.bundle` names a bundle that does not resolve to TLS material.">>,
           <<"Configure `rakun.ssl.bundle.pem.<name>.keystore.certificate` and `.private-key`, "
             "or remove `rakun.server.ssl.bundle` - rakun will not fall back to plaintext.">>},
+         {management_address,
+          <<"`rakun.management.server.address` is not an IPv4 or IPv6 address.">>,
+          <<"Set it to an address of this host (`127.0.0.1` keeps the actuator private) "
+            "or remove it to listen on every interface.">>},
          {server_address,
           <<"`rakun.server.address` is not an IPv4 or IPv6 address.">>,
           <<"Set it to an address of this host (`127.0.0.1`, `::1`, ...) or remove it "
@@ -860,9 +902,14 @@ transport() ->
 %% port goes into `?PROPS` before the loop starts, so `serve/2` can answer it
 %% even when `port: 0` asked for an ephemeral one.
 start_listener(Port, Dispatcher, Tls) ->
+    start_listener(Port, Dispatcher, Tls, bind_address(), <<"rakun.server.bound-port">>).
+
+%% The same acceptor with its own bind options and its own bound-port key —
+%% the shape a second listener (front 76's management listener) needs.
+start_listener(Port, Dispatcher, Tls, BindOpts, PortKey) ->
     Backlog = prop_int_default(<<"rakun.server.backlog">>, ?DEFAULT_BACKLOG),
     Base = [binary, {packet, http_bin}, {active, false},
-            {reuseaddr, true}, {backlog, Backlog}] ++ bind_address(),
+            {reuseaddr, true}, {backlog, Backlog}] ++ BindOpts,
     {Mod, Opts} = case Tls of
                       plain -> {gen_tcp, Base};
                       {tls, _Bundle, SslOpts, _Timeout} -> {ssl, Base ++ SslOpts}
@@ -876,7 +923,7 @@ start_listener(Port, Dispatcher, Tls) ->
         case Mod:listen(Port, Opts) of
             {ok, LSock} ->
                 {ok, Bound} = listen_port(Mod, LSock),
-                _ = set_prop(<<"rakun.server.bound-port">>, integer_to_binary(Bound)),
+                _ = set_prop(PortKey, integer_to_binary(Bound)),
                 Parent ! {self(), listening},
                 accept_loop(LSock, Dispatcher, Tls);
             {error, Reason} ->
@@ -888,6 +935,60 @@ start_listener(Port, Dispatcher, Tls) ->
         {Pid, {error, Reason}} -> {error, {listen, Reason, Port}}
     after 5000 ->
         {error, {listen, timeout, Port}}
+    end.
+
+%% ═══ the management listener (front 76) ══════════════════════════════════════
+%% A second `rakun_sup` child, `rakun_management_listener`, beside
+%% `rakun_listener`: its own port (`rakun.management.server.port`), its own
+%% interface (`rakun.management.server.address`) and its own front 74 bundle
+%% (`rakun.management.server.ssl.bundle`, independent of the application's).
+%% Killing either child leaves the other serving. Answers the bound port.
+serve_management(Port, Dispatcher) ->
+    ensure_started(),
+    Tls = case prop(<<"rakun.management.server.ssl.bundle">>) of
+              <<>> -> plain;
+              Bundle -> tls_for(Bundle)
+          end,
+    Bind = address_opts(prop(<<"rakun.management.server.address">>), management_address),
+    Spec = #{id => rakun_management_listener,
+             start => {?MODULE, start_listener, [Port, Dispatcher, Tls, Bind, <<"rakun.management.server.bound-port">>]},
+             restart => permanent, shutdown => 5000, type => worker, modules => [?MODULE]},
+    _ = supervisor:terminate_child(rakun_sup, rakun_management_listener),
+    _ = supervisor:delete_child(rakun_sup, rakun_management_listener),
+    case supervisor:start_child(rakun_sup, Spec) of
+        {ok, _Pid} -> management_port();
+        {error, {Reason, _}} -> fail(Reason);
+        {error, Reason} -> fail(Reason)
+    end.
+
+management_port() ->
+    prop_int(<<"rakun.management.server.bound-port">>).
+
+stop_management() ->
+    ensure_started(),
+    _ = supervisor:terminate_child(rakun_sup, rakun_management_listener),
+    _ = supervisor:delete_child(rakun_sup, rakun_management_listener),
+    0.
+
+tls_for(Bundle) ->
+    case code:ensure_loaded(rakun_ssl) of
+        {module, rakun_ssl} ->
+            case rakun_ssl:transport(Bundle) of
+                ssl ->
+                    _ = application:ensure_all_started(ssl),
+                    {tls, Bundle, rakun_ssl:listen_options(Bundle),
+                     prop_int_default(<<"rakun.ssl.handshake-timeout">>, rakun_ssl:handshake_timeout(Bundle))};
+                _ -> fail({ssl_bundle, Bundle})
+            end;
+        _ -> fail({ssl_bundle, Bundle})
+    end.
+
+address_opts(<<>>, _Why) -> [];
+address_opts(Text, Why) ->
+    case inet:parse_address(binary_to_list(Text)) of
+        {ok, Addr} when tuple_size(Addr) =:= 8 -> [inet6, {ip, Addr}];
+        {ok, Addr} -> [{ip, Addr}];
+        {error, _} -> fail({Why, Text})
     end.
 
 %% `rakun.server.address` binds the listener to one interface (`127.0.0.1`,
@@ -1045,23 +1146,109 @@ serve_requests(Sock, Dispatcher) ->
     case read_request(Sock, Idle) of
         {ok, Verb, Path, Headers} ->
             true = ets:insert(?CONNS, {self(), busy}),
-            Body = read_body(Sock, Headers, Idle),
             {RawPath, Query} = split_query(Path),
-            Response = run_handler(Dispatcher, Verb, RawPath, Headers, Query, Body),
-            %% A handler that streamed (front 23's chunk writer) already wrote
-            %% its head and its chunks; the acceptor writes nothing more.
-            KeepAlive = case get(rakun_streamed) of
-                            true -> true;
-                            _ -> write_response(Sock, Response)
-                        end,
-            _ = clear_reply_headers(),
-            Draining = persistent_term:get(rakun_draining, false),
-            case KeepAlive andalso not Draining of
-                true -> serve_requests(Sock, Dispatcher);
-                false -> close_connection(Sock)
+            case body_hook(Verb, RawPath, Headers) of
+                accept -> serve_request(Sock, Dispatcher, Verb, RawPath, Query, Headers, Idle);
+                {refuse, Status, Text} -> refuse_before_body(Sock, Status, Text)
             end;
         _ ->
             close_connection(Sock)
+    end.
+
+%% Front 24: a member may inspect a request's head BEFORE its body is read
+%% (`rakun_body_hook`: `fun(Verb, Path, HeadersJson) -> <<>> | <<"<status>\n<body>">>`).
+%% A refusal is written with `Connection: close` and the connection closed
+%% without reading one byte of the body; the bytes the socket had received by
+%% then are recorded under `rakun.server.last-refused-bytes`.
+body_hook(Verb, Path, Headers) ->
+    case persistent_term:get(rakun_body_hook, undefined) of
+        undefined -> accept;
+        Hook ->
+            case Hook(Verb, Path, iolist_to_binary(json:encode(Headers))) of
+                <<>> -> accept;
+                Answer ->
+                    [StatusText | Rest] = binary:split(Answer, <<"\n">>),
+                    {refuse, parse_int(StatusText), iolist_to_binary(Rest)}
+            end
+    end.
+
+refuse_before_body(Sock, Status, Text) ->
+    _ = t_send(Sock, [<<"HTTP/1.1 ">>, integer_to_binary(Status), <<" ">>, reason_phrase(Status),
+                      <<"\r\nContent-Length: ">>, integer_to_binary(byte_size(Text)),
+                      <<"\r\nConnection: close\r\n\r\n">>, Text]),
+    %% Half-close, then read and drop at most 8 KiB and hold the socket open
+    %% for the rest of 200 ms, so a client still sending reads the refusal
+    %% before the close resets the connection (a reset discards what the
+    %% client had not read yet).
+    Received = case get(rakun_transport) of
+                   ssl -> 0;
+                   _ ->
+                       _ = gen_tcp:shutdown(Sock, write),
+                       _ = inet:setopts(Sock, [{packet, raw}]),
+                       drain_upto(Sock, 8192, erlang:monotonic_time(millisecond) + 200),
+                       case inet:getstat(Sock, [recv_oct]) of
+                           {ok, [{recv_oct, N}]} -> N;
+                           _ -> 0
+                       end
+               end,
+    _ = set_prop(<<"rakun.server.last-refused-bytes">>, integer_to_binary(Received)),
+    close_connection(Sock).
+
+drain_upto(_Sock, Left, Deadline) when Left =< 0 ->
+    Wait = Deadline - erlang:monotonic_time(millisecond),
+    case Wait > 0 of
+        true -> timer:sleep(Wait);
+        false -> ok
+    end;
+drain_upto(Sock, Left, Deadline) ->
+    Wait = Deadline - erlang:monotonic_time(millisecond),
+    case Wait > 0 of
+        false -> ok;
+        true ->
+            case gen_tcp:recv(Sock, 0, Wait) of
+                {ok, Data} -> drain_upto(Sock, Left - byte_size(Data), Deadline);
+                _ -> ok
+            end
+    end.
+
+serve_request(Sock, Dispatcher, Verb, RawPath, Query, Headers, Idle) ->
+    Body = read_body(Sock, Headers, Idle),
+    Response = run_handler(Dispatcher, Verb, RawPath, Headers, Query, Body),
+    case upgrade_hook(Headers) of
+        {ok, Hook} ->
+            %% Front 20: an `Upgrade: websocket` request, and a member
+            %% installed the hook. The dispatcher has already answered
+            %% (the chain, security, the endpoint's own route); the hook
+            %% reads that answer, owns the socket from here on, and this
+            %% process becomes the WebSocket connection until it closes.
+            _ = Hook(Sock, get(rakun_transport), RawPath, Headers, Response),
+            close_connection(Sock);
+        none ->
+            serve_answer(Sock, Dispatcher, Response)
+    end.
+
+upgrade_hook(Headers) ->
+    case string:lowercase(maps:get(<<"upgrade">>, Headers, <<>>)) of
+        <<"websocket">> ->
+            case persistent_term:get(rakun_upgrade_hook, undefined) of
+                undefined -> none;
+                Hook -> {ok, Hook}
+            end;
+        _ -> none
+    end.
+
+serve_answer(Sock, Dispatcher, Response) ->
+    %% A handler that streamed (front 23's chunk writer) already wrote
+    %% its head and its chunks; the acceptor writes nothing more.
+    KeepAlive = case get(rakun_streamed) of
+                    true -> true;
+                    _ -> write_response(Sock, Response)
+                end,
+    _ = clear_reply_headers(),
+    Draining = persistent_term:get(rakun_draining, false),
+    case KeepAlive andalso not Draining of
+        true -> serve_requests(Sock, Dispatcher);
+        false -> close_connection(Sock)
     end.
 
 close_connection(Sock) ->
@@ -1181,7 +1368,10 @@ write_response(Sock, #{status := Status, body := Body}) ->
 reason_phrase(200) -> <<"OK">>;
 reason_phrase(201) -> <<"Created">>;
 reason_phrase(400) -> <<"Bad Request">>;
+reason_phrase(403) -> <<"Forbidden">>;
 reason_phrase(404) -> <<"Not Found">>;
+reason_phrase(413) -> <<"Content Too Large">>;
+reason_phrase(415) -> <<"Unsupported Media Type">>;
 reason_phrase(500) -> <<"Internal Server Error">>;
 reason_phrase(503) -> <<"Service Unavailable">>;
 reason_phrase(_) -> <<"OK">>.
