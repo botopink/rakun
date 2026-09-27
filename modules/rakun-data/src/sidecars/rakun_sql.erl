@@ -718,6 +718,9 @@ locked(Ds, Fun) ->
 %%   UPDATE t SET col = v, ... [WHERE p]
 %%   DELETE FROM t [WHERE p]
 %%   CALL rakun_sleep(ms)                    (holds the connection, not the store)
+%%   CALL rakun_meet(key, parties)           (holds the connection until `parties`
+%%                                            statements have met under `key`;
+%%                                            an error after 10 s alone)
 %% where `p` is `operand (= | <> | !=) operand` joined by AND / OR, with
 %% parentheses; an operand is a column, `$N`, a quoted string, a number or NULL.
 %% Anything else is `{error, "... unsupported construct 'X' ..."}` — never an
@@ -731,6 +734,12 @@ exec_ets(Ds, Sql, Params) ->
             {sleep, V} ->
                 timer:sleep(binary_to_integer(value(V, Params))),
                 {ok, {count, 0}};
+            {meet, K, N} ->
+                Key = value(K, Params),
+                case meet(Key, binary_to_integer(value(N, Params)), 10000) of
+                    true -> {ok, {count, 0}};
+                    false -> {error, <<"rakun_meet: '", Key/binary, "' was not met within 10000 ms">>}
+                end;
             {literal_select, Items} ->
                 {ok, {rows, [to_bin(L) || {lit, L} <- Items], [[L || {lit, L} <- Items]]}};
             _ ->
@@ -1099,7 +1108,47 @@ parse_call([{word, W}, {sym, $(}, V, {sym, $)} | R], Sql) ->
         <<"rakun_sleep">> -> {sleep, operand(V, Sql)};
         _ -> unsupported(<<"CALL ", (low(W))/binary>>, Sql)
     end;
+parse_call([{word, W}, {sym, $(}, V1, {sym, $,}, V2, {sym, $)} | R], Sql) ->
+    done(R, Sql),
+    case low(W) of
+        <<"rakun_meet">> -> {meet, operand(V1, Sql), operand(V2, Sql)};
+        _ -> unsupported(<<"CALL ", (low(W))/binary>>, Sql)
+    end;
 parse_call(_R, Sql) -> unsupported(<<"CALL">>, Sql).
+
+%% `CALL rakun_meet(key, parties)`: a barrier across connections, so a test can
+%% say "these statements ran at the same time" by construction instead of by
+%% an elapsed-time budget. The first caller starts the one registered barrier
+%% process; each arrival waits for `{Ref, go}`, sent to all `parties` once the
+%% last one arrives. `false` when `Budget` ms pass first.
+meet(Key, Parties, Budget) ->
+    Barrier = meet_barrier(),
+    Ref = make_ref(),
+    Barrier ! {arrive, Key, Parties, self(), Ref},
+    receive {Ref, go} -> true after Budget -> false end.
+
+meet_barrier() ->
+    case whereis(rakun_sql_meet) of
+        undefined ->
+            Pid = spawn(fun() -> meet_loop(#{}) end),
+            try register(rakun_sql_meet, Pid), Pid
+            catch error:badarg -> exit(Pid, kill), whereis(rakun_sql_meet)
+            end;
+        Pid -> Pid
+    end.
+
+meet_loop(Waiting) ->
+    receive
+        {arrive, Key, Parties, From, Ref} ->
+            Here = [{From, Ref} | maps:get(Key, Waiting, [])],
+            case length(Here) >= Parties of
+                true ->
+                    [P ! {R, go} || {P, R} <- Here],
+                    meet_loop(maps:remove(Key, Waiting));
+                false ->
+                    meet_loop(Waiting#{Key => Here})
+            end
+    end.
 
 %% ── execution ──
 

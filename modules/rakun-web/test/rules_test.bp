@@ -39,8 +39,13 @@ fn m(source: string) -> Matcher {
 #[@External.Erlang("""undefined""")]
 declare fn noMatcher() -> Matcher;
 
-#[@External.Erlang("""erlang:monotonic_time(millisecond)""")]
-declare fn nowMs() -> i32;
+// The reductions this process has spent — the BEAM's own count of the work a
+// process did. The two cost tests below compare the work of the hot path with
+// the work of the path it must avoid (compiling per call), both counted here:
+// a count, unlike an elapsed-time budget, is the same on an idle machine and a
+// loaded one.
+#[@External.Erlang("""element(2, erlang:process_info(self(), reductions))""")]
+declare fn reductions() -> i32;
 
 fn rules(redirects: Array<RedirectRule>, rewrites: Array<RewriteRule>, headers: Array<HeaderRule>) -> UrlRules {
     return UrlRules(basePath: "", trailingSlash: false, redirects: redirects, rewrites: rewrites, headers: headers);
@@ -107,16 +112,22 @@ test "rakun-web rules: captures come back in declaration order" {
     assert caps.map({ c -> c._0 + "=" + c._1 }).join(",") == "category=books,item=dune";
 }
 
-test "rakun-web rules: matching runs the compiled pattern - 10 000 runs well inside a budget" {
+test "rakun-web rules: matching runs the compiled pattern - 10 000 runs cost under a tenth of compiling each time" {
     val d = m("/blog/:slug");
-    val before: i32 = nowMs();
     var hits = 0;
+    val r0: i32 = reductions();
     for (Array.range(0, 10000)) { i ->
         if (matches(d, "/blog/hello")) hits = hits + 1;
     };
-    val took: i32 = nowMs() - before;
-    assert hits == 10000;
-    assert took < 1000;
+    val r1: i32 = reductions();
+    for (Array.range(0, 10000)) { i ->
+        if (matches(m("/blog/:slug"), "/blog/hello")) hits = hits + 1;
+    };
+    val r2: i32 = reductions();
+    val matching: i32 = r1 - r0;
+    val compiling: i32 = r2 - r1;
+    assert hits == 20000;
+    assert matching * 10 < compiling, "matching " + matching.toString() + " reductions, compiling and matching " + compiling.toString();
 }
 
 // ── step 3: redirects ───────────────────────────────────────────────────────
@@ -335,11 +346,20 @@ test "rakun-web rules: no rule matched - the chain continues at the canonical pa
     assert res.body == "handled /guide";
 }
 
-test "rakun-web rules: applyRules compiles nothing per request - 10 000 runs inside the budget" {
+test "rakun-web rules: applyRules compiles nothing per request - 10 000 runs cost under half of compiling each time" {
     val c = compiled(rules([RedirectRule(source: "/old/:p*", destination: "/new/:p*", permanent: false)], [], [HeaderRule(source: "/:p*", name: "X", value: "1")]));
-    val before: i32 = nowMs();
+    val r0: i32 = reductions();
     for (Array.range(0, 10000)) { i ->
         val _o = applyRules(c, "/elsewhere/x");
     };
-    assert nowMs() - before < 2000;
+    val r1: i32 = reductions();
+    for (Array.range(0, 10000)) { i ->
+        val _o = applyRules(compiled(rules([RedirectRule(source: "/old/:p*", destination: "/new/:p*", permanent: false)], [], [HeaderRule(source: "/:p*", name: "X", value: "1")])), "/elsewhere/x");
+    };
+    val r2: i32 = reductions();
+    val applying: i32 = r1 - r0;
+    val compiling: i32 = r2 - r1;
+    // Compiling the rules is most of the work of compiling AND applying them,
+    // so a precompiled apply costs well under half of it.
+    assert applying * 2 < compiling, "applying " + applying.toString() + " reductions, compiling and applying " + compiling.toString();
 }

@@ -73,11 +73,14 @@ fn explicitOptions(req: Request) -> @Task<HandlerResponse> {
     return HandlerResponse.noContent().withHeader("X-Explicit", "yes");
 }
 
+// Each part answers only once all three are running: a streamer that ran its
+// thunks one after another would leave the first alone at the barrier, and
+// it would answer "alone".
 fn slowParts() -> @Task<HandlerResponse> {
     return streamed(200, [
-        { -> async { part(50, "a") } },
-        { -> async { part(10, "b") } },
-        { -> async { part(30, "c") } },
+        { -> async { meetingPart("stream-abc", "a") } },
+        { -> async { meetingPart("stream-abc", "b") } },
+        { -> async { meetingPart("stream-abc", "c") } },
     ]);
 }
 
@@ -108,8 +111,16 @@ fn part(ms: i32, text: string) -> string {
 #[@External.Erlang("rakun_request_context", "sleep")]
 declare fn sleepMs(ms: i32) -> i32;
 
-#[@External.Erlang("""erlang:monotonic_time(millisecond)""")]
-declare fn nowMs() -> i32;
+// Block until `parties` processes have arrived under `key`, then let them all
+// through; `false` when `budgetMs` passes first. The barrier is one registered
+// process (`rk_test_meet`), started by the first caller.
+#[@External.Erlang("""(fun(__K, __N, __Ms) -> __S = case whereis(rk_test_meet) of undefined -> __P = spawn(fun() -> (fun BpMeet(__Map) -> receive {arrive, __K2, __N2, __F, __R} -> __W = [{__F, __R} | maps:get(__K2, __Map, [])], case length(__W) >= __N2 of true -> lists:foreach(fun({__F2, __R2}) -> __F2 ! {__R2, go} end, __W), BpMeet(maps:remove(__K2, __Map)); false -> BpMeet(__Map#{__K2 => __W}) end end end)(#{}) end), try register(rk_test_meet, __P), __P catch error:badarg -> exit(__P, kill), whereis(rk_test_meet) end; __Q -> __Q end, __Ref = make_ref(), __S ! {arrive, __K, __N, self(), __Ref}, receive {__Ref, go} -> true after __Ms -> false end end)($0, $1, $2)""")]
+declare fn meet(key: string, parties: i32, budgetMs: i32) -> bool;
+
+fn meetingPart(key: string, text: string) -> string {
+    val met = meet(key, 3, 10000);
+    return if (met) text else "alone";
+}
 
 fn fresh() -> i32 {
     val _r = rkAppReset();
@@ -228,11 +239,8 @@ test "rakun handler: toResponse joins the chunks in order and keeps the status" 
 test "rakun handler: streamed writes one chunk per thunk in index order, concurrently" {
     val _f = fresh();
     val _t = registerRoute("GET", "export", "slowStream", { r -> slowStream(r) });
-    val before: i32 = nowMs();
     val res: Response = call("GET", "/export", "{}", "");
-    val took: i32 = nowMs() - before;
     assert res.body == "abc";
-    assert took < 90;
 }
 
 test "rakun handler: a thunk that raises ends the stream; the chunks already written stand" {
@@ -245,7 +253,7 @@ test "rakun handler: a thunk that raises ends the stream; the chunks already wri
     assert res.body == "a";
 }
 
-#[@External.Erlang("""(fun(__Port, __Req) -> {ok, __S} = gen_tcp:connect("127.0.0.1", __Port, [binary, {active, false}]), ok = gen_tcp:send(__S, __Req), __Loop = fun __Loop(__Acc) -> case binary:match(__Acc, <<"0", 13, 10, 13, 10>>) of nomatch -> case gen_tcp:recv(__S, 0, 3000) of {ok, __M} -> __Loop(<<__Acc/binary, __M/binary>>); _ -> __Acc end; _ -> __Acc end end, __R = __Loop(<<>>), gen_tcp:close(__S), __R end)($0, $1)""")]
+#[@External.Erlang("""(fun(__Port, __Req) -> {ok, __S} = gen_tcp:connect("127.0.0.1", __Port, [binary, {active, false}]), ok = gen_tcp:send(__S, __Req), __Loop = fun __Loop(__Acc) -> case binary:match(__Acc, <<"0", 13, 10, 13, 10>>) of nomatch -> case gen_tcp:recv(__S, 0, 10000) of {ok, __M} -> __Loop(<<__Acc/binary, __M/binary>>); _ -> __Acc end; _ -> __Acc end end, __R = __Loop(<<>>), gen_tcp:close(__S), __R end)($0, $1)""")]
 declare fn rawExchange(port: i32, request: string) -> string;
 
 test "rakun handler: a streamed response is chunked with no Content-Length" {

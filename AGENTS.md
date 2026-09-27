@@ -2185,10 +2185,15 @@ ACCEPTOR now opens the listening socket (it used to be opened in the
 supervisor's `start_listener/2` call, so the supervisor owned it, stopping the
 child did not close it, and every restart leaked the old socket), and each
 connection process marks itself `idle` / `busy` in `rakun_connections` and, once
-draining is set, closes after its response instead of looping.
+draining is set, closes after its response instead of looping. `drain/1`
+publishes the size of the busy set it waits for as `rakun.server.draining-busy`
+the moment it takes it.
 `test/shutdown_test.bp` asserts every step over sockets, the pre-drain ordering
 against a stand-in `rakun_probes` compiled from text at run time, and a real
-`kill -TERM` of the test node reaching the installed hook.
+`kill -TERM` of the test node reaching the installed hook. No step is ordered by
+a timer: the shutdown starts once the slow request is inside its handler, a
+request to be drained stays in flight until `rakun.server.draining-busy` is set,
+and one to be killed sleeps a minute against the 100 ms timeout.
 
 Every step of the front's spec is now in. What is still open is recorded in the
 front README (the Definition of done's q-value box names `br` refusal and both
@@ -2427,8 +2432,12 @@ Rows}`, statements parsed in the sidecar and applied under a per-datasource
 EXISTS]`, `INSERT INTO t [(cols)] VALUES (…)[, (…)]`, `SELECT * | cols [AS a] |
 COUNT(*) [AS a] FROM t [WHERE] [ORDER BY c [ASC|DESC], …] [LIMIT n]`, `SELECT
 <literal>` (the liveness statement), `UPDATE … SET … [WHERE]`, `DELETE FROM t
-[WHERE]`, and `CALL rakun_sleep(ms)` (holds the connection, not the store — what the
-concurrency cell measures with). A predicate is `=` / `<>` / `!=` joined by `AND` /
+[WHERE]`, `CALL rakun_sleep(ms)` (holds the connection, not the store) and `CALL
+rakun_meet(key, parties)` (holds the connection until `parties` statements have met
+under `key` at one registered barrier process, `rakun_sql_meet`; an error after
+10 s alone — what the concurrency cell asserts with: two async queries can only both
+complete when they run at the same time, where a pair of sleeps under an
+elapsed-time budget measured the machine's load). A predicate is `=` / `<>` / `!=` joined by `AND` /
 `OR` with parentheses; NULL equals nothing. Anything else — `JOIN`, `GROUP`, `LIKE`,
 `>`, a qualified name — is an error naming the construct, never an empty result.
 Transactions are snapshot-and-restore: atomic, NOT isolated (a second connection
@@ -3679,6 +3688,17 @@ completed handshake.
   `.bp` files (run by `botopink test`), NOT in the compiler's Zig test suites.
   Wrong-placement *rejection* is covered generically by the compiler's
   annotation-processor suite (a compile-failure can't be a runtime `assert`).
+- **No verdict depends on the machine's load.** A test orders processes by SIGNAL
+  (a barrier: `rk_test_meet` in `health_test.bp` / `route_handler_test.bp`,
+  `CALL rakun_meet` in the ETS driver; std's `async` gates; a property the code
+  under test publishes), never by a pair of sleeps. A timeout is asserted against
+  work that cannot finish inside the run (a minute's sleep, a gate opened only
+  afterwards), and a hung process is proven DEAD (`survivors`), not "did not
+  finish yet". Elapsed time gets only LOWER bounds, or an upper bound with a
+  margin of seconds against a behaviour that would take a minute; a cost claim
+  counts reductions (`erlang:process_info(self(), reductions)`), not
+  microseconds; a socket or read budget on a path expected to succeed is ten
+  seconds.
 - Keep this file in sync with `docs.md` and the spec in the same change.
 
 ## See also

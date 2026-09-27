@@ -7,7 +7,6 @@
 //// the `Error` text of the `try*` surface; every needle is plain ASCII.
 
 import {testing.asserts} from "std";
-import {io: {clock}} from "std";
 import {async} from "std";
 import {startDataSource, poolStats, PoolStats, PooledDataSource} from "datasource";
 import {Param, Bound, param, bindNamed, placeholderNames} from "sql/params";
@@ -260,20 +259,21 @@ test "async: a raise inside an async query surfaces at the await" {
     }, "no table 'missing_table'");
 }
 
-fn sleepFor(sql: SqlTemplate, millis: i32) -> @Task<i32> {
-    return await sql.updateAsync("CALL rakun_sleep(:ms)", [param("ms", millis.toString())]);
+// Holds a connection until `parties` statements have met under `key` — so two
+// of them can only BOTH complete when they run at the same time. (A pair of
+// `rakun_sleep(200)` calls under an elapsed-time budget said the same only
+// while the machine was idle.)
+fn meetFor(sql: SqlTemplate, key: string, parties: i32) -> @Task<i32> {
+    return await sql.updateAsync("CALL rakun_meet(:key, :parties)", [param("key", key), param("parties", parties.toString())]);
 }
 
 test "async: two async queries from one request run concurrently and both complete" {
     val _d = startDataSource("async", "ets:memory", 2, 2000, "eager");
     val sql = sqlTemplate("async");
-    val start = clock.monotonicMillis();
     val done = await async.runAll([
-        { -> sleepFor(sql, 200) },
-        { -> sleepFor(sql, 200) },
+        { -> meetFor(sql, "two-async-queries", 2) },
+        { -> meetFor(sql, "two-async-queries", 2) },
     ]);
-    val elapsed = clock.monotonicMillis() - start;
     assert done.length == 2;
-    assert elapsed < 350;
     assert poolStats("async").peak == 2;
 }
