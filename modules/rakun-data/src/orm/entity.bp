@@ -94,7 +94,8 @@ pub fn snakeCase(name: string) -> string {
     var out = "";
     for (name.split("")) { c ->
         val upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".contains(c);
-        out = out + (if (upper && out != "") "_" + c.toLower() else c.toLower());
+        val piece = if (upper && out != "") { "_" + c.toLower() } else { c.toLower() };
+        out = out + piece;
     };
     return out;
 }
@@ -122,7 +123,7 @@ fn defaultOf(f: Field) -> string {
 }
 
 fn textOf(f: Field, v: string) -> string {
-    return if (f.typeName == "string") v else if (f.typeName == "bool") "(if (" + v + ") \"true\" else \"false\")" else v + ".toString()";
+    return if (f.typeName == "string") v else if (f.typeName == "bool") "if (" + v + ") { \"true\" } else { \"false\" }" else v + ".toString()";
 }
 
 fn columnsOf(fields: Field[]) -> Field[] {
@@ -147,19 +148,26 @@ pub fn entity(comptime decl: @Decl, table: string) {
     val badType = cols.filter({ f -> f.typeName != "string" && f.typeName != "i32" && f.typeName != "bool" });
     val colNames = cols.map({ f -> columnOf(f) });
     val types = cols.map({ f -> columnOf(f) + ":" + sqlType(f.typeName) });
-    val ctorFromRow = decl.fields.map({ f -> f.name + ": " + (if (marked(f, "transient")) defaultOf(f) else readOf(f)) });
+    val ctorFromRow = decl.fields.map({ f ->
+        val value = if (marked(f, "transient")) { defaultOf(f) } else { readOf(f) };
+        return f.name + ": " + value;
+    });
     val params = cols.map({ f -> "param(\"" + columnOf(f) + "\", " + textOf(f, "c." + f.name) + ")" });
     val stamp = cols.map({ f ->
-        f.name + ": " + (if (marked(f, "createdAt") || marked(f, "updatedAt")) "now" else if (marked(f, "createdBy") || marked(f, "updatedBy")) "who" else if (verName == f.name) "0" else "c0." + f.name)
+        val value = if (marked(f, "createdAt") || marked(f, "updatedAt")) { "now" } else if (marked(f, "createdBy") || marked(f, "updatedBy")) { "who" } else if (verName == f.name) { "0" } else { "c0." + f.name };
+        return f.name + ": " + value;
     });
     val insertCols = cols.filter({ f -> (generated && f.name == idName) == false });
-    val insertSql = "INSERT INTO " + table + " (" + insertCols.map({ f -> columnOf(f) }).join(", ") + ") VALUES (" + insertCols.map({ f -> ":" + columnOf(f) }).join(", ") + ")" + (if (generated) " RETURNING " + idCol else "");
+    val returning = if (generated) { " RETURNING " + idCol } else { "" };
+    val insertSql = "INSERT INTO " + table + " (" + insertCols.map({ f -> columnOf(f) }).join(", ") + ") VALUES (" + insertCols.map({ f -> ":" + columnOf(f) }).join(", ") + ")" + returning;
     val updCols = cols.filter({ f -> f.name != idName && marked(f, "createdAt") == false && marked(f, "createdBy") == false });
-    val updateSql = "UPDATE " + table + " SET " + updCols.map({ f -> columnOf(f) + " = :" + columnOf(f) }).join(", ") + " WHERE " + idCol + " = :__id" + (if (verCol != "") " AND " + verCol + " = :__version" else "");
+    val versionGuard = if (verCol != "") { " AND " + verCol + " = :__version" } else { "" };
+    val updateSql = "UPDATE " + table + " SET " + updCols.map({ f -> columnOf(f) + " = :" + columnOf(f) }).join(", ") + " WHERE " + idCol + " = :__id" + versionGuard;
     val updStamp = decl.fields.map({ f ->
-        f.name + ": " + (if (marked(f, "updatedAt")) "now" else if (marked(f, "updatedBy")) "who" else if (verName == f.name) "c." + f.name + " + 1" else "c." + f.name)
+        val value = if (marked(f, "updatedAt")) { "now" } else if (marked(f, "updatedBy")) { "who" } else if (verName == f.name) { "c." + f.name + " + 1" } else { "c." + f.name };
+        return f.name + ": " + value;
     });
-    val deleteSql = "DELETE FROM " + table + " WHERE " + idCol + " = :__id" + (if (verCol != "") " AND " + verCol + " = :__version" else "");
+    val deleteSql = "DELETE FROM " + table + " WHERE " + idCol + " = :__id" + versionGuard;
     val selectSql = "SELECT " + colNames.join(", ") + " FROM " + table + " WHERE " + idCol + " = :__id";
     val idText = if (idType == "string") "c." + idName else "c." + idName + ".toString()";
     val idArgText = if (idType == "string") "id" else "id.toString()";
@@ -174,16 +182,29 @@ pub fn entity(comptime decl: @Decl, table: string) {
     @emit("pub fn __rkEntity_" + n + "_params(c: " + n + ") -> Param[] { val ps: Param[] = [" + params.join(", ") + "]; return ps; }");
     @emit("pub type " + n + "Columns(" + cols.map({ f -> f.name + ": string" }).join(", ") + ")");
     @emit("pub fn " + n + "Col() -> " + n + "Columns { return " + n + "Columns(" + cols.map({ f -> f.name + ": \"" + columnOf(f) + "\"" }).join(", ") + "); }");
-    @emit("pub fn " + n + "Meta() -> EntityMeta { return EntityMeta(entity: \"" + n + "\", table: \"" + table + "\", columns: \"" + colNames.join("|") + "\", types: \"" + types.join("|") + "\", idColumn: \"" + idCol + "\", generated: " + (if (generated) "true" else "false") + ", versionColumn: \"" + verCol + "\", revisions: " + (if (audited) "true" else "false") + "); }");
+    val generatedText = if (generated) { "true" } else { "false" };
+    val auditedText = if (audited) { "true" } else { "false" };
+    @emit("pub fn " + n + "Meta() -> EntityMeta { return EntityMeta(entity: \"" + n + "\", table: \"" + table + "\", columns: \"" + colNames.join("|") + "\", types: \"" + types.join("|") + "\", idColumn: \"" + idCol + "\", generated: " + generatedText + ", versionColumn: \"" + verCol + "\", revisions: " + auditedText + "); }");
     @emit("val __rkEntityReg_" + n + " = rkRegisterEntity(" + n + "Meta());");
-    @emit("pub fn __rkEntity_" + n + "_revise(t: Tx, c: " + n + ", kind: string) -> i32 {\n    " + (if (audited) "val seen = t.query(\"SELECT " + idCol + " FROM " + revTable + " WHERE " + idCol + " = :__id\", [param(\"__id\", " + idText + ")]).rowCount();\n    val ps: Param[] = [" + revParams.join(", ") + ", param(\"revision_number\", (seen + 1).toString()), param(\"revision_type\", kind), param(\"revision_timestamp\", rkOrmNow()), param(\"revision_author\", rkOrmPrincipal())];\n    return t.update(\"" + revInsert + "\", ps);" else "return 0;") + "\n}");
-    @emit("pub fn __rkEntity_" + n + "_insert(sql: SqlTemplate, c0: " + n + ") -> " + n + " {\n    val now = rkOrmNow();\n    val who = rkOrmPrincipal();\n    val c = " + n + "(" + stamp.join(", ") + (if (decl.fields.length > cols.length) ", " + decl.fields.filter({ f -> marked(f, "transient") }).map({ f -> f.name + ": c0." + f.name }).join(", ") else "") + ");\n    return sql.transaction({ t -> __rkEntity_" + n + "_insertIn(t, c) });\n}");
-    @emit("pub fn __rkEntity_" + n + "_insertIn(t: Tx, c: " + n + ") -> " + n + " {\n    val rows = t.query(\"" + insertSql + "\", __rkEntity_" + n + "_params(c).filter({ p -> \"" + insertCols.map({ f -> columnOf(f) }).join("|") + "\".split(\"|\").indexOf(p.name) >= 0 }));\n    val stored = " + (if (generated) n + "(" + decl.fields.map({ f -> f.name + ": " + (if (f.name == idName) "(rows.first() ?? Row(columns: [], values: [])).int(\"" + idCol + "\")" else "c." + f.name) }).join(", ") + ")" else "c") + ";\n    val _r = __rkEntity_" + n + "_revise(t, stored, \"insert\");\n    return stored;\n}");
+    val reviseBody = if (audited) { "val seen = t.query(\"SELECT " + idCol + " FROM " + revTable + " WHERE " + idCol + " = :__id\", [param(\"__id\", " + idText + ")]).rowCount();\n    val ps: Param[] = [" + revParams.join(", ") + ", param(\"revision_number\", (seen + 1).toString()), param(\"revision_type\", kind), param(\"revision_timestamp\", rkOrmNow()), param(\"revision_author\", rkOrmPrincipal())];\n    return t.update(\"" + revInsert + "\", ps);" } else { "return 0;" };
+    @emit("pub fn __rkEntity_" + n + "_revise(t: Tx, c: " + n + ", kind: string) -> i32 {\n    " + reviseBody + "\n}");
+    val transientArgs = if (decl.fields.length > cols.length) { ", " + decl.fields.filter({ f -> marked(f, "transient") }).map({ f -> f.name + ": c0." + f.name }).join(", ") } else { "" };
+    @emit("pub fn __rkEntity_" + n + "_insert(sql: SqlTemplate, c0: " + n + ") -> " + n + " {\n    val now = rkOrmNow();\n    val who = rkOrmPrincipal();\n    val c = " + n + "(" + stamp.join(", ") + transientArgs + ");\n    return sql.transaction({ t -> __rkEntity_" + n + "_insertIn(t, c) });\n}");
+    val storedFields = decl.fields.map({ f ->
+        val value = if (f.name == idName) { "(rows.first() ?? Row(columns: [], values: [])).int(\"" + idCol + "\")" } else { "c." + f.name };
+        return f.name + ": " + value;
+    });
+    val storedText = if (generated) { n + "(" + storedFields.join(", ") + ")" } else { "c" };
+    @emit("pub fn __rkEntity_" + n + "_insertIn(t: Tx, c: " + n + ") -> " + n + " {\n    val rows = t.query(\"" + insertSql + "\", __rkEntity_" + n + "_params(c).filter({ p -> \"" + insertCols.map({ f -> columnOf(f) }).join("|") + "\".split(\"|\").indexOf(p.name) >= 0 }));\n    val stored = " + storedText + ";\n    val _r = __rkEntity_" + n + "_revise(t, stored, \"insert\");\n    return stored;\n}");
     @emit("pub fn __rkEntity_" + n + "_update(sql: SqlTemplate, c0: " + n + ") -> " + n + " {\n    val now = rkOrmNow();\n    val who = rkOrmPrincipal();\n    val c = c0;\n    val next = " + n + "(" + updStamp.join(", ") + ");\n    return sql.transaction({ t -> __rkEntity_" + n + "_updateIn(t, c, next) });\n}");
-    @emit("pub fn __rkEntity_" + n + "_updateIn(t: Tx, c: " + n + ", next: " + n + ") -> " + n + " {\n    var ps: Param[] = __rkEntity_" + n + "_params(next).filter({ p -> \"" + updCols.map({ f -> columnOf(f) }).join("|") + "\".split(\"|\").indexOf(p.name) >= 0 });\n    ps.push(param(\"__id\", " + idText + "));\n    " + (if (verCol != "") "ps.push(param(\"__version\", c." + verName + ".toString()));\n    " else "") + "val n = t.update(\"" + updateSql + "\", ps);\n    if (n == 0) @panic(__rkEntity_" + n + "_stale(t, c));\n    val _r = __rkEntity_" + n + "_revise(t, next, \"update\");\n    return next;\n}");
-    @emit("pub fn __rkEntity_" + n + "_stale(t: Tx, c: " + n + ") -> string {\n    val cur = t.query(\"" + selectSql + "\", [param(\"__id\", " + idText + ")]);\n    val stored = if (cur.rowCount() == 0) \"no row\" else " + (if (verCol != "") "(cur.first() ?? Row(columns: [], values: [])).get(\"" + verCol + "\")" else "\"present\"") + ";\n    return \"rakun-data: optimistic lock failure on " + table + " id \" + " + idText + " + \" - expected version \" + " + (if (verCol != "") "c." + verName + ".toString()" else "\"-\"") + " + \", stored \" + stored;\n}");
+    val versionPush = if (verCol != "") { "ps.push(param(\"__version\", c." + verName + ".toString()));\n    " } else { "" };
+    @emit("pub fn __rkEntity_" + n + "_updateIn(t: Tx, c: " + n + ", next: " + n + ") -> " + n + " {\n    var ps: Param[] = __rkEntity_" + n + "_params(next).filter({ p -> \"" + updCols.map({ f -> columnOf(f) }).join("|") + "\".split(\"|\").indexOf(p.name) >= 0 });\n    ps.push(param(\"__id\", " + idText + "));\n    " + versionPush + "val n = t.update(\"" + updateSql + "\", ps);\n    if (n == 0) @panic(__rkEntity_" + n + "_stale(t, c));\n    val _r = __rkEntity_" + n + "_revise(t, next, \"update\");\n    return next;\n}");
+    val storedVersionText = if (verCol != "") { "(cur.first() ?? Row(columns: [], values: [])).get(\"" + verCol + "\")" } else { "\"present\"" };
+    val expectedVersionText = if (verCol != "") { "c." + verName + ".toString()" } else { "\"-\"" };
+    @emit("pub fn __rkEntity_" + n + "_stale(t: Tx, c: " + n + ") -> string {\n    val cur = t.query(\"" + selectSql + "\", [param(\"__id\", " + idText + ")]);\n    val stored = if (cur.rowCount() == 0) \"no row\" else " + storedVersionText + ";\n    return \"rakun-data: optimistic lock failure on " + table + " id \" + " + idText + " + \" - expected version \" + " + expectedVersionText + " + \", stored \" + stored;\n}");
     @emit("pub fn __rkEntity_" + n + "_delete(sql: SqlTemplate, c: " + n + ") -> i32 {\n    return sql.transaction({ t -> __rkEntity_" + n + "_deleteIn(t, c) });\n}");
-    @emit("pub fn __rkEntity_" + n + "_deleteIn(t: Tx, c: " + n + ") -> i32 {\n    var ps: Param[] = [param(\"__id\", " + idText + ")];\n    " + (if (verCol != "") "ps.push(param(\"__version\", c." + verName + ".toString()));\n    " else "") + "val n = t.update(\"" + deleteSql + "\", ps);\n    " + (if (verCol != "") "if (n == 0) @panic(__rkEntity_" + n + "_stale(t, c));\n    " else "") + "val _r = if (n > 0) __rkEntity_" + n + "_revise(t, c, \"delete\") else 0;\n    return n;\n}");
+    val staleCheck = if (verCol != "") { "if (n == 0) @panic(__rkEntity_" + n + "_stale(t, c));\n    " } else { "" };
+    @emit("pub fn __rkEntity_" + n + "_deleteIn(t: Tx, c: " + n + ") -> i32 {\n    var ps: Param[] = [param(\"__id\", " + idText + ")];\n    " + versionPush + "val n = t.update(\"" + deleteSql + "\", ps);\n    " + staleCheck + "val _r = if (n > 0) __rkEntity_" + n + "_revise(t, c, \"delete\") else 0;\n    return n;\n}");
     @emit("pub fn __rkEntity_" + n + "_byId(sql: SqlTemplate, id: " + idType + ") -> ?" + n + " {\n    val rows = sql.query(\"" + selectSql + "\", [param(\"__id\", " + idArgText + ")]);\n    if (rows.rowCount() == 0) return null;\n    return __rkEntity_" + n + "_fromRow(rows.first() ?? Row(columns: [], values: []));\n}");
     if (audited) {
         @emit("pub fn " + n + "RevisionMeta() -> EntityMeta { return EntityMeta(entity: \"" + n + "Revision\", table: \"" + revTable + "\", columns: \"" + colNames.join("|") + "|revision_number|revision_type|revision_timestamp|revision_author\", types: \"" + revTypes + "\", idColumn: \"" + idCol + "\", generated: false, versionColumn: \"\", revisions: false); }");

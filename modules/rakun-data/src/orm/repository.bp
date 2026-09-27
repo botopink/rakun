@@ -74,7 +74,8 @@ pub fn parseTerm(term: string) -> string {
         if (op == "" && body.endsWith(o) && body.length() > o.length()) op = o;
     };
     val field = lowerFirst(body.slice(0, body.length() - op.length()));
-    return field + "|" + op + "|" + (if (ignore) "1" else "0");
+    val ignoreFlag = if (ignore) { "1" } else { "0" };
+    return field + "|" + op + "|" + ignoreFlag;
 }
 
 // The predicate between `By` and `OrderBy` (or the end).
@@ -118,7 +119,8 @@ pub fn orderKeysOf(method: string) -> string[] {
     var cur = "";
     for (camelWords(rest)) { w ->
         if (w == "Asc" || w == "Desc") {
-            out.push(lowerFirst(cur) + "|" + (if (w == "Desc") "1" else "0"));
+            val descFlag = if (w == "Desc") { "1" } else { "0" };
+            out.push(lowerFirst(cur) + "|" + descFlag);
             cur = "";
         } else cur = cur + w;
     };
@@ -159,7 +161,7 @@ fn termExpr(entity: string, term: string, k: i32, ignoreAll: bool) -> string {
 // How the k-th parameter becomes text: a pattern for StartingWith/EndingWith/
 // Containing, a joined list for In/NotIn, `toString` for a number.
 fn paramExpr(op: string, name: string, typeName: string) -> string {
-    val text = if (typeName == "string") name else if (typeName == "string[]" || typeName == "Array<string>") name + ".join(\",\")" else if (typeName == "bool") "(if (" + name + ") \"true\" else \"false\")" else if (typeName == "i32[]" || typeName == "Array<i32>") name + ".map({ x -> x.toString() }).join(\",\")" else name + ".toString()";
+    val text = if (typeName == "string") name else if (typeName == "string[]" || typeName == "Array<string>") name + ".join(\",\")" else if (typeName == "bool") "if (" + name + ") { \"true\" } else { \"false\" }" else if (typeName == "i32[]" || typeName == "Array<i32>") name + ".map({ x -> x.toString() }).join(\",\")" else name + ".toString()";
     if (op == "StartingWith") return text + " + \"%\"";
     if (op == "EndingWith") return "\"%\" + " + text;
     if (op == "Containing") return "\"%\" + " + text + " + \"%\"";
@@ -202,13 +204,17 @@ pub fn entityRepository(comptime decl: @Decl, entity: string) {
             i = i + 1;
         };
         val whereText = if (clauses.length == 0) "" else " where " + clauses.join(" ");
-        val order = orderKeysOf(m.name).map({ o -> "\" + " + e + "Col()." + field3(o, 0) + " + \"" + (if (field3(o, 1) == "1") " desc" else " asc") });
+        val order = orderKeysOf(m.name).map({ o ->
+            val direction = if (field3(o, 1) == "1") { " desc" } else { " asc" };
+            return "\" + " + e + "Col()." + field3(o, 0) + " + \"" + direction;
+        });
         val orderText = if (order.length == 0) "" else " order by " + order.join(", ");
         val distinct = if (m.name.contains("DistinctBy")) "distinct " else "";
         val columns = "\" + " + e + "Meta().columns.replaceAll(\"|\", \", \") + \"";
         val table = "\" + " + e + "Meta().table + \"";
         val first = prefix == "findFirst" || prefix == "findTop";
-        val body = if (prefix == "count" || prefix == "exists") "select count(*) as n from " + table + whereText else if (prefix == "delete") "delete from " + table + whereText else "select " + distinct + columns + " from " + table + whereText + orderText + (if (first) " limit 1" else "");
+        val limitText = if (first) { " limit 1" } else { "" };
+        val body = if (prefix == "count" || prefix == "exists") "select count(*) as n from " + table + whereText else if (prefix == "delete") "delete from " + table + whereText else "select " + distinct + columns + " from " + table + whereText + orderText + limitText;
         var pexprs: string[] = [];
         var j = 0;
         var kk = 0;
@@ -224,7 +230,8 @@ pub fn entityRepository(comptime decl: @Decl, entity: string) {
             };
         };
         val sig = params.map({ p -> p.name + ": " + p.typeName });
-        val head = "pub fn __rkDerived_" + repo + "_" + m.name + "(sql: SqlTemplate" + (if (sig.length > 0) ", " + sig.join(", ") else "") + ") -> " + m.returnType;
+        val sigText = if (sig.length > 0) { ", " + sig.join(", ") } else { "" };
+        val head = "pub fn __rkDerived_" + repo + "_" + m.name + "(sql: SqlTemplate" + sigText + ") -> " + m.returnType;
         val ps = "val ps: Param[] = [" + pexprs.join(", ") + "];";
         val sqlFn = "__rkDerivedSql_" + repo + "_" + m.name + "()";
         val mapper = "{ r -> __rkEntity_" + e + "_fromRow(r) }";
@@ -264,7 +271,8 @@ pub fn belongsTo(comptime decl: @Decl, owner: string, ownerField: string, target
     val join = if (left) " left join " else " join ";
     val cols = "\" + joinColumns(" + owner + "Meta(), \"a\") + \", \" + joinColumns(" + target + "Meta(), \"b\") + \"";
     @emit("pub fn __rkJoin_" + n + "_sql() -> string { return \"select " + cols + " from \" + " + owner + "Meta().table + \" a" + join + "\" + " + target + "Meta().table + \" b on a.\" + " + owner + "Col()." + ownerField + " + \" = b.\" + " + target + "Col()." + targetField + "; }");
-    @emit("pub fn __rkJoin_" + n + "_fromRow(r: Row) -> " + n + " {\n    val a = __rkEntity_" + owner + "_fromRow(unprefixed(r, \"a\"));\n    " + (if (left) "val present = r.get(\"b__\" + " + target + "Meta().idColumn) != \"\";\n    val b: ?" + target + " = if (present) __rkEntity_" + target + "_fromRow(unprefixed(r, \"b\")) else null;" else "val b = __rkEntity_" + target + "_fromRow(unprefixed(r, \"b\"));") + "\n    return " + n + "(" + ownerName + ": a, " + targetName + ": b);\n}");
+    val bindTarget = if (left) { "val present = r.get(\"b__\" + " + target + "Meta().idColumn) != \"\";\n    val b: ?" + target + " = if (present) __rkEntity_" + target + "_fromRow(unprefixed(r, \"b\")) else null;" } else { "val b = __rkEntity_" + target + "_fromRow(unprefixed(r, \"b\"));" };
+    @emit("pub fn __rkJoin_" + n + "_fromRow(r: Row) -> " + n + " {\n    val a = __rkEntity_" + owner + "_fromRow(unprefixed(r, \"a\"));\n    " + bindTarget + "\n    return " + n + "(" + ownerName + ": a, " + targetName + ": b);\n}");
     if (decl.kind != DeclKind.Type) decl.fail("#[belongsTo] must annotate a record holding the two entities");
     if (ownerName == "") decl.fail("#[belongsTo] " + n + " has no field of type " + owner);
     if (targetName == "") decl.fail("#[belongsTo] " + n + " has no field of type " + target + " or ?" + target);

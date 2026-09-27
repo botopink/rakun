@@ -39,7 +39,11 @@ pub fn pagedSql(base: string, p: Pageable, meta: EntityMeta, extra: i32) -> stri
     val cols = meta.columns.split("|");
     val bad = p.sort.filter({ s -> cols.indexOf(s.field) < 0 });
     if (bad.length > 0) @panic("rakun-data: the sort field `" + (bad.at(0) ?? Sort(field: "", descending: false)).field + "` is not a column of " + meta.table + " - columns: " + cols.join(", "));
-    val order = if (p.sort.length == 0) "" else " order by " + p.sort.map({ s -> s.field + (if (s.descending) " desc" else " asc") }).join(", ");
+    val keys = p.sort.map({ s ->
+        val direction = if (s.descending) { " desc" } else { " asc" };
+        return s.field + direction;
+    });
+    val order = if (p.sort.length == 0) "" else " order by " + keys.join(", ");
     return base + order + " limit :__limit offset :__offset";
 }
 
@@ -124,7 +128,8 @@ pub type QueryBuilder(
         val k = self.params.length;
         var cs: string[] = [];
         for (self.clauses) { c -> cs.push(c); };
-        cs.push((if (cs.length == 0) "" else conn) + column + " " + opText(op) + " :p" + k.toString());
+        val lead = if (cs.length == 0) { "" } else { conn };
+        cs.push(lead + column + " " + opText(op) + " :p" + k.toString());
         var ps: Param[] = [];
         for (self.params) { p -> ps.push(p); };
         ps.push(param("p" + k.toString(), value));
@@ -134,7 +139,8 @@ pub type QueryBuilder(
     pub fn orderBy(self: Self, column: string, descending: bool) -> QueryBuilder {
         var os: string[] = [];
         for (self.order) { o -> os.push(o); };
-        os.push(column + (if (descending) " desc" else " asc"));
+        val direction = if (descending) { " desc" } else { " asc" };
+        os.push(column + direction);
         return QueryBuilder(meta: self.meta, clauses: self.clauses, params: self.params, order: os, limitN: self.limitN, offsetN: self.offsetN);
     }
 

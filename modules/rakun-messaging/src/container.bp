@@ -78,12 +78,13 @@ fn intOr(key: string, fallback: i32) -> i32 {
 pub fn containerSettings(container: string, broker: string) -> ContainerSettings {
     val ack = rkProp(listenerKey(container, "ack-mode")).trim();
     val enabled = rkProp(listenerKey(container, "enabled")).trim();
+    val defaultAck = if (broker == "redis") { "none" } else { "auto" };
     return ContainerSettings(
         name: container,
         broker: broker,
         concurrency: intOr(listenerKey(container, "concurrency"), 1),
         prefetch: intOr(listenerKey(container, "prefetch"), 10),
-        ackMode: if (ack == "") (if (broker == "redis") "none" else "auto") else ack,
+        ackMode: if (ack == "") defaultAck else ack,
         enabled: enabled != "false",
     );
 }
@@ -164,7 +165,8 @@ pub fn startMessaging() -> i32 {
             val props = passthrough(arm);
             val _c = rkMsgArmConnect(arm, props);
             val names = props.map({ kv -> (kv.split("=")[0] ?? "") });
-            val _l = rkMsgLogLine("passthrough " + arm + ": " + (if (names.length == 0) "(none)" else names.join(", ")));
+            val shown = if (names.length == 0) { "(none)" } else { names.join(", ") };
+            val _l = rkMsgLogLine("passthrough " + arm + ": " + shown);
             val _h = rkRegisterHealthIndicator("messaging." + arm, "rakun-messaging", { -> armHealth(arm) });
         };
     };

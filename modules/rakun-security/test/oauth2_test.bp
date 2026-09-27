@@ -42,7 +42,8 @@ declare fn s256Of(v: string) -> string;
 
 fn bump(key: string) -> i32 {
     val n = prop(key);
-    return rkSetProp(key, (if (n == "") 1 else toInt(n) + 1).toString());
+    val next = if (n == "") { 1 } else { toInt(n) + 1 };
+    return rkSetProp(key, next.toString());
 }
 
 #[@External.Erlang("""(fun(__S) -> try binary_to_integer(__S) catch _:_ -> 0 end end)($0)""")]
@@ -307,7 +308,12 @@ test "oauth2: a refresh answered invalid_grant ends the session instead of retry
     val res = login("/x");
     val cookie = sessionCookie();
     val _g = rkSetProp("test.idp.mode", "invalid-grant");
-    val _t = rkChainSetTerminal({ method, path, hw, qw, body -> Response.ok("token=" + accessToken("idp") + " session=" + (if (optionalSession() == null) "none" else "live")) });
+    val _t = rkChainSetTerminal({ method, path, hw, qw, body ->
+        // The refresh runs first: it is what ends the session the next read sees.
+        val token = accessToken("idp");
+        val session = if (optionalSession() == null) { "none" } else { "live" };
+        return Response.ok("token=" + token + " session=" + session);
+    });
     val before = toInt(prop("test.idp.token"));
     val out = runChain("GET", "/me", "cookie\t" + cookie, "", "");
     val _u = rkSetProp("test.idp.mode", "");

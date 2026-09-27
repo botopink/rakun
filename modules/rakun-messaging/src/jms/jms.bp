@@ -106,7 +106,8 @@ pub fn jmsConfigProblem() -> string {
     if (known == false) return "rakun jms: rakun.jms.url `" + redactedUrl(url) + "` has an unsupported scheme - amqp:// (amqps://) or stomp:// (stomp+ssl://)";
     if (armFor(url) == "amqp10") return "rakun jms: the AMQP 1.0 arm needs amqp10_client, an OTP application a sidecar cannot load - use a stomp:// URL (ActiveMQ and Artemis both speak STOMP)";
     val bundle = rkProp("rakun.jms.ssl.bundle").trim();
-    if (u.startsWith("stomp+ssl://") && (bundle == "" || bundleRegistered(bundle) == false)) return "rakun jms: stomp+ssl:// needs rakun.jms.ssl.bundle naming a registered front 74 bundle" + (if (bundle == "") "" else " - `" + bundle + "` is not one");
+    val bundleNote = if (bundle == "") { "" } else { " - `" + bundle + "` is not one" };
+    if (u.startsWith("stomp+ssl://") && (bundle == "" || bundleRegistered(bundle) == false)) return "rakun jms: stomp+ssl:// needs rakun.jms.ssl.bundle naming a registered front 74 bundle" + bundleNote;
     if (rkProp("rakun.jms.embedded").trim() == "true") return "rakun jms: an embedded broker is refused - run the broker as its own service";
     return "";
 }
@@ -180,7 +181,8 @@ pub fn jmsListen(name: string, destination: Destination, ack: string, selector: 
     if (selector != "") extra.push(#("selector", selector));
     if (durable != "") extra.push(#("activemq.subscriptionName", durable));
     val err = rkJmsSubscribe(jmsConnection(), name, path, if (ack == "") "client-individual" else ack, extra, { body, headers -> handle(path, body, headers, handler) });
-    if (err != "") @panic("rakun jms: the broker refused the subscription " + name + " to " + path + " - " + err + (if (selector != "") " (the selector is the broker's: client-side filtering is not a fallback)" else ""));
+    val selectorNote = if (selector != "") { " (the selector is the broker's: client-side filtering is not a fallback)" } else { "" };
+    if (err != "") @panic("rakun jms: the broker refused the subscription " + name + " to " + path + " - " + err + selectorNote);
     return 0;
 }
 
@@ -195,5 +197,6 @@ pub fn jmsHealth() -> Health {
     val c = jmsConnection();
     val url = redactedUrl(rkProp("rakun.jms.url").trim());
     if (c != "" && rkJmsAlive(c)) return Health(status: "UP", details: "{\"url\":\"" + url + "\"}");
-    return Health(status: "DOWN", details: "{\"url\":\"" + url + "\",\"error\":\"" + (if (c == "") "not connected" else "the STOMP connection closed") + "\"}");
+    val reason = if (c == "") { "not connected" } else { "the STOMP connection closed" };
+    return Health(status: "DOWN", details: "{\"url\":\"" + url + "\",\"error\":\"" + reason + "\"}");
 }

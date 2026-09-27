@@ -1152,8 +1152,13 @@ guessed, and each costs a spelling in `src/config.bp`:
 - std's `random.intInRange` floors a float by walking one recursive step per
   unit of range, which blows the stack for anything the size of a port space —
   hence `randomBelow`, rejection sampling over composed decimal digits.
-- An `if` expression cannot sit on the right of `+` (`i = i + if (…) 2 else 1`);
-  parenthesise it (`i + (if (…) { 2 } else { 1 })`).
+- An `if` expression is never an operand — not on the right of `+`, not in
+  parentheses (`i + (if (…) 2 else 1)` is `error[if-operand]`, decision gate-g /
+  rc3-a). Bind it first: `val step = if (…) { 2 } else { 1 }; i = i + step;`.
+  Inside a lambda the body becomes a block: `{ f -> val v = if (…) { a } else
+  { b }; return f.name + v; }`. Binding moves the evaluation earlier: when the
+  condition or a sibling operand has a side effect (a refresh that ends the
+  session, a counter), bind the operands in their original left-to-right order.
 
 ## The container's doors
 
