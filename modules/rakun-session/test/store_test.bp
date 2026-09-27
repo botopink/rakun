@@ -1,12 +1,14 @@
-//// One suite, run once per arm: ETS always, SQL over rakun-data's
-//// `ets:memory` datasource, Redis only when `RAKUN_TEST_REDIS_URL` is set
-//// (reported as skipped otherwise — there is no Redis on this machine's PATH).
+//// One suite, run once per arm: ETS, and SQL over rakun-data's `ets:memory`
+//// datasource. The Redis arm has no cell: a cell that needs a service outside
+//// the process is not a gate cell (decision gate-h), and the RESP double that
+//// would stand in for the server is `rakun-test`'s to write (`03-rakun/19`,
+//// `specs/1.0.11-beta/deferred.md`). `saveCommand` is asserted on its own.
 
-import {io: {clock, env}} from "std";
+import {io: {clock}} from "std";
 import {Session, SessionRepository, newSession, touchedAt} from "session";
 import {etsRepository} from "store_ets";
 import {sqlRepository, sessionDdl, initializeSessionSchema} from "store_sql";
-import {redisRepository, saveCommand} from "store_redis";
+import {saveCommand} from "store_redis";
 import {startDataSource} from "rakun-data";
 import {rkSessSpawnCrash, rkSessEtsOwnerFacts, rkSessEtsClear} from "host";
 
@@ -62,13 +64,6 @@ test "store: the suite passes unchanged on the SQL arm" {
     val _d = startDataSource("sessions-suite", "ets:memory", 2, 1000, "eager");
     assert initializeSessionSchema("sessions-suite", "SESSIONS", "always");
     val out: string = suite(sqlRepository("sessions-suite", "SESSIONS", 60));
-    assert out == "", out;
-}
-
-test "store: the suite runs on the Redis arm when RAKUN_TEST_REDIS_URL is set" {
-    val url: string = env.read("RAKUN_TEST_REDIS_URL") ?? "";
-    val out: string = if (url == "") "" else suite(redisRepository(url, 60));
-    if (url == "") @print("store: Redis arm SKIPPED - RAKUN_TEST_REDIS_URL is not set");
     assert out == "", out;
 }
 

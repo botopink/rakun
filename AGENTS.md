@@ -3907,8 +3907,11 @@ one connection per command).
   rakun-data (`sessionDdl`; the table is created only by
   `initializeSessionSchema(…, "always")`), `redisRepository(url, timeout)`
   (`SET … EX <timeout>`, a principal set per user). One suite
-  (`test/store_test.bp`) runs on ETS and SQL; Redis runs when
-  `RAKUN_TEST_REDIS_URL` is set and prints SKIPPED otherwise.
+  (`test/store_test.bp`) runs on ETS and SQL. The Redis arm has no cell: a
+  cell that needs a service outside the process is not a gate cell (decision
+  gate-h), and the RESP double that would stand in for the server is
+  `rakun-test`'s to write (`03-rakun/19`); `saveCommand` is asserted on its
+  own, and no environment variable gates a test.
 - **Ids and signing** (`signing.bp`, the verification path) — 32 bytes from
   `random.secureToken`, base64url; cookie value `<id>.<hmacSha256Base64Url>`;
   the signature is checked with `hash.equalsConstantTime` BEFORE the store is

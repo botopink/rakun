@@ -38,8 +38,8 @@
          max_queue_seen/0, note_principal/1, accepting/0, session_supervised/1,
          client_connect/3, client_send/2, client_send_binary/2, client_recv/2,
          client_pause/1, client_autopong/2, client_close/2,
-         two_node_broadcast/2, wide/1]).
--export([remote_subscriber/2]).
+         pg_broadcast/2, wide/1]).
+-export([pg_subscriber/2]).
 
 -define(ENDPOINTS, rakun_ws_endpoints). %% ordered_set {Seq, Path, TypeName, OnOpen, OnMessage, OnClose}
 -define(SESSIONS, rakun_ws_sessions).   %% set {Id, Pid, Principal, Path}
@@ -507,52 +507,28 @@ bump(Key) ->
 %% subscriber received>"`, or `"skipped: <why>"` when this runner cannot start
 %% a distributed peer.
 
-two_node_broadcast(Topic, Text) ->
+%% A `pg` member that is not a session (a peer node's subscriber, in a
+%% cluster) receives the raw frame. Two subscriber processes of THIS node join
+%% the topic's group; one broadcast reaches both, and each answers the payload
+%% it was handed: `"<count>|<payload>|<payload>"`. No peer node is started —
+%% a cell that needs one is not a gate cell (decision gate-h); the non-session
+%% arm of `broadcast/2` is what the cell asserts.
+pg_broadcast(Topic, Text) ->
     ensure(),
-    try
-        case node() of
-            nonode@nohost ->
-                _ = os:cmd("epmd -daemon"),
-                {ok, _} = net_kernel:start([list_to_atom("rakun_ws_" ++ integer_to_list(erlang:unique_integer([positive]))), shortnames]);
-            _ -> ok
-        end,
-        {ok, Peer, Node} = peer:start_link(#{name => peer:random_name(), args => ["-setcookie", atom_to_list(erlang:get_cookie())]}),
-        try
-            true = rpc:call(Node, code, set_path, [code:get_path()]),
-            %% The sidecar is compiled from source at run time and has no
-            %% `.beam` on the path: compile the same source on the peer.
-            Source = proplists:get_value(source, ?MODULE:module_info(compile)),
-            {ok, ?MODULE, Bin} = rpc:call(Node, compile, file, [Source, [binary]]),
-            {module, ?MODULE} = rpc:call(Node, code, load_binary, [?MODULE, Source, Bin]),
-            _ = rpc:call(Node, pg, start, [?SCOPE]),
-            Self = self(),
-            Remote = erlang:spawn(Node, ?MODULE, remote_subscriber, [Topic, Self]),
-            receive {remote_joined, Remote} -> ok after 5000 -> erlang:error(remote_join_timeout) end,
-            wait_members(Topic, 50),
-            Count = broadcast(Topic, Text),
-            Got = receive {remote_got, Data} -> Data after 5000 -> <<"nothing">> end,
-            iolist_to_binary([integer_to_binary(Count), "|", Got])
-        after
-            peer:stop(Peer)
-        end
-    catch C:E ->
-        iolist_to_binary(io_lib:format("skipped: ~p:~p", [C, E]))
-    end.
+    Self = self(),
+    Subs = [erlang:spawn_link(?MODULE, pg_subscriber, [Topic, Self]) || _ <- [1, 2]],
+    _ = [receive {pg_joined, P} -> ok after 5000 -> erlang:error(pg_join_timeout) end || P <- Subs],
+    Count = broadcast(Topic, Text),
+    Got = [receive {pg_got, P, Data} -> Data after 5000 -> <<"nothing">> end || P <- Subs],
+    iolist_to_binary([integer_to_binary(Count), "|", lists:join("|", Got)]).
 
-wait_members(_Topic, 0) -> ok;
-wait_members(Topic, N) ->
-    case [P || P <- pg:get_members(?SCOPE, {topic, Topic}), node(P) =/= node()] of
-        [] -> receive after 20 -> wait_members(Topic, N - 1) end;
-        _ -> ok
-    end.
-
-remote_subscriber(Topic, Parent) ->
+pg_subscriber(Topic, Parent) ->
     ok = pg:join(?SCOPE, {topic, Topic}, self()),
-    Parent ! {remote_joined, self()},
+    Parent ! {pg_joined, self()},
     receive
         {ws_out, Frame} ->
             <<_:16, Payload/binary>> = iolist_to_binary(Frame),
-            Parent ! {remote_got, Payload}
+            Parent ! {pg_got, self(), Payload}
     after 10000 -> ok
     end.
 
