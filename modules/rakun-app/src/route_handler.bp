@@ -34,18 +34,10 @@
 
 import {io.fs, json, encoding, collections.Dict} from "std";
 import {Request, Response, rkProp} from "rakun";
-import {
-    RequestPhase,
-    RequestScope,
-    beginRequest,
-    endRequest,
-    requestLive,
-    requestPhase,
-    setPhase,
-} from "rakun/request_context";
+import {RequestPhase, RequestScope, beginRequest, endRequest, requestLive, requestPhase, setPhase} from "rakun/request_context";
 import {rkAppRegisterHandler, rkAppHasRender, rkAppRender, rkAppRegisterSource, rkAppSources, rkAppTable, entryLine} from "file_router";
 import {servePage, chunkWriter, rkSsrBegin, rkSsrBody, rkSsrStatus, rkSsrWrite, rkSsrClose, rkSsrSetStatus, rkSsrGuard, rkSsrStarted, rkSsrClosed, rkSsrPageRequest} from "ssr";
-import {table: {RouteEntry, parseTable, writeTable}, match: {RouteMatch, matchPath}, navigation: {NavKind, NavOutcome}} from "routing";
+import {table.RouteEntry, table.parseTable, table.writeTable, match.RouteMatch, match.matchPath, navigation.NavKind, navigation.NavOutcome} from "routing";
 import {captureSignals, takeSignal, statusFor, locationHeaderFor} from "navigation";
 
 // ── the response ────────────────────────────────────────────────────────────
@@ -57,15 +49,30 @@ pub type HandlerResponse(
     tasks: Array<fn() -> @Task<string>>,
 ) {
     pub fn json(body: string) -> HandlerResponse {
-        return HandlerResponse(status: 200, headers: [#("Content-Type", "application/json")], chunks: [body], tasks: []);
+        return HandlerResponse(
+            status: 200,
+            headers: [#("Content-Type", "application/json")],
+            chunks: [body],
+            tasks: [],
+        );
     }
 
     pub fn text(body: string) -> HandlerResponse {
-        return HandlerResponse(status: 200, headers: [#("Content-Type", "text/plain; charset=utf-8")], chunks: [body], tasks: []);
+        return HandlerResponse(
+            status: 200,
+            headers: [#("Content-Type", "text/plain; charset=utf-8")],
+            chunks: [body],
+            tasks: [],
+        );
     }
 
     pub fn created(body: string) -> HandlerResponse {
-        return HandlerResponse(status: 201, headers: [#("Content-Type", "application/json")], chunks: [body], tasks: []);
+        return HandlerResponse(
+            status: 201,
+            headers: [#("Content-Type", "application/json")],
+            chunks: [body],
+            tasks: [],
+        );
     }
 
     pub fn noContent() -> HandlerResponse {
@@ -77,25 +84,54 @@ pub type HandlerResponse(
     }
 
     pub fn badRequest(message: string) -> HandlerResponse {
-        return HandlerResponse(status: 400, headers: [#("Content-Type", "text/plain; charset=utf-8")], chunks: [message], tasks: []);
+        return HandlerResponse(
+            status: 400,
+            headers: [#("Content-Type", "text/plain; charset=utf-8")],
+            chunks: [message],
+            tasks: [],
+        );
     }
 
     pub fn unsupportedMedia(message: string) -> HandlerResponse {
-        return HandlerResponse(status: 415, headers: [#("Content-Type", "text/plain; charset=utf-8")], chunks: [message], tasks: []);
+        return HandlerResponse(
+            status: 415,
+            headers: [#("Content-Type", "text/plain; charset=utf-8")],
+            chunks: [message],
+            tasks: [],
+        );
     }
 
     // A NEW value; the original is unchanged. A repeated name is kept twice.
-    pub fn withHeader(self: Self, name: string, value: string) -> HandlerResponse {
+    pub fn withHeader(
+        self: Self,
+        name: string,
+        value: string,
+    ) -> HandlerResponse {
         var hs: Array<#(string, string)> = [];
-        for (self.headers) { h -> hs.push(h); };
+        for (self.headers) { h ->
+            hs.push(h);
+        }
         hs.push(#(name, value));
-        return HandlerResponse(status: self.status, headers: hs, chunks: self.chunks, tasks: self.tasks);
+        return HandlerResponse(
+            status: self.status,
+            headers: hs,
+            chunks: self.chunks,
+            tasks: self.tasks,
+        );
     }
 }
 
 // One chunk per thunk, in index order, whatever order they finish in.
-pub fn streamed(status: i32, tasks: Array<fn() -> @Task<string>>) -> HandlerResponse {
-    return HandlerResponse(status: status, headers: [], chunks: [], tasks: tasks);
+pub fn streamed(
+    status: i32,
+    tasks: Array<fn() -> @Task<string>>,
+) -> HandlerResponse {
+    return HandlerResponse(
+        status: status,
+        headers: [],
+        chunks: [],
+        tasks: tasks,
+    );
 }
 
 pub fn headerValues(h: HandlerResponse, name: string) -> string[] {
@@ -118,7 +154,7 @@ pub fn bodyForm(req: Request) -> Dict<string, string> {
     var d = Dict.empty();
     for (encoding.formParse(req.body())) { pair ->
         d = d.insert(pair._0, pair._1);
-    };
+    }
     return d;
 }
 
@@ -134,12 +170,15 @@ pub fn bodyJson(req: Request) -> @Result<string, string> {
     if (parsed.isError()) {
         val assert Error(e) = parsed;
         throw "the request body is not JSON: " + e;
-    };
+    }
     return req.body();
 }
 
 pub fn isMultipart(req: Request) -> bool {
-    return req.header("content-type").toLower().startsWith("multipart/form-data");
+    return req
+        .header("content-type")
+        .toLower()
+        .startsWith("multipart/form-data");
 }
 
 // ── the verbs ───────────────────────────────────────────────────────────────
@@ -148,8 +187,21 @@ pub fn routeVerbs() -> string[] {
     return ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
 }
 
-pub fn duplicateVerbProblem(verb: string, seg: string, first: string, second: string) -> string {
-    return "rakun routing: `" + verb + "` at `" + seg + "` is registered by `" + first + "` and again by `" + second + "` - a route.bp exports each verb once";
+pub fn duplicateVerbProblem(
+    verb: string,
+    seg: string,
+    first: string,
+    second: string,
+) -> string {
+    return "rakun routing: `"
+        + verb
+        + "` at `"
+        + seg
+        + "` is registered by `"
+        + first
+        + "` and again by `"
+        + second
+        + "` - a route.bp exports each verb once";
 }
 
 fn sourceKey(verb: string, seg: string) -> string {
@@ -160,60 +212,193 @@ fn firstRegistrant(key: string) -> string {
     var found = "";
     for (rkAppSources().split("\n")) { line ->
         val parts: string[] = line.split("|");
-        if ((found == "") && ((parts.at(0) ?? "") == key)) found = parts.at(1) ?? "";
-    };
+        if ((found == "") && ((parts.at(0) ?? "") == key))
+            found = parts.at(1) ?? "";
+    }
     return found;
 }
 
 // What each verb decorator emits: the `R` record and the handler, refusing a
 // second registration of one verb at one segment, naming both functions.
-pub fn registerRoute<Res>(verb: string, seg: string, fnName: string, handle: fn(req: Request) -> Res) -> i32 {
+pub fn registerRoute<Res>(
+    verb: string,
+    seg: string,
+    fnName: string,
+    handle: fn(req: Request) -> Res,
+) -> i32 {
     val record: string = entryLine("R", seg, "", verb);
-    if (rkAppHasRender(record)) @panic(duplicateVerbProblem(verb, seg, firstRegistrant(sourceKey(verb, seg)), fnName));
+    if (rkAppHasRender(record))
+        @panic(
+            duplicateVerbProblem(
+                verb,
+                seg,
+                firstRegistrant(sourceKey(verb, seg)),
+                fnName,
+            ),
+        );
     val _s = rkAppRegisterSource(sourceKey(verb, seg), fnName);
     return rkAppRegisterHandler(verb, seg, handle);
 }
 
 pub fn getRoute(comptime decl: @Decl, seg: string) {
-    @emit("val __rkHandler_GET_" + decl.name + " = registerRoute(\"GET\", \"" + seg + "\", \"" + decl.name + "\", { req -> " + decl.name + "(req) });");
-    if (decl.kind != DeclKind.Fn) decl.fail("#[getRoute] must annotate a function, fn(req: Request) -> @Task<HandlerResponse>");
-    if (decl.returnType.contains("Task") == false) decl.fail("#[getRoute] needs a handler returning @Task<HandlerResponse>, not " + decl.returnType);
+    @emit(
+        "val __rkHandler_GET_"
+            + decl.name
+            + " = registerRoute(\"GET\", \""
+            + seg
+            + "\", \""
+            + decl.name
+            + "\", { req -> "
+            + decl.name
+            + "(req) });",
+    );
+    if (decl.kind != DeclKind.Fn)
+        decl.fail(
+            "#[getRoute] must annotate a function, fn(req: Request) -> @Task<HandlerResponse>",
+        );
+    if (decl.returnType.contains("Task") == false)
+        decl.fail(
+            "#[getRoute] needs a handler returning @Task<HandlerResponse>, not "
+                + decl.returnType,
+        );
 }
 
 pub fn postRoute(comptime decl: @Decl, seg: string) {
-    @emit("val __rkHandler_POST_" + decl.name + " = registerRoute(\"POST\", \"" + seg + "\", \"" + decl.name + "\", { req -> " + decl.name + "(req) });");
-    if (decl.kind != DeclKind.Fn) decl.fail("#[postRoute] must annotate a function, fn(req: Request) -> @Task<HandlerResponse>");
-    if (decl.returnType.contains("Task") == false) decl.fail("#[postRoute] needs a handler returning @Task<HandlerResponse>, not " + decl.returnType);
+    @emit(
+        "val __rkHandler_POST_"
+            + decl.name
+            + " = registerRoute(\"POST\", \""
+            + seg
+            + "\", \""
+            + decl.name
+            + "\", { req -> "
+            + decl.name
+            + "(req) });",
+    );
+    if (decl.kind != DeclKind.Fn)
+        decl.fail(
+            "#[postRoute] must annotate a function, fn(req: Request) -> @Task<HandlerResponse>",
+        );
+    if (decl.returnType.contains("Task") == false)
+        decl.fail(
+            "#[postRoute] needs a handler returning @Task<HandlerResponse>, not "
+                + decl.returnType,
+        );
 }
 
 pub fn putRoute(comptime decl: @Decl, seg: string) {
-    @emit("val __rkHandler_PUT_" + decl.name + " = registerRoute(\"PUT\", \"" + seg + "\", \"" + decl.name + "\", { req -> " + decl.name + "(req) });");
-    if (decl.kind != DeclKind.Fn) decl.fail("#[putRoute] must annotate a function, fn(req: Request) -> @Task<HandlerResponse>");
-    if (decl.returnType.contains("Task") == false) decl.fail("#[putRoute] needs a handler returning @Task<HandlerResponse>, not " + decl.returnType);
+    @emit(
+        "val __rkHandler_PUT_"
+            + decl.name
+            + " = registerRoute(\"PUT\", \""
+            + seg
+            + "\", \""
+            + decl.name
+            + "\", { req -> "
+            + decl.name
+            + "(req) });",
+    );
+    if (decl.kind != DeclKind.Fn)
+        decl.fail(
+            "#[putRoute] must annotate a function, fn(req: Request) -> @Task<HandlerResponse>",
+        );
+    if (decl.returnType.contains("Task") == false)
+        decl.fail(
+            "#[putRoute] needs a handler returning @Task<HandlerResponse>, not "
+                + decl.returnType,
+        );
 }
 
 pub fn patchRoute(comptime decl: @Decl, seg: string) {
-    @emit("val __rkHandler_PATCH_" + decl.name + " = registerRoute(\"PATCH\", \"" + seg + "\", \"" + decl.name + "\", { req -> " + decl.name + "(req) });");
-    if (decl.kind != DeclKind.Fn) decl.fail("#[patchRoute] must annotate a function, fn(req: Request) -> @Task<HandlerResponse>");
-    if (decl.returnType.contains("Task") == false) decl.fail("#[patchRoute] needs a handler returning @Task<HandlerResponse>, not " + decl.returnType);
+    @emit(
+        "val __rkHandler_PATCH_"
+            + decl.name
+            + " = registerRoute(\"PATCH\", \""
+            + seg
+            + "\", \""
+            + decl.name
+            + "\", { req -> "
+            + decl.name
+            + "(req) });",
+    );
+    if (decl.kind != DeclKind.Fn)
+        decl.fail(
+            "#[patchRoute] must annotate a function, fn(req: Request) -> @Task<HandlerResponse>",
+        );
+    if (decl.returnType.contains("Task") == false)
+        decl.fail(
+            "#[patchRoute] needs a handler returning @Task<HandlerResponse>, not "
+                + decl.returnType,
+        );
 }
 
 pub fn deleteRoute(comptime decl: @Decl, seg: string) {
-    @emit("val __rkHandler_DELETE_" + decl.name + " = registerRoute(\"DELETE\", \"" + seg + "\", \"" + decl.name + "\", { req -> " + decl.name + "(req) });");
-    if (decl.kind != DeclKind.Fn) decl.fail("#[deleteRoute] must annotate a function, fn(req: Request) -> @Task<HandlerResponse>");
-    if (decl.returnType.contains("Task") == false) decl.fail("#[deleteRoute] needs a handler returning @Task<HandlerResponse>, not " + decl.returnType);
+    @emit(
+        "val __rkHandler_DELETE_"
+            + decl.name
+            + " = registerRoute(\"DELETE\", \""
+            + seg
+            + "\", \""
+            + decl.name
+            + "\", { req -> "
+            + decl.name
+            + "(req) });",
+    );
+    if (decl.kind != DeclKind.Fn)
+        decl.fail(
+            "#[deleteRoute] must annotate a function, fn(req: Request) -> @Task<HandlerResponse>",
+        );
+    if (decl.returnType.contains("Task") == false)
+        decl.fail(
+            "#[deleteRoute] needs a handler returning @Task<HandlerResponse>, not "
+                + decl.returnType,
+        );
 }
 
 pub fn headRoute(comptime decl: @Decl, seg: string) {
-    @emit("val __rkHandler_HEAD_" + decl.name + " = registerRoute(\"HEAD\", \"" + seg + "\", \"" + decl.name + "\", { req -> " + decl.name + "(req) });");
-    if (decl.kind != DeclKind.Fn) decl.fail("#[headRoute] must annotate a function, fn(req: Request) -> @Task<HandlerResponse>");
-    if (decl.returnType.contains("Task") == false) decl.fail("#[headRoute] needs a handler returning @Task<HandlerResponse>, not " + decl.returnType);
+    @emit(
+        "val __rkHandler_HEAD_"
+            + decl.name
+            + " = registerRoute(\"HEAD\", \""
+            + seg
+            + "\", \""
+            + decl.name
+            + "\", { req -> "
+            + decl.name
+            + "(req) });",
+    );
+    if (decl.kind != DeclKind.Fn)
+        decl.fail(
+            "#[headRoute] must annotate a function, fn(req: Request) -> @Task<HandlerResponse>",
+        );
+    if (decl.returnType.contains("Task") == false)
+        decl.fail(
+            "#[headRoute] needs a handler returning @Task<HandlerResponse>, not "
+                + decl.returnType,
+        );
 }
 
 pub fn optionsRoute(comptime decl: @Decl, seg: string) {
-    @emit("val __rkHandler_OPTIONS_" + decl.name + " = registerRoute(\"OPTIONS\", \"" + seg + "\", \"" + decl.name + "\", { req -> " + decl.name + "(req) });");
-    if (decl.kind != DeclKind.Fn) decl.fail("#[optionsRoute] must annotate a function, fn(req: Request) -> @Task<HandlerResponse>");
-    if (decl.returnType.contains("Task") == false) decl.fail("#[optionsRoute] needs a handler returning @Task<HandlerResponse>, not " + decl.returnType);
+    @emit(
+        "val __rkHandler_OPTIONS_"
+            + decl.name
+            + " = registerRoute(\"OPTIONS\", \""
+            + seg
+            + "\", \""
+            + decl.name
+            + "\", { req -> "
+            + decl.name
+            + "(req) });",
+    );
+    if (decl.kind != DeclKind.Fn)
+        decl.fail(
+            "#[optionsRoute] must annotate a function, fn(req: Request) -> @Task<HandlerResponse>",
+        );
+    if (decl.returnType.contains("Task") == false)
+        decl.fail(
+            "#[optionsRoute] needs a handler returning @Task<HandlerResponse>, not "
+                + decl.returnType,
+        );
 }
 
 // ── the dispatch ────────────────────────────────────────────────────────────
@@ -228,11 +413,15 @@ declare fn rkSsrAddHeader(name: string, value: string) -> void;
 declare fn rkSsrStream(tasks: Array<fn() -> @Task<string>>) -> i32;
 
 #[@External.Erlang("rakun_ssr", "set_fallback")]
-declare fn rkAppSetFallback(dispatch: fn(req: Request) -> @Task<Response>) -> i32;
+declare fn rkAppSetFallback(
+    dispatch: fn(req: Request) -> @Task<Response>,
+) -> i32;
 
 // The verbs registered at the pattern a request reached, in table order.
 pub fn verbsAt(pattern: string) -> string[] {
-    return parseTable(rkAppTable()).filter({ e -> (e.kind == "R") && (e.pattern == pattern) }).map({ e -> e.verb });
+    return parseTable(rkAppTable())
+        .filter({ e -> (e.kind == "R") && (e.pattern == pattern) })
+        .map({ e -> e.verb });
 }
 
 fn missingHandler() -> fn(req: Request) -> @Task<HandlerResponse> {
@@ -247,7 +436,7 @@ fn paramsOfMatch(m: RouteMatch) -> string {
     var lines: string[] = [];
     for (m.params.keys()) { k ->
         lines.push(k + "\t" + m.params.at(k).unwrapOr(""));
-    };
+    }
     return lines.join("\n");
 }
 
@@ -262,10 +451,18 @@ declare fn rkReqVerb(req: Request) -> string;
 // Write one handler response through the writer: status, headers (a repeated
 // name twice), the chunks, or the spawned thunks; `bodyless` drops the body
 // (HEAD). Answers the status.
-pub fn writeHandlerResponse(h: HandlerResponse, bodyless: bool, cookies: string) -> i32 {
+pub fn writeHandlerResponse(
+    h: HandlerResponse,
+    bodyless: bool,
+    cookies: string,
+) -> i32 {
     val _s = rkSsrSetStatus(h.status);
-    for (h.headers) { p -> val _h = rkSsrAddHeader(p._0, p._1); };
-    for (cookies.split("\n")) { c -> if (c != "") { val _c = rkSsrAddHeader("Set-Cookie", c); }; };
+    for (h.headers) { p ->
+        val _h = rkSsrAddHeader(p._0, p._1);
+    }
+    for (cookies.split("\n")) { c ->
+        if (c != "") val _c = rkSsrAddHeader("Set-Cookie", c);
+    }
     val _w = if (bodyless) 0 else writeBody(h);
     val _x = if (rkSsrClosed()) 0 else closeWriter();
     return h.status;
@@ -273,7 +470,9 @@ pub fn writeHandlerResponse(h: HandlerResponse, bodyless: bool, cookies: string)
 
 fn writeBody(h: HandlerResponse) -> i32 {
     if (h.tasks.length > 0) return rkSsrStream(h.tasks);
-    for (h.chunks) { c -> val _w = rkSsrWrite(c); };
+    for (h.chunks) { c ->
+        val _w = rkSsrWrite(c);
+    }
     return h.chunks.length;
 }
 
@@ -293,25 +492,51 @@ pub fn serveHandler(req: Request, m: RouteMatch) -> @Task<i32> {
     val verbs: string[] = verbsAt(pattern);
     val has = { v -> verbs.filter({ x -> x == v }).length > 0 };
     val explicit: bool = has(verb);
-    val headFallback: bool = (verb == "HEAD") && (explicit == false) && has("GET");
+    val headFallback: bool = (verb == "HEAD")
+        && (explicit == false)
+        && has("GET");
     val chosen: string = if (headFallback) "GET" else verb;
     val _b = rkSsrBeginHandler();
-    if ((explicit == false) && (headFallback == false)) {
+    if ((explicit == false) && (headFallback == false))
         return writeNoHandler(verb, pattern);
-    };
-    val record: string = writeTable([RouteEntry(kind: "R", pattern: pattern, slot: "", verb: chosen)]);
-    val handle: fn(req: Request) -> @Task<HandlerResponse> = rkAppRender(record, missingHandler());
+    val record: string = writeTable(
+        [RouteEntry(kind: "R", pattern: pattern, slot: "", verb: chosen)],
+    );
+    val handle: fn(req: Request) -> @Task<HandlerResponse> = rkAppRender(
+        record,
+        missingHandler(),
+    );
     val handlerReq: Request = rkSsrPageRequest(req, paramsOfMatch(m));
-    if (isMultipart(req)) {
-        return writeHandlerResponse(HandlerResponse.unsupportedMedia("multipart/form-data is not accepted - botopink has no byte type"), false, "");
-    };
+    if (isMultipart(req))
+        return writeHandlerResponse(
+            HandlerResponse.unsupportedMedia(
+                "multipart/form-data is not accepted - botopink has no byte type",
+            ),
+            false,
+            "",
+        );
     val opened: bool = requestLive() == false;
-    val _o = if (opened) beginRequest(RequestScope(id: "handler", phase: RequestPhase.Handler, method: verb, path: req.path, query: "", headersWire: "", strict: false)) else 0;
+    val _o = if (opened)
+        beginRequest(
+            RequestScope(
+                id: "handler",
+                phase: RequestPhase.Handler,
+                method: verb,
+                path: req.path,
+                query: "",
+                headersWire: "",
+                strict: false,
+            ),
+        )
+    else
+        0;
     val previous: RequestPhase = requestPhase();
     val _p = setPhase(RequestPhase.Handler);
     // A navigation signal out of the handler (front 63) becomes a 404 or a 3xx
     // with `Location`; any other raise is a 500.
-    val result = rkRunHandler({ -> captureSignals({ -> handle(handlerReq) }, signalled()) });
+    val result = rkRunHandler(
+        { -> captureSignals({ -> handle(handlerReq) }, signalled()) },
+    );
     val out: NavOutcome = takeSignal();
     val _r = setPhase(previous);
     val cookies: string = if (opened) endRequest() else "";
@@ -325,26 +550,47 @@ fn signalled() -> @Task<HandlerResponse> {
 
 // The response a captured signal answers, or the handler's own when there was
 // none.
-pub fn signalResponse(out: NavOutcome, own: HandlerResponse) -> HandlerResponse {
+pub fn signalResponse(
+    out: NavOutcome,
+    own: HandlerResponse,
+) -> HandlerResponse {
     val none: bool = case out.kind {
         None -> true;
         _ -> false;
     };
     if (none) return own;
-    val bare: HandlerResponse = HandlerResponse(status: statusFor(out), headers: [], chunks: [], tasks: []);
+    val bare: HandlerResponse = HandlerResponse(
+        status: statusFor(out),
+        headers: [],
+        chunks: [],
+        tasks: [],
+    );
     val location: string = locationHeaderFor(out) ?? "";
-    if (location == "") return bare else return bare.withHeader("Location", location);
+    if (location == "")
+        return bare
+    else
+        return bare.withHeader("Location", location);
 }
 
 fn writeNoHandler(verb: string, pattern: string) -> i32 {
     val allow: string = allowHeader(pattern);
-    val h: HandlerResponse = if (verb == "OPTIONS") HandlerResponse.noContent().withHeader("Allow", allow) else HandlerResponse(status: 405, headers: [#("Allow", allow)], chunks: [], tasks: []);
+    val h: HandlerResponse = if (verb == "OPTIONS")
+        HandlerResponse.noContent().withHeader("Allow", allow)
+    else
+        HandlerResponse(
+            status: 405,
+            headers: [#("Allow", allow)],
+            chunks: [],
+            tasks: [],
+        );
     return writeHandlerResponse(h, false, "");
 }
 
 // Run a handler; a raise is a 500 with no reason in the body.
 #[@External.Erlang("""(fun(__F) -> try __F() catch _:_ -> {'rakun_app@route_handler@@HandlerResponse', 500, [], [], []} end end)($0)""")]
-declare fn rkRunHandler(work: fn() -> @Task<HandlerResponse>) -> HandlerResponse;
+declare fn rkRunHandler(
+    work: fn() -> @Task<HandlerResponse>,
+) -> HandlerResponse;
 
 // The app path — pages and handlers — as the core router's fallback.
 pub fn serveApp() -> i32 {
@@ -353,12 +599,11 @@ pub fn serveApp() -> i32 {
 
 pub fn appResponse(req: Request) -> @Task<Response> {
     val found = matchPath(parseTable(rkAppTable()), req.path);
-    if (found != null) {
+    if (found != null)
         if (found.entry.kind == "R") {
             val status: i32 = await serveHandler(req, found);
             return Response(status: status, body: rkSsrBody());
-        };
-    };
+        }
     val _p = rkSsrBegin();
     val pageStatus: i32 = await servePage(req, chunkWriter());
     return Response(status: pageStatus, body: rkSsrBody());

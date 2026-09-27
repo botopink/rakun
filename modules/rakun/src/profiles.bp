@@ -22,7 +22,9 @@ fn pAt(s: string, i: i32) -> string {
 
 fn contains(xs: string[], name: string) -> bool {
     var found = false;
-    for (xs) { x -> if (x == name) { found = true; }; };
+    for (xs) { x ->
+        if (x == name) found = true;
+    }
     return found;
 }
 
@@ -55,11 +57,16 @@ pub fn setResolved(names: string[]) -> i32 {
 // is transitive, the GROUP NAME is activated beside what it expands to, and a
 // cycle is a refusal naming the two names that close it, never a loop.
 
-pub fn expand(seed: string[], groupOf: fn(name: string, index: i32) -> string) -> @Result<string[], string> {
+pub fn expand(
+    seed: string[],
+    groupOf: fn(name: string, index: i32) -> string,
+) -> @Result<string[], string> {
     var out: string[] = [];
     var queue: string[] = [];
     var trail: string[] = [];
-    for (seed) { s -> queue.push(s); };
+    for (seed) { s ->
+        queue.push(s);
+    }
     var head = 0;
     var guard = 0;
     var err = "";
@@ -74,23 +81,31 @@ pub fn expand(seed: string[], groupOf: fn(name: string, index: i32) -> string) -
             val members = groupMembers(name, groupOf);
             if (members.length == 0) {
                 if (contains(out, name) == false) out.push(name);
+            } else if (contains(trail, name)) {
+                err = "rakun.profiles.group."
+                    + name
+                    + ": a group that refers to itself — "
+                    + trail.join(" -> ")
+                    + " -> "
+                    + name;
+                head = queue.length;
             } else {
-                if (contains(trail, name)) {
-                    err = "rakun.profiles.group." + name + ": a group that refers to itself — " + trail.join(" -> ") + " -> " + name;
-                    head = queue.length;
-                } else {
-                    trail.push(name);
-                    if (contains(out, name) == false) out.push(name);
-                    for (members) { m -> queue.push(m); };
-                };
-            };
-        };
-    };
+                trail.push(name);
+                if (contains(out, name) == false) out.push(name);
+                for (members) { m ->
+                    queue.push(m);
+                }
+            }
+        }
+    }
     if (err != "") throw err;
     return out;
 }
 
-fn groupMembers(name: string, groupOf: fn(name: string, index: i32) -> string) -> string[] {
+fn groupMembers(
+    name: string,
+    groupOf: fn(name: string, index: i32) -> string,
+) -> string[] {
     var out: string[] = [];
     var i = 0;
     var run = true;
@@ -99,8 +114,8 @@ fn groupMembers(name: string, groupOf: fn(name: string, index: i32) -> string) -
         if (v == "") run = false else {
             out.push(v);
             i = i + 1;
-        };
-    };
+        }
+    }
     return out;
 }
 
@@ -157,12 +172,17 @@ pub fn matches(expr: string, actives: string[]) -> bool {
                 } else {
                     st = pushVal(st, if (contains(actives, name)) "1" else "0");
                     i = i + name.length();
-                };
-            };
-        };
+                }
+            }
+        }
         val done = applyAll(st);
-        if (done.bad) return false else if (done.vals.length == 0) return true else return done.vals.at(done.vals.length - 1).unwrapOr("0") == "1";
-    };
+        if (done.bad)
+            return false
+        else if (done.vals.length == 0)
+            return true
+        else
+            return done.vals.at(done.vals.length - 1).unwrapOr("0") == "1";
+    }
 }
 
 fn scanName(s: string, start: i32) -> string {
@@ -171,12 +191,18 @@ fn scanName(s: string, start: i32) -> string {
     var run = true;
     while (run) {
         val ch = pAt(s, i);
-        val stop = (ch == "" || ch == " " || ch == "(" || ch == ")" || ch == "!" || ch == "&" || ch == "|");
+        val stop = (ch == ""
+            || ch == " "
+            || ch == "("
+            || ch == ")"
+            || ch == "!"
+            || ch == "&"
+            || ch == "|");
         if (stop) run = false else {
             name = name + ch;
             i = i + 1;
-        };
-    };
+        }
+    }
     return name;
 }
 
@@ -206,7 +232,7 @@ fn drainFor(st: Stacks, incoming: i32) -> Stacks {
         val op: string = if (n == 0) "" else topOp(cur);
         val keep = (n == 0 || op == "(" || prec(op) < incoming);
         if (keep) run = false else cur = applyTop(cur);
-    };
+    }
     return cur;
 }
 
@@ -223,7 +249,7 @@ fn unwindParen(st: Stacks) -> Stacks {
             cur = Stacks(vals: cur.vals, ops: dropTail(cur.ops), bad: cur.bad);
             run = false;
         } else cur = applyTop(cur);
-    };
+    }
     return cur;
 }
 
@@ -232,38 +258,53 @@ fn applyAll(st: Stacks) -> Stacks {
     var cur = st;
     var run = true;
     while (run) {
-        if (cur.ops.length == 0) run = false else if (topOp(cur) == "(") {
-            cur = Stacks(vals: cur.vals, ops: dropTail(cur.ops), bad: true);
-        } else cur = applyTop(cur);
-    };
+        if (cur.ops.length == 0)
+            run = false
+        else if (topOp(cur) == "(")
+            cur = Stacks(vals: cur.vals, ops: dropTail(cur.ops), bad: true)
+        else
+            cur = applyTop(cur);
+    }
     return cur;
 }
 
 fn prec(op: string) -> i32 {
-    if (op == "!") return 3 else if (op == "&") return 2 else if (op == "|") return 1 else return 0;
+    if (op == "!")
+        return 3
+    else if (op == "&")
+        return 2
+    else if (op == "|")
+        return 1
+    else
+        return 0;
 }
 
 fn applyTop(st: Stacks) -> Stacks {
     val op: string = topOp(st);
     val ops = dropTail(st.ops);
     if (op == "!") {
-        if (st.vals.length == 0) return Stacks(vals: st.vals, ops: ops, bad: true) else {
+        if (st.vals.length == 0)
+            return Stacks(vals: st.vals, ops: ops, bad: true)
+        else {
             val a = st.vals.at(st.vals.length - 1).unwrapOr("0");
             var vals = dropTail(st.vals);
             vals.push(if (a == "1") "0" else "1");
             return Stacks(vals: vals, ops: ops, bad: st.bad);
-        };
-    } else {
-        if (st.vals.length < 2) return Stacks(vals: st.vals, ops: ops, bad: true) else {
-            val b = st.vals.at(st.vals.length - 1).unwrapOr("0");
-            val a = st.vals.at(st.vals.length - 2).unwrapOr("0");
-            var vals = dropTail(dropTail(st.vals));
-            val both = (a == "1" && b == "1");
-            val either = (a == "1" || b == "1");
-            if (op == "&") vals.push(if (both) "1" else "0") else vals.push(if (either) "1" else "0");
-            return Stacks(vals: vals, ops: ops, bad: st.bad);
-        };
-    };
+        }
+    } else if (st.vals.length < 2)
+        return Stacks(vals: st.vals, ops: ops, bad: true)
+    else {
+        val b = st.vals.at(st.vals.length - 1).unwrapOr("0");
+        val a = st.vals.at(st.vals.length - 2).unwrapOr("0");
+        var vals = dropTail(dropTail(st.vals));
+        val both = (a == "1" && b == "1");
+        val either = (a == "1" || b == "1");
+        if (op == "&")
+            vals.push(if (both) "1" else "0")
+        else
+            vals.push(if (either) "1" else "0");
+        return Stacks(vals: vals, ops: ops, bad: st.bad);
+    }
 }
 
 fn dropTail(xs: string[]) -> string[] {
@@ -272,6 +313,6 @@ fn dropTail(xs: string[]) -> string[] {
     while (i < xs.length - 1) {
         out.push(xs.at(i).unwrapOr(""));
         i = i + 1;
-    };
+    }
     return out;
 }

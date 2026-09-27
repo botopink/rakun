@@ -30,7 +30,13 @@ declare fn copyFile(src: string, dest: string) -> i32;
 // certificate when `cert` is not `""`. Answers `status|body`, or `error` when
 // the handshake or the exchange fails.
 #[@External.Erlang("""(fun(__Port, __Ca, __Cert, __Key, __Vsn) -> _ = application:ensure_all_started(ssl), __Mine = case __Cert of <<>> -> []; _ -> [{certfile, binary_to_list(__Cert)}, {keyfile, binary_to_list(__Key)}] end, __Opts = [binary, {active, false}, {verify, verify_peer}, {cacertfile, binary_to_list(__Ca)}, {server_name_indication, "localhost"}, {versions, [binary_to_atom(__Vsn, utf8)]}] ++ __Mine, case ssl:connect("localhost", __Port, __Opts, 10000) of {error, _} -> <<"error">>; {ok, __S} -> case ssl:send(__S, <<"GET /tls/peer HTTP/1.1", 13, 10, "Host: localhost", 13, 10, 13, 10>>) of ok -> __R = ssl:recv(__S, 0, 10000), ssl:close(__S), case __R of {ok, __Bin} -> case binary:split(__Bin, <<13, 10, 13, 10>>) of [__H, __B] -> [_, __St | _] = binary:split(__H, <<" ">>, [global]), <<__St/binary, "|", __B/binary>>; _ -> <<"error">> end; _ -> <<"error">> end; _ -> ssl:close(__S), <<"error">> end end end)($0, $1, $2, $3, $4)""")]
-declare fn tlsGet(port: i32, ca: string, cert: string, key: string, version: string) -> string;
+declare fn tlsGet(
+    port: i32,
+    ca: string,
+    cert: string,
+    key: string,
+    version: string,
+) -> string;
 
 // The subject of the certificate the server presented.
 #[@External.Erlang("""(fun(__Port, __Ca) -> case ssl:connect("localhost", __Port, [binary, {active, false}, {verify, verify_peer}, {cacertfile, binary_to_list(__Ca)}, {server_name_indication, "localhost"}], 10000) of {ok, __S} -> {ok, __Der} = ssl:peercert(__S), ssl:close(__S), rakun_ssl:peer_subject(__Der); _ -> <<"error">> end end)($0, $1)""")]
@@ -66,9 +72,18 @@ fn material() -> string {
 
 fn configure(clientAuth: string, protocols: string) -> string {
     val d: string = material();
-    val _a = rkSetProp(bundleKey("web", "keystore.certificate"), d + "/cert.pem");
-    val _b = rkSetProp(bundleKey("web", "keystore.private-key"), d + "/key.pem");
-    val _c = rkSetProp(bundleKey("web", "truststore.certificate"), d + "/ca.pem");
+    val _a = rkSetProp(
+        bundleKey("web", "keystore.certificate"),
+        d + "/cert.pem",
+    );
+    val _b = rkSetProp(
+        bundleKey("web", "keystore.private-key"),
+        d + "/key.pem",
+    );
+    val _c = rkSetProp(
+        bundleKey("web", "truststore.certificate"),
+        d + "/ca.pem",
+    );
     val _e = rkSetProp(bundleKey("web", "client-auth"), clientAuth);
     val _f = rkSetProp(bundleKey("web", "protocols"), protocols);
     val _g = rkSetProp("rakun.ssl.bundle.pem", "web");
@@ -80,7 +95,7 @@ fn serveTls() -> i32 {
     if (rkProp("test.tls.route") != "yes") {
         val _m = rkSetProp("test.tls.route", "yes");
         val _r = rkRegisterRoute("GET", "/tls/peer", { r -> peer(r) });
-    };
+    }
     val _s = rkSetProp("rakun.server.ssl.bundle", "web");
     val _k = rkSetProp("rakun.main.keep-alive", "false");
     return rkServe(0, { m, p, h, q, b -> rkDispatchHttp(m, p, h, q, b) });
@@ -153,7 +168,13 @@ test "rakun tls: client-auth=none accepts no certificate and an untrusted one, a
     val d: string = configure("none", "tlsv1.3,tlsv1.2");
     val port: i32 = serveTls();
     val bare: string = tlsGet(port, d + "/ca.pem", "", "", "tlsv1.3");
-    val stranger: string = tlsGet(port, d + "/ca.pem", d + "/stranger.pem", d + "/stranger.key", "tlsv1.3");
+    val stranger: string = tlsGet(
+        port,
+        d + "/ca.pem",
+        d + "/stranger.pem",
+        d + "/stranger.key",
+        "tlsv1.3",
+    );
     val _p = plainAgain();
     assert bare == "200|tls ";
     assert stranger == "200|tls ";
@@ -163,8 +184,20 @@ test "rakun tls: client-auth=want accepts none, rejects an unverified certificat
     val d: string = configure("want", "tlsv1.3,tlsv1.2");
     val port: i32 = serveTls();
     val bare: string = tlsGet(port, d + "/ca.pem", "", "", "tlsv1.3");
-    val stranger: string = tlsGet(port, d + "/ca.pem", d + "/stranger.pem", d + "/stranger.key", "tlsv1.3");
-    val client: string = tlsGet(port, d + "/ca.pem", d + "/client.pem", d + "/client.key", "tlsv1.3");
+    val stranger: string = tlsGet(
+        port,
+        d + "/ca.pem",
+        d + "/stranger.pem",
+        d + "/stranger.key",
+        "tlsv1.3",
+    );
+    val client: string = tlsGet(
+        port,
+        d + "/ca.pem",
+        d + "/client.pem",
+        d + "/client.key",
+        "tlsv1.3",
+    );
     val _p = plainAgain();
     assert bare == "200|tls ";
     assert stranger == "error";
@@ -175,7 +208,13 @@ test "rakun tls: client-auth=need rejects a client presenting no certificate" {
     val d: string = configure("need", "tlsv1.3,tlsv1.2");
     val port: i32 = serveTls();
     val bare: string = tlsGet(port, d + "/ca.pem", "", "", "tlsv1.3");
-    val client: string = tlsGet(port, d + "/ca.pem", d + "/client.pem", d + "/client.key", "tlsv1.3");
+    val client: string = tlsGet(
+        port,
+        d + "/ca.pem",
+        d + "/client.pem",
+        d + "/client.key",
+        "tlsv1.3",
+    );
     val _p = plainAgain();
     assert bare == "error";
     assert client == "200|tls CN=rakun-client,O=rakun";
@@ -189,8 +228,14 @@ test "rakun tls: sslReload after replacing both files makes the next handshake p
     val _m = fs.mkdir(live);
     val _a = copyFile(d + "/cert.pem", live + "/cert.pem");
     val _b = copyFile(d + "/key.pem", live + "/key.pem");
-    val _c = rkSetProp(bundleKey("web", "keystore.certificate"), live + "/cert.pem");
-    val _k = rkSetProp(bundleKey("web", "keystore.private-key"), live + "/key.pem");
+    val _c = rkSetProp(
+        bundleKey("web", "keystore.certificate"),
+        live + "/cert.pem",
+    );
+    val _k = rkSetProp(
+        bundleKey("web", "keystore.private-key"),
+        live + "/key.pem",
+    );
     val _r = sslRegister("web");
     val port: i32 = serveTls();
     val before: string = serverSubject(port, d + "/ca.pem");
@@ -208,8 +253,14 @@ test "rakun tls: sslReload after replacing both files makes the next handshake p
 
 test "rakun tls: a certificate expiring in 3 days is OUT_OF_SERVICE, naming the bundle and the days" {
     val d: string = material();
-    val _a = rkSetProp(bundleKey("soon", "keystore.certificate"), d + "/soon.pem");
-    val _b = rkSetProp(bundleKey("soon", "keystore.private-key"), d + "/key.pem");
+    val _a = rkSetProp(
+        bundleKey("soon", "keystore.certificate"),
+        d + "/soon.pem",
+    );
+    val _b = rkSetProp(
+        bundleKey("soon", "keystore.private-key"),
+        d + "/key.pem",
+    );
     val _n = rkSetProp("rakun.ssl.bundle.pem", "web,soon");
     val _r = sslRegister("soon");
     val health: string = sslHealth();

@@ -47,7 +47,12 @@ import {io.fs, json, json.Json, path} from "std";
 // make the report lie about the size of the table.
 
 #[@External.Erlang("rakun_autoconfig", "auto_register")]
-pub declare fn rkAutoRegister(name: string, conditions: string, before: string, after: string) -> i32;
+pub declare fn rkAutoRegister(
+    name: string,
+    conditions: string,
+    before: string,
+    after: string,
+) -> i32;
 
 // What an entry contributes to the registered set once it matches. It is NOT a
 // condition, so it is NOT a record of the condition blob: `rkAutoConditions`
@@ -211,17 +216,22 @@ pub fn manifestDependencies(text: string) -> @Result<string[], string> {
     if (decoded.isError()) {
         val assert Error(e) = decoded;
         throw manifestShapeProblem("is not JSON - " + e);
-    };
+    }
     val root: Json = decoded.unwrapOr(Json.Null);
-    if (isObject(root) == false) throw manifestShapeProblem("is not a JSON object");
+    if (isObject(root) == false)
+        throw manifestShapeProblem("is not a JSON object");
     val found = membersOf(root).filter({ m -> m._0 == "dependencies" });
     val none: string[] = [];
     if (found.length == 0) return none;
     val deps: Json = found.at(0).unwrapOr(#("", Json.Null))._1;
     if (isObject(deps)) return membersOf(deps).map({ m -> m._0 });
-    if (isArray(deps) == false) throw manifestShapeProblem("declares `dependencies` as neither an array of names nor an object keyed by name");
+    if (isArray(deps) == false)
+        throw manifestShapeProblem(
+            "declares `dependencies` as neither an array of names nor an object keyed by name",
+        );
     val items = itemsOf(deps);
-    if (items.filter({ x -> isText(x) == false }).length > 0) throw manifestShapeProblem("lists a dependency that is not a string");
+    if (items.filter({ x -> isText(x) == false }).length > 0)
+        throw manifestShapeProblem("lists a dependency that is not a string");
     return items.map({ x -> textOf(x) });
 }
 
@@ -235,19 +245,19 @@ pub fn manifestDependencies(text: string) -> @Result<string[], string> {
 // without saying so.
 
 pub fn manifestMissingProblem() -> string {
-    return "rakun: #[conditionalOnModule] needs the application's " + manifestName() + " and none was readable from the working directory - run the program from the directory holding its manifest";
+    return "rakun: #[conditionalOnModule] needs the application's "
+        + manifestName()
+        + " and none was readable from the working directory - run the program from the directory holding its manifest";
 }
 
 pub fn moduleListIn(path: string) -> string[] {
     val text = try fs.readText(path) catch "";
-    if (text == "") {
-        @panic(manifestMissingProblem());
-    };
+    if (text == "") @panic(manifestMissingProblem());
     val names = manifestDependencies(text);
     if (names.isError()) {
         val assert Error(e) = names;
         @panic(path + ": " + e);
-    };
+    }
     val none: string[] = [];
     return names.unwrapOr(none);
 }
@@ -267,7 +277,10 @@ pub fn moduleListIn(path: string) -> string[] {
 declare fn rkCwd() -> string;
 
 fn absolute(p: string) -> string {
-    return if (path.isAbsolute(p)) path.resolve([p]) else path.resolve([rkCwd(), p]);
+    return if (path.isAbsolute(p))
+        path.resolve([p])
+    else
+        path.resolve([rkCwd(), p]);
 }
 
 // `manifestDependencies` without the refusal: `[]` for a text that is not a
@@ -312,7 +325,9 @@ pub fn manifestPackageName(text: string) -> string {
 }
 
 fn workspacePatterns(text: string) -> string[] {
-    return itemsOf(memberOf(decodedOr(text), "workspaces")).filter({ x -> isText(x) }).map({ x -> textOf(x) });
+    return itemsOf(memberOf(decodedOr(text), "workspaces"))
+        .filter({ x -> isText(x) })
+        .map({ x -> textOf(x) });
 }
 
 // The directory of the nearest ancestor of `dir` (itself excluded) whose
@@ -326,8 +341,11 @@ fn workspaceRootAbove(dir: string) -> string {
         if (workspacePatterns(text).length > 0) {
             found = d;
             run = false;
-        } else if (d == "/" || d == "." || d == "") run = false else d = path.dirname(d);
-    };
+        } else if (d == "/" || d == "." || d == "")
+            run = false
+        else
+            d = path.dirname(d);
+    }
     return found;
 }
 
@@ -348,17 +366,23 @@ fn workspaceMember(dir: string, name: string) -> string {
     for (workspacePatterns(readOr(root + "/" + manifestName()))) { pat ->
         for (patternDirs(root, pat)) { d ->
             val file = d + "/" + manifestName();
-            if (hit == "" && manifestPackageName(readOr(file)) == name) hit = file;
-        };
-    };
+            if (hit == "" && manifestPackageName(readOr(file)) == name)
+                hit = file;
+        }
+    }
     return hit;
 }
 
 // The manifest file a dependency resolves to, or `""` when it is not followed.
-pub fn dependencyManifest(fromManifest: string, text: string, name: string) -> string {
+pub fn dependencyManifest(
+    fromManifest: string,
+    text: string,
+    name: string,
+) -> string {
     val src = dependencySource(text, name);
     val dir = path.dirname(absolute(fromManifest));
-    if (src.startsWith("path:")) return path.resolve([dir, src.slice(5, src.length()), manifestName()]);
+    if (src.startsWith("path:"))
+        return path.resolve([dir, src.slice(5, src.length()), manifestName()]);
     if (src == "workspace") return workspaceMember(dir, name);
     return "";
 }
@@ -378,8 +402,8 @@ fn visit(r: Resolution, file: string) -> Resolution {
             names.push(d);
             val next = dependencyManifest(file, text, d);
             if (next != "") queue.push(next);
-        };
-    };
+        }
+    }
     return Resolution(names: names, queue: queue, i: r.i + 1);
 }
 
@@ -393,7 +417,7 @@ pub fn resolvedModuleListIn(manifestPath: string) -> string[] {
     var r = Resolution(names: none, queue: [first], i: 0);
     while (r.i < r.queue.length) {
         r = visit(r, r.queue.at(r.i).unwrapOr(""));
-    };
+    }
     return r.names;
 }
 

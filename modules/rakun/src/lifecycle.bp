@@ -60,19 +60,29 @@ pub declare fn rkLifecycleReset() -> i32;
 // ── the refusals ────────────────────────────────────────────────────────────
 
 pub fn lifecyclePhaseProblem(phase: string) -> string {
-    return "rakun: '" + phase + "' is not a lifecycle phase - write post or pre";
+    return "rakun: '"
+        + phase
+        + "' is not a lifecycle phase - write post or pre";
 }
 
 pub fn lifecycleFieldProblem(what: string, value: string) -> string {
-    return "rakun: a lifecycle hook's " + what + " may not contain '|' or a newline, and '" + value + "' does";
+    return "rakun: a lifecycle hook's "
+        + what
+        + " may not contain '|' or a newline, and '"
+        + value
+        + "' does";
 }
 
 pub fn postConstructProblem(who: string) -> string {
-    return "rakun: the #[postConstruct] " + who + " raised; the boot stops here rather than serving a half-built component";
+    return "rakun: the #[postConstruct] "
+        + who
+        + " raised; the boot stops here rather than serving a half-built component";
 }
 
 pub fn preDestroyProblem(who: string) -> string {
-    return "rakun: the #[preDestroy] " + who + " raised; shutdown continues with the remaining hooks";
+    return "rakun: the #[preDestroy] "
+        + who
+        + " raised; shutdown continues with the remaining hooks";
 }
 
 // ── the hook record ─────────────────────────────────────────────────────────
@@ -106,10 +116,10 @@ pub fn parseHooks(wire: string) -> Hook[] {
                         order: toI32(f.at(3).unwrapOr("0")),
                     ),
                 );
-            };
-        };
+            }
+        }
         return out;
-    };
+    }
 }
 
 // ── registration ────────────────────────────────────────────────────────────
@@ -131,7 +141,12 @@ pub fn rkRegisterLifecycle<R>(
     if (!known) @panic(lifecyclePhaseProblem(phase));
     if (unwritable(owner)) @panic(lifecycleFieldProblem("owner", owner));
     if (unwritable(method)) @panic(lifecycleFieldProblem("method", method));
-    return rkLifecycleStore(hookLine(Hook(owner: owner, method: method, phase: phase, order: order)), run);
+    return rkLifecycleStore(
+        hookLine(
+            Hook(owner: owner, method: method, phase: phase, order: order),
+        ),
+        run,
+    );
 }
 
 fn unwritable(value: string) -> bool {
@@ -160,7 +175,7 @@ pub fn runPreDestroy() -> string {
         val who = describe(failed);
         @print(preDestroyProblem(who));
         return who;
-    };
+    }
 }
 
 // The post pass as `context.bootSequence()` needs it: the failure comes back as
@@ -176,7 +191,9 @@ pub fn postConstructFailure() -> string {
 
 fn describe(failed: string) -> string {
     var names: string[] = [];
-    for (parseHooks(failed)) { h -> names.push(h.owner + "." + h.method); };
+    for (parseHooks(failed)) { h ->
+        names.push(h.owner + "." + h.method);
+    }
     return names.join(", ");
 }
 
@@ -184,7 +201,7 @@ fn ranCount(phase: string) -> i32 {
     var n = 0;
     for (parseHooks(rkLifecycleTable())) { h ->
         if (h.phase == phase) n = n + 1;
-    };
+    }
     return n;
 }
 
@@ -194,7 +211,7 @@ pub fn lifecycleHooks(phase: string) -> Hook[] {
     var out: Hook[] = [];
     for (parseHooks(rkLifecycleTable())) { h ->
         if (h.phase == phase) out.push(h);
-    };
+    }
     return out;
 }
 
@@ -223,7 +240,8 @@ pub declare fn rkExitValues() -> string;
 pub declare fn rkExitReset() -> i32;
 
 pub fn rkRegisterExitCode(name: string, gen: fn() -> i32) -> i32 {
-    if (unwritable(name)) @panic(lifecycleFieldProblem("exit-code generator", name));
+    if (unwritable(name))
+        @panic(lifecycleFieldProblem("exit-code generator", name));
     return rkExitStore(name, gen);
 }
 
@@ -238,10 +256,10 @@ pub fn processExitCode() -> i32 {
             if (line != "") {
                 val n = toI32(line);
                 if (n > best) best = n;
-            };
-        };
+            }
+        }
         return best;
-    };
+    }
 }
 
 // ── shutdown ────────────────────────────────────────────────────────────────
@@ -262,11 +280,17 @@ pub fn shutdown() -> i32 {
 // owner, so a marker here cannot name the factory whose method it is.
 
 pub fn postConstruct(comptime decl: @Decl) {
-    if (decl.kind != DeclKind.Method) decl.fail("#[postConstruct] must annotate a method of a #[managed] type - the registration is emitted by #[managed], which is the only decl that can see both the method and its owner");
+    if (decl.kind != DeclKind.Method)
+        decl.fail(
+            "#[postConstruct] must annotate a method of a #[managed] type - the registration is emitted by #[managed], which is the only decl that can see both the method and its owner",
+        );
 }
 
 pub fn preDestroy(comptime decl: @Decl) {
-    if (decl.kind != DeclKind.Method) decl.fail("#[preDestroy] must annotate a method of a #[managed] type - the registration is emitted by #[managed], which is the only decl that can see both the method and its owner");
+    if (decl.kind != DeclKind.Method)
+        decl.fail(
+            "#[preDestroy] must annotate a method of a #[managed] type - the registration is emitted by #[managed], which is the only decl that can see both the method and its owner",
+        );
 }
 
 // `#[exitCode]` is the one marker in this module that EMITS. A module-level
@@ -276,7 +300,19 @@ pub fn preDestroy(comptime decl: @Decl) {
 // The generator is a lambda and not a bare name: a named function used as a
 // VALUE is `variable 'DrainExitCode' is unbound` on the erlang row.
 pub fn exitCode(comptime decl: @Decl) {
-    @emit("val __rkExit_" + decl.name + " = rkRegisterExitCode(\"" + decl.name + "\", { -> " + decl.name + "() });");
-    if (decl.kind != DeclKind.Fn) decl.fail("#[exitCode] must annotate a module-level function");
-    if (decl.returnType != "i32") decl.fail("#[exitCode] must annotate a function returning i32 - the value becomes the process status, and there is nothing else it could be");
+    @emit(
+        "val __rkExit_"
+            + decl.name
+            + " = rkRegisterExitCode(\""
+            + decl.name
+            + "\", { -> "
+            + decl.name
+            + "() });",
+    );
+    if (decl.kind != DeclKind.Fn)
+        decl.fail("#[exitCode] must annotate a module-level function");
+    if (decl.returnType != "i32")
+        decl.fail(
+            "#[exitCode] must annotate a function returning i32 - the value becomes the process status, and there is nothing else it could be",
+        );
 }

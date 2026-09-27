@@ -24,7 +24,7 @@
 //// element. The `z` payload section is `routing`'s `writeSlotStates` of
 //// `slotStateLines`.
 
-import {table: {RouteEntry, parseTable}, match: {RouteMatch, matchPath, ancestorPatterns}, slot_states: {SlotState}} from "routing";
+import {table.RouteEntry, table.parseTable, match.RouteMatch, match.matchPath, match.ancestorPatterns, slot_states.SlotState} from "routing";
 import {collections.Dict} from "std";
 import {rkAppTable} from "file_router";
 
@@ -54,8 +54,10 @@ fn isAncestorOrSelf(ancestor: string, pattern: string) -> bool {
 fn slotRoot(table: RouteEntry[], slot: string) -> string {
     var root = "";
     for (table) { e ->
-        if (e.slot == slot && (root == "" || e.pattern.length() < root.length())) root = e.pattern;
-    };
+        if (e.slot == slot
+            && (root == "" || e.pattern.length() < root.length()))
+            root = e.pattern;
+    }
     return root;
 }
 
@@ -65,8 +67,12 @@ pub fn ownerLayout(table: RouteEntry[], slot: string) -> string {
     val root = slotRoot(table, slot);
     var best = "";
     for (table) { e ->
-        if (e.kind == "L" && e.slot == "" && isAncestorOrSelf(e.pattern, root) && e.pattern.length() >= best.length()) best = e.pattern;
-    };
+        if (e.kind == "L"
+            && e.slot == ""
+            && isAncestorOrSelf(e.pattern, root)
+            && e.pattern.length() >= best.length())
+            best = e.pattern;
+    }
     return best;
 }
 
@@ -75,13 +81,20 @@ pub fn ownerLayout(table: RouteEntry[], slot: string) -> string {
 pub fn slotsOf(table: RouteEntry[], layoutPattern: string) -> string[] {
     var out: string[] = [];
     for (table) { e ->
-        if (e.slot != "" && out.filter({ s -> s == e.slot }).length == 0 && ownerLayout(table, e.slot) == layoutPattern) out.push(e.slot);
-    };
+        if (e.slot != ""
+            && out.filter({ s -> s == e.slot }).length == 0
+            && ownerLayout(table, e.slot) == layoutPattern)
+            out.push(e.slot);
+    }
     return out;
 }
 
 pub fn tableForSlot(table: RouteEntry[], slot: string) -> RouteEntry[] {
-    return table.filter({ e -> e.slot == slot }).map({ e -> RouteEntry(kind: e.kind, pattern: e.pattern, slot: "", verb: e.verb) });
+    return table
+        .filter({ e -> e.slot == slot })
+        .map(
+            { e -> RouteEntry(kind: e.kind, pattern: e.pattern, slot: "", verb: e.verb) },
+        );
 }
 
 fn defaultOf(view: RouteEntry[]) -> ?RouteEntry {
@@ -90,29 +103,71 @@ fn defaultOf(view: RouteEntry[]) -> ?RouteEntry {
     return ds.at(0) ?? blank();
 }
 
-pub fn resolveSlot(table: RouteEntry[], slot: string, layoutPattern: string, pathname: string, soft: bool) -> SlotResolution {
+pub fn resolveSlot(
+    table: RouteEntry[],
+    slot: string,
+    layoutPattern: string,
+    pathname: string,
+    soft: bool,
+) -> SlotResolution {
     val view = tableForSlot(table, slot);
     val found: ?RouteMatch = matchPath(view, pathname);
     if (found != null) {
-        val m: RouteMatch = found ?? RouteMatch(entry: blank(), params: Dict.empty(), rest: [], chain: []);
-        return SlotResolution(slot: slot, state: SlotState.Matched, entry: m.entry, params: m.params);
-    };
-    if (soft) return SlotResolution(slot: slot, state: SlotState.Unchanged, entry: null, params: Dict.empty());
+        val m: RouteMatch = found ?? RouteMatch(
+            entry: blank(),
+            params: Dict.empty(),
+            rest: [],
+            chain: [],
+        );
+        return SlotResolution(
+            slot: slot,
+            state: SlotState.Matched,
+            entry: m.entry,
+            params: m.params,
+        );
+    }
+    if (soft)
+        return SlotResolution(
+            slot: slot,
+            state: SlotState.Unchanged,
+            entry: null,
+            params: Dict.empty(),
+        );
     val d: ?RouteEntry = defaultOf(view);
-    if (d != null) return SlotResolution(slot: slot, state: SlotState.Defaulted, entry: d, params: Dict.empty());
-    return SlotResolution(slot: slot, state: SlotState.Empty, entry: null, params: Dict.empty());
+    if (d != null)
+        return SlotResolution(
+            slot: slot,
+            state: SlotState.Defaulted,
+            entry: d,
+            params: Dict.empty(),
+        );
+    return SlotResolution(
+        slot: slot,
+        state: SlotState.Empty,
+        entry: null,
+        params: Dict.empty(),
+    );
 }
 
-pub fn resolveSlots(table: RouteEntry[], layoutPattern: string, pathname: string, soft: bool) -> SlotResolution[] {
-    return slotsOf(table, layoutPattern).map({ s -> resolveSlot(table, s, layoutPattern, pathname, soft) });
+pub fn resolveSlots(
+    table: RouteEntry[],
+    layoutPattern: string,
+    pathname: string,
+    soft: bool,
+) -> SlotResolution[] {
+    return slotsOf(table, layoutPattern).map(
+        { s -> resolveSlot(table, s, layoutPattern, pathname, soft) },
+    );
 }
 
 // The `z` triples `routing`'s `writeSlotStates` writes: the slot, the
 // resolved entry's pattern (`""` with none), the state.
-pub fn slotStateLines(rs: SlotResolution[]) -> Array<#(string, string, SlotState)> {
+pub fn slotStateLines(
+    rs: SlotResolution[],
+) -> Array<#(string, string, SlotState)> {
     return rs.map({ r ->
         val e: RouteEntry = r.entry ?? blank();
-        #(r.slot, e.pattern, r.state)
+        #(r.slot, e.pattern, r.state);
     });
 }
 
@@ -123,11 +178,19 @@ pub fn defaultProblem(table: RouteEntry[]) -> string {
     var seen: string[] = [];
     for (table) { e ->
         if (e.kind == "D") {
-            if (problem == "" && e.slot == "") problem = "rakun slots: a default.bp at `" + e.pattern + "` sits outside any @slot - it would be the default of nothing";
-            if (problem == "" && e.slot != "" && seen.filter({ s -> s == e.slot }).length > 0) problem = "rakun slots: @" + e.slot + " has two default.bp entries - one slot, one default";
+            if (problem == "" && e.slot == "")
+                problem = "rakun slots: a default.bp at `"
+                    + e.pattern
+                    + "` sits outside any @slot - it would be the default of nothing";
+            if (problem == ""
+                && e.slot != ""
+                && seen.filter({ s -> s == e.slot }).length > 0)
+                problem = "rakun slots: @"
+                    + e.slot
+                    + " has two default.bp entries - one slot, one default";
             seen.push(e.slot);
-        };
-    };
+        }
+    }
     return problem;
 }
 
@@ -137,14 +200,22 @@ pub fn defaultProblem(table: RouteEntry[]) -> string {
 pub fn slotConflictProblem(table: RouteEntry[]) -> string {
     val pages = table.filter({ e -> e.kind == "P" && e.slot != "" });
     var problem = "";
-    for (pages) { a -> problem = if (problem != "") problem else clashWith(pages, a); };
+    for (pages) { a ->
+        problem = if (problem != "") problem else clashWith(pages, a);
+    }
     return problem;
 }
 
 fn clashWith(pages: RouteEntry[], a: RouteEntry) -> string {
-    val same = pages.filter({ b -> b.slot == a.slot && b.pattern == a.pattern });
+    val same = pages.filter(
+        { b -> b.slot == a.slot && b.pattern == a.pattern },
+    );
     if (same.length < 2) return "";
-    return "rakun slots: @" + a.slot + " has two pages claiming `" + a.pattern + "`";
+    return "rakun slots: @"
+        + a.slot
+        + " has two pages claiming `"
+        + a.pattern
+        + "`";
 }
 
 // A bound parameter of a resolution, `""` when the slot binds none of that

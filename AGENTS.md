@@ -4726,6 +4726,11 @@ completed handshake.
   microseconds; a socket or read budget on a path expected to succeed is ten
   seconds.
 - Keep this file in sync with `docs.md` and the spec in the same change.
+- `modules/rakun/**` and `modules/rakun-app/**` are `botopink format`-clean
+  (`botopink format --check modules/rakun modules/rakun-app` exits 0 — PK-5);
+  run the formatter over them before committing. A test that greps a source
+  file for a call shape reads a whitespace-free copy of it
+  (`actions_test.bp`), never a layout the formatter may break across lines.
 
 ## See also
 

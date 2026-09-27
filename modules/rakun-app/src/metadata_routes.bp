@@ -23,9 +23,9 @@
 //// and its `ImageMeta` is still produced.
 
 import {escape, path, json.object, json.quote, json.array} from "std";
-import {io: {fs}} from "std";
+import {io.fs} from "std";
 import {Request, rkProp} from "rakun";
-import {table: {RouteEntry, parseTable}, match: {attempt}} from "routing";
+import {table.RouteEntry, table.parseTable, match.attempt} from "routing";
 import {rkAppTable, appDirOf} from "file_router";
 import {PageRenderer, chunkWriter, rkSsrBegin, rkSsrBody} from "ssr";
 import {HandlerResponse, registerRoute} from "route_handler";
@@ -66,7 +66,13 @@ pub fn resetMetadataRoutes() -> i32 {
 // registration leaves nothing behind.
 fn notYet(family: string) -> i32 {
     val existing: string[] = rkMetaAll(family);
-    if (existing.length > 0) @panic("rakun metadata: a " + family + " is already registered - one application, one " + family);
+    if (existing.length > 0)
+        @panic(
+            "rakun metadata: a "
+                + family
+                + " is already registered - one application, one "
+                + family,
+        );
     return 0;
 }
 
@@ -75,7 +81,12 @@ fn immutable(h: HandlerResponse) -> HandlerResponse {
 }
 
 fn typed(body: string, contentType: string) -> HandlerResponse {
-    return HandlerResponse(status: 200, headers: [#("Content-Type", contentType)], chunks: [body], tasks: []);
+    return HandlerResponse(
+        status: 200,
+        headers: [#("Content-Type", contentType)],
+        chunks: [body],
+        tasks: [],
+    );
 }
 
 fn noTask(h: HandlerResponse) -> @Task<HandlerResponse> {
@@ -92,18 +103,37 @@ pub type SitemapEntry(
 )
 
 pub fn changeFrequencies() -> string[] {
-    return ["always", "hourly", "daily", "weekly", "monthly", "yearly", "never"];
+    return [
+        "always",
+        "hourly",
+        "daily",
+        "weekly",
+        "monthly",
+        "yearly",
+        "never",
+    ];
 }
 
 fn priorityOk(p: string) -> bool {
     if (p == "") return true;
     if (p == "1" || p == "1.0" || p == "0" || p == "0.0") return true;
-    return p.length() == 3 && p.startsWith("0.") && "0123456789".contains(p.slice(2, 3));
+    return p.length() == 3
+        && p.startsWith("0.")
+        && "0123456789".contains(p.slice(2, 3));
 }
 
 pub fn sitemapEntryProblem(e: SitemapEntry) -> string {
-    if (e.changeFrequency != "" && changeFrequencies().filter({ f -> f == e.changeFrequency }).length == 0) return "rakun metadata: changeFrequency `" + e.changeFrequency + "` is not one of " + changeFrequencies().join(", ");
-    if (priorityOk(e.priority) == false) return "rakun metadata: priority `" + e.priority + "` is not between 0.0 and 1.0 in tenths";
+    if (e.changeFrequency != ""
+        && changeFrequencies().filter({ f -> f == e.changeFrequency }).length
+            == 0)
+        return "rakun metadata: changeFrequency `"
+            + e.changeFrequency
+            + "` is not one of "
+            + changeFrequencies().join(", ");
+    if (priorityOk(e.priority) == false)
+        return "rakun metadata: priority `"
+            + e.priority
+            + "` is not between 0.0 and 1.0 in tenths";
     return "";
 }
 
@@ -116,12 +146,21 @@ pub fn maxSitemapBytes() -> i32 {
 }
 
 fn xmlElement(name: string, value: string) -> string {
-    return if (value == "") "" else "<" + name + ">" + escape.html(value) + "</" + name + ">\n";
+    return if (value == "")
+        ""
+    else
+        "<" + name + ">" + escape.html(value) + "</" + name + ">\n";
 }
 
 pub fn renderSitemap(entries: SitemapEntry[]) -> string {
-    val urls = entries.map({ e -> "<url>\n" + xmlElement("loc", e.loc) + xmlElement("lastmod", e.lastModified) + xmlElement("changefreq", e.changeFrequency) + xmlElement("priority", e.priority) + "</url>\n" }).join("");
-    return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n" + urls + "</urlset>\n";
+    val urls = entries
+        .map(
+            { e -> "<url>\n" + xmlElement("loc", e.loc) + xmlElement("lastmod", e.lastModified) + xmlElement("changefreq", e.changeFrequency) + xmlElement("priority", e.priority) + "</url>\n" },
+        )
+        .join("");
+    return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n"
+        + urls
+        + "</urlset>\n";
 }
 
 // Shards of at most 50 000 entries whose rendered document stays under 50 MB.
@@ -131,36 +170,56 @@ pub fn shardEntries(entries: SitemapEntry[]) -> Array<SitemapEntry[]> {
     var bytes = 0;
     for (entries) { e ->
         val size = renderSitemap([e]).length();
-        if (current.length > 0 && (current.length >= maxSitemapUrls() || bytes + size > maxSitemapBytes())) {
+        if (current.length > 0
+            && (current.length >= maxSitemapUrls()
+                || bytes + size > maxSitemapBytes())) {
             shards.push(current);
             current = [];
             bytes = 0;
-        };
+        }
         current.push(e);
         bytes = bytes + size;
-    };
+    }
     if (current.length > 0) shards.push(current);
     return shards;
 }
 
 pub fn renderSitemapIndex(shards: i32, origin: string) -> string {
-    val items = Array.range(0, shards).map({ i -> "<sitemap>\n" + xmlElement("loc", origin + "/sitemap/" + i.toString() + ".xml") + "</sitemap>\n" }).join("");
-    return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<sitemapindex xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n" + items + "</sitemapindex>\n";
+    val items = Array
+        .range(0, shards)
+        .map(
+            { i -> "<sitemap>\n" + xmlElement("loc", origin + "/sitemap/" + i.toString() + ".xml") + "</sitemap>\n" },
+        )
+        .join("");
+    return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<sitemapindex xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n"
+        + items
+        + "</sitemapindex>\n";
 }
 
 #[@External.Erlang("""(fun(__F) -> __F() end)($0)""")]
-declare fn rkMetaRunSitemap(produce: fn() -> @Task<SitemapEntry[]>) -> SitemapEntry[];
+declare fn rkMetaRunSitemap(
+    produce: fn() -> @Task<SitemapEntry[]>,
+) -> SitemapEntry[];
 
 fn sitemapShards() -> Array<SitemapEntry[]> {
-    val producers: Array<fn() -> @Task<SitemapEntry[]>> = rkMetaAll("sitemap-producer");
+    val producers: Array<fn() -> @Task<SitemapEntry[]>> = rkMetaAll(
+        "sitemap-producer",
+    );
     var entries: SitemapEntry[] = [];
-    for (producers) { p -> for (rkMetaRunSitemap(p)) { e -> entries.push(e); }; };
+    for (producers) { p ->
+        for (rkMetaRunSitemap(p)) { e ->
+            entries.push(e);
+        }
+    }
     return shardEntries(entries);
 }
 
 fn sitemapRoot(req: Request) -> @Task<HandlerResponse> {
     val shards = sitemapShards();
-    val body = if (shards.length > 1) renderSitemapIndex(shards.length, rkProp("rakun.metadata.origin")) else renderSitemap(shards.at(0) ?? []);
+    val body = if (shards.length > 1)
+        renderSitemapIndex(shards.length, rkProp("rakun.metadata.origin"))
+    else
+        renderSitemap(shards.at(0) ?? []);
     return typed(body, "application/xml");
 }
 
@@ -168,14 +227,22 @@ fn sitemapShard(req: Request) -> @Task<HandlerResponse> {
     val name = req.param("shard");
     val n = if (name.endsWith(".xml")) name.slice(0, name.length() - 4) else "";
     val shards = sitemapShards();
-    val index = if (n != "" && n.split("").filter({ c -> "0123456789".contains(c) == false }).length == 0) toIndex(n) else -1;
-    if (shards.length < 2 || index < 0 || index >= shards.length) return HandlerResponse.notFound();
+    val index = if (n != ""
+        && n.split("").filter({ c -> "0123456789".contains(c) == false }).length
+            == 0)
+        toIndex(n)
+    else
+        -1;
+    if (shards.length < 2 || index < 0 || index >= shards.length)
+        return HandlerResponse.notFound();
     return typed(renderSitemap(shards.at(index) ?? []), "application/xml");
 }
 
 fn toIndex(s: string) -> i32 {
     var n = 0;
-    for (s.split("")) { c -> n = n * 10 + "0123456789".indexOf(c); };
+    for (s.split("")) { c ->
+        n = n * 10 + "0123456789".indexOf(c);
+    }
     return n;
 }
 
@@ -184,11 +251,21 @@ pub fn registerSitemap(produce: fn() -> @Task<SitemapEntry[]>) -> i32 {
     for (rkMetaRunSitemap(produce)) { e ->
         val p = sitemapEntryProblem(e);
         if (p != "") @panic(p);
-    };
+    }
     val _c = rkMetaAdd("sitemap", "sitemap");
     val _p = rkMetaAdd("sitemap-producer", produce);
-    val _a = registerRoute("GET", "sitemap.xml", "sitemap", { req -> sitemapRoot(req) });
-    val _b = registerRoute("GET", "sitemap/[shard]", "sitemapShard", { req -> sitemapShard(req) });
+    val _a = registerRoute(
+        "GET",
+        "sitemap.xml",
+        "sitemap",
+        { req -> sitemapRoot(req) },
+    );
+    val _b = registerRoute(
+        "GET",
+        "sitemap/[shard]",
+        "sitemapShard",
+        { req -> sitemapShard(req) },
+    );
     return rkMetaAdd("pattern", "/sitemap.xml");
 }
 
@@ -202,10 +279,14 @@ pub fn renderRobots(r: Robots) -> string {
     var lines: string[] = [];
     for (r.rules) { rule ->
         lines.push("User-Agent: " + rule.userAgent);
-        for (rule.allow) { a -> lines.push("Allow: " + a); };
-        for (rule.disallow) { d -> lines.push("Disallow: " + d); };
+        for (rule.allow) { a ->
+            lines.push("Allow: " + a);
+        }
+        for (rule.disallow) { d ->
+            lines.push("Disallow: " + d);
+        }
         lines.push("");
-    };
+    }
     if (r.host != "") lines.push("Host: " + r.host);
     if (r.sitemap != "") lines.push("Sitemap: " + r.sitemap);
     return lines.join("\n") + "\n";
@@ -215,12 +296,22 @@ pub fn robotsProblem(r: Robots) -> string {
     var bad = "";
     for (r.rules) { rule ->
         var values: string[] = [rule.userAgent];
-        for (rule.allow) { a -> values.push(a); };
-        for (rule.disallow) { d -> values.push(d); };
-        for (values) { v -> if (bad == "" && (v.contains("\n") || v.contains("\r"))) bad = v; };
-    };
-    if (bad == "" && (r.sitemap.contains("\n") || r.host.contains("\n"))) bad = r.sitemap + r.host;
-    return if (bad == "") "" else "rakun metadata: a robots value holds a line break - an injected line is an injected rule";
+        for (rule.allow) { a ->
+            values.push(a);
+        }
+        for (rule.disallow) { d ->
+            values.push(d);
+        }
+        for (values) { v ->
+            if (bad == "" && (v.contains("\n") || v.contains("\r"))) bad = v;
+        }
+    }
+    if (bad == "" && (r.sitemap.contains("\n") || r.host.contains("\n")))
+        bad = r.sitemap + r.host;
+    return if (bad == "")
+        ""
+    else
+        "rakun metadata: a robots value holds a line break - an injected line is an injected rule";
 }
 
 #[@External.Erlang("""(fun(__F) -> __F() end)($0)""")]
@@ -231,7 +322,12 @@ pub fn registerRobots(produce: fn() -> @Task<Robots>) -> i32 {
     val p = robotsProblem(rkMetaRunRobots(produce));
     if (p != "") @panic(p);
     val _c = rkMetaAdd("robots", "robots");
-    val _a = registerRoute("GET", "robots.txt", "robots", { req -> noTask(typed(renderRobots(rkMetaRunRobots(produce)), "text/plain")) });
+    val _a = registerRoute(
+        "GET",
+        "robots.txt",
+        "robots",
+        { req -> noTask(typed(renderRobots(rkMetaRunRobots(produce)), "text/plain")) },
+    );
     return rkMetaAdd("pattern", "/robots.txt");
 }
 
@@ -254,27 +350,44 @@ pub fn displays() -> string[] {
 }
 
 pub fn renderManifest(m: WebManifest) -> string {
-    val icons = m.icons.map({ i -> object([#("src", quote(i.src)), #("sizes", quote(i.sizes)), #("type", quote(i.contentType))]) });
-    return object([
-        #("name", quote(m.name)),
-        #("short_name", quote(m.shortName)),
-        #("start_url", quote(m.startUrl)),
-        #("display", quote(m.display)),
-        #("background_color", quote(m.backgroundColor)),
-        #("theme_color", quote(m.themeColor)),
-        #("icons", array(icons)),
-    ]);
+    val icons = m.icons.map(
+        { i -> object([#("src", quote(i.src)), #("sizes", quote(i.sizes)), #("type", quote(i.contentType))]) },
+    );
+    return object(
+        [
+            #("name", quote(m.name)),
+            #("short_name", quote(m.shortName)),
+            #("start_url", quote(m.startUrl)),
+            #("display", quote(m.display)),
+            #("background_color", quote(m.backgroundColor)),
+            #("theme_color", quote(m.themeColor)),
+            #("icons", array(icons)),
+        ],
+    );
 }
 
 #[@External.Erlang("""(fun(__F) -> __F() end)($0)""")]
-declare fn rkMetaRunManifest(produce: fn() -> @Task<WebManifest>) -> WebManifest;
+declare fn rkMetaRunManifest(
+    produce: fn() -> @Task<WebManifest>,
+) -> WebManifest;
 
 pub fn registerManifest(produce: fn() -> @Task<WebManifest>) -> i32 {
     val _o = notYet("manifest");
     val m = rkMetaRunManifest(produce);
-    if (displays().filter({ d -> d == m.display }).length == 0) @panic("rakun metadata: display `" + m.display + "` is not one of " + displays().join(", "));
+    if (displays().filter({ d -> d == m.display }).length == 0)
+        @panic(
+            "rakun metadata: display `"
+                + m.display
+                + "` is not one of "
+                + displays().join(", "),
+        );
     val _c = rkMetaAdd("manifest", "manifest");
-    val _a = registerRoute("GET", "manifest.webmanifest", "manifest", { req -> noTask(typed(renderManifest(rkMetaRunManifest(produce)), "application/manifest+json")) });
+    val _a = registerRoute(
+        "GET",
+        "manifest.webmanifest",
+        "manifest",
+        { req -> noTask(typed(renderManifest(rkMetaRunManifest(produce)), "application/manifest+json")) },
+    );
     return rkMetaAdd("pattern", "/manifest.webmanifest");
 }
 
@@ -301,7 +414,7 @@ fn anchorOf(pattern: string, pathname: string) -> string {
         val prefix = "/" + parts.slice(0, i).join("/");
         if (found == "" && attempt(pattern, prefix).ok) found = prefix;
         i = i - 1;
-    };
+    }
     return found;
 }
 
@@ -316,8 +429,22 @@ fn fileOf(appDir: string, file: string) -> string {
 fn checkFile(file: string) -> string {
     val appDir = appDirOf();
     val full = fileOf(appDir, file);
-    if (path.isInside(appDir, file) == false) @panic("rakun metadata: `" + file + "` escapes the app directory `" + appDir + "`");
-    if (rkMetaExists(full) == false) @panic("rakun metadata: `" + file + "` does not exist under `" + appDir + "`");
+    if (path.isInside(appDir, file) == false)
+        @panic(
+            "rakun metadata: `"
+                + file
+                + "` escapes the app directory `"
+                + appDir
+                + "`",
+        );
+    if (rkMetaExists(full) == false)
+        @panic(
+            "rakun metadata: `"
+                + file
+                + "` does not exist under `"
+                + appDir
+                + "`",
+        );
     return full;
 }
 
@@ -346,18 +473,46 @@ pub fn iconKindName(k: IconKind) -> string {
     return n;
 }
 
-pub fn registerIconFile(kind: IconKind, seg: string, file: string, contentType: string, sizes: string) -> i32 {
+pub fn registerIconFile(
+    kind: IconKind,
+    seg: string,
+    file: string,
+    contentType: string,
+    sizes: string,
+) -> i32 {
     val full = checkFile(file);
     val pattern = patternOfSeg(seg);
-    val prefix = if (pattern == "/") { "" } else { pattern };
+    val prefix = if (pattern == "/") "" else pattern;
     val route = prefix + "/" + baseName(file);
-    val hashed = if (iconKindName(kind) == "favicon") route else route + "?" + rkMetaHash(full);
-    val _r = registerRoute("GET", route, iconKindName(kind), { req -> noTask(serveFile(full, contentType, iconKindName(kind) != "favicon")) });
+    val hashed = if (iconKindName(kind) == "favicon")
+        route
+    else
+        route + "?" + rkMetaHash(full);
+    val _r = registerRoute(
+        "GET",
+        route,
+        iconKindName(kind),
+        { req -> noTask(serveFile(full, contentType, iconKindName(kind) != "favicon")) },
+    );
     val _p = rkMetaAdd("pattern", route);
-    return rkMetaAdd("icon", IconFile(kind: kind, pattern: pattern, href: hashed, full: full, contentType: contentType, sizes: sizes));
+    return rkMetaAdd(
+        "icon",
+        IconFile(
+            kind: kind,
+            pattern: pattern,
+            href: hashed,
+            full: full,
+            contentType: contentType,
+            sizes: sizes,
+        ),
+    );
 }
 
-fn serveFile(full: string, contentType: string, cached: bool) -> HandlerResponse {
+fn serveFile(
+    full: string,
+    contentType: string,
+    cached: bool,
+) -> HandlerResponse {
     val h = typed(rkMetaRead(full), contentType);
     return if (cached) immutable(h) else h;
 }
@@ -370,14 +525,27 @@ pub fn iconsFor(pattern: string) -> Array<IconRef> {
         var best = "";
         var chosen: IconFile[] = [];
         for (all) { f ->
-            val applies = iconKindName(f.kind) == k && (f.pattern == "/" || pattern == f.pattern || pattern.startsWith(f.pattern + "/"));
-            if (applies && (chosen.length == 0 || depth(f.pattern) > depth(best))) {
+            val applies = iconKindName(f.kind) == k
+                && (f.pattern == "/"
+                    || pattern == f.pattern
+                    || pattern.startsWith(f.pattern + "/"));
+            if (applies
+                && (chosen.length == 0 || depth(f.pattern) > depth(best))) {
                 best = f.pattern;
                 chosen = [f];
-            };
-        };
-        for (chosen) { f -> out.push(IconRef(kind: f.kind, href: f.href, contentType: f.contentType, sizes: f.sizes)); };
-    };
+            }
+        }
+        for (chosen) { f ->
+            out.push(
+                IconRef(
+                    kind: f.kind,
+                    href: f.href,
+                    contentType: f.contentType,
+                    sizes: f.sizes,
+                ),
+            );
+        }
+    }
     return out;
 }
 
@@ -404,7 +572,7 @@ pub fn imageFileName(k: ImageKind) -> string {
 }
 
 fn imageRouteOf(pattern: string, kind: ImageKind) -> string {
-    val prefix = if (pattern == "/") { "" } else { pattern };
+    val prefix = if (pattern == "/") "" else pattern;
     return prefix + "/" + imageFileName(kind);
 }
 
@@ -418,28 +586,89 @@ fn rendererKey(kind: ImageKind, pattern: string) -> string {
     return imageFileName(kind) + "|" + pattern;
 }
 
-pub fn registerImageFile(kind: ImageKind, seg: string, file: string, contentType: string, width: i32, height: i32) -> i32 {
+pub fn registerImageFile(
+    kind: ImageKind,
+    seg: string,
+    file: string,
+    contentType: string,
+    width: i32,
+    height: i32,
+) -> i32 {
     val full = checkFile(file);
     val pattern = patternOfSeg(seg);
     val route = imageRouteOf(pattern, kind);
-    val _r = registerRoute("GET", route, imageFileName(kind), { req -> noTask(serveFile(full, contentType, true)) });
+    val _r = registerRoute(
+        "GET",
+        route,
+        imageFileName(kind),
+        { req -> noTask(serveFile(full, contentType, true)) },
+    );
     val _p = rkMetaAdd("pattern", route);
-    return rkMetaAdd("image", ImageReg(route: ImageRoute(kind: kind, pattern: pattern, width: width, height: height, contentType: contentType), file: full));
+    return rkMetaAdd(
+        "image",
+        ImageReg(
+            route: ImageRoute(
+                kind: kind,
+                pattern: pattern,
+                width: width,
+                height: height,
+                contentType: contentType,
+            ),
+            file: full,
+        ),
+    );
 }
 
-pub fn registerImageRoute(kind: ImageKind, seg: string, width: i32, height: i32, contentType: string) -> i32 {
+pub fn registerImageRoute(
+    kind: ImageKind,
+    seg: string,
+    width: i32,
+    height: i32,
+    contentType: string,
+) -> i32 {
     val pattern = patternOfSeg(seg);
     val route = imageRouteOf(pattern, kind);
-    val _r = registerRoute("GET", route, imageFileName(kind), { req -> noTask(serveDynamic(kind, pattern, contentType, req.path)) });
+    val _r = registerRoute(
+        "GET",
+        route,
+        imageFileName(kind),
+        { req -> noTask(serveDynamic(kind, pattern, contentType, req.path)) },
+    );
     val _p = rkMetaAdd("pattern", route);
-    return rkMetaAdd("image", ImageReg(route: ImageRoute(kind: kind, pattern: pattern, width: width, height: height, contentType: contentType), file: ""));
+    return rkMetaAdd(
+        "image",
+        ImageReg(
+            route: ImageRoute(
+                kind: kind,
+                pattern: pattern,
+                width: width,
+                height: height,
+                contentType: contentType,
+            ),
+            file: "",
+        ),
+    );
 }
 
-pub fn setImageRenderer(kind: ImageKind, seg: string, render: PageRenderer) -> i32 {
+pub fn setImageRenderer(
+    kind: ImageKind,
+    seg: string,
+    render: PageRenderer,
+) -> i32 {
     val pattern = patternOfSeg(seg);
     val regs: ImageReg[] = rkMetaAll("image");
-    val known = regs.filter({ r -> imageFileName(r.route.kind) == imageFileName(kind) && r.route.pattern == pattern && r.file == "" }).length > 0;
-    if (known == false) @panic("rakun metadata: no dynamic " + imageFileName(kind) + " is registered at `" + pattern + "` - registerImageRoute it first");
+    val known = regs.filter(
+        { r -> imageFileName(r.route.kind) == imageFileName(kind) && r.route.pattern == pattern && r.file == "" },
+    ).length
+        > 0;
+    if (known == false)
+        @panic(
+            "rakun metadata: no dynamic "
+                + imageFileName(kind)
+                + " is registered at `"
+                + pattern
+                + "` - registerImageRoute it first",
+        );
     return rkMetaPutRenderer(rendererKey(kind, pattern), render);
 }
 
@@ -465,10 +694,32 @@ fn renderInto(render: PageRenderer, pagePath: string) -> string {
 #[@External.Erlang("""rakun_runtime:make_request(<<"GET">>, $0, <<"{}">>, <<"{}">>, <<"{}">>, <<>>)""")]
 declare fn rkMakeReq(pathname: string) -> Request;
 
-fn serveDynamic(kind: ImageKind, pattern: string, contentType: string, routePath: string) -> HandlerResponse {
-    val pagePath = routePath.slice(0, routePath.length() - imageFileName(kind).length() - 1);
-    val body: ?string = renderedBody(kind, pattern, if (pagePath == "") "/" else pagePath);
-    if (body == null) return HandlerResponse(status: 501, headers: [#("Content-Type", "text/plain")], chunks: ["rakun metadata: no renderer is set for this " + imageFileName(kind) + " - front 70 renders dynamic images; the orchestrator sets it with setImageRenderer"], tasks: []);
+fn serveDynamic(
+    kind: ImageKind,
+    pattern: string,
+    contentType: string,
+    routePath: string,
+) -> HandlerResponse {
+    val pagePath = routePath.slice(
+        0,
+        routePath.length() - imageFileName(kind).length() - 1,
+    );
+    val body: ?string = renderedBody(
+        kind,
+        pattern,
+        if (pagePath == "") "/" else pagePath,
+    );
+    if (body == null)
+        return HandlerResponse(
+            status: 501,
+            headers: [#("Content-Type", "text/plain")],
+            chunks: [
+                "rakun metadata: no renderer is set for this "
+                    + imageFileName(kind)
+                    + " - front 70 renders dynamic images; the orchestrator sets it with setImageRenderer",
+            ],
+            tasks: [],
+        );
     return immutable(typed(body ?? "", contentType));
 }
 
@@ -476,10 +727,12 @@ fn nearestImage(kind: ImageKind, pathname: string) -> ?ImageReg {
     val regs: ImageReg[] = rkMetaAll("image");
     var best: ImageReg[] = [];
     for (regs) { r ->
-        val applies = imageFileName(r.route.kind) == imageFileName(kind) && anchorOf(r.route.pattern, pathname) != "";
-        val deeper = best.length == 0 || depth(r.route.pattern) > depth((best.at(0) ?? r).route.pattern);
+        val applies = imageFileName(r.route.kind) == imageFileName(kind)
+            && anchorOf(r.route.pattern, pathname) != "";
+        val deeper = best.length == 0
+            || depth(r.route.pattern) > depth((best.at(0) ?? r).route.pattern);
         if (applies && deeper) best = [r];
-    };
+    }
     if (best.length == 0) return null;
     return best.at(0) ?? null;
 }
@@ -490,17 +743,23 @@ pub fn resolveImage(kind: ImageKind, pattern: string) -> ?ImageRoute {
     var best: ImageRoute[] = [];
     for (regs) { r ->
         val p = r.route.pattern;
-        val applies = imageFileName(r.route.kind) == imageFileName(kind) && (p == "/" || pattern == p || pattern.startsWith(p + "/"));
-        val deeper = best.length == 0 || depth(p) > depth((best.at(0) ?? r.route).pattern);
+        val applies = imageFileName(r.route.kind) == imageFileName(kind)
+            && (p == "/" || pattern == p || pattern.startsWith(p + "/"));
+        val deeper = best.length == 0
+            || depth(p) > depth((best.at(0) ?? r.route).pattern);
         if (applies && deeper) best = [r.route];
-    };
+    }
     if (best.length == 0) return null;
     return best.at(0) ?? null;
 }
 
 fn hashOf(reg: ImageReg, pathname: string) -> string {
     if (reg.file != "") return rkMetaHash(reg.file);
-    val body: ?string = renderedBody(reg.route.kind, reg.route.pattern, pathname);
+    val body: ?string = renderedBody(
+        reg.route.kind,
+        reg.route.pattern,
+        pathname,
+    );
     return rkMetaHashText(body ?? "no-renderer");
 }
 
@@ -509,7 +768,16 @@ fn hashOf(reg: ImageReg, pathname: string) -> string {
 pub fn imageUrlFor(kind: ImageKind, pathname: string) -> ?string {
     val found: ?ImageReg = nearestImage(kind, pathname);
     if (found == null) return null;
-    val reg: ImageReg = found ?? ImageReg(route: ImageRoute(kind: kind, pattern: "/", width: 0, height: 0, contentType: ""), file: "");
+    val reg: ImageReg = found ?? ImageReg(
+        route: ImageRoute(
+            kind: kind,
+            pattern: "/",
+            width: 0,
+            height: 0,
+            contentType: "",
+        ),
+        file: "",
+    );
     val anchor = anchorOf(reg.route.pattern, pathname);
     val base = if (anchor == "/") "" else anchor;
     return base + "/" + imageFileName(kind) + "?" + hashOf(reg, pathname);
@@ -521,10 +789,24 @@ pub fn imagesFor(pathname: string, pattern: string) -> Array<ImageMeta> {
         val r: ?ImageRoute = resolveImage(k, patternOfSeg(pattern));
         val url: ?string = imageUrlFor(k, pathname);
         if (r != null && url != null) {
-            val route: ImageRoute = r ?? ImageRoute(kind: k, pattern: "", width: 0, height: 0, contentType: "");
-            out.push(ImageMeta(kind: k, url: url ?? "", width: route.width, height: route.height, contentType: route.contentType));
-        };
-    };
+            val route: ImageRoute = r ?? ImageRoute(
+                kind: k,
+                pattern: "",
+                width: 0,
+                height: 0,
+                contentType: "",
+            );
+            out.push(
+                ImageMeta(
+                    kind: k,
+                    url: url ?? "",
+                    width: route.width,
+                    height: route.height,
+                    contentType: route.contentType,
+                ),
+            );
+        }
+    }
     return out;
 }
 
@@ -535,7 +817,13 @@ pub fn metadataRoutePatterns() -> string[] {
 }
 
 pub fn metadataFileNames() -> string[] {
-    return ["favicon", "icon", "apple-icon", "opengraph-image", "twitter-image"];
+    return [
+        "favicon",
+        "icon",
+        "apple-icon",
+        "opengraph-image",
+        "twitter-image",
+    ];
 }
 
 // Every metadata file under `appDir` (relative paths, sorted), none inside a
@@ -545,9 +833,12 @@ pub fn scanMetadataFiles(appDir: string) -> string[] {
     for (metadataFileNames()) { n ->
         for (["**/" + n + ".*", n + ".*"]) { pattern ->
             val hits: string[] = fs.glob(pattern, appDir).unwrapOr([]);
-            for (hits) { f -> if (out.filter({ x -> x == f }).length == 0) out.push(f); };
-        };
-    };
-    return out.filter({ f -> f.split("/").filter({ s -> s.startsWith("_") }).length == 0 });
+            for (hits) { f ->
+                if (out.filter({ x -> x == f }).length == 0) out.push(f);
+            }
+        }
+    }
+    return out.filter(
+        { f -> f.split("/").filter({ s -> s.startsWith("_") }).length == 0 },
+    );
 }
-

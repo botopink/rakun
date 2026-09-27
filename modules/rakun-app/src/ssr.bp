@@ -37,23 +37,15 @@
 
 import {collections.Dict, querystring} from "std";
 import {Request, Response, rkProp} from "rakun";
-import {
-    RequestPhase,
-    RequestScope,
-    beginRequest,
-    endRequest,
-    requestLive,
-    requestPhase,
-    setPhase,
-} from "rakun/request_context";
+import {RequestPhase, RequestScope, beginRequest, endRequest, requestLive, requestPhase, setPhase} from "rakun/request_context";
 import {rkAppRegisterPage, rkAppTable, rkAppRender} from "file_router";
-import {table: {RouteEntry, parseTable, writeTable}, match: {RouteMatch, matchPath}} from "routing";
+import {table.RouteEntry, table.parseTable, table.writeTable, match.RouteMatch, match.matchPath} from "routing";
 
 // ── step 1: the seam ────────────────────────────────────────────────────────
 
 pub type ChunkWriter(
-    setStatus: fn(code: i32) -> void,
-    setHeader: fn(name: string, value: string) -> void,
+    setStatus: fn(code: i32),
+    setHeader: fn(name: string, value: string),
     write: fn(chunk: string) -> @Task<void>,
     close: fn() -> @Task<void>,
 )
@@ -139,7 +131,9 @@ pub declare fn rkSsrLogFailure(reason: string) -> string;
 pub declare fn rkSsrPageRequest(req: Request, paramsWire: string) -> Request;
 
 #[@External.Erlang("rakun_ssr", "set_fallback")]
-pub declare fn rkSsrSetFallback(dispatch: fn(req: Request) -> @Task<Response>) -> i32;
+pub declare fn rkSsrSetFallback(
+    dispatch: fn(req: Request) -> @Task<Response>,
+) -> i32;
 
 #[@External.Erlang("rakun_ssr", "clear_fallback")]
 pub declare fn rkSsrClearFallback() -> i32;
@@ -165,14 +159,16 @@ pub type PageMatch(
 )
 
 pub fn matchPage(pathname: string) -> PageMatch {
-    val pages: RouteEntry[] = parseTable(rkAppTable()).filter({ e -> (e.kind == "P") && (e.slot == "") });
+    val pages: RouteEntry[] = parseTable(rkAppTable()).filter(
+        { e -> (e.kind == "P") && (e.slot == "") },
+    );
     val found = matchPath(pages, pathname);
     if (found == null) return PageMatch(record: "", params: "");
     val m: RouteMatch = found;
     var lines: string[] = [];
     for (m.params.keys()) { k ->
         lines.push(k + "\t" + m.params.at(k).unwrapOr(""));
-    };
+    }
     return PageMatch(record: writeTable([m.entry]), params: lines.join("\n"));
 }
 
@@ -190,7 +186,11 @@ pub fn renderErrorProblem(message: string) -> string {
 }
 
 // The renderer's outcome as text: `""` for `Ok`, the problem for `Error(msg)`.
-fn renderOutcome(render: PageRenderer, req: Request, out: ChunkWriter) -> @Task<string> {
+fn renderOutcome(
+    render: PageRenderer,
+    req: Request,
+    out: ChunkWriter,
+) -> @Task<string> {
     val r: @Result<void, string> = await render(req, out);
     return case r {
         Ok(_) -> "";
@@ -199,7 +199,9 @@ fn renderOutcome(render: PageRenderer, req: Request, out: ChunkWriter) -> @Task<
 }
 
 pub fn notFoundProblem(pathname: string) -> string {
-    return "rakun ssr: no page claims `" + pathname + "` - a pattern carrying nothing but a layout is not public";
+    return "rakun ssr: no page claims `"
+        + pathname
+        + "` - a pattern carrying nothing but a layout is not public";
 }
 
 // The dispatch: one function, the status written. The renderer runs inside one
@@ -211,26 +213,35 @@ pub fn servePage(req: Request, out: ChunkWriter) -> @Task<i32> {
         out.setStatus(404);
         await out.close();
         return 404;
-    };
+    }
     val render: PageRenderer = rkAppRender(found.record, missingRenderer());
     val pageReq: Request = rkSsrPageRequest(req, found.params);
     val opened: bool = requestLive() == false;
-    val _b = if (opened) beginRequest(RequestScope(
-        id: "page",
-        phase: RequestPhase.Render,
-        method: "GET",
-        path: req.path,
-        query: "",
-        headersWire: "",
-        strict: rkProp("rakun.render.strict") == "true",
-    )) else 0;
+    val _b = if (opened)
+        beginRequest(
+            RequestScope(
+                id: "page",
+                phase: RequestPhase.Render,
+                method: "GET",
+                path: req.path,
+                query: "",
+                headersWire: "",
+                strict: rkProp("rakun.render.strict") == "true",
+            ),
+        )
+    else
+        0;
     val previous: RequestPhase = requestPhase();
     val _p = setPhase(RequestPhase.Render);
-    val failure: string = rkSsrGuard({ -> renderOutcome(render, pageReq, out) });
+    val failure: string = rkSsrGuard(
+        { -> renderOutcome(render, pageReq, out) },
+    );
     val _l = if (failure != "") rkSsrLogFailure(failure) else "";
     val _r = setPhase(previous);
     val _e = if (opened) endRequest() else "";
-    val failedEarly: bool = (failure != "") && (rkSsrStarted() == false) && (rkSsrClosed() == false);
+    val failedEarly: bool = (failure != "")
+        && (rkSsrStarted() == false)
+        && (rkSsrClosed() == false);
     val _f = if (failedEarly) failRender(out) else 0;
     val _c = await closeIfOpen(out);
     return rkSsrStatus();
@@ -278,7 +289,7 @@ pub fn queryDict(query: string) -> @Result<Dict<string, string>, string> {
     var d = Dict.empty();
     for (pairs) { pair ->
         d = d.insert(pair._0, pair._1);
-    };
+    }
     return d;
 }
 

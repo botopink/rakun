@@ -27,7 +27,7 @@
 
 import {rkProp} from "rakun";
 import {rkReqPutSlot, rkReqSlot, demandRequest} from "rakun/request_context";
-import {navigation: {NavKind, NavOutcome, signalReason, signalFromReason, isSignalReason, signalToWire, signalFromWire}} from "routing";
+import {navigation.NavKind, navigation.NavOutcome, navigation.signalReason, navigation.signalFromReason, navigation.isSignalReason, navigation.signalToWire, navigation.signalFromWire} from "routing";
 import {appMatch} from "file_router";
 
 #[@External.Erlang("rakun_navigation", "signal")]
@@ -45,7 +45,11 @@ declare fn rkNavRethrow(reason: string) -> i32;
 // ── step 1: the signal ──────────────────────────────────────────────────────
 
 pub fn notFound() -> i32 {
-    return rkNavSignal(signalReason(NavOutcome(kind: NavKind.NotFound, location: "", status: 404)));
+    return rkNavSignal(
+        signalReason(
+            NavOutcome(kind: NavKind.NotFound, location: "", status: 404),
+        ),
+    );
 }
 
 pub fn redirect(location: string) -> i32 {
@@ -57,36 +61,59 @@ pub fn permanentRedirect(location: string) -> i32 {
 }
 
 pub fn statusProblem(status: i32) -> string {
-    return "rakun navigation: a redirect status is 303, 307 or 308, not " + status.toString();
+    return "rakun navigation: a redirect status is 303, 307 or 308, not "
+        + status.toString();
 }
 
 pub fn unknownTargetProblem(location: string) -> string {
-    return "rakun navigation: redirect to `" + location + "` - no route in the table matches it";
+    return "rakun navigation: redirect to `"
+        + location
+        + "` - no route in the table matches it";
 }
 
 pub fn offListProblem(location: string, host: string) -> string {
-    return "rakun navigation: redirect to `" + location + "` - the host `" + host + "` is not on rakun.navigation.allowedHosts";
+    return "rakun navigation: redirect to `"
+        + location
+        + "` - the host `"
+        + host
+        + "` is not on rakun.navigation.allowedHosts";
 }
 
 pub fn redirectWithStatus(location: string, status: i32) -> i32 {
     val known: bool = (status == 303) || (status == 307) || (status == 308);
     if (known == false) @panic(statusProblem(status));
     val _v = validateTarget(location);
-    return rkNavSignal(signalReason(NavOutcome(kind: NavKind.Redirect, location: location, status: status)));
+    return rkNavSignal(
+        signalReason(
+            NavOutcome(
+                kind: NavKind.Redirect,
+                location: location,
+                status: status,
+            ),
+        ),
+    );
 }
 
 pub fn isAbsolute(location: string) -> bool {
-    return location.startsWith("http://") || location.startsWith("https://") || location.startsWith("//");
+    return location.startsWith("http://")
+        || location.startsWith("https://")
+        || location.startsWith("//");
 }
 
 pub fn hostOf(location: string) -> string {
-    val rest: string = if (location.startsWith("//")) location.slice(2, location.length) else (location.split("://").at(1) ?? "");
+    val rest: string = if (location.startsWith("//"))
+        location.slice(2, location.length)
+    else
+        (location.split("://").at(1) ?? "");
     val hostPort: string = (rest.split("/").at(0) ?? "");
     return (hostPort.split(":").at(0) ?? "").toLower();
 }
 
 pub fn allowedHosts() -> string[] {
-    return rkProp("rakun.navigation.allowedHosts").split(",").map({ h -> h.trim().toLower() }).filter({ h -> h != "" });
+    return rkProp("rakun.navigation.allowedHosts")
+        .split(",")
+        .map({ h -> h.trim().toLower() })
+        .filter({ h -> h != "" });
 }
 
 fn validateTarget(location: string) -> i32 {
@@ -109,12 +136,14 @@ pub fn captureSignals<T>(body: fn() -> T, fallback: T) -> T {
     // A `nav:` reason with a verb `routing` does not know is VERSION SKEW
     // between the two sides, and stays loud: `signalFromReason` raises for it.
     val recognised: bool = isSignalReason(reason);
-    val skewed: bool = (recognised == false) && reason.startsWith("nav:") && (reason.length > 4);
+    val skewed: bool = (recognised == false)
+        && reason.startsWith("nav:")
+        && (reason.length > 4);
     val _k = if (skewed) loudSkew(reason) else 0;
     if (recognised == false) {
         val _r = rkNavRethrow(reason);
         return fallback;
-    };
+    }
     val out: NavOutcome = signalFromReason(reason);
     val _w = rkReqPutSlot("navigation", signalToWire(out));
     return fallback;
