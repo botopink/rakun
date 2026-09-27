@@ -47,6 +47,7 @@ refusal is the core's `config_check.bp`.
 | [rakun-test](./rakun-test/) | root | erlang | `-test` | 19 | FakeRequest (implements Request) + toRequest, expect* assertions, MockMvc, resetSingletons/resetContext/contextSnapshot; 27 tests |
 | [rakun-websocket](./rakun-websocket/) | root · ws_host · ws · endpoint | erlang | `-websocket` | 20 | real code, 27 tests (no JavaScript) |
 | [rakun-tx](./rakun-tx/) | root · outbox · saga · twopc | erlang | JTA (`spring-boot-starter-jta-*`), Kafka/Pulsar transactions | 83 | real code, 32 tests |
+| [rakun-ws](./rakun-ws/) | root · ws | erlang | `-web-services` (SOAP — not WebSocket) | 93 | real code, 13 tests |
 | [rakun-web](./rakun-web/) | root · filter · negotiation · error · middleware · cors · compression · customizer · apiversion · shutdown · convention · tls · rules · static | erlang | `-webmvc` (websocket is `rakun-websocket`) | 07 · 65 · 82 | real code, 209 tests |
 
 `modules/rakun-web/` stopped being a scaffold with front 07: it carries the filter chain, CORS and

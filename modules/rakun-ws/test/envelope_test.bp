@@ -1,0 +1,44 @@
+//// rakun-ws — envelopes and faults (front 93 steps 1 and 5), pure.
+
+import {testing.asserts} from "std";
+import {soapEnvelope, soapBody, parseFault, SoapFault, xmlEscape, envelopeVersion, wrappedElement} from "ws";
+
+test "envelope: each version carries its own namespace and never the other's" {
+    val e11 = soapEnvelope("1.1", "<a/>");
+    val e12 = soapEnvelope("1.2", "<a/>");
+    assert e11.contains("http://schemas.xmlsoap.org/soap/envelope/") && e11.contains("2003/05/soap-envelope") == false;
+    assert e12.contains("http://www.w3.org/2003/05/soap-envelope") && e12.contains("xmlsoap.org/soap/envelope") == false;
+    assert envelopeVersion(e11) == "1.1" && envelopeVersion(e12) == "1.2";
+}
+
+test "envelope: the body round-trips for both versions, a nested element named Body included" {
+    val body = "<m:GetInvoice xmlns:m=\"urn:billing\"><Body>kept</Body><id>7</id></m:GetInvoice>";
+    assert soapBody(soapEnvelope("1.1", body)) == body && soapBody(soapEnvelope("1.2", body)) == body, soapBody(soapEnvelope("1.1", body));
+    assert wrappedElement(soapEnvelope("1.1", body)) == "GetInvoice";
+}
+
+test "envelope: leaf values are escaped exactly once, element names never" {
+    assert xmlEscape("a&b<c>\"d'") == "a&amp;b&lt;c&gt;&quot;d&apos;";
+    val body = "<note>" + xmlEscape("5 < 6 & \"x\"") + "</note>";
+    assert soapBody(soapEnvelope("1.1", body)).contains("5 &lt; 6 &amp; ") && soapBody(soapEnvelope("1.1", body)).contains("&amp;amp;") == false;
+}
+
+test "envelope: the prefix is not assumed - s11:, env: and a default namespace read the same" {
+    val s11 = "<s11:Envelope xmlns:s11=\"http://schemas.xmlsoap.org/soap/envelope/\"><s11:Body><x>1</x></s11:Body></s11:Envelope>";
+    val env = "<env:Envelope xmlns:env=\"http://www.w3.org/2003/05/soap-envelope\"><env:Body><x>1</x></env:Body></env:Envelope>";
+    val bare = "<Envelope xmlns=\"http://schemas.xmlsoap.org/soap/envelope/\"><Body><x xmlns=\"\">1</x></Body></Envelope>";
+    assert soapBody(s11) == "<x>1</x>" && soapBody(env) == "<x>1</x>" && soapBody(bare).contains(">1</x>"), soapBody(bare);
+}
+
+fn show(f: ?SoapFault) -> string {
+    return case f { null -> "null"; fault -> fault.code + "|" + fault.reason + "|" + fault.actor + "|" + fault.detail; };
+}
+
+test "faults: a normal body is null; the 1.1 and 1.2 shapes decode into one record; detail stays raw" {
+    val ok = soapEnvelope("1.1", "<r>fine</r>");
+    val f11 = "<soap:Envelope xmlns:soap=\"http://schemas.xmlsoap.org/soap/envelope/\"><soap:Body><soap:Fault><faultcode>soap:Client</faultcode><faultstring>bad id</faultstring><faultactor>urn:gw</faultactor><detail><e:code xmlns:e=\"urn:e\">E42</e:code></detail></soap:Fault></soap:Body></soap:Envelope>";
+    val f12 = "<env:Envelope xmlns:env=\"http://www.w3.org/2003/05/soap-envelope\"><env:Body><env:Fault><env:Code><env:Value>env:Sender</env:Value></env:Code><env:Reason><env:Text>bad id</env:Text></env:Reason><env:Role>urn:gw</env:Role><env:Detail><e:code xmlns:e=\"urn:e\">E42</e:code></env:Detail></env:Fault></env:Body></env:Envelope>";
+    assert show(parseFault(ok)) == "null";
+    assert show(parseFault(f11)) == "soap:Client|bad id|urn:gw|<e:code xmlns:e=\"urn:e\">E42</e:code>", show(parseFault(f11));
+    assert show(parseFault(f12)) == "env:Sender|bad id|urn:gw|<e:code xmlns:e=\"urn:e\">E42</e:code>", show(parseFault(f12));
+}

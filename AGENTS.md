@@ -2582,6 +2582,23 @@ hashes, module facts).
   path dependencies with a SHA-256 of their tree; `registerSbomEndpoint(file)`
   serves it at `sbom`.
 
+## SOAP web services — `modules/rakun-ws/` (front 93)
+
+Not WebSocket (that is rakun-web's `websocket`). `src/sidecars/rakun_ws.erl`
+over xmerl reads envelopes by namespace URI and local name (any prefix):
+`soapEnvelope` / `soapBody` (1.1 and 1.2), `parseFault` (`?SoapFault`, both
+shapes, raw detail), `wrappedElement`, `xmlEscape`. `wsCall(client, action,
+body)` over front 13's client: 1.1 `SOAPAction`, 1.2 the Content-Type
+`action`; a fault is `Error(fault)`, anything else failing is `Error` with
+code `transport`. WS-Security UsernameToken (PasswordText, fresh Nonce,
+Created) when the client has a username; plain `http://` is refused unless
+`rakun.ws.security.allow-plain-http=true` — DEVELOPMENT ONLY.
+`publishEndpoint(path, wsdl, operations, version)`: POST dispatches on the
+wrapped element, GET serves the WSDL; no operation / malformed → Client
+fault, a raise → Server fault; `rakun.ws.security.{username,password,
+nonce-window-ms}` verifies incoming tokens and rejects a replayed nonce. The
+WSDL/XSD generator is not written.
+
 ## RSocket — `modules/rakun-rsocket/` (front 92)
 
 `src/sidecars/rakun_rsocket.erl` is the wire (no byte type in botopink): the
