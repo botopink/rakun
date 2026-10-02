@@ -3960,7 +3960,11 @@ their own dependencies follow transitively (decision 143). Sidecar
 per cache name), owned by `rakun_cache_owner`; the names table (resolved
 settings), the customizers, single flight, background refresh, the monotonic
 clock with a test offset, the invalidation log and trace and a RESP double for
-the tests.
+the tests. A read's LRU tick and LFU hit count and a tag's mark are updated IN
+PLACE (`ets:update_element` / `update_counter`), never by re-inserting the tuple
+the read saw: a write-back undoes a concurrent `row_put` or delete (it once
+resurrected a stale prerendered entry and started a second regeneration);
+`store_test.bp` races a writer against sixteen readers.
 
 - **One primitive** (`cache.bp`) — `cacheThrough(policy, keys, load)`;
   `cacheFn(name, keys, life, tags, load)` (Next's `unstable_cache`),

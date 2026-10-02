@@ -220,6 +220,32 @@ test "store: cacheStore overwrites and cachePeek reads without loading, stale on
     assert cacheThrough(p, ["k"], { -> "loaded" }) == "two";
 }
 
+// A read updates its row's tick and hit count in place: it never writes back
+// the row it saw, so a write that lands between a read's lookup and its
+// bookkeeping is never undone (front 60's single-flight regeneration relied
+// on it — a resurrected stale entry started a second regeneration).
+test "store: a write racing sixteen readers is never undone by a read" {
+    val _b = boot("ets");
+    val p = cachePolicy(CacheScope.Shared, "st-race", cacheLifeOf(0, 600, 600), []);
+    val _s = cacheStore(p, ["k"], "0");
+    val out = rkCacheSpawnMany(17, { i ->
+        var lost = "";
+        for (Array.range(1, 401)) { n ->
+            if (i == 1) {
+                val _w = cacheStore(p, ["k"], n.toString());
+                val seen = cachePeek(p, ["k"]).value;
+                if (seen != n.toString() && lost == "") lost = "wrote " + n.toString() + " read " + seen;
+            } else {
+                val _r = cachePeek(p, ["k"]);
+            };
+        };
+        lost;
+    });
+    val bad = out.filter({ r -> r != "" });
+    assert bad.length == 0, bad.join(";");
+    assert cachePeek(p, ["k"]).value == "400";
+}
+
 test "store: a rakun. cache is the framework's own - ETS whatever the kill switch says" {
     val _b = boot("none");
     val p = cachePolicy(CacheScope.Shared, "rakun.internal", cacheLifeOf(0, 600, 600), []);

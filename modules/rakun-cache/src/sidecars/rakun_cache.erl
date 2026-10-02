@@ -72,11 +72,21 @@ tel(Op, Name, Result) ->
     end.
 
 %% A read counts: the tick moves (LRU) and the hit count grows (LFU).
+%%
+%% The two columns are updated IN PLACE (`update_element` / `update_counter`),
+%% never by re-inserting the tuple the read saw: a write-back of `Row` would
+%% put back the value a concurrent `row_put` just replaced (or a row a
+%% concurrent delete just removed, or clear a concurrent mark), so a reader
+%% racing a regeneration resurrected the stale entry and a second
+%% regeneration started. A row gone between the lookup and the update is
+%% left gone.
 row_get(Name, Key) ->
     ensure(),
-    case ets:lookup(?ROWS, {Name, Key}) of
-        [{K, Row, Tags, Marked, _Tick, Hits, ExpireAt}] ->
-            true = ets:insert(?ROWS, {K, Row, Tags, Marked, tick(), Hits + 1, ExpireAt}),
+    K = {Name, Key},
+    case ets:lookup(?ROWS, K) of
+        [{K, Row, _Tags, _Marked, _Tick, _Hits, _ExpireAt}] ->
+            _ = ets:update_element(?ROWS, K, {5, tick()}),
+            _ = try ets:update_counter(?ROWS, K, {6, 1}) catch error:badarg -> 0 end,
             tel(get, Name, <<"hit">>),
             Row;
         [] -> tel(get, Name, <<"miss">>), undefined
@@ -139,11 +149,10 @@ evict_one(Name, Policy, Keep) ->
 %% schedules a refresh. Answers how many rows were marked.
 mark_tag(Tag) ->
     ensure(),
-    Hits = [R || {_, _, Tags, _, _, _, _} = R <- ets:tab2list(?ROWS), lists:member(Tag, Tags)],
-    lists:foreach(fun({K, Row, Tags, _, T, H, E}) ->
-                          ets:insert(?ROWS, {K, Row, Tags, true, T, H, E})
-                  end, Hits),
-    length(Hits).
+    %% The mark is set in place: re-inserting the listed tuple would put back
+    %% a row a concurrent `row_put` replaced or a concurrent delete removed.
+    Hits = [K || {K, _, Tags, _, _, _, _} <- ets:tab2list(?ROWS), lists:member(Tag, Tags)],
+    length([K || K <- Hits, ets:update_element(?ROWS, K, {4, true})]).
 
 %% Every row carrying `Tag` is removed now. Answers how many.
 expire_tag(Tag) ->
