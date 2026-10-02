@@ -2733,6 +2733,11 @@ involved, the mechanism is here. Tables (`rakun_outbox`, `rakun_inbox`,
   `recover2pc` delivers a logged decision again and aborts a transaction
   without one. Between a participant's prepare and the decision reaching it,
   the participant blocks — prefer the outbox.
+- **Counters and log** (`bump` / `counterOf`, `note` / `txLog`): node-wide
+  persistent_terms written from any process (the path counters, two relays
+  in one test). Each write is a read-modify-write under a node-local
+  `global:trans` lock on its key; without the lock, concurrent writers lose
+  each other's updates.
 
 ## DevTools — `modules/rakun-devtools/` (front 80)
 
