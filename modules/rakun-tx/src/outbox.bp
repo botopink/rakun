@@ -34,11 +34,16 @@ pub declare fn nowMs() -> i32;
 declare fn me() -> string;
 #[@External.Erlang("""(fun(__F) -> try __F(), <<>> catch _:{panic, __R} when is_binary(__R) -> __R; _:__R -> iolist_to_binary(io_lib:format("~p", [__R])) end end)($0)""")]
 pub declare fn attempt(work: fn() -> i32) -> string;
-#[@External.Erlang("""(fun(__N) -> persistent_term:put({rakun_tx_counter, __N}, persistent_term:get({rakun_tx_counter, __N}, 0) + 1), persistent_term:get({rakun_tx_counter, __N}) end)($0)""")]
+// `bump` and `note` are read-modify-writes of one persistent_term shared by
+// every process (two relays, a relay and its caller): each runs under a
+// node-local `global:trans` lock on its key, so a concurrent writer cannot
+// overwrite the other's update with the value it read before it. Without the
+// lock two relays lost a quarter of their log lines.
+#[@External.Erlang("""(fun(__N) -> global:trans({{rakun_tx_counter, __N}, self()}, fun() -> __V = persistent_term:get({rakun_tx_counter, __N}, 0) + 1, persistent_term:put({rakun_tx_counter, __N}, __V), __V end, [node()]) end)($0)""")]
 pub declare fn bump(name: string) -> i32;
 #[@External.Erlang("""(fun(__N) -> persistent_term:get({rakun_tx_counter, __N}, 0) end)($0)""")]
 pub declare fn counterOf(name: string) -> i32;
-#[@External.Erlang("""(fun(__T) -> logger:notice("~ts", [__T]), persistent_term:put(rakun_tx_log, persistent_term:get(rakun_tx_log, []) ++ [__T]), 0 end)($0)""")]
+#[@External.Erlang("""(fun(__T) -> logger:notice("~ts", [__T]), global:trans({rakun_tx_log, self()}, fun() -> persistent_term:put(rakun_tx_log, persistent_term:get(rakun_tx_log, []) ++ [__T]) end, [node()]), 0 end)($0)""")]
 pub declare fn note(line: string) -> i32;
 #[@External.Erlang("""persistent_term:get(rakun_tx_log, [])""")]
 pub declare fn txLog() -> string[];
