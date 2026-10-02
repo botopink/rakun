@@ -4196,10 +4196,15 @@ half is the browser's own `WebSocket` against the wire contract below.
 - **Connection** — the connection process of front 04's `rakun_conn_sup` becomes
   the WebSocket connection: one supervised process per connection. A raising
   handler closes only its own connection with `1011`. Outbound frames are pushed
-  to the process's mailbox; `push` refuses and flags the connection once the
-  mailbox holds `rakun.websocket.max-outbound-queue` (1000) frames, and a
-  connection whose peer stopped reading (the socket driver holding unsent bytes)
-  waits, sees the flag and closes with `1013` — the mailbox never passes the cap.
+  to the process's mailbox and counted in the session's `{queued, Id}` count
+  (raised atomically by `push`, lowered when the connection takes the frame);
+  `push` refuses and flags the connection once that count holds
+  `rakun.websocket.max-outbound-queue` (1000) frames, and a connection whose peer
+  stopped reading (the socket driver holding unsent bytes) waits, sees the flag
+  and closes with `1013` — the queued frames never pass the cap. The cap counts
+  frames, not the mailbox length (which also holds socket messages, the heartbeat
+  and transient `gen_server` replies). A broadcast to a member on another node
+  goes through that node's `deliver/2`, so it counts against the cap there.
   The socket's high watermark is raised so a `send` never parks the process.
 - **Handlers** (`endpoint.bp`) — `#[wsEndpoint("/path")]` on a stereotyped
   record type emits `val __rkWs_<T> = rkRegisterWsEndpoint(path, "<T>", open,

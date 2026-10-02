@@ -39,11 +39,11 @@
          client_connect/3, client_send/2, client_send_binary/2, client_recv/2,
          client_pause/1, client_autopong/2, client_close/2,
          pg_broadcast/2, wide/1]).
--export([pg_subscriber/2]).
+-export([pg_subscriber/2, deliver/2]).
 
 -define(ENDPOINTS, rakun_ws_endpoints). %% ordered_set {Seq, Path, TypeName, OnOpen, OnMessage, OnClose}
 -define(SESSIONS, rakun_ws_sessions).   %% set {Id, Pid, Principal, Path}
--define(STATE, rakun_ws_state).         %% set {Key, Value}: overflow flags, counters, close log
+-define(STATE, rakun_ws_state).         %% set {Key, Value}: overflow flags, queued-frame counts, counters, close log
 -define(SCOPE, rakun_ws).
 -define(GUID, <<"258EAFA5-E914-47DA-95CA-C5AB0DC85B11">>).
 
@@ -184,6 +184,9 @@ phrase(_) -> <<"Error">>.
 run(Mod, Sock, Path, {OnOpen, OnMessage, OnClose}) ->
     Id = iolist_to_binary(["ws-", integer_to_binary(seq())]),
     Principal = case get(rakun_ws_principal) of undefined -> <<>>; P -> P end,
+    %% The queued-frame count exists before the session can be found, so a
+    %% `push/3` that finds the session always finds its count.
+    true = ets:insert(?STATE, {{queued, Id}, 0}),
     true = ets:insert(?SESSIONS, {Id, self(), Principal, Path}),
     _ = pg:join(?SCOPE, all, self()),
     Opts = [{packet, raw}, {send_timeout, 500}, {send_timeout_close, false}, {sndbuf, 65536},
@@ -192,8 +195,6 @@ run(Mod, Sock, Path, {OnOpen, OnMessage, OnClose}) ->
     Heartbeat = setting(<<"heartbeat-seconds">>, 30) * 1000,
     Idle = setting(<<"idle-timeout-seconds">>, 90) * 1000,
     MaxFrame = setting(<<"max-frame-bytes">>, 65536),
-    Cap = setting(<<"max-outbound-queue">>, 1000),
-    put(rakun_ws_cap, Cap),
     erlang:send_after(Heartbeat, self(), ws_heartbeat),
     S = #{mod => Mod, sock => Sock, id => Id, principal => Principal, path => Path,
           buf => <<>>, last => now_ms(), heartbeat => Heartbeat, idle => Idle,
@@ -215,7 +216,8 @@ loop(S = #{sock := Sock, id := Id}) ->
                     frames(S#{buf := <<(maps:get(buf, S))/binary, Data/binary>>, last := now_ms()});
                 {Tag, Sock} when Tag =:= tcp_closed; Tag =:= ssl_closed ->
                     finish_silent(S, 1006, <<"the peer went away">>);
-                {ws_out, Frame} ->
+                {ws_queued, Frame} ->
+                    _ = ets:update_counter(?STATE, {queued, Id}, {2, -1, 0, 0}),
                     case writable(S) of
                         false -> finish(S, 1013, <<"outbound queue over the cap">>);
                         true ->
@@ -245,6 +247,7 @@ loop(S = #{sock := Sock, id := Id}) ->
 %% far — the high watermark is raised so a send never parks); otherwise the process
 %% waits, still watching its overflow flag: the frames behind it pile up in the
 %% mailbox, `push/3` stops at the cap and flags it, and this answers false.
+%% A frame leaves the queued count when this process takes it from the mailbox.
 writable(S = #{sock := Sock, id := Id}) ->
     case overflowed(Id) of
         true -> false;
@@ -308,6 +311,9 @@ finish_silent(#{mod := Mod, sock := Sock, id := Id, principal := P, path := Path
     _ = call_handler(fun() -> OnClose(Id, P, Path, Code, Reason) end),
     log_close(Id, Code),
     true = ets:delete(?SESSIONS, Id),
+    %% The count goes before the flag: a `push/3` that flags this session after
+    %% this point sees no count and takes its flag back.
+    true = ets:delete(?STATE, {queued, Id}),
     true = ets:delete(?STATE, {overflow, Id}),
     _ = Mod:close(Sock),
     ok.
@@ -385,20 +391,30 @@ pid_of(Id) ->
         [] -> undefined
     end.
 
-%% Queues one text frame to a connection unless its mailbox is at the cap, in
-%% which case the connection is flagged and closes itself with 1013. Answers 1
-%% when queued.
+%% Queues one text frame to a connection unless it already holds `cap` queued
+%% frames, in which case the connection is flagged and closes itself with 1013.
+%% Answers 1 when queued. The queue the cap governs is the session's
+%% `{queued, Id}` count — frames pushed and not yet taken by the connection —
+%% not the mailbox length: the mailbox also holds the socket's messages, the
+%% heartbeat timer and transient `gen_server` replies (`pg:leave` while the
+%% connection closes), none of which is a queued frame. The count is taken and
+%% raised in one atomic `ets:update_counter`, so concurrent pushers never put
+%% more than `cap` frames in the queue; a push past the cap is undone before
+%% anything is sent. A session already closing has no count: nothing is queued.
 push(Pid, Id, Text) ->
     Cap = case ets:lookup(?STATE, cap) of [{_, C}] -> C; [] -> 1000 end,
-    Queue = case erlang:process_info(Pid, message_queue_len) of
-                {message_queue_len, N} -> N;
-                undefined -> -1
-            end,
-    record_queue(Queue),
-    if
-        Queue < 0 -> 0;
-        Queue >= Cap -> true = ets:insert(?STATE, {{overflow, Id}, true}), 0;
-        true -> Pid ! {ws_out, frame(1, Text)}, 1
+    try ets:update_counter(?STATE, {queued, Id}, {2, 1}) of
+        Queued when Queued =< Cap ->
+            record_queue(Queued),
+            Pid ! {ws_queued, frame(1, Text)},
+            1;
+        _ ->
+            _ = ets:update_counter(?STATE, {queued, Id}, {2, -1, 0, 0}),
+            true = ets:insert(?STATE, {{overflow, Id}, true}),
+            _ = ets:member(?STATE, {queued, Id}) orelse ets:delete(?STATE, {overflow, Id}),
+            0
+    catch
+        error:badarg -> 0
     end.
 
 record_queue(N) ->
@@ -455,19 +471,26 @@ unsubscribe(Id, Topic) ->
     end.
 
 %% Fire-and-forget to every member of the topic on every connected node;
-%% answers how many frames were queued.
+%% answers how many frames were queued. A member on another node is handed to
+%% that node's `deliver/2`, so its frames count against the cap there too.
 broadcast(Topic, Text) ->
     ensure(),
     set_cap(),
     Members = pg:get_members(?SCOPE, {topic, Topic}),
     lists:sum([case node(Pid) =:= node() of
-                   true ->
-                       case [I || {I, P, _, _} <- ets:tab2list(?SESSIONS), P =:= Pid] of
-                           [Id | _] -> push(Pid, Id, Text);
-                           [] -> Pid ! {ws_out, frame(1, Text)}, 1
-                       end;
-                   false -> Pid ! {ws_out, frame(1, Text)}, 1
+                   true -> deliver(Pid, Text);
+                   false -> ok = erpc:cast(node(Pid), ?MODULE, deliver, [Pid, Text]), 1
                end || Pid <- Members]).
+
+%% One frame to a local `pg` member: a session goes through the cap
+%% (`push/3`); a member that is not a session (a subscriber process) receives
+%% the raw frame.
+deliver(Pid, Text) ->
+    ensure(),
+    case [I || {I, P, _, _} <- ets:tab2list(?SESSIONS), P =:= Pid] of
+        [Id | _] -> push(Pid, Id, Text);
+        [] -> Pid ! {ws_out, frame(1, Text)}, 1
+    end.
 
 sessions_on(Topic) ->
     ensure(),
@@ -500,12 +523,7 @@ refused_count() ->
 bump(Key) ->
     ets:update_counter(?STATE, Key, {2, 1}, {Key, 0}).
 
-%% ═══ two nodes ═══════════════════════════════════════════════════════════════
-%%
-%% Starts a peer node sharing this code path, joins a subscriber there to
-%% `Topic`, broadcasts `Text` from here and answers `"<count>|<what the remote
-%% subscriber received>"`, or `"skipped: <why>"` when this runner cannot start
-%% a distributed peer.
+%% ═══ pg members that are not sessions ═════════════════════════════════════════
 
 %% A `pg` member that is not a session (a peer node's subscriber, in a
 %% cluster) receives the raw frame. Two subscriber processes of THIS node join
