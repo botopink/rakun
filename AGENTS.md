@@ -254,9 +254,11 @@ rakun/
 │                        through `from "rakun"` — the element adapter, a layout
 │                        and a page, one render inside a request scope, and the
 │                        escaping assertion. `botopink run` prints the document
-└── scripts/git-hooks/ ← the pre-commit gate (§ Local gate): the refusal greps, `botopink test`
-                         per module member, `botopink build` per example; refuses a missing
-                         compiler and a staged `*.snap.new`
+└── scripts/git-hooks/ ← the pre-commit gate (§ Local gate): `lib/runner-standalone.sh` (one
+                         text in the five library repositories — refuses a staged
+                         `*.snap.new` and a missing compiler, `botopink test` in every
+                         workspace member, `botopink build` per example) and
+                         `repository-stages.sh` (rakun's own stage: the refusal greps)
 ```
 
 ## Module tree (`root.bp`)
@@ -4739,24 +4741,33 @@ completed handshake.
 
 ## CI
 
-`.github/workflows/test.yml` is the manifests' target set (decision gate-j):
-`erlang` × {`ubuntu-22.04`, `macos-14`, `windows-2022`}, every row hard — no
-`allow_fail`, no `commonJS` row (no member declares it; rakun is erlang-only,
-decision 113), no `beam` row (`botopink test` cannot run beam, so such a row
-measured nothing). Each row runs `zig-out/bin/botopink-lib-test --target
-erlang --strict` from the botopink-lang checkout with **no `--lib`**: the
-runner discovers every project under `repository/` — the 25 modules, the 8
-starters and the 3 examples, one row each (a `--lib rakun` would restrict the
-run to the core member; the umbrella has no row) — then builds every example
-(`runExamplesGate`) on every row. `BOTOPINK_BIN` is exported to the step from
-the binary the job built, for `rakun-client`'s fixture-build tests. The windows
-row installs OTP through `erlef/setup-beam`, as botopink-lang's does.
+`.github/workflows/test.yml` is the manifests' target set (decision gate-j) on
+the runners the compiler is gated on: `erlang` × {`ubuntu-24.04`, `macos-14`},
+every row hard — no `allow_fail`, no `commonJS` row (no member declares it;
+rakun is erlang-only, decision 113), no `beam` row (`botopink test` cannot run
+beam, so such a row measured nothing), no windows row (gate-f: botopink-lang's
+own workflow has none, so a row here would measure the compiler's windows
+port; it returns with the compiler's). The linux runner is `ubuntu-24.04`, not
+22.04: the compiler links against a pinned glibc 2.38 and imports
+`arc4random_buf` (GLIBC_2.36), which ubuntu-22.04's glibc 2.35 cannot load.
+Erlang/OTP 28 is installed on every row before `zig build install` (the build
+runs `erlc`).
+
+Each row runs one `botopink-lib-test --bin "$BOTOPINK_BIN" --target erlang
+--strict` from a scratch directory with `BOTOPINK_LIB_ROOTS` naming this
+repository: the runner discovers this workspace's members — the 25 modules,
+the 8 starters and the 3 examples, one row each (the umbrella has no row) —
+and nothing else. onze, jhonstart and emilia are checked out under
+`botopink-lang/repository/` because `starters/rakun-starter-test` depends on
+`onze` and `onze-test` by `path` (and `onze` on the other two); they are
+dependencies, not rows — run from inside the checkout they would be, and an
+onze red would be rakun's. Then the hook's other stages run from the hook's
+own runner on every row: `runRepositoryStagesGate` (the front 22/23 greps of
+`scripts/git-hooks/repository-stages.sh`), `runExamplesGate "$bin" erlang`,
+`runRefusalsGate` (no `refusals/` here). `BOTOPINK_BIN` is exported to every
+step from the binary the job built, for `rakun-client`'s fixture-build tests.
 `BOTOPINK_LANG_REF` repo variable pins a specific botopink-lang ref (default
 `feat`).
-
-Bootstrap: check out this lib + a fresh `botopink-lang` clone, place
-this lib under `botopink-lang/repository/rakun/`, then `zig build
-install && zig build test-libs`.
 
 ## Tagging (auto)
 
@@ -4785,35 +4796,64 @@ git config core.hooksPath scripts/git-hooks
 ```
 
 `core.hooksPath` is per clone and applies to every worktree of it. The
-gate, in order (every stage a refusal — decision 67, fail beats warn):
+gate's stages, in order — each one a refusal (decision 67: fail beats warn),
+none with a flag, variable or list that turns it off:
 
-1. staged files hold no conflict marker;
-2. no staged `*.snap.new` / `*.snap.md.new` (what a snapshot mismatch writes
-   beside its `.snap.md`; review the snapshot, never commit the `.new` —
-   `.gitignore` lists both spellings so `git add .` does not pick them up);
-3. the front 22/23 greps over `modules/rakun/src/` and `modules/rakun-app/src/`,
-   on **code** (`codeLines` drops `//` comments first) and on **whole
+1. **staged files** — no `*.snap.new` / `*.snap.md.new` (what a snapshot
+   mismatch writes beside its `.snap.md`; review the snapshot, never commit
+   the `.new` — `.gitignore` lists both spellings so `git add .` does not pick
+   them up, and the hook catches a `git add -f`) and no conflict marker;
+2. **the compiler** — `$BOTOPINK_BIN` when it is set (a value that is not an
+   executable is a refusal, never a reason to pick another compiler), else the
+   enclosing checkout's `repository/botopink-lang/zig-out/bin/botopink` (the
+   walk stops at the first ancestor that holds `repository/botopink-lang/`, so
+   a worktree nested under the main checkout never borrows its binary), else a
+   botopink-lang checkout's own `zig-out`, else `$PATH` — **none resolving
+   fails the gate** (the message says how to provide one; a gate that skips
+   its `.bp` stage gates nothing). The path is exported as `BOTOPINK_BIN`, for
+   `rakun-client`'s fixture-build tests;
+3. **repository stages** — `scripts/git-hooks/repository-stages.sh`: the front
+   22/23 greps over `modules/rakun/src/` and `modules/rakun-app/src/`, on
+   **code** (`codeLines` drops `//` comments first) and on **whole
    identifiers**: no `from "jhonstart"` / `from "onze"`, no `onze` as a word,
    and in `rakun-app/src/` none of the UI types decision 114 forbids by name
    (`Element`, `ElementView`, `Children`, `LayoutProps`, `PageProps`) nor
    `jhonstart` — never the substring `Element` (`xmlElement` is rakun's);
    `ssr.bp` calls no `renderToString` and spells no void tag. A comment may
-   say "the orchestrator" or "the UI library"; it does not name them;
-4. the compiler binary, located via (in order) `$BOTOPINK_BIN`, the nearest
-   ancestor `repository/botopink-lang/zig-out/bin/botopink`, then `$PATH` —
-   **none resolving fails the gate** (the message says how to provide one;
-   a gate that skips its `.bp` stage gates nothing);
-5. because the root `botopink.json` is a workspace, `botopink test` **inside
-   every `modules/*/` that holds a `botopink.json`**, each on its own manifest
-   target (`erl` on `PATH`); a red member fails the gate and names the re-run
-   command. (A root manifest without `"workspaces"` keeps the old single
-   `botopink test` over `src/` + `test/`.)
-6. every `examples/*/` that has a `botopink.json` builds (`runExamplesGate`,
-   each with its own manifest target, into a throwaway `--out`); an example
-   that does not build fails the gate — there is no list of examples allowed
-   to fail (gate-i). CI runs the same function on every row.
+   say "the orchestrator" or "the UI library"; it does not name them. The
+   stage fails when `modules/rakun-app/src/ssr.bp` is missing (the greps would
+   read nothing);
+4. **tests** — `botopink test --target <t>` **inside every workspace member**
+   (every directory the root manifest's `workspaces` patterns expand to: the
+   25 `modules/*`, the 8 `starters/*` and the 3 `examples/*`) on every target
+   its manifest declares — `erlang` for all 36 (`erl` on `PATH`). A member
+   with no `test` block (the starters) is still compiled;
+5. **examples** — `botopink build --target erlang` of every `examples/*/` into
+   a throwaway `--out` (`runExamplesGate`): 3 builds. An example that does not
+   build fails the gate — there is no list of examples allowed to fail
+   (gate-i);
+6. **refusals** — every `refusals/*/` case, when the directory exists. rakun
+   has none.
 
-Never commit with `--no-verify`; fix the red instead.
+Stages 1–3 stop the gate at the first red. Stages 4–6 all run: every red cell
+is listed with the tail of its output and a re-run line, and the gate fails at
+the end — one run tells every red. Measured 2026-10-01 with the compiler
+built from botopink-lang `29cfffc8`: 36 cells — the 25 modules (1,817 tests),
+the 8 starters and the 3 examples (no `test` block: compiled) — and 3/3
+builds. `rakun-websocket` is the one cell that depends on the machine: alone
+on an idle machine it is 27/0, and under load `test/limits_test.bp:48` can
+read a queue of 51 against the cap of 50 (26/1) — a `rakun-websocket` row
+(the cap's enforcement, or the test's bound), not a tolerance of the gate. Never commit with
+`--no-verify`; fix the red instead.
+
+`scripts/git-hooks/pre-commit` and `scripts/git-hooks/lib/runner-standalone.sh`
+are one text in the five library repositories (emilia, erika, jhonstart, onze,
+rakun): the meta repository's `hook-integrity` workflow compares the bytes
+(its check 4), so a change to either lands in all five together. What only
+rakun checks — stage 3 — lives in `scripts/git-hooks/repository-stages.sh`,
+which the runner runs in a child process: it can add a red, it cannot remove
+or skip a shared stage (its exit status is all the runner reads). CI runs the
+same file (`runRepositoryStagesGate`).
 
 `examples/rakun` (member `rakun-example`, depending on `rakun` through
 `{ "workspace": true }`) builds. Until the erlang-only move it
