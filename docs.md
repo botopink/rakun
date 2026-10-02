@@ -77,8 +77,8 @@ sidecar naming rule and what is still blocked.
   `#[middleware]` as its two entry points, `Next` for redirect/rewrite, CORS with
   deny-all defaults, and RFC 9457 problem details. See § The filter chain below.
 - **Validation** — the bundled library `validation` (`from "validation"`), and the only one
-  that compiles for **both** rows: `#[validated]` on a record emits
-  `validate<TypeName>` and `constraintsOf<TypeName>` from string comparisons,
+  that compiles for **both** rows: `#[validated]` on a record gives it the
+  members `validate()` and `constraints()`, built from string comparisons,
   length checks and regex matches alone, so the server and the browser run the
   SAME predicate rather than two that are meant to agree. Thirteen constraint
   markers, an SPI for application constraints, message templates resolved from
