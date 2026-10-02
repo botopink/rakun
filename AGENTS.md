@@ -4291,22 +4291,22 @@ its own half of a two-test pair.
 
 ### The naming contract with front 05
 
-`#[validated]` on a record-shaped `type` `@emit`s exactly two functions:
+`#[validated]` on a record-shaped `type` gives it exactly two members
+(`decl.addMember`, decision 216 of 1.0.11-beta):
 
 ```
-pub fn validate<TypeName>(v: <TypeName>) -> ValidationReport
-pub fn constraintsOf<TypeName>() -> string
+pub fn validate(self: Self) -> ValidationReport     // bound.validate()
+pub fn constraints() -> string                      // T.constraints()
 ```
 
-The names are a contract, not a convention. Front 05's boot path builds
-`validate` + the type name from the type name it already has and calls it after
-binding and before the first component is constructed; it never has to know what
-constraints exist. If either side changes the spelling, the build breaks rather
-than a test.
+The names are a contract, not a convention. Front 05's boot path calls
+`validate()` on the bound record after binding and before the first component
+is constructed; it never has to know what constraints exist. If either side
+changes the spelling, the build breaks rather than a test.
 
 `modules/rakun/src/config.bp` no longer declares a placement-only `#[validated]`:
 the decorator registry is keyed by name, so a same-named marker in this package
-shadowed the imported one everywhere in it (`validate<TypeName>` came out
+shadowed the imported one everywhere in it (the validator came out
 unbound). `#[validated]` is `validation`'s, imported
 `import {decorators.validated} from "validation";`. `config_check.bp` ships the
 other half of the seam — `configProblem` / `refuseInvalidConfig`, which render a
@@ -4314,7 +4314,7 @@ refusal naming property KEYS rather than field names.
 
 **The boot call site.** `#[configurationProperties]` on a record that also
 carries `#[validated]` emits, beside its binder, `__rkCheck_<Name>() -> string`
-(bind with the record's prefix, `validate<Name>`, `configProblemOf` — `""` when
+(bind with the record's prefix, `.validate()`, `configProblemOf` — `""` when
 valid) and `val __rkChk_<Name> = rkConfigCheckRegister("<Name>", …)` at module
 load. `bootSequenceFor` installs the message source and runs every registered
 check (`rkConfigCheckRun`, the refusals `\n`-joined, in registration order)
@@ -4389,7 +4389,7 @@ design out is a validator that silently passes what it cannot check, so:
 
 ### The constraint table, and why it is a blob
 
-`constraintsOf<Name>()` is emitted as a CALL — `constraintTableJson("<Name>",
+`T.constraints()` is added as a CALL — `constraintTableJson("<Name>",
 "<blob>")` — rather than as a JSON string literal. A decorator body that wrote
 the JSON itself would be writing a string literal INTO source (two levels of
 escaping), and the grammar would live in a comptime body no test can call. The
@@ -4485,7 +4485,7 @@ Each measured against the pinned binary, not guessed.
 
 ### What front 07 and front 78 consume from this front
 
-`validate<TypeName>` by name (front 07's `ValidationFilter` runs a route's
+`validate()` by name (front 07's `ValidationFilter` runs a route's
 registered binder before the handler, which is the closest thing to Spring's
 `@Valid` parameter and belongs to that front's chain, not to this module's
 decorators) and `ValidationReport.toProblemDetail()`, so an application has ONE
