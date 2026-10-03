@@ -27,19 +27,21 @@
 // In order, the body:
 //   1. `@emit`s `rkScan("Name")` — module-load self-registration into the scan
 //      registry (F2: the scan discovers every component, no shared comptime state);
-//   2. `@emit`s a SINGLETON factory `__rkMake_Name()` that constructs the value
-//      once and caches it (`rkSingleton`), injecting each field by type via that
-//      type's own factory (F2: constructor injection) — except a `#[value("key")]`
-//      field, which is filled from config (`rkProp`/`rkPropInt`) and is NOT a DI
-//      edge. Construction is bracketed by `rkEnter`/`rkDone` so a dependency cycle
+//   2. adds the member `Name.make()` (decision 234), the SINGLETON factory that
+//      constructs the value once and caches it (`rkSingleton`), injecting each
+//      field by type through `rkResolve("<FieldType>")` — the catalogue the
+//      application's entry point installs (decisions 254, 256) — except a
+//      `#[value("key")]` field, which is filled from config
+//      (`rkProp`/`rkPropInt`) and is NOT a DI edge. Construction is bracketed by `rkEnter`/`rkDone` so a dependency cycle
 //      raises at first construction;
 //   3. enforces placement (must annotate a `type` with fields: `DeclKind.Type` and
 //      no `variants`, so an enum-shaped `type` is rejected).
 // The `@emit`s run before the placement `fail`, and a failed outcome discards the
-// contributions — so only correctly placed types wire up. The emitted code calls
-// `rkScan`/`rkSingleton`/`rkEnter`/`rkDone`/`rkProp(Int)`, which are in scope at the
-// application site (`import {service, rkScan, rkSingleton, rkEnter, rkDone, …} from
-// "rakun"`).
+// contributions — so only correctly placed types wire up. The emitted code and
+// the member call `rkScan`/`rkSingleton`/`rkEnter`/`rkDone`/`rkResolve`/
+// `rkProp(Int)`, which are in scope at the application site (`import {service,
+// rkScan, rkSingleton, rkEnter, rkDone, rkResolve, …} from "rakun"`); a
+// configuration's `#[bean]` also needs `rkRegisterBean`.
 //
 // Decorator-body constraints (see ../AGENTS.md): the body can't call sibling fns
 // (each is lowered alone into the eval script), so the per-field injection rule
@@ -58,13 +60,11 @@ pub fn component(comptime decl: @Decl) {
                 "rkPropInt(" + valKey + ")"
             else
                 "rkProp(" + valKey + ")";
-        } else "__rkMake_" + f.typeName + "()";
+        } else "rkResolve(\"" + f.typeName + "\")";
         args.push(f.name + ": " + expr);
     });
-    @emit(
-        "pub fn __rkMake_"
-            + decl.name
-            + "() -> "
+    decl.addMember(
+        "pub fn make() -> "
             + decl.name
             + " { return rkSingleton(\""
             + decl.name
@@ -97,13 +97,11 @@ pub fn service(comptime decl: @Decl) {
                 "rkPropInt(" + valKey + ")"
             else
                 "rkProp(" + valKey + ")";
-        } else "__rkMake_" + f.typeName + "()";
+        } else "rkResolve(\"" + f.typeName + "\")";
         args.push(f.name + ": " + expr);
     });
-    @emit(
-        "pub fn __rkMake_"
-            + decl.name
-            + "() -> "
+    decl.addMember(
+        "pub fn make() -> "
             + decl.name
             + " { return rkSingleton(\""
             + decl.name
@@ -136,13 +134,11 @@ pub fn repository(comptime decl: @Decl) {
                 "rkPropInt(" + valKey + ")"
             else
                 "rkProp(" + valKey + ")";
-        } else "__rkMake_" + f.typeName + "()";
+        } else "rkResolve(\"" + f.typeName + "\")";
         args.push(f.name + ": " + expr);
     });
-    @emit(
-        "pub fn __rkMake_"
-            + decl.name
-            + "() -> "
+    decl.addMember(
+        "pub fn make() -> "
             + decl.name
             + " { return rkSingleton(\""
             + decl.name
@@ -183,13 +179,11 @@ pub fn controller(comptime decl: @Decl) {
                 "rkPropInt(" + valKey + ")"
             else
                 "rkProp(" + valKey + ")";
-        } else "__rkMake_" + f.typeName + "()";
+        } else "rkResolve(\"" + f.typeName + "\")";
         cargs.push(f.name + ": " + expr);
     });
-    @emit(
-        "pub fn __rkMake_"
-            + decl.name
-            + "() -> "
+    decl.addMember(
+        "pub fn make() -> "
             + decl.name
             + " { return rkSingleton(\""
             + decl.name
@@ -233,9 +227,9 @@ pub fn controller(comptime decl: @Decl) {
                         + prefix
                         + " + "
                         + a.args.join("")
-                        + ", { req -> __rkMake_"
+                        + ", { req -> "
                         + decl.name
-                        + "()."
+                        + ".make()."
                         + m.name
                         + "(req) });",
                 );
@@ -262,13 +256,11 @@ pub fn restController(comptime decl: @Decl) {
                 "rkPropInt(" + valKey + ")"
             else
                 "rkProp(" + valKey + ")";
-        } else "__rkMake_" + f.typeName + "()";
+        } else "rkResolve(\"" + f.typeName + "\")";
         rargs.push(f.name + ": " + expr);
     });
-    @emit(
-        "pub fn __rkMake_"
-            + decl.name
-            + "() -> "
+    decl.addMember(
+        "pub fn make() -> "
             + decl.name
             + " { return rkSingleton(\""
             + decl.name
@@ -312,9 +304,9 @@ pub fn restController(comptime decl: @Decl) {
                         + rprefix
                         + " + "
                         + a.args.join("")
-                        + ", { req -> __rkMake_"
+                        + ", { req -> "
                         + decl.name
-                        + "()."
+                        + ".make()."
                         + m.name
                         + "(req) });",
                 );
@@ -331,11 +323,13 @@ pub fn restController(comptime decl: @Decl) {
 // ---- configuration / factory markers ----
 
 // `#[configuration]` marks a type whose `#[bean]` methods are factories. The
-// configuration is itself a managed singleton (scan + factory), and for every
-// `#[bean]` method it `@emit`s a `__rkMake_<ReturnType>()` that builds the
-// configuration and calls the bean — so the bean's RETURN TYPE becomes injectable
-// by type anywhere a component declares a field of it (Spring's @Bean). The bean
-// output is a singleton too (cached by its return-type name).
+// configuration is itself a stereotype (scan + its `make()` member), and every
+// `#[bean]` method registers its RETURN TYPE in the context table with a
+// factory that builds the configuration and calls the bean — so the type is
+// injectable by type anywhere a component declares a field of it
+// (`rkResolve` falls back to the context table; Spring's @Bean). The bean
+// output is a singleton too (cached by its return-type name). How a `#[bean]`
+// reaches the entry point's catalogue instead is question `130-c`.
 pub fn configuration(comptime decl: @Decl) {
     @emit("val __rkScan_" + decl.name + " = rkScan(\"" + decl.name + "\");");
     var gargs: Array<string> = [];
@@ -349,13 +343,11 @@ pub fn configuration(comptime decl: @Decl) {
                 "rkPropInt(" + valKey + ")"
             else
                 "rkProp(" + valKey + ")";
-        } else "__rkMake_" + f.typeName + "()";
+        } else "rkResolve(\"" + f.typeName + "\")";
         gargs.push(f.name + ": " + expr);
     });
-    @emit(
-        "pub fn __rkMake_"
-            + decl.name
-            + "() -> "
+    decl.addMember(
+        "pub fn make() -> "
             + decl.name
             + " { return rkSingleton(\""
             + decl.name
@@ -374,17 +366,21 @@ pub fn configuration(comptime decl: @Decl) {
         m.annotations.forEach({ a -> if (a.name == "bean") isBean = true });
         if (isBean)
             @emit(
-                "pub fn __rkMake_"
-                    + m.returnType
-                    + "() -> "
-                    + m.returnType
-                    + " { return rkSingleton(\""
-                    + m.returnType
-                    + "\", { -> __rkMake_"
+                "val __rkBeanM_"
                     + decl.name
-                    + "()."
+                    + "_"
                     + m.name
-                    + "() }); }",
+                    + " = rkRegisterBean(\""
+                    + m.returnType
+                    + "\", \"\", \"singleton\", false, false, \""
+                    + decl.name
+                    + "\", { -> rkSingleton(\""
+                    + m.returnType
+                    + "\", { -> "
+                    + decl.name
+                    + ".make()."
+                    + m.name
+                    + "() }) });",
             );
     });
     if (decl.kind != DeclKind.Type)

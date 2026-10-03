@@ -39,6 +39,8 @@
 
 -export([bean_register/2, bean_table/0, bean_count/0, bean_has_record/1,
          bean_invoke/1, bean_touch/1, bean_try/1, bean_reset/0,
+         catalogue_put/2, catalogue_get/1, catalogue_names/0,
+         catalogue_reset/0,
          request_scoped/2, request_scope_end/0,
          lifecycle_register/2, lifecycle_table/0, lifecycle_run/2,
          lifecycle_reset/0,
@@ -51,6 +53,7 @@
 -export([ensure/0, owner/1]).
 
 -define(BEANS, rakun_ctx_beans).      %% ordered_set: {Seq, Record, Factory}
+-define(CATALOGUE, rakun_ctx_catalogue). %% ordered_set: {Seq, Name, Factory}
 -define(HOOKS, rakun_ctx_hooks).      %% ordered_set: {Seq, Record, Fun, Done}
 -define(LISTEN, rakun_ctx_listeners). %% ordered_set: {Seq, Record, Fun}
 -define(FAILED, rakun_ctx_failed).    %% ordered_set: {Seq, Record}
@@ -92,6 +95,7 @@ owner(Caller) ->
         true ->
             Common = [named_table, public, {read_concurrency, true}],
             _ = ets:new(?BEANS, [ordered_set | Common]),
+            _ = ets:new(?CATALOGUE, [ordered_set | Common]),
             _ = ets:new(?HOOKS, [ordered_set | Common]),
             _ = ets:new(?LISTEN, [ordered_set | Common]),
             _ = ets:new(?FAILED, [ordered_set | Common]),
@@ -198,6 +202,39 @@ bean_reset() ->
     ensure(),
     true = ets:delete_all_objects(?BEANS),
     true = ets:insert(?SEQ, {beans, 0}),
+    0.
+
+%% ═══ the catalogue ══════════════════════════════════════════════════════════
+%%
+%% Decision 256's registry, installed at boot from the `Dict<string, unknown>`
+%% the application's entry point builds: one factory per bean name, stored as
+%% the value it is (botopink narrows it with `is fn() -> T` when it reads it
+%% back). The host keeps insertion order and answers `undefined` for a name it
+%% does not hold; it never checks a type or a duplicate — `rkInstallBeans` and
+%% `rkAddBean` do, in botopink.
+
+catalogue_put(Name, Factory) ->
+    ensure(),
+    Seq = next_seq(catalogue),
+    true = ets:insert(?CATALOGUE, {Seq, to_bin(Name), Factory}),
+    ets:info(?CATALOGUE, size).
+
+catalogue_get(Name) ->
+    ensure(),
+    N = to_bin(Name),
+    case [F || {_S, K, F} <- ets:tab2list(?CATALOGUE), K =:= N] of
+        [F | _] -> F;
+        [] -> undefined
+    end.
+
+catalogue_names() ->
+    ensure(),
+    join([K || {_S, K, _F} <- ets:tab2list(?CATALOGUE)]).
+
+catalogue_reset() ->
+    ensure(),
+    true = ets:delete_all_objects(?CATALOGUE),
+    true = ets:insert(?SEQ, {catalogue, 0}),
     0.
 
 %% ═══ request scope ══════════════════════════════════════════════════════════
