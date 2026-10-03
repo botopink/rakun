@@ -404,11 +404,12 @@ pub fn isAutoConfigured(name: string) -> bool {
 //      order lists;
 //   2. the scan self-registration, so an auto-configuration is a component like
 //      any other;
-//   3. the singleton factory, IDENTICAL in shape to the one `#[configuration]`
-//      emits, so a `#[value]` field and an injected field behave the same way
-//      in both;
+//   3. the singleton factory, the member `Type.make()`, IDENTICAL in shape to
+//      the one `#[configuration]` adds, so a `#[value]` field and an injected
+//      field behave the same way in both;
 //   4. per `#[bean]` method, its own registration under `Type.method` and a
-//      factory for its return type that passes through `rkAutoGate` first.
+//      context-table registration of its return type whose factory passes
+//      through `rkAutoGate` first (`rkResolve` falls back to that table).
 //
 // The condition serialisation is INLINED here rather than shared with
 // `conditions.bp`: `decorator_eval` emits only the decorator function into the
@@ -497,13 +498,11 @@ pub fn autoConfiguration(comptime decl: @Decl) {
                 "rkPropInt(" + valKey + ")"
             else
                 "rkProp(" + valKey + ")";
-        } else "__rkMake_" + f.typeName + "()";
+        } else "rkResolve(\"" + f.typeName + "\")";
         gargs.push(f.name + ": " + expr);
     });
-    @emit(
-        "pub fn __rkMake_"
-            + decl.name
-            + "() -> "
+    decl.addMember(
+        "pub fn make() -> "
             + decl.name
             + " { return rkSingleton(\""
             + decl.name
@@ -575,19 +574,23 @@ pub fn autoConfiguration(comptime decl: @Decl) {
             "";
         @emit(provLine);
         val facLine = if (isBean)
-            "pub fn __rkMake_"
+            "val __rkBeanM_"
+                + decl.name
+                + "_"
+                + m.name
+                + " = rkRegisterBean(\""
                 + m.returnType
-                + "() -> "
-                + m.returnType
-                + " { return rkSingleton(\""
+                + "\", \"\", \"singleton\", false, false, \""
+                + full
+                + "\", { -> rkSingleton(\""
                 + m.returnType
                 + "\", { -> val _g = rkAutoGate(\""
                 + full
-                + "\"); __rkMake_"
+                + "\"); "
                 + decl.name
-                + "()."
+                + ".make()."
                 + m.name
-                + "() }); }"
+                + "() }) });"
         else
             "";
         @emit(facLine);

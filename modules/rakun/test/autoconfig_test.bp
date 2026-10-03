@@ -25,8 +25,32 @@ import {autoconfig_registry.rkAutoRegister, autoconfig_registry.rkAutoNames, aut
 import {condition_report.rkAutoReport, condition_report.autoConfigurationReport, condition_report.printConditionReport, condition_report.reportTitle, condition_report.notAppliedLine, condition_report.debugKey, condition_report.reportNames, condition_report.reportStateOf};
 import {profiles.setResolved};
 import {testing.asserts} from "std";
+import {collections.Dict} from "std";
+import {rkResolve, rkAddBean, rkInstallBeans, rkRegisterBean};
+
+fn beans() -> Dict<string, unknown> {
+    return comptime {
+        var d: Dict<string, unknown> = Dict.empty();
+        for (@TypeInfo.all(
+            with: [service, autoConfiguration],
+            member: "make",
+        )) { b ->
+            d = rkAddBean(d, b.name, b.value);
+        }
+        break d;
+    };
+}
 
 // ── the declarations the first half runs against ────────────────────────────
+
+// The two `#[bean]` return types, resolved the way a field of them is.
+fn demoClockBean() -> DemoClock {
+    return rkResolve("DemoClock");
+}
+
+fn demoMailerBean() -> DemoMailer {
+    return rkResolve("DemoMailer");
+}
 
 pub type DemoClock(
     zone: string,
@@ -73,6 +97,7 @@ fn expectedOrder() -> string {
 // ── before the pass ─────────────────────────────────────────────────────────
 
 test "rakun autoconfig: with no pass run, nothing matches and the report says why" {
+    val _beans = rkInstallBeans(beans());
     assert rkAutoSealed() == false;
     assert rkAutoMatched("AcCoreAutoConfiguration") == false;
     assert isAutoConfigured("AcMailAutoConfiguration") == false;
@@ -83,8 +108,9 @@ test "rakun autoconfig: with no pass run, nothing matches and the report says wh
 }
 
 test "rakun autoconfig: a gated factory before the pass names the missing call" {
+    val _beans = rkInstallBeans(beans());
     try asserts.throwsWith({ ->
-        __rkMake_DemoClock();
+        demoClockBean();
         0;
     }, neverAppliedProblem());
 }
@@ -92,6 +118,7 @@ test "rakun autoconfig: a gated factory before the pass names the missing call" 
 // ── the pass ────────────────────────────────────────────────────────────────
 
 test "rakun autoconfig: the pass sorts first, so `after` beats module load order" {
+    val _beans = rkInstallBeans(beans());
     val _p = setResolved([]);
     val n = autoConfigure();
     assert rkAutoSealed();
@@ -101,6 +128,7 @@ test "rakun autoconfig: the pass sorts first, so `after` beats module load order
 }
 
 test "rakun autoconfig: the ordered answer, not the registration-order one" {
+    val _beans = rkInstallBeans(beans());
     assert rkAutoMatched("AcCoreAutoConfiguration");
     assert rkAutoMatched("AcCoreAutoConfiguration.demoClock");
     assert rkAutoMatched("AcMailAutoConfiguration") == false;
@@ -110,15 +138,17 @@ test "rakun autoconfig: the ordered answer, not the registration-order one" {
 }
 
 test "rakun autoconfig: a bean of an unapplied configuration is skipped with its owner named" {
+    val _beans = rkInstallBeans(beans());
     assert rkAutoState("AcMailAutoConfiguration.demoMailer") == skippedState();
     assert rkAutoReason("AcMailAutoConfiguration.demoMailer")
         == "the configuration 'AcMailAutoConfiguration' it belongs to was not applied";
 }
 
 test "rakun autoconfig: an applied bean builds and an unapplied one raises" {
-    assert __rkMake_DemoClock().zone == "UTC";
+    val _beans = rkInstallBeans(beans());
+    assert demoClockBean().zone == "UTC";
     try asserts.throwsWith({ ->
-        __rkMake_DemoMailer();
+        demoMailerBean();
         0;
     }, gateProblem(
         "AcMailAutoConfiguration.demoMailer",
@@ -127,6 +157,7 @@ test "rakun autoconfig: an applied bean builds and an unapplied one raises" {
 }
 
 test "rakun autoconfig: the pass is idempotent - a second call re-evaluates nothing" {
+    val _beans = rkInstallBeans(beans());
     val before = rkAutoReport();
     val again = autoConfigure();
     assert again == 2;
@@ -137,6 +168,7 @@ test "rakun autoconfig: the pass is idempotent - a second call re-evaluates noth
 // ── `#[profile]` on an ordinary component ───────────────────────────────────
 
 test "rakun autoconfig: a #[profile] component off its profile is left unbuilt" {
+    val _beans = rkInstallBeans(beans());
     assert rkAutoMatched("AcProdOnlyService") == false;
     assert rkBuildCount("AcProdOnlyService") == 0;
     assert rkAutoReason("AcProdOnlyService")
@@ -151,6 +183,7 @@ test "rakun autoconfig: a #[profile] component off its profile is left unbuilt" 
 // ── the report ──────────────────────────────────────────────────────────────
 
 test "rakun autoconfig: every registered name is in exactly one of the three blocks" {
+    val _beans = rkInstallBeans(beans());
     val text = rkAutoReport();
     assert text.contains(reportTitle());
     assert text.contains("Applied (2):");
@@ -168,6 +201,7 @@ test "rakun autoconfig: every registered name is in exactly one of the three blo
 }
 
 test "rakun autoconfig: a failed row names the record and the value observed" {
+    val _beans = rkInstallBeans(beans());
     val text = rkAutoReport();
     assert text.contains(
         "  AcMailAutoConfiguration: did not match: X|DemoClock - a bean named 'DemoClock' is already registered",
@@ -179,6 +213,7 @@ test "rakun autoconfig: a failed row names the record and the value observed" {
 }
 
 test "rakun autoconfig: the report is stable across runs, and debug only gates the printing" {
+    val _beans = rkInstallBeans(beans());
     assert rkAutoReport() == rkAutoReport();
     val _off = rkSetProp(debugKey(), "false");
     assert printConditionReport() == 0;
@@ -208,6 +243,7 @@ fn seedOrderedPair(withAfter: bool) -> i32 {
 }
 
 test "rakun autoconfig: the sort runs BEFORE the evaluation, and reversing it flips the answer" {
+    val _beans = rkInstallBeans(beans());
     assert seedOrderedPair(true) == 2;
     val _a = autoConfigure();
     assert sortNames(registeredList()).join(",") == "SynProvider,SynConsumer";
@@ -223,6 +259,7 @@ test "rakun autoconfig: the sort runs BEFORE the evaluation, and reversing it fl
 }
 
 test "rakun autoconfig: an ordering edge naming an unregistered configuration is dropped" {
+    val _beans = rkInstallBeans(beans());
     val _r = rkAutoReset();
     val _a = rkAutoRegister("SynAlone", "", "", "NeverRegisteredConfiguration");
     assert edgesOf(registeredList()).length == 0;
@@ -232,6 +269,7 @@ test "rakun autoconfig: an ordering edge naming an unregistered configuration is
 }
 
 test "rakun autoconfig: a cycle halts the pass and names both members" {
+    val _beans = rkInstallBeans(beans());
     val _r = rkAutoReset();
     val _a = rkAutoRegister("SynLeft", "", "", "SynRight");
     val _b = rkAutoRegister("SynRight", "", "", "SynLeft");
@@ -242,6 +280,7 @@ test "rakun autoconfig: a cycle halts the pass and names both members" {
 }
 
 test "rakun autoconfig: a bean is ordered after the configuration that owns it" {
+    val _beans = rkInstallBeans(beans());
     val _r = rkAutoReset();
     val _b = rkAutoRegister("SynHolder.late", "", "", "");
     val _h = rkAutoRegister("SynHolder", "", "", "");
@@ -267,6 +306,7 @@ fn seedExcludable() -> i32 {
 }
 
 test "rakun autoconfig: the exclude property leaves a configuration unapplied" {
+    val _beans = rkInstallBeans(beans());
     assert seedExcludable() == 2;
     val _p = rkSetProp(excludeKey(), "SynMailAutoConfiguration");
     val n = autoConfigure();
@@ -279,6 +319,7 @@ test "rakun autoconfig: the exclude property leaves a configuration unapplied" {
 }
 
 test "rakun autoconfig: an excluded configuration's conditions are never evaluated" {
+    val _beans = rkInstallBeans(beans());
     assert seedExcludable() == 2;
     val _h = rkSetProp("rakun.syn.mail.host", "");
     val _p = rkSetProp(excludeKey(), "SynMailAutoConfiguration");
@@ -294,6 +335,7 @@ test "rakun autoconfig: an excluded configuration's conditions are never evaluat
 }
 
 test "rakun autoconfig: autoConfigureExcept does the same with no property set" {
+    val _beans = rkInstallBeans(beans());
     assert seedExcludable() == 2;
     val _c = rkSetProp(excludeKey(), "");
     val n = autoConfigureExcept(["SynMailAutoConfiguration"]);
@@ -304,6 +346,7 @@ test "rakun autoconfig: autoConfigureExcept does the same with no property set" 
 }
 
 test "rakun autoconfig: the two channels are a union, not a conflict" {
+    val _beans = rkInstallBeans(beans());
     assert seedExcludable() == 2;
     val _p = rkSetProp(excludeKey(), "SynMailAutoConfiguration");
     val n = autoConfigureExcept(["SynCacheAutoConfiguration"]);
@@ -318,6 +361,7 @@ test "rakun autoconfig: the two channels are a union, not a conflict" {
 }
 
 test "rakun autoconfig: an exclusion naming nothing halts and lists what is registered" {
+    val _beans = rkInstallBeans(beans());
     assert seedExcludable() == 2;
     val _c = rkSetProp(excludeKey(), "");
     try asserts.throwsWith({ ->
@@ -330,6 +374,7 @@ test "rakun autoconfig: an exclusion naming nothing halts and lists what is regi
 }
 
 test "rakun autoconfig: the exclude property leaves the beans of the configuration unbuildable" {
+    val _beans = rkInstallBeans(beans());
     val _r = rkAutoReset();
     val _a = rkAutoRegister("SynMailAutoConfiguration", "", "", "");
     val _ap = rkAutoProvides("SynMailAutoConfiguration", "SynMailSender");
@@ -350,6 +395,7 @@ test "rakun autoconfig: the exclude property leaves the beans of the configurati
 }
 
 test "rakun autoconfig: the report says evaluation stopped at the first failing condition" {
+    val _beans = rkInstallBeans(beans());
     val _r = rkAutoReset();
     val _a = rkAutoRegister(
         "SynTwoConditions",
@@ -378,6 +424,7 @@ test "rakun autoconfig: the report says evaluation stopped at the first failing 
 }
 
 test "rakun autoconfig: the exclude PROPERTY naming nothing halts, naming the value and the registered names" {
+    val _beans = rkInstallBeans(beans());
     assert seedExcludable() == 2;
     val _p = rkSetProp(excludeKey(), "Nonexistent");
     try asserts.throwsWith({ ->
@@ -391,6 +438,7 @@ test "rakun autoconfig: the exclude PROPERTY naming nothing halts, naming the va
 }
 
 test "rakun autoconfig: autoConfigurationReport is the application's name for the same string" {
+    val _beans = rkInstallBeans(beans());
     assert seedExcludable() == 2;
     val _c = rkSetProp(excludeKey(), "");
     val _n = autoConfigure();
@@ -399,6 +447,7 @@ test "rakun autoconfig: autoConfigurationReport is the application's name for th
 }
 
 test "rakun autoconfig: a property condition that holds applies, and the list splits on commas" {
+    val _beans = rkInstallBeans(beans());
     assert seedExcludable() == 2;
     val _c = rkSetProp(excludeKey(), "");
     val _h = rkSetProp("rakun.syn.mail.host", "smtp.example.com");

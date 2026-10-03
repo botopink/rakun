@@ -11,10 +11,24 @@
 import {decorators.service, decorators.repository, decorators.restController, decorators.route, decorators.getMapping, decorators.configuration, decorators.bean};
 import {runtime.rkScan, runtime.rkSingleton, runtime.rkEnter, runtime.rkDone, runtime.rkRegisterRoute, runtime.rkBuildCount, runtime.rkScannedNames, runtime.rkSetProp, runtime.rkProp};
 import {http.Request, http.Response};
-import {context.managed, context.provides, context.imports, context.qualifier, context.primary, context.lazy, context.scope, context.Bean, context.Scope, context.beanLine, context.parseBeans, context.scopeName, context.scopeOf, context.scopeProblem, context.ambiguousBeanProblem, context.duplicateBeanProblem, context.rkRegisterBean, context.rkRegisterBeanAt, context.rkBeanTable, context.rkBeanCount, context.rkBeanNames, context.rkBeanNamesIn, context.rkResolve, context.rkResolveIn, context.rkResolveNamed, context.rkHasBean, context.rkHasBeanIn, context.chooseBean, context.Context, context.childNameProblem, context.__rkMake_Context, context.rkCtxNote, context.rkCtxNotes, context.rkCtxNoteReset, context.rkCtxBump, context.rkCtxCount, context.rkRequestScoped, context.rkRequestScopeEnd, context.eagerInit, context.eagerInitIn, context.bootSequence, context.lazyInitialization};
+import {context.managed, context.provides, context.imports, context.qualifier, context.primary, context.lazy, context.scope, context.Bean, context.Scope, context.beanLine, context.parseBeans, context.scopeName, context.scopeOf, context.scopeProblem, context.ambiguousBeanProblem, context.duplicateBeanProblem, context.rkRegisterBean, context.rkRegisterBeanAt, context.rkBeanTable, context.rkBeanCount, context.rkBeanNames, context.rkBeanNamesIn, context.rkResolve, context.rkFind, context.rkFindIn, context.rkFindNamed, context.rkAddBean, context.rkInstallBeans, context.rkHasBean, context.rkHasBeanIn, context.chooseBean, context.Context, context.childNameProblem, context.rootContext, context.rkCtxNote, context.rkCtxNotes, context.rkCtxNoteReset, context.rkCtxBump, context.rkCtxCount, context.rkRequestScoped, context.rkRequestScopeEnd, context.eagerInit, context.eagerInitIn, context.bootSequence, context.lazyInitialization};
 import {events.Event, events.event, events.publishEvent};
 import {lifecycle.postConstruct, lifecycle.preDestroy, lifecycle.Hook, lifecycle.hookLine, lifecycle.parseHooks, lifecycle.rkRegisterLifecycle, lifecycle.rkLifecycleTable, lifecycle.rkLifecycleReset, lifecycle.lifecycleHooks, lifecycle.runPostConstruct, lifecycle.runPreDestroy, lifecycle.postConstructProblem, lifecycle.lifecyclePhaseProblem, lifecycle.exitCode, lifecycle.rkRegisterExitCode, lifecycle.rkExitValues, lifecycle.rkExitReset, lifecycle.processExitCode, lifecycle.shutdown};
 import {testing.asserts, async} from "std";
+import {collections.Dict} from "std";
+
+fn beans() -> Dict<string, unknown> {
+    return comptime {
+        var d: Dict<string, unknown> = Dict.empty();
+        for (@TypeInfo.all(
+            with: [service, repository, configuration],
+            member: "make",
+        )) { b ->
+            d = rkAddBean(d, b.name, b.value);
+        }
+        break d;
+    };
+}
 
 // ── the components under test ───────────────────────────────────────────────
 
@@ -48,6 +62,7 @@ pub type UnregisteredService() {
 // ── the record grammar ──────────────────────────────────────────────────────
 
 test "rakun context: a bean record round-trips through the wire line" {
+    val _beans = rkInstallBeans(beans());
     val b = Bean(
         path: "",
         typeName: "ZoneClock",
@@ -71,6 +86,7 @@ test "rakun context: a bean record round-trips through the wire line" {
 }
 
 test "rakun context: a scope name round-trips and an unknown one is refused" {
+    val _beans = rkInstallBeans(beans());
     assert scopeName(Scope.Singleton) == "singleton";
     assert scopeName(Scope.Prototype) == "prototype";
     assert scopeName(Scope.Request) == "request";
@@ -84,6 +100,7 @@ test "rakun context: a scope name round-trips and an unknown one is refused" {
 // ── step 1: the registry ────────────────────────────────────────────────────
 
 test "rakun context: #[managed] on a #[service] registers exactly one bean" {
+    val _beans = rkInstallBeans(beans());
     var mine = 0;
     for (parseBeans(rkBeanTable())) { b ->
         if (b.typeName == "OrderCache") mine = mine + 1;
@@ -94,11 +111,13 @@ test "rakun context: #[managed] on a #[service] registers exactly one bean" {
 }
 
 test "rakun context: a scanned type that is not #[managed] is not a bean" {
+    val _beans = rkInstallBeans(beans());
     assert !rkHasBean("UnregisteredService");
     assert !rkBeanNames().contains("UnregisteredService");
 }
 
 test "rakun context: beanNames lists registered beans in declaration order" {
+    val _beans = rkInstallBeans(beans());
     val names = rkBeanNames();
     val repo = names.indexOf("OrderRepository");
     val cache = names.indexOf("OrderCache");
@@ -107,12 +126,14 @@ test "rakun context: beanNames lists registered beans in declaration order" {
 }
 
 test "rakun context: the registered record carries the scope and the flags" {
+    val _beans = rkInstallBeans(beans());
     val record = chooseBean("", "OrderCache");
     assert record == "|OrderCache||singleton|0|0|OrderCache";
 }
 
 test "rakun context: an unregistered type resolves to null and has answers false" {
-    val missing: ?OrderCache = rkResolve("NoSuchBean");
+    val _beans = rkInstallBeans(beans());
+    val missing: ?OrderCache = rkFind("NoSuchBean");
     var found = false;
     if (missing != null) found = true;
     assert !found;
@@ -121,6 +142,7 @@ test "rakun context: an unregistered type resolves to null and has answers false
 }
 
 test "rakun context: registering the same type and qualifier twice names both owners" {
+    val _beans = rkInstallBeans(beans());
     val _a = rkRegisterBean(
         "DupBean",
         "",
@@ -145,11 +167,12 @@ test "rakun context: registering the same type and qualifier twice names both ow
 }
 
 test "rakun context: a resolved bean is the same instance field injection gives" {
-    val cache: ?OrderCache = rkResolve("OrderCache");
+    val _beans = rkInstallBeans(beans());
+    val cache: ?OrderCache = rkFind("OrderCache");
     var size = -1;
     if (cache != null) size = cache.size();
     assert size == 3;
-    val direct = __rkMake_OrderCache();
+    val direct = OrderCache.make();
     assert rkBuildCount("OrderCache") == 1;
     assert direct.size() == 3;
 }
@@ -157,6 +180,7 @@ test "rakun context: a resolved bean is the same instance field injection gives"
 // ── the parent/child chain ──────────────────────────────────────────────────
 
 test "rakun context: a child path sees the parent's beans and the parent does not see the child's" {
+    val _beans = rkInstallBeans(beans());
     val _c = rkRegisterBeanAt(
         "/request",
         "ScopedOnly",
@@ -170,13 +194,14 @@ test "rakun context: a child path sees the parent's beans and the parent does no
     assert rkHasBeanIn("/request", "ScopedOnly");
     assert !rkHasBean("ScopedOnly");
     assert rkHasBeanIn("/request", "OrderCache");
-    val v: ?i32 = rkResolveIn("/request", "ScopedOnly");
+    val v: ?i32 = rkFindIn("/request", "ScopedOnly");
     assert v.unwrapOr(0) == 7;
     assert rkBeanNamesIn("/request").contains("ScopedOnly");
     assert !rkBeanNamesIn("").contains("ScopedOnly");
 }
 
 test "rakun context: the nearest registration of a type wins over an ancestor's" {
+    val _beans = rkInstallBeans(beans());
     val _p = rkRegisterBean(
         "Layered",
         "",
@@ -196,13 +221,14 @@ test "rakun context: the nearest registration of a type wins over an ancestor's"
         "innerOwner",
         { -> 2 },
     );
-    val root: ?i32 = rkResolve("Layered");
-    val inner: ?i32 = rkResolveIn("/inner", "Layered");
+    val root: ?i32 = rkFind("Layered");
+    val inner: ?i32 = rkFindIn("/inner", "Layered");
     assert root.unwrapOr(0) == 1;
     assert inner.unwrapOr(0) == 2;
 }
 
 test "rakun context: two candidates and no #[primary] name both owners" {
+    val _beans = rkInstallBeans(beans());
     val _a = rkRegisterBean(
         "Tied",
         "left",
@@ -226,11 +252,12 @@ test "rakun context: two candidates and no #[primary] name both owners" {
         chooseBean("", "Tied");
         0;
     }, ambiguousBeanProblem("Tied", "'leftMaker', 'rightMaker'"));
-    val right: ?i32 = rkResolveNamed("Tied", "right");
+    val right: ?i32 = rkFindNamed("Tied", "right");
     assert right.unwrapOr(0) == 2;
 }
 
 test "rakun context: with one candidate marked #[primary] the unqualified resolve returns it" {
+    val _beans = rkInstallBeans(beans());
     val _a = rkRegisterBean(
         "Picked",
         "left",
@@ -249,14 +276,14 @@ test "rakun context: with one candidate marked #[primary] the unqualified resolv
         "rightMaker",
         { -> 2 },
     );
-    val v: ?i32 = rkResolve("Picked");
+    val v: ?i32 = rkFind("Picked");
     assert v.unwrapOr(0) == 2;
 }
 
 // ── step 2: `Context` ───────────────────────────────────────────────────────
 //
-// The receiver is ALWAYS an annotated local. `__rkMake_Context().resolve(...)`
-// and `val ctx = __rkMake_Context();` both lose the optional's payload type —
+// The receiver is ALWAYS an annotated local. `rootContext().resolve(...)`
+// and `val ctx = rootContext();` both lose the optional's payload type —
 // the optional a record method answers loses its type when the receiver is a
 // call or an UNANNOTATED local (AGENTS.md § Language notes). `val ctx: Context`
 // is the spelling that keeps `?OrderCache` an `?OrderCache`.
@@ -265,7 +292,7 @@ test "rakun context: with one candidate marked #[primary] the unqualified resolv
 #[managed]
 pub type ContextHolder(
     // `Context` is injectable by type with no extra declaration: front 06 emits
-    // its factory and `decorators.bp` emits `__rkMake_Context()` for the field.
+    // its factory and `decorators.bp` emits `rootContext()` for the field.
     ctx: Context,
 ) {
     pub fn sees(self: Self, typeName: string) -> bool {
@@ -274,7 +301,8 @@ pub type ContextHolder(
 }
 
 test "rakun context: ctx.resolve returns what field injection returns" {
-    val ctx: Context = __rkMake_Context();
+    val _beans = rkInstallBeans(beans());
+    val ctx: Context = rootContext();
     val cache: ?OrderCache = ctx.resolve("OrderCache");
     var size = -1;
     if (cache != null) size = cache.size();
@@ -285,13 +313,15 @@ test "rakun context: ctx.resolve returns what field injection returns" {
 }
 
 test "rakun context: a field of type Context is injected with no extra declaration" {
-    val holder = __rkMake_ContextHolder();
+    val _beans = rkInstallBeans(beans());
+    val holder = ContextHolder.make();
     assert holder.sees("OrderCache");
     assert !holder.sees("Nonexistent");
 }
 
 test "rakun context: Context is not a bean of its own registry and is not in the cycle guard" {
-    val ctx: Context = __rkMake_Context();
+    val _beans = rkInstallBeans(beans());
+    val ctx: Context = rootContext();
     assert !ctx.has("Context");
     assert !ctx.beanNames().contains("Context");
     // `rkEnter`/`rkDone` are what `rkBuildCount` counts; the Context factory
@@ -306,7 +336,8 @@ test "rakun context: Context is not a bean of its own registry and is not in the
 // registry is not a filter over the scan; it is its own table, and this
 // asserts both halves.
 test "rakun context: beanNames is the registry, not a filter over the scan list" {
-    val ctx: Context = __rkMake_Context();
+    val _beans = rkInstallBeans(beans());
+    val ctx: Context = rootContext();
     val scanned = rkScannedNames();
     assert scanned.contains("OrderCache");
     assert ctx.beanNames().contains("OrderCache");
@@ -318,7 +349,8 @@ test "rakun context: beanNames is the registry, not a filter over the scan list"
 }
 
 test "rakun context: a child context finds a bean registered only in the parent" {
-    val ctx: Context = __rkMake_Context();
+    val _beans = rkInstallBeans(beans());
+    val ctx: Context = rootContext();
     val kid: Context = ctx.child("request");
     assert kid.path() == "/request";
     val cache: ?OrderCache = kid.resolve("OrderCache");
@@ -332,7 +364,8 @@ test "rakun context: a child context finds a bean registered only in the parent"
 }
 
 test "rakun context: a child needs a name and the name may not carry a separator" {
-    val ctx: Context = __rkMake_Context();
+    val _beans = rkInstallBeans(beans());
+    val ctx: Context = rootContext();
     try asserts.throwsWith({ ->
         ctx.child("");
         0;
@@ -359,7 +392,7 @@ pub type ZoneClock(
     }
 }
 
-// The #[primary] one owns `__rkMake_Clock`, so an unqualified field of type
+// The #[primary] one is the context table's answer, so an unqualified field of type
 // `ZoneClock` gets it and the unqualified `resolve` answers the same instance.
 #[provides]
 #[qualifier("system")]
@@ -374,7 +407,7 @@ pub fn fixedZoneClock() -> ZoneClock {
     return ZoneClock(zone: "fixed");
 }
 
-// No qualifier at all: this one owns `__rkMake_Ledger` by being the only
+// No qualifier at all: this one answers `rkResolve("Ledger")` by being the only
 // provider of its type.
 pub type Ledger(
     name: string,
@@ -385,9 +418,8 @@ pub fn mainLedger() -> Ledger {
     return Ledger(name: "main");
 }
 
-// Two candidates, both qualified, NEITHER #[primary]: `__rkMake_Dye` is defined
-// by neither, so nothing may field-inject a `Dye` and the unqualified resolve
-// raises naming both.
+// Two candidates, both qualified, NEITHER #[primary]: a field of `Dye` stops
+// the boot with the ambiguity, and the unqualified resolve raises naming both.
 pub type Dye(
     hue: string,
 )
@@ -418,14 +450,16 @@ pub type Stamper(
 }
 
 test "rakun context: #[provides] makes the return type injectable by type" {
-    val s = __rkMake_Stamper();
+    val _beans = rkInstallBeans(beans());
+    val s = Stamper.make();
     assert s.stamp() == "main<now@UTC>";
     assert rkHasBean("ZoneClock");
     assert rkHasBean("Ledger");
 }
 
 test "rakun context: two #[provides] of one type are told apart by qualifier" {
-    val ctx: Context = __rkMake_Context();
+    val _beans = rkInstallBeans(beans());
+    val ctx: Context = rootContext();
     val fixed: ?ZoneClock = ctx.resolveNamed("ZoneClock", "fixed");
     var fz = "";
     if (fixed != null) fz = fixed.zone;
@@ -437,19 +471,21 @@ test "rakun context: two #[provides] of one type are told apart by qualifier" {
 }
 
 test "rakun context: with one #[provides] marked #[primary] the unqualified resolve returns it" {
-    val ctx: Context = __rkMake_Context();
+    val _beans = rkInstallBeans(beans());
+    val ctx: Context = rootContext();
     val any: ?ZoneClock = ctx.resolve("ZoneClock");
     var zone = "";
     if (any != null) zone = any.zone;
     assert zone == "UTC";
-    // The same instance field injection gives: `__rkMake_Clock` is the primary
-    // provider's own factory, so there is one `rkSingleton("ZoneClock", ...)` cell.
-    val injected = __rkMake_Stamper();
+    // The same instance field injection gives: the primary provider's
+    // registration caches in one `rkSingleton("ZoneClock", ...)` cell.
+    val injected = Stamper.make();
     assert injected.clock.zone == "UTC";
 }
 
 test "rakun context: two qualified #[provides] and no #[primary] raise naming both" {
-    val ctx: Context = __rkMake_Context();
+    val _beans = rkInstallBeans(beans());
+    val ctx: Context = rootContext();
     assert ctx.has("Dye");
     try asserts.throwsWith({ ->
         chooseBean("", "Dye");
@@ -462,7 +498,8 @@ test "rakun context: two qualified #[provides] and no #[primary] raise naming bo
 }
 
 test "rakun context: a qualified provider caches per qualifier, not per type" {
-    val ctx: Context = __rkMake_Context();
+    val _beans = rkInstallBeans(beans());
+    val ctx: Context = rootContext();
     val a: ?Dye = ctx.resolveNamed("Dye", "warm");
     val b: ?Dye = ctx.resolveNamed("Dye", "cool");
     var ah = "";
@@ -500,6 +537,7 @@ pub type WarmCache(
 }
 
 test "rakun lifecycle: #[managed] emits one registration per marked method" {
+    val _beans = rkInstallBeans(beans());
     val post = lifecycleHooks("post");
     var sawWarm = false;
     for (post) { h ->
@@ -519,6 +557,7 @@ test "rakun lifecycle: #[managed] emits one registration per marked method" {
 }
 
 test "rakun lifecycle: the post pass runs a hook exactly once and it sees its dependencies" {
+    val _beans = rkInstallBeans(beans());
     val _r = runPostConstruct();
     assert rkCtxCount("WarmCache.warm") == 1;
     // It reached the injected repository: three ids, counted inside the hook.
@@ -531,6 +570,7 @@ test "rakun lifecycle: the post pass runs a hook exactly once and it sees its de
 }
 
 test "rakun lifecycle: the pre pass runs in reverse registration order" {
+    val _beans = rkInstallBeans(beans());
     val _z = rkLifecycleReset();
     val _n = rkCtxNoteReset();
     val _a = rkRegisterLifecycle(
@@ -560,6 +600,7 @@ test "rakun lifecycle: the pre pass runs in reverse registration order" {
 }
 
 test "rakun lifecycle: the post pass runs in registration order" {
+    val _beans = rkInstallBeans(beans());
     val _z = rkLifecycleReset();
     val _n = rkCtxNoteReset();
     val _a = rkRegisterLifecycle(
@@ -581,6 +622,7 @@ test "rakun lifecycle: the post pass runs in registration order" {
 }
 
 test "rakun lifecycle: an explicit order runs ahead of registration order" {
+    val _beans = rkInstallBeans(beans());
     val _z = rkLifecycleReset();
     val _n = rkCtxNoteReset();
     val _a = rkRegisterLifecycle(
@@ -602,6 +644,7 @@ test "rakun lifecycle: an explicit order runs ahead of registration order" {
 }
 
 test "rakun lifecycle: a #[postConstruct] that raises fails the boot naming both" {
+    val _beans = rkInstallBeans(beans());
     val _z = rkLifecycleReset();
     val _n = rkCtxNoteReset();
     val _a = rkRegisterLifecycle(
@@ -627,6 +670,7 @@ test "rakun lifecycle: a #[postConstruct] that raises fails the boot naming both
 }
 
 test "rakun lifecycle: a #[preDestroy] that raises is logged and the rest still run" {
+    val _beans = rkInstallBeans(beans());
     val _z = rkLifecycleReset();
     val _n = rkCtxNoteReset();
     val _a = rkRegisterLifecycle(
@@ -657,6 +701,7 @@ test "rakun lifecycle: a #[preDestroy] that raises is logged and the rest still 
 }
 
 test "rakun lifecycle: a phase that is not post or pre is refused" {
+    val _beans = rkInstallBeans(beans());
     try asserts.throwsWith({ ->
         rkRegisterLifecycle("X", "m", "during", 0, { -> 1 });
         0;
@@ -692,7 +737,8 @@ pub type RequestBasket(
 }
 
 test "rakun scope: a prototype bean is constructed on every resolve" {
-    val ctx: Context = __rkMake_Context();
+    val _beans = rkInstallBeans(beans());
+    val ctx: Context = rootContext();
     val _n = rkCtxNoteReset();
     assert ctx.has("TicketMachine");
     val a: ?TicketMachine = ctx.resolve("TicketMachine");
@@ -710,6 +756,7 @@ test "rakun scope: a prototype bean is constructed on every resolve" {
 }
 
 test "rakun scope: the registered record carries the scope the decorator was given" {
+    val _beans = rkInstallBeans(beans());
     assert chooseBean("", "TicketMachine")
         == "|TicketMachine||prototype|0|0|TicketMachine";
     assert chooseBean("", "RequestBasket")
@@ -717,7 +764,8 @@ test "rakun scope: the registered record carries the scope the decorator was giv
 }
 
 test "rakun scope: a request bean is one instance within a request and another in the next" {
-    val ctx: Context = __rkMake_Context();
+    val _beans = rkInstallBeans(beans());
+    val ctx: Context = rootContext();
     val _e = rkRequestScopeEnd();
     val _n = rkCtxNoteReset();
     val a: ?RequestBasket = ctx.resolve("RequestBasket");
@@ -749,6 +797,7 @@ fn resolveTwice() -> string {
 }
 
 test "rakun scope: two concurrent requests each get their own request instance" {
+    val _beans = rkInstallBeans(beans());
     val _n = rkCtxNoteReset();
     // `runAll` spawns one process per task on the BEAM, and a request IS a
     // process: each task is a request of its own, running at the same time.
@@ -775,6 +824,7 @@ test "rakun scope: two concurrent requests each get their own request instance" 
 }
 
 test "rakun scope: rkRequestScoped caches by key and the bracket clears it" {
+    val _beans = rkInstallBeans(beans());
     val _e = rkRequestScopeEnd();
     val _n = rkCtxNoteReset();
     val one = rkRequestScoped("k", { -> rkCtxBump("scoped") });
@@ -792,6 +842,7 @@ test "rakun scope: rkRequestScoped caches by key and the bracket clears it" {
 }
 
 test "rakun scope: a non-singleton bean is not constructed by the eager pass" {
+    val _beans = rkInstallBeans(beans());
     val _n = rkCtxNoteReset();
     val _e = rkRequestScopeEnd();
     assert eagerInit() == "";
@@ -828,6 +879,7 @@ pub type CycleB(
 }
 
 test "rakun eager: a registered bean is constructed by the pass" {
+    val _beans = rkInstallBeans(beans());
     val _n = rkCtxNoteReset();
     val _b = rkRegisterBeanAt(
         "/eager",
@@ -844,6 +896,7 @@ test "rakun eager: a registered bean is constructed by the pass" {
 }
 
 test "rakun eager: #[lazy] excludes only the bean that carries it" {
+    val _beans = rkInstallBeans(beans());
     val _n = rkCtxNoteReset();
     val _a = rkRegisterBeanAt(
         "/lazybean",
@@ -871,6 +924,7 @@ test "rakun eager: #[lazy] excludes only the bean that carries it" {
 }
 
 test "rakun eager: a cyclic graph fails the boot through front 04's cycle guard" {
+    val _beans = rkInstallBeans(beans());
     val _c = rkRegisterBeanAt(
         "/cycle",
         "CycleA",
@@ -879,7 +933,7 @@ test "rakun eager: a cyclic graph fails the boot through front 04's cycle guard"
         false,
         false,
         "cycleOwner",
-        { -> __rkMake_CycleA() },
+        { -> CycleA.make() },
     );
     val reason = eagerInitIn("/cycle");
     // The two rows word it differently — node raises a sentence and the BEAM an
@@ -891,6 +945,7 @@ test "rakun eager: a cyclic graph fails the boot through front 04's cycle guard"
 }
 
 test "rakun eager: rakun.main.lazy-initialization=true constructs nothing at boot" {
+    val _beans = rkInstallBeans(beans());
     val _b = rkRegisterBean(
         "BootCounted",
         "",
@@ -924,6 +979,7 @@ test "rakun eager: rakun.main.lazy-initialization=true constructs nothing at boo
 // failure is a construction that RAISES, which is the assertion below and the
 // cycle one above.
 test "rakun eager: a missing #[value] key is a default, not a failure - by design" {
+    val _beans = rkInstallBeans(beans());
     assert rkProp("rakun.no.such.key") == "";
     val _n = rkCtxNoteReset();
     val _b = rkRegisterBeanAt(
@@ -957,12 +1013,14 @@ pub fn drainExitCode() -> i32 {
 }
 
 test "rakun shutdown: #[exitCode] emits a registration at module load" {
+    val _beans = rkInstallBeans(beans());
     val wire = rkExitValues();
     assert wire.contains("3");
     assert processExitCode() == 3;
 }
 
 test "rakun shutdown: the highest generator wins and none means zero" {
+    val _beans = rkInstallBeans(beans());
     val _z = rkExitReset();
     assert processExitCode() == 0;
     val _a = rkRegisterExitCode("low", { -> 2 });
@@ -973,6 +1031,7 @@ test "rakun shutdown: the highest generator wins and none means zero" {
 }
 
 test "rakun shutdown: the pre pass runs in reverse order and answers the exit code" {
+    val _beans = rkInstallBeans(beans());
     val _z = rkLifecycleReset();
     val _e = rkExitReset();
     val _n = rkCtxNoteReset();
@@ -1006,6 +1065,7 @@ test "rakun shutdown: the pre pass runs in reverse order and answers the exit co
 }
 
 test "rakun shutdown: a #[preDestroy] that raises is logged and the rest still run" {
+    val _beans = rkInstallBeans(beans());
     val _z = rkLifecycleReset();
     val _e = rkExitReset();
     val _n = rkCtxNoteReset();
@@ -1042,12 +1102,11 @@ pub type Wallet(
     owner: string,
 )
 
-// `#[configuration]` emits `__rkMake_Wallet()` for the `#[bean]` method, which
-// makes `Wallet` injectable by TYPE. `#[imports]` is what additionally puts it
-// in the registry, so `ctx.resolve("Wallet")` finds it.
+// `#[configuration]` registers the `#[bean]` method's return type in the
+// context table, owned by the configuration, so `Wallet` is injectable by TYPE
+// and `ctx.resolve("Wallet")` finds it.
 #[configuration]
 #[managed]
-#[imports("Wallet")]
 pub type WalletConfig() {
     #[bean]
     pub fn wallet(self: Self) -> Wallet {
@@ -1055,13 +1114,32 @@ pub type WalletConfig() {
     }
 }
 
-test "rakun context: #[imports] registers a bean for each named type" {
-    val ctx: Context = __rkMake_Context();
+test "rakun context: a #[bean] registers its return type, owned by its configuration" {
+    val _beans = rkInstallBeans(beans());
+    val ctx: Context = rootContext();
     assert ctx.has("Wallet");
     val w: ?Wallet = ctx.resolve("Wallet");
     var owner = "";
     if (w != null) owner = w.owner;
     assert owner == "treasury";
-    // The owner recorded is the configuration that asked for it, not the type.
+    // The owner recorded is the configuration that declared it, not the type.
     assert chooseBean("", "Wallet") == "|Wallet||singleton|0|0|WalletConfig";
+}
+
+// `#[imports]` puts a stereotyped type in the context table — its `make()` is
+// the registered factory — so `ctx.resolve` finds a type no `#[managed]`
+// registers.
+#[service]
+pub type Vault()
+
+#[configuration]
+#[imports("Vault")]
+pub type VaultConfig()
+
+test "rakun context: #[imports] registers a bean for each named type" {
+    val _beans = rkInstallBeans(beans());
+    val ctx: Context = rootContext();
+    assert ctx.has("Vault");
+    // The owner recorded is the configuration that asked for it, not the type.
+    assert chooseBean("", "Vault") == "|Vault||singleton|0|0|VaultConfig";
 }

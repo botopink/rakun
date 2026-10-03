@@ -2,9 +2,9 @@
 //// decorators that fill them.
 ////
 //// WHY THIS EXISTS. rakun's IoC container works and, until this module, was
-//// unreachable. Constructor injection resolves a field by type through an
-//// emitted `__rkMake_<Type>()` factory (`decorators.bp`), and that was the
-//// entire public surface: a value that is not a field of something could not
+//// unreachable. Constructor injection resolved a field by type through an
+//// emitted factory function (`decorators.bp`), and that was the entire public
+//// surface: a value that is not a field of something could not
 //// be got at, nothing ran at startup or shutdown, and nothing reacted to
 //// anything. `src/rakun.d.bp` had written the intended door down and called it
 //// "not yet implemented". This is the implementation.
@@ -33,6 +33,7 @@
 //// call a sibling function. When `decorators.bp` unfreezes, this body folds
 //// into the six stereotypes and the extra line goes away.
 
+import {collections.Dict} from "std";
 import {runtime.rkSingleton, runtime.rkProp, runtime.rkConfigCheckRun};
 import {events.Event, events.event, events.publishEvent, events.bootEventNames, events.bootEventPayloads, events.applicationFailedEvent};
 import {lifecycle.postConstructFailure, lifecycle.postConstructProblem};
@@ -251,6 +252,21 @@ pub declare fn rkBeanTry(record: string) -> string;
 #[@External.Erlang("rakun_context", "bean_reset")]
 pub declare fn rkBeanReset() -> i32;
 
+// Decision 256's catalogue: the factories the application's entry point
+// collects at comptime, one per bean name, stored as the `unknown` values they
+// are. `rkResolve<T>` narrows an entry with `is fn() -> T` when it reads it.
+#[@External.Erlang("rakun_context", "catalogue_put")]
+pub declare fn rkCatalogueStore(name: string, factory: unknown) -> i32;
+
+#[@External.Erlang("rakun_context", "catalogue_get")]
+pub declare fn rkCatalogueEntry(name: string) -> unknown;
+
+#[@External.Erlang("rakun_context", "catalogue_names")]
+pub declare fn rkCatalogueNames() -> string;
+
+#[@External.Erlang("rakun_context", "catalogue_reset")]
+pub declare fn rkCatalogueReset() -> i32;
+
 // `rkSingleton` one scope down. On the BEAM this is the process dictionary, so
 // two concurrent requests are two processes and get their own instance for
 // free; node is single-threaded, so the scope is the bracket the dispatcher
@@ -451,23 +467,109 @@ pub fn chooseBeanNamed(
     return found;
 }
 
-// The programmatic doors, as free functions. `Context` is the record face of
-// the same three, and `rakun.d.bp`'s declaration-only `behavior Context` is
-// what they replace.
-pub fn rkResolve<T>(typeName: string) -> ?T {
-    return rkResolveIn("", typeName);
+// ── the catalogue and constructor injection (decisions 234, 254, 256) ──────
+//
+// The application's entry point collects every stereotyped type's `make()`
+// and installs them before anything resolves:
+//
+//     val beans: Dict<string, unknown> = comptime {
+//         var d: Dict<string, unknown> = Dict.empty();
+//         for (@TypeInfo.all(with: [component, service, …], member: "make")) { b ->
+//             d = rkAddBean(d, b.name, b.value);
+//         }
+//         break d;
+//     };
+//     val _i = rkInstallBeans(beans);
+//
+// A field `clock: Clock` of a stereotyped type is `rkResolve("Clock")` in the
+// type's `make()` member: the catalogue's entry, narrowed with
+// `is fn() -> T`, built once per name. A name the catalogue does not hold is
+// asked of the context table (`#[managed]`, `#[provides]`, `#[imports]` and a
+// `#[configuration]`'s `#[bean]` methods register there, with the
+// `#[qualifier]` / `#[primary]` rules); a name neither holds stops the boot.
+
+pub fn duplicateCatalogueProblem(name: string) -> string {
+    return "rakun: the bean '"
+        + name
+        + "' is registered twice - two stereotyped types (or providers) answer the one name the catalogue keys it by";
 }
 
-pub fn rkResolveIn<T>(path: string, typeName: string) -> ?T {
+pub fn beanTypeProblem(name: string) -> string {
+    return "rakun: the bean '"
+        + name
+        + "' is not a fn() -> "
+        + name
+        + " - the catalogue's entry for it has another shape";
+}
+
+pub fn missingBeanProblem(name: string) -> string {
+    return "rakun: no bean '"
+        + name
+        + "' - nothing in the catalogue or the context provides it; give the type a stereotype, or a #[provides] function returning it";
+}
+
+// One entry of the entry point's catalogue; a name already in it stops the
+// block (decision 256: a bean name registered twice is refused).
+pub fn rkAddBean(
+    beans: Dict<string, unknown>,
+    name: string,
+    factory: unknown,
+) -> Dict<string, unknown> {
+    if (beans.hasKey(name)) @panic(duplicateCatalogueProblem(name));
+    return beans.insert(name, factory);
+}
+
+// Replace the installed catalogue with `beans`. The root `Context` is always
+// in it — the container answers for itself — unless the application put its
+// own entry under that name. Answers how many entries were installed.
+pub fn rkInstallBeans(beans: Dict<string, unknown>) -> i32 {
+    val _r = rkCatalogueReset();
+    var n = 0;
+    for (beans.keys()) { k ->
+        val f = beans.at(k);
+        if (f != null) n = rkCatalogueStore(k, f);
+    }
+    if (!beans.hasKey("Context"))
+        n = rkCatalogueStore("Context", { -> rootContext() });
+    return n;
+}
+
+// The installed catalogue's names, in installation order.
+pub fn rkInstalledBeans() -> string[] {
+    val names = rkCatalogueNames();
+    if (names == "") return [] else return names.split("\n");
+}
+
+// Constructor injection's door: the bean named `name`, as a `T`, or the boot
+// stops naming the bean and the type it was expected to be.
+pub fn rkResolve<T>(name: string) -> T {
+    val entry = rkCatalogueEntry(name);
+    if (entry is fn() -> T) return rkSingleton("bean:" + name, entry);
+    if (entry != null) @panic(beanTypeProblem(name));
+    val record = chooseBean("", name);
+    if (record == "") @panic(missingBeanProblem(name));
+    val built: ?T = rkBeanInvoke(record);
+    if (built == null) @panic(missingBeanProblem(name));
+    return built;
+}
+
+// The programmatic doors, as free functions, answering `null` for a type no
+// bean provides. `Context` is the record face of the same three, and
+// `rakun.d.bp`'s declaration-only `behavior Context` is what they replace.
+pub fn rkFind<T>(typeName: string) -> ?T {
+    return rkFindIn("", typeName);
+}
+
+pub fn rkFindIn<T>(path: string, typeName: string) -> ?T {
     val record = chooseBean(path, typeName);
     if (record == "") return null else return rkBeanInvoke(record);
 }
 
-pub fn rkResolveNamed<T>(typeName: string, qualifier: string) -> ?T {
-    return rkResolveNamedIn("", typeName, qualifier);
+pub fn rkFindNamed<T>(typeName: string, qualifier: string) -> ?T {
+    return rkFindNamedIn("", typeName, qualifier);
 }
 
-pub fn rkResolveNamedIn<T>(
+pub fn rkFindNamedIn<T>(
     path: string,
     typeName: string,
     qualifier: string,
@@ -509,9 +611,10 @@ pub fn rkBeanNamesIn(path: string) -> string[] {
 // declaration-only `behavior Context` that `rakun.d.bp` carried under a header
 // calling it "not yet implemented".
 //
-// `Context` IS INJECTABLE BY TYPE. `__rkMake_Context()` is emitted here, so a
-// field of type `Context` wires with no extra declaration — `decorators.bp`
-// emits `__rkMake_<FieldType>()` for every field and this is that factory. It
+// `Context` IS INJECTABLE BY TYPE. `rkInstallBeans` puts `rootContext` in the
+// catalogue under `"Context"`, so a field of type `Context` wires with no extra
+// declaration — a stereotype's `make()` resolves every field through
+// `rkResolve("<FieldType>")` and this is the entry it finds. It
 // is EXEMPT FROM THE CYCLE GUARD on purpose: it brackets nothing with
 // `rkEnter`/`rkDone` because it is constructed before the scan runs and depends
 // on nothing, so a component holding a `Context` can never be a cycle through
@@ -533,7 +636,7 @@ pub type Context(
     scopePath: string,
 ) {
     pub fn resolve<T>(self: Self, typeName: string) -> ?T {
-        return rkResolveIn(self.scopePath, typeName);
+        return rkFindIn(self.scopePath, typeName);
     }
 
     pub fn resolveNamed<T>(
@@ -541,7 +644,7 @@ pub type Context(
         typeName: string,
         qualifier: string,
     ) -> ?T {
-        return rkResolveNamedIn(self.scopePath, typeName, qualifier);
+        return rkFindNamedIn(self.scopePath, typeName, qualifier);
     }
 
     pub fn has(self: Self, typeName: string) -> bool {
@@ -577,7 +680,7 @@ pub fn childNameProblem() -> string {
 
 // The root context. A singleton so two injection sites share one value, and
 // deliberately NOT bracketed by `rkEnter`/`rkDone`: see above.
-pub fn __rkMake_Context() -> Context {
+pub fn rootContext() -> Context {
     return rkSingleton("Context", { -> Context(scopePath: "") });
 }
 
@@ -716,8 +819,8 @@ fn bootFailure(source: string, reason: string, published: i32) -> i32 {
 // than a chain of bare `if`s, which only the LAST statement of a block may be.
 //
 // SCOPE CHANGES WHAT THE REGISTERED FACTORY IS. `Singleton` registers
-// `{ -> __rkMake_<Type>() }`, the stereotype's cached factory, and that is what
-// constructor injection always gets. `Prototype` and `Request` register a FRESH
+// `{ -> <Type>.make() }`, the stereotype's cached factory (its `make()`
+// member, decision 234), and that is what constructor injection always gets. `Prototype` and `Request` register a FRESH
 // constructor `__rkNew_<Type>()` that `#[managed]` emits itself, with the same
 // per-field injection rule the stereotypes use (a `#[value]` field comes from
 // the property table and is not a DI edge) — `Request` wrapped in
@@ -726,12 +829,11 @@ fn bootFailure(source: string, reason: string, published: i32) -> i32 {
 // AND IT REFUSES THE COMBINATION THE README CANNOT SEE. "A prototype or request
 // bean cannot be a constructor-injected field" is not checkable from a
 // decorator: no decl sees another type's fields. What IS checkable is the reason
-// — the STEREOTYPE is what emits the singleton `__rkMake_<Type>()` a field
-// resolves through. So a non-singleton `#[managed]` type carrying a stereotype
-// is refused at comptime, and without one there is no `__rkMake_<Type>` at all,
-// so a field of that type fails the build at its own injection site with
-// `unbound variable`. That is the guarantee the README asks for, reached from
-// the half of it reflection can see.
+// — the STEREOTYPE is what gives the type the singleton `make()` the catalogue
+// holds and a field resolves through. So a non-singleton `#[managed]` type
+// carrying a stereotype is refused at comptime; without one the type has no
+// `make()`, is not in the catalogue, and a field of it resolves through the
+// context table to the scope it was registered with.
 //
 // It also refuses `#[postConstruct]`/`#[preDestroy]` on a non-singleton bean:
 // the passes run once at boot and once at shutdown, over an instance nobody
@@ -750,10 +852,9 @@ fn bootFailure(source: string, reason: string, published: i32) -> i32 {
 // would need a dummy emission in the else branch, which is noise in every
 // consumer's output.
 //
-// THE FACTORY IS A LAMBDA, NOT A BARE NAME. `rkRegisterBean(..., __rkMake_X)`
-// compiles on the node row and is `variable '__rkMake_X' is unbound` on the
-// erlang one: a named function used as a VALUE is not lowered to a `fun name/0`.
-// `{ -> __rkMake_X() }` is the same value and lowers on both.
+// THE FACTORY IS A LAMBDA, NOT A BARE NAME: `{ -> X.make() }`, because an
+// associated fn read as a value is an unbound variable on erlang (front 130's
+// README, "Found during the migration").
 
 pub fn managed(comptime decl: @Decl) {
     var qual = "\"\"";
@@ -792,7 +893,7 @@ pub fn managed(comptime decl: @Decl) {
                 "rkPropInt(" + valKey + ")"
             else
                 "rkProp(" + valKey + ")";
-        } else "__rkMake_" + f.typeName + "()";
+        } else "rkResolve(\"" + f.typeName + "\")";
         args.push(f.name + ": " + expr);
     });
     val scanLine = if (singleton)
@@ -818,10 +919,7 @@ pub fn managed(comptime decl: @Decl) {
         "{ -> rkRequestScoped(\"" + decl.name + "\", { -> " + fresh + " }) }"
     else
         "{ -> " + fresh + " }";
-    val factory = if (singleton)
-        "{ -> __rkMake_" + decl.name + "() }"
-    else
-        scoped;
+    val factory = if (singleton) "{ -> " + decl.name + ".make() }" else scoped;
     @emit(
         "val __rkBean_"
             + decl.name
@@ -841,7 +939,7 @@ pub fn managed(comptime decl: @Decl) {
             + factory
             + ");",
     );
-    val instance = if (singleton) "__rkMake_" + decl.name + "()" else fresh;
+    val instance = if (singleton) decl.name + ".make()" else fresh;
     var hooked = "";
     decl.methods.forEach({ m ->
         var phase = "";
@@ -904,7 +1002,7 @@ pub fn managed(comptime decl: @Decl) {
         decl.fail("#[managed] must annotate a type with fields, not an enum");
     if ((!singleton && stereotype != ""))
         decl.fail(
-            "a #[managed] type with a non-singleton #[scope] may not also carry a stereotype - the stereotype emits the singleton __rkMake_<Type>() that constructor injection resolves a field through, so the bean would be REGISTERED as a prototype and INJECTED as a singleton. Drop the stereotype: a prototype or request bean is reached through ctx.resolve, and a field of it then fails the build at its own injection site",
+            "a #[managed] type with a non-singleton #[scope] may not also carry a stereotype - the stereotype gives the type the singleton make() the catalogue holds and constructor injection resolves a field through, so the bean would be REGISTERED as a prototype and INJECTED as a singleton. Drop the stereotype: a prototype or request bean is reached through ctx.resolve, and a field of it through the context table",
         );
     if ((!singleton && hooked != ""))
         decl.fail(
@@ -929,15 +1027,17 @@ pub fn managed(comptime decl: @Decl) {
 // `decl.returnType` is what a `Fn` decl carries, and it is the same field
 // `#[configuration]` already reads off its `#[bean]` methods.
 //
-// WHO OWNS `__rkMake_<Type>`. Constructor injection emits `__rkMake_<FieldType>()`
-// and that name is unique by construction, so exactly one `#[provides]` of a
-// type may define it: the unqualified one, or the `#[primary]` one.
+// WHO A FIELD GETS. Constructor injection is `rkResolve("<FieldType>")`: the
+// catalogue first, then the context table this registration fills, where the
+// unqualified provider or the `#[primary]` one is the answer and two qualified
+// ones with no `#[primary]` are the ambiguity `chooseBean` raises, naming both.
+// Each registration's factory caches under its own key (the type for the
+// owner of the plain name, `<Type>@<qualifier>` otherwise), so no function is
+// emitted at all.
 //
-// Two UNQUALIFIED `#[provides]` of one type both try to. The front's README
-// expects the compiler to fail the BUILD on the duplicate definition; measured,
-// it does not — two emitted `pub fn __rkMake_Ledger` definitions compile. What
-// catches it is `rkRegisterBeanAt`'s duplicate check, which fires at MODULE
-// LOAD, before any test or request runs, and names both functions:
+// Two UNQUALIFIED `#[provides]` of one type are caught by
+// `rkRegisterBeanAt`'s duplicate check, which fires at MODULE LOAD, before any
+// test or request runs, and names both functions:
 //
 //     rakun: two beans of type 'Ledger' are registered ('mainLedger' and
 //            'backupLedger'); give one a distinct #[qualifier]
@@ -945,16 +1045,11 @@ pub fn managed(comptime decl: @Decl) {
 // That is the acceptance's "naming both functions" met at boot rather than at
 // compile time, and it is why the owner is a field of the record at all.
 //
-// Two QUALIFIED providers with no `#[primary]` define `__rkMake_<Type>` neither
-// time, so a field of that type IS a build failure — `unbound variable
-// '__rkMake_Dye'` at the injection site — and `ctx.resolve` raises the ambiguity
-// naming both; `resolveNamed` still works.
-//
-// Every provider gets a factory function either way — `__rkMake_<Type>` when it
-// owns the name, `__rkProvide_<fn>` when it does not — so the registration line
-// has ONE shape and the body is not a conditional emit. A bare `if` may only be
-// the last statement of a comptime block, which is the same restriction the
-// four markers in `file_router.bp` are written around.
+// Two QUALIFIED providers with no `#[primary]`: a field of that type stops the
+// boot with the ambiguity, `ctx.resolve` raises it naming both, and
+// `resolveNamed` still works. (Whether providers also enter the entry point's
+// catalogue, keyed by their return type, is question `130-b`; until it is
+// answered they reach injection through the context table alone.)
 
 pub fn provides(comptime decl: @Decl) {
     var qual = "\"\"";
@@ -980,7 +1075,6 @@ pub fn provides(comptime decl: @Decl) {
     val marked = isPrimary == "true";
     val owns = unqualified || marked;
     val ownsName = owns && singleton;
-    val fname = if (ownsName) "__rkMake_" + t else "__rkProvide_" + decl.name;
     val scoped = if (request)
         "rkRequestScoped(" + keyExpr + ", { -> " + call + " })"
     else
@@ -991,7 +1085,6 @@ pub fn provides(comptime decl: @Decl) {
         "rkSingleton(" + keyExpr + ", { -> " + call + " })"
     else
         scoped;
-    @emit("pub fn " + fname + "() -> " + t + " { return " + cached + "; }");
     @emit(
         "val __rkBean_"
             + decl.name
@@ -1008,8 +1101,8 @@ pub fn provides(comptime decl: @Decl) {
             + ", \""
             + decl.name
             + "\", { -> "
-            + fname
-            + "() });",
+            + cached
+            + " });",
     );
     if (decl.kind != DeclKind.Fn)
         decl.fail("#[provides] must annotate a function");
@@ -1057,10 +1150,9 @@ pub fn lazy(comptime decl: @Decl) {
 // botopink is already explicit, and an extra root is a `pub mod` line. The front
 // says that rather than inventing a `basePackages`.
 //
-// Each named type must already have a `__rkMake_<Type>()` — from a stereotype,
-// from a `#[configuration]`'s `#[bean]`, or from a `#[provides]`. A name that
-// has none is `unbound variable '__rkMake_<Name>'` at the import site, which
-// names the type and the configuration that asked for it.
+// Each named type must carry a stereotype — its `make()` member is the
+// registered factory. A name that has none is `unknown-associated-fn` at the
+// import site, which names the type and the configuration that asked for it.
 pub fn imports(comptime decl: @Decl, names: string) {
     names
         .split(",")
@@ -1076,9 +1168,9 @@ pub fn imports(comptime decl: @Decl, names: string) {
                         + name
                         + "\", \"\", \"singleton\", false, false, \""
                         + decl.name
-                        + "\", { -> __rkMake_"
+                        + "\", { -> "
                         + name
-                        + "() });",
+                        + ".make() });",
                 );
         });
     if (decl.kind != DeclKind.Type)

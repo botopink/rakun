@@ -13,13 +13,14 @@ mechanism (`@Decl` reflection, comptime decorator bodies, `@emit`).
 
 How the wiring works: each component decorator (`decorators.bp`) is a comptime fn
 over the annotated `type` (`DeclKind.Type` with no `variants` — an enum-shaped `type` is rejected). It `@emit`s, at the application site, (1) a scan
-self-registration and (2) a SINGLETON factory `__rkMake_<Type>()` that constructs
-the value once (`rkSingleton`) and caches it, injecting each field by its own
-factory — except a `#[value("key")]` field, filled from config (`rkProp`/
+self-registration and (2) the member `<Type>.make()` (decision 234), a SINGLETON
+factory that constructs the value once (`rkSingleton`) and caches it, injecting
+each field through `rkResolve("<FieldType>")` (§ The catalogue and constructor
+injection) — except a `#[value("key")]` field, filled from config (`rkProp`/
 `rkPropInt`) and kept OFF the DI graph. A controller additionally `@emit`s one
 route registration per mapped method (reading `decl.methods` + the `#[route]`
-prefix); a `#[configuration]` `@emit`s a `__rkMake_<ReturnType>()` per `#[bean]`
-method. botopink has no top-level mutable state, so the registries those calls
+prefix); a `#[configuration]` registers each `#[bean]` method's return type in
+the context table (`rkRegisterBean`). botopink has no top-level mutable state, so the registries those calls
 feed — the scan list, the singleton cache, the cycle guard, the config props, the
 router table — live in the BEAM host module `sidecars/rakun_runtime.erl`, reached
 through the `#[@External.Erlang]` declarations in `runtime.bp`. rakun is
@@ -1080,7 +1081,7 @@ milestone). It emits three things into the module that declares the record:
 
 ```bp
 pub fn __rkBind_MyService(prefix: string) -> MyService { … }   // prefix is a PARAMETER
-pub fn __rkMake_MyService() -> MyService { … }                 // the ordinary DI factory name
+MyService.make() -> MyService                                  // the stereotype's DI factory member
 val __rkCat_MyService = rkRegisterConfigKeys("my.service", "…"); // the run-time catalogue
 ```
 
@@ -1088,9 +1089,10 @@ The prefix being a parameter is what makes `#[nested]` compose: a nested field
 calls the nested type's own binder with `prefix + "." + <field>`, and neither
 decorator has to know the other exists. A rakun decorator body cannot call a
 sibling function, so composition has to happen in the EMITTED code — which is
-also why two levels of nesting work with no extra machinery. `__rkMake_<Name>`
-is the ordinary factory name, so a bound record is injectable by type into any
-`#[service]` with no further wiring.
+also why two levels of nesting work with no extra machinery. `<Name>.make()` is
+the stereotype's factory member, so a bound record enters the entry point's
+catalogue (`with: […, configurationProperties]`) and is injectable by type into
+any `#[service]` with no further wiring.
 
 The field markers are `#[nested]`, `#[unit("seconds")]` (the unit a BARE number
 is read in) and `#[defaultValue("guest")]` (row 8, written where the catalogue
@@ -1167,7 +1169,7 @@ guessed, and each costs a spelling in `src/config.bp`:
 
 `modules/rakun/src/context.bp`, `src/events.bp` and `src/lifecycle.bp` are what
 makes the IoC container reachable. Before them, constructor injection through an
-emitted `__rkMake_<Type>()` was the container's entire public surface: a value
+emitted factory function was the container's entire public surface: a value
 that was not a field of something could not be got at, nothing ran at startup or
 shutdown, and nothing reacted to anything.
 
@@ -1211,7 +1213,7 @@ four values, none of which a string table holds:
 | Stored | What it is | Could a `rkSetProp`/`rkProp` string table hold it? |
 |---|---|---|
 | A bean factory | a closure over a constructor, or over `rkSingleton` and a constructor | no — calling it is the point, and a name is not callable (`list_to_existing_atom("__rkMake_" ++ Name)` yields an ATOM, and an atom is not a function) |
-| A `#[postConstruct]`/`#[preDestroy]` hook | a thunk closing over `__rkMake_<Type>()` and a method | no |
+| A `#[postConstruct]`/`#[preDestroy]` hook | a thunk closing over `<Type>.make()` and a method | no |
 | An `#[eventListener]` binding | a closure taking an `Event` | no |
 | An `#[exitCode]` generator | a function returning `i32` | no |
 
@@ -1263,25 +1265,63 @@ five-argument call has no room for the third of those four, and neither has room
 for the owner its own ambiguity message spells (`two beans of type 'Clock'
 ('systemClock', 'fixedClock')`). Both are added rather than dropped.
 
+### The catalogue and constructor injection (decisions 234, 254, 256)
+
+A stereotyped type's factory is its member `T.make()`. The application's entry
+point collects every one into a `Dict<string, unknown>` — decision 256's
+registry — and installs it before anything resolves:
+
+```bp
+val beans: Dict<string, unknown> = comptime {
+    var d: Dict<string, unknown> = Dict.empty();
+    for (@TypeInfo.all(with: [component, service, repository, controller, restController, configuration, autoConfiguration, configurationProperties], member: "make")) { b ->
+        d = rkAddBean(d, b.name, b.value);
+    }
+    break d;
+};
+val _i = rkInstallBeans(beans);
+```
+
+`with:` lists the stereotypes the program uses (each must be imported).
+`rkAddBean` refuses a name registered twice (`duplicateCatalogueProblem`).
+Decision 266 makes a `comptime` block evaluate at compile time everywhere, so the
+refusal becomes a build error; until `01-checker` step 21 lands the lift, the
+block written inside a function runs at boot on erlang (rakun's one target) and
+the refusal is a boot failure. A field `clock: Clock` of a stereotyped type is
+`rkResolve("Clock")` in its `make()`: the catalogue's entry narrowed with
+`is fn() -> T` and built once under `"bean:<name>"`; an entry of another shape
+stops the boot with `beanTypeProblem` (the bean and the expected type); a name
+the catalogue lacks is asked of the context table (`#[managed]`, `#[provides]`,
+`#[imports]` and a `#[configuration]`'s `#[bean]` register there, with the
+`#[qualifier]` / `#[primary]` rules), and a name neither holds is
+`missingBeanProblem`. `rkFind` / `rkFindIn` / `rkFindNamed` are the `?T` doors
+over the context table (`Context.resolve` reads them).
+
+Whether `#[provides]` also enters the catalogue keyed by its return type, and
+how a `#[bean]` method reaches it, are questions `130-b` and `130-c`; until they
+are answered both reach injection through the context table.
+
+Every test module that declares a stereotyped type reads `@TypeInfo.all` itself
+(its `beans()` helper, installed at each test's start): a module that reads it
+is left out of every other reader's answer, so test files never see each
+other's beans.
+
 ### `Context` is injectable, and reached through an annotated local
 
-`context.bp` emits `pub fn __rkMake_Context() -> Context`, which is the name
-`decorators.bp` already emits for a field of any type — so a `ctx: Context` field
-wires with no extra step. The consumer names that factory in its `import` list
-beside `rkScan` and `rkSingleton`, because the emitted wiring calls it at the
-APPLICATION site; the front's acceptance says "without any extra declaration",
-and an import is not a declaration.
+`rkInstallBeans` puts `rootContext` in the catalogue under `"Context"` (unless
+the application put its own entry there), so a `ctx: Context` field wires with
+no extra step.
 
 The factory brackets nothing with `rkEnter`/`rkDone` — `Context` is constructed
 before the scan runs and depends on nothing, so a component holding one can never
 be a cycle through it — and it registers no bean, so `Context` does not appear in
 its own `beanNames()` and the eager pass does not build it twice.
 
-**The receiver has to be an annotated local.** `__rkMake_Context().resolve(…)`
-and `val ctx = __rkMake_Context();` both lose the optional's payload type (the
+**The receiver has to be an annotated local.** `rootContext().resolve(…)`
+and `val ctx = rootContext();` both lose the optional's payload type (the
 `§ Language notes` row about a record method's optional and an unannotated
 receiver). Every call site in `test/context_test.bp` writes
-`val ctx: Context = __rkMake_Context();`, and that is not style.
+`val ctx: Context = rootContext();`, and that is not style.
 
 ### Lifecycle: the markers check placement, `#[managed]` does the wiring
 
@@ -1407,7 +1447,7 @@ either sentence would be a one-row test.
 
 ### Scopes, and the refusal reflection can actually reach
 
-`Singleton` registers `{ -> __rkMake_<Type>() }`, the stereotype's cached
+`Singleton` registers `{ -> <Type>.make() }`, the stereotype's cached
 factory, and that is what constructor injection always gets. `Prototype` and
 `Request` register a FRESH constructor `__rkNew_<Type>()` that `#[managed]` emits
 itself, with the same per-field injection rule the stereotypes use; `Request`
@@ -1418,12 +1458,12 @@ never share, and an explicit bracket on node, which is single-threaded.
 The front's step 6 asks for "`#[scope("request")]` on a type whose factory is
 constructor-injected somewhere fails at comptime naming the injection site's
 limitation". **No decorator can see another type's fields**, so that check is not
-writable. What IS writable is its REASON: the stereotype is what emits the
-singleton `__rkMake_<Type>()` a field resolves through, so `#[managed]` refuses a
-non-singleton scope on a type that also carries a stereotype. Without one there
-is no `__rkMake_<Type>` at all, and a field of that type fails the build at its
-own injection site with `unbound variable`. Same guarantee, reached from the half
-reflection can see.
+writable. What IS writable is its REASON: the stereotype is what gives the type
+the singleton `make()` the catalogue holds and a field resolves through, so
+`#[managed]` refuses a non-singleton scope on a type that also carries a
+stereotype. Without one the type has no `make()`, is not in the catalogue, and a
+field of it resolves through the context table to the scope it was registered
+with.
 
 `#[managed]` also refuses `#[postConstruct]`/`#[preDestroy]` on a non-singleton
 bean: both passes run once, over an instance nobody kept.
@@ -1449,10 +1489,10 @@ of `Context` imports both.
 `#[imports("DatabaseConfig,SecurityConfig")]` on a `#[configuration]` type
 registers a bean for each named type, so a configuration record in a module the
 application does not otherwise reference is still wired. This is Spring's
-`@Import`. Each named type must already have a `__rkMake_<Type>()` — from a
-stereotype, a `#[configuration]`'s `#[bean]`, or a `#[provides]` — and a name
-with none is `unbound variable '__rkMake_<Name>'` at the import site, which names
-both the type and the configuration that asked for it.
+`@Import`. Each named type must carry a stereotype — its `make()` is the
+registered factory — and a name with none is `unknown-associated-fn` at the
+import site, which names both the type and the configuration that asked for it.
+(A `#[bean]`'s return type needs no `#[imports]`: the bean registers it.)
 
 Spring's `@ComponentScan(basePackages=…)` has NO analogue here and needs none: an
 additional scan root in botopink is a `pub mod` line, because module resolution
@@ -1465,7 +1505,7 @@ the surface it may rely on; none of it changes without a note here.
 
 | What | Where | Shape |
 |---|---|---|
-| The root context | `context.__rkMake_Context()` | `Context`, a singleton, exempt from the cycle guard and absent from its own `beanNames()` |
+| The root context | `context.rootContext()` (and `rkResolve("Context")`, which `rkInstallBeans` puts in the catalogue) | `Context`, a singleton, exempt from the cycle guard and absent from its own `beanNames()` |
 | Per-render resolution | `ctx.resolve(typeName)` / `ctx.resolveNamed(typeName, qualifier)` | `?T` from an ANNOTATED binding — `val x: ?Foo = ctx.resolve("Foo")`; the string is unchecked against `T` |
 | The per-request child | `ctx.child(name)` → `rkRegisterBeanAt(path, …)` | a bean is visible from a path when registered at it or an ancestor, nearest wins; `""` is the root |
 | Request scope | `rkRequestScoped(key, build)` · `rkRequestScopeEnd()` | the process dictionary on the BEAM, an explicit bracket on node. Front 62 owns the ACCESSORS; this is the storage |
@@ -1492,7 +1532,7 @@ boot reads them rather than spelling them.
 `botopink test` runs each test FILE in its own process on the node row and in ONE
 node on the erlang row, where `rkSingleton`'s cache is a node-global ETS table
 keyed by the type name. So two test files declaring a type of the same name are a
-real collision there: the second `__rkMake_Clock()` finds the first file's
+real collision there: the second `Clock.make()` finds the first file's
 instance in the cache and hands it back, and the caller's method call on a
 foreign record is `{error, undef}`.
 
@@ -1504,10 +1544,10 @@ nothing. Every type a test file declares is named for that file
 
 ### Resolution and the tie
 
-`__rkMake_<FieldType>()` is unique by construction, so constructor injection
-cannot be ambiguous; a tie is only reachable through the registry, from two
-`#[provides]` functions or two `#[bean]` methods producing one type. So
-`rkResolve(typeName)` takes the single candidate, or the single `#[primary]` one,
+The catalogue holds one factory per name (`rkAddBean` refuses a second), so a
+tie is only reachable through the context table, from two `#[provides]`
+functions or two `#[bean]` methods producing one type. So `chooseBean` — behind
+`rkFind(typeName)`, `ctx.resolve` and `rkResolve`'s fallback — takes the single candidate, or the single `#[primary]` one,
 and otherwise RAISES naming both owners. A tie is an error and never a silent
 first-wins. `rkHasBean` never raises — an ambiguous type IS registered, and a
 caller asking whether the container knows about it deserves the answer rather
@@ -1912,14 +1952,12 @@ and "nobody asked" are different answers.
 
 `#[autoConfiguration]` emits its own `#[bean]` factories, so the gate goes
 inside them. `#[profile]` on an ordinary `#[service]` cannot do that:
-`decorators.bp` is frozen and its stereotypes emit `__rkMake_<Type>()`
+`decorators.bp` is frozen and its stereotypes add `<Type>.make()`
 unconditionally. **The narrowing:** the marker leaves the component UNBUILT — the
 factory is lazy, nothing calls it at module load and `rkBuildCount` stays 0 — and
 emits `__rkAutoGated_<Type>()` beside it, which raises with the diagnosis instead
 of building. When `decorators.bp` unfreezes the gate moves into the factory and
-the accessor goes away. The alternative would have been a second
-`pub fn __rkMake_<Type>` definition, which is a duplicate the node row accepts
-silently (front 06 § `#[provides]` measured the same thing).
+the accessor goes away.
 
 ### Exclusion: two channels, one resolution path
 
@@ -4703,16 +4741,18 @@ completed handshake.
 
 - **IoC container** — components (`#[component]`/`#[service]`/`#[repository]`/
   `#[controller]`/`#[restController]`) are scanned at module load; each gets an
-  emitted **singleton** factory `__rkMake_<Type>()` (`rkSingleton` — one instance
-  per type, shared across a 3-level chain / diamond).
+  **singleton** factory member `<Type>.make()` (`rkSingleton` — one instance
+  per type, shared across a 3-level chain / diamond), collected into the entry
+  point's catalogue (decisions 234, 254, 256).
 - **Constructor injection** — a dependency is declared as a field of the `type` and
-  resolved **by type** (the factory calls the field type's own factory).
+  resolved **by type** (`rkResolve("<FieldType>")`: the catalogue, then the
+  context table).
   Immutable-first: no setter/field injection.
 - **`#[value("key")]` property injection** — a `#[value]` field is filled from the
   config source (`rkProp`/`rkPropInt`), **excluded** from the DI graph (the factory
-  reads `f.annotations` to detect it). `#[configuration]` + `#[bean]` register a
-  `__rkMake_<ReturnType>()` so a bean's return type is injectable by type.
-- **Cycle detection** — `__rkMake_X` brackets construction with `rkEnter`/`rkDone`;
+  reads `f.annotations` to detect it). `#[configuration]` + `#[bean]` register the
+  return type in the context table so it is injectable by type.
+- **Cycle detection** — `X.make()` brackets construction with `rkEnter`/`rkDone`;
   a cycle A→B→A raises at first construction. (A *comptime* cycle diagnostic would
   need a whole-graph view no single decorator has — a recorded follow-up.)
 - **Web layer** — `#[restController, route(prefix)]` + `#[getMapping(path)]`/… emit

@@ -20,7 +20,7 @@
 //// The most specific mapping wins, by longest matching path prefix.
 
 import {Response} from "rakun";
-import {rkResolve, rkHasBean} from "rakun";
+import {rkFind, rkHasBean} from "rakun";
 import {rkProp, rkRoutePaths} from "rakun";
 import {filter.WebRequest, filter.Chain, filter.withHeader, filter.splitTokens};
 import {filter.routeAdmits, filter.routeRowPath, filter.sentinelStatus};
@@ -28,7 +28,11 @@ import {filter.routeAdmits, filter.routeRowPath, filter.sentinelStatus};
 // ── the host cells ──────────────────────────────────────────────────────────
 
 #[@External.Erlang("rakun_chain", "cors_register")]
-pub declare fn rkCorsRegister(prefix: string, origins: string, methods: string) -> i32;
+pub declare fn rkCorsRegister(
+    prefix: string,
+    origins: string,
+    methods: string,
+) -> i32;
 
 #[@External.Erlang("rakun_chain", "cors_rows")]
 pub declare fn rkCorsRows() -> string;
@@ -72,9 +76,8 @@ pub fn credentialsWildcardProblem() -> string {
 // Called by every constructor of a live policy, so an application cannot reach
 // the chain with a policy that was never checked.
 pub fn validatePolicy(p: CorsPolicy) -> i32 {
-    if (p.allowCredentials && (p.allowedOrigins.indexOf("*") >= 0)) {
+    if (p.allowCredentials && (p.allowedOrigins.indexOf("*") >= 0))
         @panic(credentialsWildcardProblem());
-    };
     return 0;
 }
 
@@ -116,8 +119,15 @@ pub fn allowsMethod(p: CorsPolicy, method: string) -> bool {
 // only the two lists the decorator can spell; everything else comes from the
 // global policy, so an override narrows a controller rather than resetting it.
 
-pub fn registerCorsMapping(prefix: string, origins: string, methods: string) -> i32 {
-    if (prefix == "") @panic("rakun-web: #[crossOrigin] needs the controller's #[route] prefix");
+pub fn registerCorsMapping(
+    prefix: string,
+    origins: string,
+    methods: string,
+) -> i32 {
+    if (prefix == "")
+        @panic(
+            "rakun-web: #[crossOrigin] needs the controller's #[route] prefix",
+        );
     return rkCorsRegister(prefix, origins, methods);
 }
 
@@ -146,8 +156,8 @@ pub fn mappingFor(path: string) -> string {
         if (hit && (prefix.length() > bestLen)) {
             bestLen = prefix.length();
             best = row;
-        };
-    };
+        }
+    }
     return best;
 }
 
@@ -159,7 +169,7 @@ pub fn mappingFor(path: string) -> string {
 
 pub fn globalPolicy() -> CorsPolicy {
     if (rkHasBean("CorsPolicy") == false) return denyAll();
-    val found: ?CorsPolicy = rkResolve("CorsPolicy");
+    val found: ?CorsPolicy = rkFind("CorsPolicy");
     return found.unwrapOr(denyAll());
 }
 
@@ -193,7 +203,7 @@ pub fn routeExists(path: string) -> bool {
     for (wire.split(",")) { row ->
         val pattern: string = routeRowPath(row.trim());
         if ((pattern != "") && routeAdmits(pattern, path)) found = true;
-    };
+    }
     return found;
 }
 
@@ -217,9 +227,16 @@ fn markVary(res: Response) -> Response {
 
 fn allowHeaders(res: Response, p: CorsPolicy, origin: string) -> Response {
     val a: Response = withHeader(res, "Access-Control-Allow-Origin", origin);
-    val b: Response = if (p.allowCredentials) withHeader(a, "Access-Control-Allow-Credentials", "true") else a;
+    val b: Response = if (p.allowCredentials)
+        withHeader(a, "Access-Control-Allow-Credentials", "true")
+    else
+        a;
     if (p.exposedHeaders.length == 0) return b;
-    return withHeader(b, "Access-Control-Expose-Headers", p.exposedHeaders.join(", "));
+    return withHeader(
+        b,
+        "Access-Control-Expose-Headers",
+        p.exposedHeaders.join(", "),
+    );
 }
 
 pub fn preflightResponse(p: CorsPolicy, origin: string) -> Response {
@@ -230,7 +247,14 @@ pub fn preflightResponse(p: CorsPolicy, origin: string) -> Response {
         "Access-Control-Allow-Methods",
         p.allowedMethods.join(", "),
     );
-    val headers: Response = if (p.allowedHeaders.length > 0) withHeader(methods, "Access-Control-Allow-Headers", p.allowedHeaders.join(", ")) else methods;
+    val headers: Response = if (p.allowedHeaders.length > 0)
+        withHeader(
+            methods,
+            "Access-Control-Allow-Headers",
+            p.allowedHeaders.join(", "),
+        )
+    else
+        methods;
     if (p.maxAgeSeconds <= 0) return headers;
     return withHeader(headers, "Access-Control-Max-Age", maxAgeHeader(p));
 }
@@ -246,11 +270,13 @@ pub fn corsEntry(req: WebRequest, chain: Chain) -> Response {
     val p: CorsPolicy = policyFor(req.target);
     if (isPreflight(req)) {
         if (routeExists(req.target) == false) return Response.notFound();
-        if (allowsOrigin(p, origin) == false) return markVary(Response(status: 403, body: ""));
+        if (allowsOrigin(p, origin) == false)
+            return markVary(Response(status: 403, body: ""));
         val asked: string = req.header("access-control-request-method");
-        if (allowsMethod(p, asked) == false) return markVary(Response(status: 403, body: ""));
+        if (allowsMethod(p, asked) == false)
+            return markVary(Response(status: 403, body: ""));
         return preflightResponse(p, origin);
-    };
+    }
     val res: Response = chain.next(req);
     if (res.status == sentinelStatus()) return res;
     if (allowsOrigin(p, origin) == false) return markVary(res);

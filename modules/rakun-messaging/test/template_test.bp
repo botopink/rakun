@@ -4,9 +4,21 @@
 import {testing.asserts} from "std";
 import {io: {fs}} from "std";
 import {service, rkScan, rkSingleton, rkEnter, rkDone, rkSetProp} from "rakun";
-import {templates.AmqpTemplate, templates.KafkaTemplate, templates.RedisPubSubTemplate, templates.StreamTemplate, templates.__rkMake_AmqpTemplate, templates.__rkMake_KafkaTemplate, templates.__rkMake_RedisPubSubTemplate, templates.__rkMake_StreamTemplate};
+import {templates.AmqpTemplate, templates.KafkaTemplate, templates.RedisPubSubTemplate, templates.StreamTemplate, templates.amqpTemplate, templates.kafkaTemplate, templates.redisPubSubTemplate, templates.streamTemplate};
 import {registry.rkRegisterListener};
 import {container.resetMessaging, container.stopMessaging, container.startMessaging, container.messagingConfigProblem, container.published, container.clearPublished, container.armProperties, container.messagingStartupLog};
+import {collections.Dict} from "std";
+import {rkResolve, rkAddBean, rkInstallBeans} from "rakun";
+
+fn beans() -> Dict<string, unknown> {
+    return comptime {
+        var d: Dict<string, unknown> = Dict.empty();
+        for (@TypeInfo.all(with: [service], member: "make")) { b ->
+            d = rkAddBean(d, b.name, b.value);
+        }
+        break d;
+    };
+}
 
 #[service]
 pub type TplPublisher(
@@ -32,10 +44,11 @@ fn clean() -> i32 {
 }
 
 test "template: each template is injected by type into a service that declares it" {
+    val _beans = rkInstallBeans(beans());
     val _c = clean();
     val _t = transports("memory");
     val _b = startMessaging();
-    val sent = __rkMake_TplPublisher().all();
+    val sent = TplPublisher.make().all();
     val a = published("amqp").join(";");
     val k = published("kafka").join(";");
     val r = published("redis").join(";");
@@ -46,15 +59,17 @@ test "template: each template is injected by type into a service that declares i
 }
 
 test "template: a publish with no broker connection answers non-zero and does not raise" {
+    val _beans = rkInstallBeans(beans());
     val _c = clean();
-    assert __rkMake_AmqpTemplate().send("q", "x") != 0;
-    assert __rkMake_KafkaTemplate().send("t", "k", "x") != 0;
-    assert __rkMake_RedisPubSubTemplate().publish("c", "x") != 0;
-    assert __rkMake_StreamTemplate().append("s", "x") != 0;
+    assert amqpTemplate().send("q", "x") != 0;
+    assert kafkaTemplate().send("t", "k", "x") != 0;
+    assert redisPubSubTemplate().publish("c", "x") != 0;
+    assert streamTemplate().append("s", "x") != 0;
     assert published("amqp").length == 0;
 }
 
 test "template: every properties key reaches the arm unmodified and the startup log names them" {
+    val _beans = rkInstallBeans(beans());
     val _c = clean();
     val _t = transports("memory");
     val _p1 = rkSetProp("rakun.messaging.kafka.properties.max.poll.records", "5");
@@ -73,6 +88,7 @@ test "template: every properties key reaches the arm unmodified and the startup 
 }
 
 test "template: an address key without the memory transport refuses the boot naming the driver" {
+    val _beans = rkInstallBeans(beans());
     val _c = clean();
     val _h = rkSetProp("rakun.messaging.amqp.host", "rabbit.internal");
     val problem = messagingConfigProblem();
@@ -84,6 +100,7 @@ test "template: an address key without the memory transport refuses the boot nam
 }
 
 test "template: a listener on an arm with no transport refuses the boot" {
+    val _beans = rkInstallBeans(beans());
     val _c = clean();
     val _l = rkRegisterListener("amqp", "lonely", "", "lonely", { msg -> 0 });
     assert messagingConfigProblem().contains("amqp:lonely consumes amqp lonely, and no amqp transport is configured (rakun.messaging.amqp.transport)");

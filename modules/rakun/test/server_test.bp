@@ -16,6 +16,21 @@
 import {repository, service, restController, route, getMapping, postMapping};
 import {Request, Response};
 import {rkScan, rkSingleton, rkEnter, rkDone, rkRegisterRoute, rkDispatchHttp};
+import {collections.Dict} from "std";
+import {rkResolve, rkAddBean, rkInstallBeans};
+
+fn beans() -> Dict<string, unknown> {
+    return comptime {
+        var d: Dict<string, unknown> = Dict.empty();
+        for (@TypeInfo.all(
+            with: [service, repository, restController],
+            member: "make",
+        )) { b ->
+            d = rkAddBean(d, b.name, b.value);
+        }
+        break d;
+    };
+}
 
 #[repository]
 type HttpUserRepo() {
@@ -66,18 +81,21 @@ type HttpController(
 }
 
 test "rakun http: GET a mapped route returns 200 with the joined list" {
+    val _beans = rkInstallBeans(beans());
     val resp = rkDispatchHttp("GET", "/api/users", "{}", "{}", "");
     assert resp.status == 200;
     assert resp.body == "ana, bob";
 }
 
 test "rakun http: a path param reaches the handler" {
+    val _beans = rkInstallBeans(beans());
     val resp = rkDispatchHttp("GET", "/api/hello/ana", "{}", "{}", "");
     assert resp.status == 200;
     assert resp.body == "Hello, ana!";
 }
 
 test "rakun http: query, header and body are populated on the live request" {
+    val _beans = rkInstallBeans(beans());
     val resp = rkDispatchHttp(
         "GET",
         "/api/echo",
@@ -93,6 +111,7 @@ test "rakun http: query, header and body are populated on the live request" {
 }
 
 test "rakun http: an unmapped path returns 404" {
+    val _beans = rkInstallBeans(beans());
     val resp = rkDispatchHttp("GET", "/api/nope", "{}", "{}", "");
     assert resp.status == 404;
 }

@@ -30,6 +30,21 @@ import {conditions.conditionalOnModule, conditions.conditionalOnProperty, condit
 import {autoconfig_registry.rkAutoRegister, autoconfig_registry.rkAutoProvides, autoconfig_registry.rkAutoConditions, autoconfig_registry.rkAutoProvided, autoconfig_registry.rkAutoBefore, autoconfig_registry.rkAutoAfter, autoconfig_registry.rkAutoNames, autoconfig_registry.rkAutoKnown, autoconfig_registry.rkModulePresent, autoconfig_registry.moduleList, autoconfig_registry.moduleListIn, autoconfig_registry.manifestDependencies, autoconfig_registry.manifestDependencyNames, autoconfig_registry.manifestShapeProblem, autoconfig_registry.manifestName, autoconfig_registry.manifestMissingProblem};
 import {profiles.setResolved};
 import {testing.asserts} from "std";
+import {collections.Dict} from "std";
+import {rkResolve, rkAddBean, rkInstallBeans, rkRegisterBean};
+
+fn beans() -> Dict<string, unknown> {
+    return comptime {
+        var d: Dict<string, unknown> = Dict.empty();
+        for (@TypeInfo.all(
+            with: [service, autoConfiguration],
+            member: "make",
+        )) { b ->
+            d = rkAddBean(d, b.name, b.value);
+        }
+        break d;
+    };
+}
 
 // ── the declarations whose blobs this file reads ────────────────────────────
 
@@ -92,6 +107,7 @@ type CondStagingService() {
 // ── the blob ────────────────────────────────────────────────────────────────
 
 test "rakun conditions: a type with no condition registers an always-matching blob" {
+    val _beans = rkInstallBeans(beans());
     assert rkAutoKnown("PlainAutoConfiguration");
     assert rkAutoConditions("PlainAutoConfiguration") == "";
     assert rkAutoProvided("PlainAutoConfiguration") == "PlainAutoConfiguration";
@@ -102,6 +118,7 @@ test "rakun conditions: a type with no condition registers an always-matching bl
 }
 
 test "rakun conditions: three conditions produce three records, in source order" {
+    val _beans = rkInstallBeans(beans());
     assert rkAutoConditions("CondMailAutoConfiguration")
         == "M|rakun-mail;P|rakun.cond.mail.host|*;X|CondMailSender";
     val recs = splitBlob(rkAutoConditions("CondMailAutoConfiguration"));
@@ -112,6 +129,7 @@ test "rakun conditions: three conditions produce three records, in source order"
 }
 
 test "rakun conditions: the ordering markers go to the two lists, never to the blob" {
+    val _beans = rkInstallBeans(beans());
     assert rkAutoAfter("CondMailAutoConfiguration") == "PlainAutoConfiguration";
     assert rkAutoBefore("CondMailAutoConfiguration") == "LateAutoConfiguration";
     assert rkAutoConditions("CondMailAutoConfiguration").contains(
@@ -121,6 +139,7 @@ test "rakun conditions: the ordering markers go to the two lists, never to the b
 }
 
 test "rakun conditions: a #[bean] method registers under Type.method with its own conditions" {
+    val _beans = rkInstallBeans(beans());
     assert rkAutoKnown("CondMailAutoConfiguration.condMailSender");
     assert rkAutoConditions("CondMailAutoConfiguration.condMailSender")
         == "P|rakun.cond.mail.from|noreply";
@@ -132,6 +151,7 @@ test "rakun conditions: a #[bean] method registers under Type.method with its ow
 }
 
 test "rakun conditions: #[conditionalOnBean] and #[profile] serialise their own letters" {
+    val _beans = rkInstallBeans(beans());
     assert rkAutoConditions("LateAutoConfiguration")
         == "B|PlainAutoConfiguration;F|prod";
     assert recordKind("B|X") == beanRecord();
@@ -139,6 +159,7 @@ test "rakun conditions: #[conditionalOnBean] and #[profile] serialise their own 
 }
 
 test "rakun conditions: #[profile] on a stereotype registers the component itself" {
+    val _beans = rkInstallBeans(beans());
     assert rkAutoKnown("CondStagingService");
     assert rkAutoConditions("CondStagingService") == "F|staging";
     assert rkAutoProvided("CondStagingService") == "CondStagingService";
@@ -146,6 +167,7 @@ test "rakun conditions: #[profile] on a stereotype registers the component itsel
 }
 
 test "rakun conditions: every registration this file made is in the table" {
+    val _beans = rkInstallBeans(beans());
     val names = rkAutoNames();
     assert names.contains("PlainAutoConfiguration");
     assert names.contains("CondMailAutoConfiguration");
@@ -158,6 +180,7 @@ test "rakun conditions: every registration this file made is in the table" {
 // ── reading one record ──────────────────────────────────────────────────────
 
 test "rakun conditions: a record splits into its kind and its fields" {
+    val _beans = rkInstallBeans(beans());
     assert recordField("P|a.b.c|value", 0) == "P";
     assert recordField("P|a.b.c|value", 1) == "a.b.c";
     assert recordField("P|a.b.c|value", 2) == "value";
@@ -169,6 +192,7 @@ test "rakun conditions: a record splits into its kind and its fields" {
 // ── the evaluator, letter by letter ─────────────────────────────────────────
 
 test "rakun conditions: M is answered by the manifest and never guesses" {
+    val _beans = rkInstallBeans(beans());
     assert rkModulePresent("rakun-data") == false;
     val none: string[] = [];
     val v = evaluateRecord("M|rakun-data", none);
@@ -178,6 +202,7 @@ test "rakun conditions: M is answered by the manifest and never guesses" {
 }
 
 test "rakun conditions: P with * is set-and-non-empty, and an exact value is exact" {
+    val _beans = rkInstallBeans(beans());
     val none: string[] = [];
     val _ = rkSetProp("rakun.cond.probe", "");
     assert evaluateRecord("P|rakun.cond.probe|*", none).ok == false;
@@ -192,6 +217,7 @@ test "rakun conditions: P with * is set-and-non-empty, and an exact value is exa
 }
 
 test "rakun conditions: B and X read the registered set, provided names included" {
+    val _beans = rkInstallBeans(beans());
     val none: string[] = [];
     assert evaluateRecord("B|CondStagingService", none).ok;
     assert evaluateRecord("X|CondStagingService", none).ok == false;
@@ -207,6 +233,7 @@ test "rakun conditions: B and X read the registered set, provided names included
 }
 
 test "rakun conditions: F reads front 05's set and names which set it read" {
+    val _beans = rkInstallBeans(beans());
     val none: string[] = [];
     val _ = setResolved([]);
     assert profilesAreDefaulted();
@@ -227,6 +254,7 @@ test "rakun conditions: F reads front 05's set and names which set it read" {
 }
 
 test "rakun conditions: a named default profile is the one the report names" {
+    val _beans = rkInstallBeans(beans());
     val none: string[] = [];
     val _r = setResolved([]);
     val _d = rkSetProp("rakun.profiles.default", "fallback");
@@ -238,6 +266,7 @@ test "rakun conditions: a named default profile is the one the report names" {
 }
 
 test "rakun conditions: what an entry provides is a cell, not a sixth record letter" {
+    val _beans = rkInstallBeans(beans());
     val none: string[] = [];
     assert rkAutoProvided("NeverRegisteredAtAll") == "";
     try asserts.throwsWith({ ->
@@ -247,6 +276,7 @@ test "rakun conditions: what an entry provides is a cell, not a sixth record let
 }
 
 test "rakun conditions: an unknown record letter is refused, not ignored" {
+    val _beans = rkInstallBeans(beans());
     val none: string[] = [];
     try asserts.throwsWith({ ->
         evaluateRecord("Q|mystery", none);
@@ -257,6 +287,7 @@ test "rakun conditions: an unknown record letter is refused, not ignored" {
 // ── short circuit ───────────────────────────────────────────────────────────
 
 test "rakun conditions: the FIRST failing record wins and the rest are not read" {
+    val _beans = rkInstallBeans(beans());
     val none: string[] = [];
     val _a = rkSetProp("rakun.cond.first", "");
     val _b = rkSetProp("rakun.cond.second", "");
@@ -269,6 +300,7 @@ test "rakun conditions: the FIRST failing record wins and the rest are not read"
 }
 
 test "rakun conditions: an empty blob matches" {
+    val _beans = rkInstallBeans(beans());
     val none: string[] = [];
     assert evaluateBlob("", none).ok;
     assert evaluateBlob("", none).record == "";
@@ -289,6 +321,7 @@ fn manifestRefusal(text: string) -> string {
 }
 
 test "rakun conditions: both on-disk shapes of dependencies normalise to one list" {
+    val _beans = rkInstallBeans(beans());
     assert depsOf("{\"dependencies\": [\"rakun\", \"std\"]}") == "rakun,std";
     assert depsOf(
         "{\"dependencies\": {\"rakun\": {\"workspace\": true}, \"std\": {}}}",
@@ -303,6 +336,7 @@ test "rakun conditions: both on-disk shapes of dependencies normalise to one lis
 }
 
 test "rakun conditions: a nested value is never mistaken for a dependency name" {
+    val _beans = rkInstallBeans(beans());
     assert depsOf(
         "{\"dependencies\": {\"rakun\": {\"workspace\": true, \"version\": \"0.0.1\"}}}",
     )
@@ -310,6 +344,7 @@ test "rakun conditions: a nested value is never mistaken for a dependency name" 
 }
 
 test "rakun conditions: a manifest std's json refuses is refused, never scanned" {
+    val _beans = rkInstallBeans(beans());
     assert manifestRefusal("{\"dependencies\": [\"rakun\",]}").startsWith(
         manifestShapeProblem("is not JSON - "),
     );
@@ -327,6 +362,7 @@ test "rakun conditions: a manifest std's json refuses is refused, never scanned"
 }
 
 test "rakun conditions: the manifest is read off disk in both shapes" {
+    val _beans = rkInstallBeans(beans());
     assert moduleListIn(
         "test/fixtures/autoconfig/deps-array/botopink.json",
     ).join(",")
@@ -339,6 +375,7 @@ test "rakun conditions: the manifest is read off disk in both shapes" {
 }
 
 test "rakun conditions: a manifest that cannot be read is a refusal, not a false" {
+    val _beans = rkInstallBeans(beans());
     try asserts.throwsWith({ ->
         moduleListIn("test/fixtures/autoconfig/does-not-exist/botopink.json");
         0;
@@ -346,11 +383,13 @@ test "rakun conditions: a manifest that cannot be read is a refusal, not a false
 }
 
 test "rakun conditions: rakun core's own manifest declares no dependency" {
+    val _beans = rkInstallBeans(beans());
     assert moduleList().length == 0;
     assert rkModulePresent("rakun") == false;
 }
 
 test "rakun conditions: a non-ASCII description before the dependencies does not shift the scan" {
+    val _beans = rkInstallBeans(beans());
     val text = "{\"name\": \"x\", \"description\": \"caf\u{e9} — na\u{ef}ve\", \"dependencies\": {\"rakun\": {\"workspace\": true}, \"rakun-web\": {\"path\": \"../w\"}}}";
     assert manifestDependencyNames(text).join(",")
         == "rakun,rakun-web", manifestDependencyNames(text).join(",");

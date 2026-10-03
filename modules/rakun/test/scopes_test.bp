@@ -1,10 +1,11 @@
 // rakun — DI scopes (F2-scopes): singleton scope, `#[value]` property injection,
-// and `#[configuration]`/`#[bean]` factories, exercised through the emitted
-// `__rkMake_<Type>()` factories.
+// and `#[configuration]`/`#[bean]` factories, exercised through each
+// stereotype's `make()` member and the catalogue (decisions 234, 254, 256).
 //
-// Run by `botopink test` from `libs/rakun/`. The decorators `@emit` the
-// singleton factories (and, for a configuration, one `__rkMake_<ReturnType>()`
-// per `#[bean]`); these tests call them directly and assert the runtime wiring
+// Run by `botopink test` from `libs/rakun/`. The stereotypes add the singleton
+// factory `T.make()` (and a configuration registers each `#[bean]`'s return
+// type in the context table); `beans()` is the entry point's catalogue, which
+// each test installs; these tests call the factories directly and assert the runtime wiring
 // (`runtime.mjs`): a single instance per type, config-backed fields, and
 // bean-typed injection. The runtime fns the emitted code calls are imported here
 // because the wiring is spliced into this module. Each scenario uses its own
@@ -15,6 +16,21 @@ import {repository, service, restController, route, getMapping, configuration, b
 import {Request, Response};
 import {rkScan, rkSingleton, rkEnter, rkDone, rkRegisterRoute, rkBuildCount};
 import {rkSetProp, rkProp, rkPropInt};
+import {collections.Dict} from "std";
+import {rkResolve, rkAddBean, rkInstallBeans, rkRegisterBean};
+
+fn beans() -> Dict<string, unknown> {
+    return comptime {
+        var d: Dict<string, unknown> = Dict.empty();
+        for (@TypeInfo.all(
+            with: [service, repository, restController, configuration],
+            member: "make",
+        )) { b ->
+            d = rkAddBean(d, b.name, b.value);
+        }
+        break d;
+    };
+}
 
 // ── singleton scope: a 3-level diamond resolves ONE instance per type ─────────
 
@@ -50,8 +66,9 @@ type DiamController(
 }
 
 test "rakun scope: a 3-level diamond resolves ONE shared instance per type" {
-    val a = __rkMake_DiamController();
-    val b = __rkMake_DiamController();
+    val _beans = rkInstallBeans(beans());
+    val a = DiamController.make();
+    val b = DiamController.make();
     // Repo is needed by BOTH the service and the controller, yet built once.
     assert rkBuildCount("DiamRepo") == 1;
     assert rkBuildCount("DiamService") == 1;
@@ -80,11 +97,12 @@ type SettingsService(
 }
 
 test "rakun value: #[value] fills a field from config, not the DI graph" {
+    val _beans = rkInstallBeans(beans());
     val _p = rkSetProp("rk.port", "8080");
     val _n = rkSetProp("rk.name", "rakun");
-    val s = __rkMake_SettingsService();
+    val s = SettingsService.make();
     // A clean compile already proves `i32`/`string` were not treated as DI edges
-    // (no `__rkMake_i32` factory exists); these assert the values were injected.
+    // (nothing resolves `"i32"`); these assert the values were injected.
     assert s.portValue() == 8080;
     assert s.appName() == "rakun";
 }
@@ -119,11 +137,12 @@ type StampService(
 }
 
 test "rakun bean: #[bean] output is injectable by its return type" {
-    val s = __rkMake_StampService();
+    val _beans = rkInstallBeans(beans());
+    val s = StampService.make();
     assert s.stamp() == "now@UTC";
     // The bean itself is a singleton, resolved by its return-type name.
-    val c1 = __rkMake_Clock();
-    val c2 = __rkMake_Clock();
+    val c1: Clock = rkResolve("Clock");
+    val c2: Clock = rkResolve("Clock");
     assert rkBuildCount("Clock") == 0; // beans don't go through rkEnter/rkDone
     assert c1.now() == "now@UTC";
     assert c2.now() == "now@UTC";

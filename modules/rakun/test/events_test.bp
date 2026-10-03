@@ -19,9 +19,21 @@
 import {decorators.service};
 import {runtime.rkScan, runtime.rkSingleton, runtime.rkEnter, runtime.rkDone};
 import {events.Event, events.event, events.publishEvent, events.eventListener, events.rkRegisterListener, events.rkListenerReset, events.rkListenerTable, events.listenersFor, events.listenerFailures, events.parseListeners, events.listenerLine, events.Listener, events.bootEventNames, events.bootEventPayloads, events.applicationFailedEvent, events.eventNameProblem};
-import {context.managed, context.Context, context.rkRegisterBean, context.rkRegisterBeanAt, context.rkBeanReset, context.rkCtxNote, context.rkCtxNotes, context.rkCtxNoteReset, context.rkCtxBump, context.rkCtxCount, context.bootSequence, context.bootFailedProblem, context.eagerInit, context.eagerInitIn, context.__rkMake_Context};
+import {context.managed, context.Context, context.rkRegisterBean, context.rkRegisterBeanAt, context.rkBeanReset, context.rkCtxNote, context.rkCtxNotes, context.rkCtxNoteReset, context.rkCtxBump, context.rkCtxCount, context.bootSequence, context.bootFailedProblem, context.eagerInit, context.eagerInitIn, context.rootContext};
 import {lifecycle.rkRegisterLifecycle, lifecycle.rkLifecycleReset, lifecycle.postConstructProblem};
 import {testing.asserts} from "std";
+import {collections.Dict} from "std";
+import {rkResolve, rkAddBean, rkInstallBeans};
+
+fn beans() -> Dict<string, unknown> {
+    return comptime {
+        var d: Dict<string, unknown> = Dict.empty();
+        for (@TypeInfo.all(with: [service], member: "make")) { b ->
+            d = rkAddBean(d, b.name, b.value);
+        }
+        break d;
+    };
+}
 
 // ── a listener registered by `#[managed]` ───────────────────────────────────
 
@@ -42,6 +54,7 @@ pub type AuditListener() {
 // ── the record grammar ──────────────────────────────────────────────────────
 
 test "rakun events: a listener record round-trips through the wire line" {
+    val _beans = rkInstallBeans(beans());
     val l = Listener(eventName: "OrderPlaced", owner: "AuditListener");
     assert listenerLine(l) == "OrderPlaced|AuditListener";
     val back = parseListeners(
@@ -55,6 +68,7 @@ test "rakun events: a listener record round-trips through the wire line" {
 }
 
 test "rakun events: the eight boot names and payloads line up" {
+    val _beans = rkInstallBeans(beans());
     assert bootEventNames().length == 8;
     assert bootEventPayloads().length == 8;
     assert bootEventNames().join(",")
@@ -70,6 +84,7 @@ test "rakun events: the eight boot names and payloads line up" {
 // the registrations `#[managed]` emitted at module load.
 
 test "rakun events: #[eventListener] receives the event #[managed] bound it to" {
+    val _beans = rkInstallBeans(beans());
     val bound = listenersFor("OrderPlaced");
     var owner = "";
     for (bound) { l ->
@@ -82,6 +97,7 @@ test "rakun events: #[eventListener] receives the event #[managed] bound it to" 
 }
 
 test "rakun events: two listeners for one event both run, in registration order" {
+    val _beans = rkInstallBeans(beans());
     val _z = rkListenerReset();
     val _n = rkCtxNoteReset();
     val _a = rkRegisterListener(
@@ -100,6 +116,7 @@ test "rakun events: two listeners for one event both run, in registration order"
 }
 
 test "rakun events: a listener for an event never published never runs and is not an error" {
+    val _beans = rkInstallBeans(beans());
     val _z = rkListenerReset();
     val _n = rkCtxNoteReset();
     val _a = rkRegisterListener(
@@ -114,6 +131,7 @@ test "rakun events: a listener for an event never published never runs and is no
 }
 
 test "rakun events: ctx.publish reaches an application listener" {
+    val _beans = rkInstallBeans(beans());
     val _z = rkListenerReset();
     val _n = rkCtxNoteReset();
     val _a = rkRegisterListener(
@@ -121,7 +139,7 @@ test "rakun events: ctx.publish reaches an application listener" {
         "Shipping",
         { ev -> rkCtxNote("ship:" + ev.payload) },
     );
-    val ctx: Context = __rkMake_Context();
+    val ctx: Context = rootContext();
     // The front's example writes `ctx.publish(Event(name: …, timestampMillis:
     // 0))`, and an integer literal still does not widen to `i64` in a
     // constructor argument (`type mismatch: expected i64, got i32`, measured;
@@ -135,6 +153,7 @@ test "rakun events: ctx.publish reaches an application listener" {
 }
 
 test "rakun events: a listener that raises is logged with its owner and stops nothing" {
+    val _beans = rkInstallBeans(beans());
     val _z = rkListenerReset();
     val _n = rkCtxNoteReset();
     val _a = rkRegisterListener(
@@ -157,6 +176,7 @@ test "rakun events: a listener that raises is logged with its owner and stops no
 }
 
 test "rakun events: an event with no name is refused rather than published to nobody" {
+    val _beans = rkInstallBeans(beans());
     try asserts.throwsWith({ ->
         publishEvent(event("", "test", ""));
         0;
@@ -197,6 +217,7 @@ fn bootLogExpected() -> string {
 }
 
 test "rakun events: the eight boot events publish in the documented order" {
+    val _beans = rkInstallBeans(beans());
     val _w = watchBoot();
     val _l = rkLifecycleReset();
     val published = bootSequence();
@@ -205,6 +226,7 @@ test "rakun events: the eight boot events publish in the documented order" {
 }
 
 test "rakun events: ApplicationFailed replaces the tail when a #[postConstruct] raises" {
+    val _beans = rkInstallBeans(beans());
     val _w = watchBoot();
     val _l = rkLifecycleReset();
     val _h = rkRegisterLifecycle(
@@ -229,6 +251,7 @@ test "rakun events: ApplicationFailed replaces the tail when a #[postConstruct] 
 }
 
 test "rakun events: the eager pass of a child path names the bean that raised" {
+    val _beans = rkInstallBeans(beans());
     val _b = rkRegisterBeanAt(
         "/boom",
         "BoomBean",

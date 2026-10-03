@@ -20,6 +20,21 @@ import {rkValue, rkValueOr, rkPropBool, rkPropIntOr, rkPropFloat, rkPropList, rk
 import {rkRegisterConfigKeys, configCatalogue, configCataloguePrefixes, rkConfigLoadFrom, entryAt, Entry};
 import {rkConfigCheckRegister};
 import {config_check.configProblemOf};
+import {collections.Dict} from "std";
+import {rkResolve, rkAddBean, rkInstallBeans};
+
+fn beans() -> Dict<string, unknown> {
+    return comptime {
+        var d: Dict<string, unknown> = Dict.empty();
+        for (@TypeInfo.all(
+            with: [service, configurationProperties],
+            member: "make",
+        )) { b ->
+            d = rkAddBean(d, b.name, b.value);
+        }
+        break d;
+    };
+}
 
 // Two levels of nesting: `MyService` → `Security` → `Tls`. Each carries its own
 // `#[configurationProperties]`; the outer one never names the inner prefix,
@@ -52,7 +67,7 @@ type MyService(
 )
 
 // A component that declares the bound record as a field: `#[service]` resolves
-// it by type through `__rkMake_MyService()`, which is what the decorator emitted.
+// it by type through `MyService.make()`, which is what the decorator emitted.
 #[service]
 type UsesConfig(
     cfg: MyService,
@@ -74,6 +89,7 @@ fn loadTyped() -> string {
 }
 
 test "rakun config: #[configurationProperties] binds every field from the prefix" {
+    val _beans = rkInstallBeans(beans());
     assert loadTyped() == "";
     val cfg = __rkBind_MyService("my.service");
     assert cfg.enabled == true;
@@ -86,6 +102,7 @@ test "rakun config: #[configurationProperties] binds every field from the prefix
 }
 
 test "rakun config: an Array<string> field binds as a list, like string[]" {
+    val _beans = rkInstallBeans(beans());
     assert loadTyped() == "";
     val _a = rkSetProp("my.service.aliases", "x, y,z");
     val cfg = __rkBind_MyService("my.service");
@@ -95,6 +112,7 @@ test "rakun config: an Array<string> field binds as a list, like string[]" {
 }
 
 test "rakun config: a field binds from the kebab, the camel and the screaming spelling" {
+    val _beans = rkInstallBeans(beans());
     assert loadTyped() == "";
     // The document writes `remote-address`; the field is `remoteAddress`.
     assert __rkBind_MyService("my.service").remoteAddress == "192.168.1.1";
@@ -105,6 +123,7 @@ test "rakun config: a field binds from the kebab, the camel and the screaming sp
 }
 
 test "rakun config: #[nested] composes two levels down" {
+    val _beans = rkInstallBeans(beans());
     assert loadTyped() == "";
     val _u = rkSetProp("my.service.security.username", "admin");
     val _e = rkSetProp("my.service.security.tls.enabled", "true");
@@ -116,19 +135,22 @@ test "rakun config: #[nested] composes two levels down" {
 }
 
 test "rakun config: a declared default fills a key nothing sets" {
+    val _beans = rkInstallBeans(beans());
     assert loadTyped() == "";
     val _u = rkSetProp("my.service.security.username", "");
     assert __rkBind_Security("my.service.security").username == "guest";
 }
 
 test "rakun config: the bound record is injectable by type with no extra wiring" {
+    val _beans = rkInstallBeans(beans());
     assert loadTyped() == "";
-    assert __rkMake_UsesConfig().where() == "192.168.1.1";
+    assert UsesConfig.make().where() == "192.168.1.1";
     // The singleton factory is the ordinary DI one, so the record is shared.
-    assert __rkMake_MyService().remoteAddress == "192.168.1.1";
+    assert MyService.make().remoteAddress == "192.168.1.1";
 }
 
 test "rakun config: every emission registers its keys in the catalogue" {
+    val _beans = rkInstallBeans(beans());
     assert loadTyped() == "";
     val cat = configCatalogue();
     assert entryAt(cat, "my.service.remoteAddress") == "string:";
@@ -142,6 +164,7 @@ test "rakun config: every emission registers its keys in the catalogue" {
 }
 
 test "rakun config: the catalogue lists each prefix once, however often it registers" {
+    val _beans = rkInstallBeans(beans());
     assert loadTyped() == "";
     val _a = rkRegisterConfigKeys("twice.over", "a:string:");
     val _b = rkRegisterConfigKeys("twice.over", "a:string:|b:i32:1");

@@ -15,17 +15,20 @@
 //// emits
 ////
 ////     pub type OrderServiceTx(inner: OrderService) {
+////         pub fn make() -> OrderServiceTx { … rkSingleton … OrderService.make() … }
 ////         pub fn place(self: Self, userId: i32, total: i32) -> i32 {
 ////             return rkTxRun("OrderService.place", "required", { -> self.inner.place(userId, total) });
 ////         }
 ////     }
-////     pub fn __rkMake_OrderServiceTx() -> OrderServiceTx { … rkSingleton … }
+////     val __rkTx_OrderService = rkRegisterBean("OrderServiceTx", …, { -> OrderServiceTx.make() });
 ////
 //// A component injecting `OrderServiceTx` gets the transactional path;
 //// injecting `OrderService` gets the bare one — the distinction Spring hides,
 //// made visible. `#[noTransaction]` on a method emits a plain forward.
-//// The application site imports `rkTxRun` (rakun-data) and `rkSingleton`
-//// (rakun), and the type needs a stereotype for `__rkMake_<Type>()`.
+//// The proxy enters the context table, so a field `tx: OrderServiceTx`
+//// resolves through `rkResolve`'s fallback. The application site imports
+//// `rkTxRun` (rakun-data) and `rkSingleton` and `rkRegisterBean` (rakun), and
+//// the type needs a stereotype for `<Type>.make()`.
 ////
 //// SIGNATURES ARE REDECLARED VERBATIM. `@Decl` spells every parameter and
 //// return type as written (`i32[]`, `Array<string>`, `@Result<T, E>`, a
@@ -74,8 +77,9 @@ pub fn transactional(comptime decl: @Decl) {
         };
         methods.push(sig + " {\n        " + body + "\n    }");
     });
-    @emit("pub type " + decl.name + "Tx(inner: " + decl.name + ") {\n    " + methods.join("\n\n    ") + "\n}");
-    @emit("pub fn __rkMake_" + decl.name + "Tx() -> " + decl.name + "Tx { return rkSingleton(\"" + decl.name + "Tx\", { -> " + decl.name + "Tx(inner: __rkMake_" + decl.name + "()) }); }");
+    val make = "pub fn make() -> " + decl.name + "Tx {\n        return rkSingleton(\"" + decl.name + "Tx\", { -> " + decl.name + "Tx(inner: " + decl.name + ".make()) });\n    }";
+    @emit("pub type " + decl.name + "Tx(inner: " + decl.name + ") {\n    " + make + "\n\n    " + methods.join("\n\n    ") + "\n}");
+    @emit("val __rkTx_" + decl.name + " = rkRegisterBean(\"" + decl.name + "Tx\", \"\", \"singleton\", false, false, \"" + decl.name + "\", { -> " + decl.name + "Tx.make() });");
     if (decl.kind != DeclKind.Type) decl.fail("#[transactional] must annotate a type - a decorator cannot wrap a method body, so the transaction lives on the <Type>Tx proxy the type-level marker emits");
     if (decl.variants.length > 0) decl.fail("#[transactional] must annotate a type with fields, not an enum");
     if (refused != "") decl.fail("#[transactional]: " + refused + " - only REQUIRED is implemented (a nested call joins the open transaction); REQUIRES_NEW and NESTED (savepoints) are not implemented and are refused rather than ignored");

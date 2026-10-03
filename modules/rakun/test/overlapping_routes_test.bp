@@ -14,6 +14,21 @@
 import {service, restController, route, getMapping};
 import {Request, Response};
 import {rkScan, rkSingleton, rkEnter, rkDone, rkRegisterRoute, rkDispatch, rkRouteCount, rkRoutePaths};
+import {collections.Dict} from "std";
+import {rkResolve, rkAddBean, rkInstallBeans};
+
+fn beans() -> Dict<string, unknown> {
+    return comptime {
+        var d: Dict<string, unknown> = Dict.empty();
+        for (@TypeInfo.all(
+            with: [service, restController],
+            member: "make",
+        )) { b ->
+            d = rkAddBean(d, b.name, b.value);
+        }
+        break d;
+    };
+}
 
 // A leaf component: a #[service] with NO injected fields. It resolves on its own.
 #[service]
@@ -47,22 +62,26 @@ type CartItemsController() {
 }
 
 test "rakun: both overlapping-prefix controllers register a route" {
+    val _beans = rkInstallBeans(beans());
     assert rkRouteCount() == 2;
 }
 
 test "rakun: dispatch on the shared prefix hits the prefix controller (leaf DI)" {
+    val _beans = rkInstallBeans(beans());
     val resp = rkDispatch("GET", "/shop/cart");
     assert resp.status == 200;
     assert resp.body == "cart @ 12:00"; // leaf `Clock` resolved + injected
 }
 
 test "rakun: dispatch on the deeper path hits the deeper controller" {
+    val _beans = rkInstallBeans(beans());
     val resp = rkDispatch("GET", "/shop/cart/items");
     assert resp.status == 200;
     assert resp.body == "two items";
 }
 
 test "rakun: a path that is only a prefix of a route does not match" {
+    val _beans = rkInstallBeans(beans());
     // `/shop` is a prefix of both routes but maps to neither → 404.
     assert rkDispatch("GET", "/shop").status == 404;
 }
