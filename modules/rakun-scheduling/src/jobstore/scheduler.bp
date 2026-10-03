@@ -5,14 +5,21 @@
 //// against the same store; the store is the only coordination:
 ////
 ////   1. an `acquired` trigger whose lease has passed is taken over with a
-////      conditional UPDATE on its old owner — one winner — and the takeover is
-////      a history row naming the dead owner;
+////      conditional UPDATE on its old owner AND the lease this pass read — one
+////      winner — and the takeover is a history row naming the dead owner;
 ////   2. each due `waiting` trigger is claimed with a conditional UPDATE
-////      (`state = 'acquired'`, `owner`, `lease_until`) — the portable form of
+////      (`state = 'acquired'`, `owner`, `lease_until`) on `state = 'waiting'`
+////      AND the `next_fire` this pass read — the portable form of
 ////      `FOR UPDATE SKIP LOCKED`: a node that loses the claim does nothing;
 ////   3. the claimed trigger's windows run (the misfire policy decides which),
 ////      each through the handler with its retries, and the trigger goes back
 ////      to `waiting` with its next fire time — only if this node still owns it.
+////
+//// The claim names the row VERSION it read, not only its state: a node whose
+//// SELECT saw the trigger due, but whose UPDATE lands after another node
+//// claimed, ran and put it back to `waiting` with the next window, matches no
+//// row (the state alone is the same again — the ABA that fired one window
+//// twice). The takeover likewise names the expired lease it saw.
 ////
 //// AT-LEAST-ONCE. A node that completes the work and dies before step 3's
 //// final UPDATE leaves the trigger `acquired`; after the lease another node
@@ -217,7 +224,7 @@ fn tickBody(ds: string, node: string) -> i32 {
     val acquired: Rows = sql.query("SELECT name, job, owner, lease_until FROM rakun_job_trigger WHERE state = 'acquired'", []);
     for (acquired.toList()) { r ->
         if (r.int("lease_until") < now) {
-            val got = sql.update("UPDATE rakun_job_trigger SET owner = :me, lease_until = :l WHERE name = :n AND state = 'acquired' AND owner = :old", [param("me", node), param("l", lease), param("n", r.get("name")), param("old", r.get("owner"))]);
+            val got = sql.update("UPDATE rakun_job_trigger SET owner = :me, lease_until = :l WHERE name = :n AND state = 'acquired' AND owner = :old AND lease_until = :ol", [param("me", node), param("l", lease), param("n", r.get("name")), param("old", r.get("owner")), param("ol", r.get("lease_until"))]);
             if (got == 1) {
                 val _h = history(ds, r.get("job"), r.get("name"), node, 0, now, "takeover", "from " + r.get("owner") + ", whose lease ended " + formatInstant(r.int("lease_until")));
                 mine.push(r.get("name"));
@@ -228,7 +235,7 @@ fn tickBody(ds: string, node: string) -> i32 {
     for (waiting.toList()) { r ->
         val due = r.int("next_fire") >= 0 && r.int("next_fire") <= now && r.int("start_at") <= now;
         if (due) {
-            val got = sql.update("UPDATE rakun_job_trigger SET state = 'acquired', owner = :me, lease_until = :l WHERE name = :n AND state = 'waiting'", [param("me", node), param("l", lease), param("n", r.get("name"))]);
+            val got = sql.update("UPDATE rakun_job_trigger SET state = 'acquired', owner = :me, lease_until = :l WHERE name = :n AND state = 'waiting' AND next_fire = :f", [param("me", node), param("l", lease), param("n", r.get("name")), param("f", r.get("next_fire"))]);
             if (got == 1) mine.push(r.get("name"));
         };
     };
