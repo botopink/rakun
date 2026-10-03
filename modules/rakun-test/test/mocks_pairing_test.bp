@@ -14,6 +14,18 @@ import {Request, Response, HttpMethod} from "rakun";
 import {fake_request.FakeRequest, fake_request.fakeGet};
 import {mockmvc.MockMvc};
 import {assertions.expectStatus, assertions.expectBodyEquals};
+import {collections.Dict} from "std";
+import {rkResolve, rkAddBean, rkInstallBeans, rkRegisterBean} from "rakun";
+
+fn beans() -> Dict<string, unknown> {
+    return comptime {
+        var d: Dict<string, unknown> = Dict.empty();
+        for (@TypeInfo.all(with: [service, restController, configuration], member: "make")) { b ->
+            d = rkAddBean(d, b.name, b.value);
+        }
+        break d;
+    };
+}
 
 pub behavior UserRepo {
     fn find(self: Self, id: string) -> string;
@@ -51,7 +63,8 @@ pub type UserController(users: UserService) {
 }
 
 test "rakun-test: a mocked behavior injected by #[bean] answers the dispatched request" {
-    val repo: UserRepo = __rkMake_UserRepo();
+    val _beans = rkInstallBeans(beans());
+    val repo: UserRepo = rkResolve("UserRepo");
     val _s = mocks.when(repo.find(mocks.eq("7"))).thenReturn("ana");
     val res = MockMvc.standalone().perform(fakeGet("/pair/users/7"));
     assert expectStatus(res, 200);
@@ -60,7 +73,8 @@ test "rakun-test: a mocked behavior injected by #[bean] answers the dispatched r
 }
 
 test "rakun-test: the injected mock is the one the test stubs, and an unstubbed id is a 404" {
-    val repo: UserRepo = __rkMake_UserRepo();
+    val _beans = rkInstallBeans(beans());
+    val repo: UserRepo = rkResolve("UserRepo");
     val res = MockMvc.standalone().perform(fakeGet("/pair/users/99"));
     assert expectStatus(res, 404);
     val _v = mocks.verify(repo, mocks.times(1)).find(mocks.eq("99"));

@@ -19,10 +19,22 @@ import {service, repository, component} from "rakun";
 import {datasource.dataSourceBoot, datasource.defaultDataSourceName, datasource.PooledDataSource};
 import {sql.params.Param, sql.params.param};
 import {sql.rows.Row, sql.rows.Rows};
-import {sql.template.SqlTemplate, sql.template.Tx, sql.template.sqlTemplate, sql.template.rkTxRun, sql.template.__rkMake_SqlTemplate};
+import {sql.template.SqlTemplate, sql.template.Tx, sql.template.sqlTemplate, sql.template.rkTxRun};
 import {sql.template.rkSqlLogOn, sql.template.rkSqlLogReset, sql.template.rkSqlLogLines, sql.template.rkSqlDropAll};
 import {sql.query.query, sql.query.rkRegisterQuery, sql.query.rkRegisteredQueries};
 import {sql.transactional.transactional, sql.transactional.noTransaction};
+import {collections.Dict} from "std";
+import {rkResolve, rkAddBean, rkInstallBeans, rkRegisterBean} from "rakun";
+
+fn beans() -> Dict<string, unknown> {
+    return comptime {
+        var d: Dict<string, unknown> = Dict.empty();
+        for (@TypeInfo.all(with: [component, service, repository], member: "make")) { b ->
+            d = rkAddBean(d, b.name, b.value);
+        }
+        break d;
+    };
+}
 
 #[repository]
 pub type UserRepository(
@@ -143,6 +155,7 @@ fn auditRows() -> string {
 // ── setup ────────────────────────────────────────────────────────────────────
 
 test "query: the default datasource boots on the ETS arm from rakun.datasource.url" {
+    val _beans = rkInstallBeans(beans());
     val _p = rkSetProp("rakun.datasource.url", "ets:memory");
     val ds = dataSourceBoot();
     assert ds.arm == "ets";
@@ -153,11 +166,13 @@ test "query: the default datasource boots on the ETS arm from rakun.datasource.u
 // ── step 5: #[query] ─────────────────────────────────────────────────────────
 
 test "query: #[query] gives the owning type <name>Sql() returning the statement verbatim" {
+    val _beans = rkInstallBeans(beans());
     assert UserRepository.findByIdSql() == "SELECT id, name, email FROM users WHERE id = :id";
     assert OrderRepository.createSql() == "INSERT INTO orders (id, user_id, total, state) VALUES (:id, :userId, :total, 'placed')";
 }
 
 test "query: every #[query] statement is registered and rkRegisteredQueries lists it" {
+    val _beans = rkInstallBeans(beans());
     val listed = rkRegisteredQueries().join("\n");
     try asserts.contains(listed, "findById SELECT id, name, email FROM users WHERE id = :id");
     try asserts.contains(listed, "findFamily SELECT id FROM users WHERE id = :id OR parent = :id");
@@ -165,32 +180,35 @@ test "query: every #[query] statement is registered and rkRegisteredQueries list
 }
 
 test "query: a named parameter binds by name and the statement is emitted verbatim" {
+    val _beans = rkInstallBeans(beans());
     val _r = resetTables();
-    val _i = __rkMake_UserRepository().insert(1, "ana", "a@example.com");
+    val _i = UserRepository.make().insert(1, "ana", "a@example.com");
     val _x = rkSqlLogReset();
     var name = "";
-    if (__rkMake_UserRepository().findById(1)) { r -> name = r.get("name"); };
+    if (UserRepository.make().findById(1)) { r -> name = r.get("name"); };
     assert name == "ana";
     assert log() == "SELECT id, name, email FROM users WHERE id = :id  params=[id=1]";
 }
 
 test "query: the same name used twice binds once and is passed once" {
+    val _beans = rkInstallBeans(beans());
     val _r = resetTables();
     val sql = sqlTemplate(defaultDataSourceName());
     val _a = sql.update("INSERT INTO users (id, name, parent) VALUES (7, 'root', 0)", []);
     val _b = sql.update("INSERT INTO users (id, name, parent) VALUES (8, 'kid', 7)", []);
     val _c = sql.update("INSERT INTO users (id, name, parent) VALUES (9, 'other', 3)", []);
     val _x = rkSqlLogReset();
-    val family = __rkMake_UserRepository().findFamily(7);
+    val family = UserRepository.make().findFamily(7);
     assert family.column("id").join(",") == "7,8";
     assert log() == "SELECT id FROM users WHERE id = :id OR parent = :id  params=[id=7]";
 }
 
 test "query: a hostile value is bound as a value and changes nothing" {
+    val _beans = rkInstallBeans(beans());
     val _r = resetTables();
-    val _i = __rkMake_UserRepository().insert(1, "'; DROP TABLE users; --", "a@example.com");
+    val _i = UserRepository.make().insert(1, "'; DROP TABLE users; --", "a@example.com");
     var name = "";
-    if (__rkMake_UserRepository().findById(1)) { r -> name = r.get("name"); };
+    if (UserRepository.make().findById(1)) { r -> name = r.get("name"); };
     assert name == "'; DROP TABLE users; --";
     assert log() == "INSERT INTO users (id, name, email) VALUES (:id, :name, :email)  params=[id=1, name='; DROP TABLE users; --, email=a@example.com]\nSELECT id, name, email FROM users WHERE id = :id  params=[id=1]";
 }
@@ -198,6 +216,7 @@ test "query: a hostile value is bound as a value and changes nothing" {
 // ── step 6: sql.transaction ──────────────────────────────────────────────────
 
 test "query: sql.transaction commits when the thunk returns" {
+    val _beans = rkInstallBeans(beans());
     val _r = resetTables();
     val sql = sqlTemplate(defaultDataSourceName());
     val n = sql.transaction({ tx ->
@@ -209,6 +228,7 @@ test "query: sql.transaction commits when the thunk returns" {
 }
 
 test "query: sql.transaction rolls back when the thunk raises, and the raise propagates" {
+    val _beans = rkInstallBeans(beans());
     val _r = resetTables();
     val sql = sqlTemplate(defaultDataSourceName());
     try asserts.throwsWith({ ->
@@ -223,6 +243,7 @@ test "query: sql.transaction rolls back when the thunk raises, and the raise pro
 }
 
 test "query: two statements in one transaction are both visible or neither is" {
+    val _beans = rkInstallBeans(beans());
     val _r = resetTables();
     val sql = sqlTemplate(defaultDataSourceName());
     val _ok = sql.transaction({ tx ->
@@ -241,6 +262,7 @@ test "query: two statements in one transaction are both visible or neither is" {
 }
 
 test "query: a nested transaction joins the open one with a single commit" {
+    val _beans = rkInstallBeans(beans());
     val _r = resetTables();
     val sql = sqlTemplate(defaultDataSourceName());
     val _n = sql.transaction({ outer ->
@@ -256,42 +278,47 @@ test "query: a nested transaction joins the open one with a single commit" {
 // ── step 6: #[transactional] ─────────────────────────────────────────────────
 
 test "query: a transactional proxy call is wrapped in begin and commit" {
+    val _beans = rkInstallBeans(beans());
     val _r = resetTables();
-    val _i = __rkMake_UserRepository().insert(1, "ana", "a@example.com");
-    val id = __rkMake_OrderServiceTx().place(1, 250);
+    val _i = UserRepository.make().insert(1, "ana", "a@example.com");
+    val id = OrderServiceTx.make().place(1, 250);
     assert id == 1;
     assert log() == "INSERT INTO users (id, name, email) VALUES (:id, :name, :email)  params=[id=1, name=ana, email=a@example.com]\nbegin\nSELECT id, name, email FROM users WHERE id = :id  params=[id=1]\nSELECT COUNT(*) AS n FROM orders  params=[]\nINSERT INTO orders (id, user_id, total, state) VALUES (:id, :userId, :total, 'placed')  params=[id=1, userId=1, total=250]\nINSERT INTO order_audit (order_id, action) VALUES (:orderId, :action)  params=[orderId=1, action=placed]\ncommit";
 }
 
 test "query: a raise inside the proxy rolls back and the raise propagates" {
+    val _beans = rkInstallBeans(beans());
     val _r = resetTables();
     try asserts.throwsWith({ ->
-        val _id = __rkMake_OrderServiceTx().place(9, 10);
+        val _id = OrderServiceTx.make().place(9, 10);
         0;
     }, "no user 9");
     assert log() == "begin\nSELECT id, name, email FROM users WHERE id = :id  params=[id=9]\nrollback";
 }
 
 test "query: a nested transaction inside the proxy joins it with a single commit" {
+    val _beans = rkInstallBeans(beans());
     val _r = resetTables();
     val _o = sqlTemplate(defaultDataSourceName()).update("INSERT INTO orders (id, user_id, total, state) VALUES (1, 1, 250, 'placed')", []);
     val _x = rkSqlLogReset();
-    assert __rkMake_OrderServiceTx().refund(1) == 1;
+    assert OrderServiceTx.make().refund(1) == 1;
     assert log() == "begin\nUPDATE orders SET state = 'refunded' WHERE id = :id  params=[id=1]\nINSERT INTO order_audit (order_id, action) VALUES (:id, 'refunded')  params=[id=1]\ncommit";
 }
 
 test "query: noTransaction emits a plain forward" {
+    val _beans = rkInstallBeans(beans());
     val _r = resetTables();
     val _o = sqlTemplate(defaultDataSourceName()).update("INSERT INTO orders (id, user_id, total, state) VALUES (1, 1, 250, 'placed')", []);
     val _x = rkSqlLogReset();
-    assert __rkMake_OrderServiceTx().history(1) == "1:250";
+    assert OrderServiceTx.make().history(1) == "1:250";
     assert log() == "SELECT id, user_id, total, state FROM orders WHERE user_id = :userId ORDER BY id  params=[userId=1]";
 }
 
 test "query: injecting the Tx proxy gets the transaction and injecting the bare type does not" {
+    val _beans = rkInstallBeans(beans());
     val _r = resetTables();
-    val _i = __rkMake_UserRepository().insert(1, "ana", "a@example.com");
-    val desk = __rkMake_OrderDesk();
+    val _i = UserRepository.make().insert(1, "ana", "a@example.com");
+    val desk = OrderDesk.make();
     val _x = rkSqlLogReset();
     val _b = desk.bare.place(1, 10);
     assert log().contains("begin") == false;
@@ -303,6 +330,7 @@ test "query: injecting the Tx proxy gets the transaction and injecting the bare 
 }
 
 test "query: REQUIRES_NEW and NESTED are refused at run time too, never ignored" {
+    val _beans = rkInstallBeans(beans());
     try asserts.throwsWith({ -> rkTxRun("X.y", "requires_new", { -> 1 }); }, "REQUIRES_NEW is not implemented");
     try asserts.throwsWith({ -> rkTxRun("X.y", "NESTED", { -> 1 }); }, "NESTED is not implemented");
     try asserts.throwsWith({ -> rkTxRun("X.y", "mandatory", { -> 1 }); }, "unknown transaction propagation");
