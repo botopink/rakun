@@ -3665,8 +3665,11 @@ template (a sidecar called only from a folder is not shipped).
   per-node handlers (`registerJobHandler`), `orphanJobs`, querystring job data
   (`jobData`, `jobField`, `jobFields`).
 - `scheduler.bp`: `tickOn(ds, node)` — takeover of an expired lease
-  (conditional UPDATE on the old owner, a `takeover` history row), the claim of
-  each due trigger (conditional UPDATE, 03r-x), the misfire policy, each window
+  (conditional UPDATE on the old owner and the lease the pass read, a
+  `takeover` history row), the claim of each due trigger (conditional UPDATE,
+  03r-x, on `state = 'waiting'` AND the `next_fire` the pass read — on the
+  state alone, a node whose UPDATE landed after another node claimed, ran and
+  released the trigger re-claimed it and fired the window twice), the misfire policy, each window
   through the handler with retries (stopped when the next window is due) and
   lease renewal every `lease-ms / 3`, then back to `waiting` only if still the
   owner. An unreachable store logs once per interval. `startJobScheduler` /
@@ -3678,6 +3681,10 @@ template (a sidecar called only from a folder is not shipped).
 - `endpoint.bp`: `mountJobStore()` registers `quartz` (read-only) and `GET
   <base>/quartz/:job`; data entries go through front 76's
   `sanitizeEntries("quartz", …)`.
+- `test/jobstore/cluster_test.bp`: a test that needs another process to have
+  acted (the loop ticked, the handler is running, the lease was renewed) waits
+  for that event with `waitUntil(ms, probe)` — bounded, failing loudly — never
+  a wall-clock pause, which goes red under load.
 
 ## Security — `modules/rakun-security/` (front 10)
 

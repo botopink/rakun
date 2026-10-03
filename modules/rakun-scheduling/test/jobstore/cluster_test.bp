@@ -1,11 +1,13 @@
 //// rakun-scheduling — firing once across a cluster, misfires, retries and
 //// history (front 84 steps 3, 4 and 5). Three "nodes" are three scheduler
 //// passes against one store — the production shape, since the coordination
-//// is entirely in the store. Time is `setJobClock`.
+//// is entirely in the store. Time is `setJobClock`. A test that needs another
+//// process to have done something waits for that event (`waitUntil`, bounded,
+//// failing loudly), never for a wall-clock pause.
 
 import {async} from "std";
 import {rkSetProp} from "rakun";
-import {startDataSource} from "rakun-data";
+import {startDataSource, param, Rows, sqlTemplate} from "rakun-data";
 import {
     jobstore.store.Trigger, jobstore.store.MisfirePolicy, jobstore.store.installJobStore, jobstore.store.registerTrigger, jobstore.store.registerJobHandler, jobstore.store.jobStatusOn,
     jobstore.store.setJobClock, jobstore.store.advanceJobClock, jobstore.store.clearJobClock, jobstore.store.instantOf, jobstore.store.jobClock,
@@ -16,10 +18,16 @@ import {jobstore.scheduler.tickOn, jobstore.scheduler.historyOf, jobstore.schedu
 declare fn bump(name: string) -> i32;
 #[@External.Erlang("""(fun(__N) -> persistent_term:get({rakun_jt_count, __N}, 0) end)($0)""")]
 declare fn counted(name: string) -> i32;
-#[@External.Erlang("""(fun(__Ms) -> timer:sleep(__Ms), 0 end)($0)""")]
-declare fn pause(ms: i32) -> i32;
 #[@External.Erlang("""(fun(__F) -> __Me = self(), {__Pid, __Mon} = spawn_monitor(fun() -> __F() end), receive {'DOWN', __Mon, process, __Pid, __R} -> case __R of killed -> <<"killed">>; normal -> <<"normal">>; _ -> <<"crashed">> end after 5000 -> <<"timeout">> end end)($0)""")]
 declare fn inProcess(work: fn() -> i32) -> string;
+#[@External.Erlang("""(fun(__N) -> persistent_term:put({rakun_jt_flag, __N}, true), 0 end)($0)""")]
+declare fn raiseFlag(name: string) -> i32;
+#[@External.Erlang("""(fun(__N) -> persistent_term:get({rakun_jt_flag, __N}, false) end)($0)""")]
+declare fn flagged(name: string) -> bool;
+// Polls `probe` every 5 ms of wall time until it holds (true) or `ms` passed
+// (false) — the bounded wait on an event another process produces.
+#[@External.Erlang("""(fun(__Ms, __P) -> __D = erlang:monotonic_time(millisecond) + __Ms, __W = fun __L() -> case __P() of true -> true; false -> case erlang:monotonic_time(millisecond) >= __D of true -> false; false -> timer:sleep(5), __L() end end end, __W() end)($0, $1)""")]
+declare fn waitUntil(ms: i32, probe: fn() -> bool) -> bool;
 
 fn fresh(name: string) -> string {
     val _s = startDataSource(name, "ets:memory", 2, 5000, "eager");
@@ -41,6 +49,11 @@ fn trig(name: string, job: string, misfire: MisfirePolicy, retries: i32) -> Trig
 
 fn counting(job: string) -> i32 {
     return registerJobHandler(job, "", { data -> "n=" + bump(job).toString() });
+}
+
+fn leaseUntil(ds: string, trig: string) -> i32 {
+    val rows: Rows = sqlTemplate(ds).query("SELECT lease_until FROM rakun_job_trigger WHERE name = :n", [param("n", trig)]);
+    return rows.toList().map({ r -> r.int("lease_until") }).at(0) ?? 0;
 }
 
 fn outcomes(ds: string, job: string) -> string {
@@ -86,10 +99,15 @@ test "jobstore: a node killed after acquiring is taken over after its lease, and
 }
 
 test "jobstore: a handler that outlives its lease renews it and is not taken over" {
+    // The handler holds until the other node has ticked, so it outlives its
+    // lease by construction: the other node waits for the handler to run,
+    // moves the clock past the lease, waits for the renewal to land, ticks,
+    // and only then releases the handler. Every wait is on an event.
     val ds = fresh("jc3");
     val _l = rkSetProp("rakun.scheduling.jobstore.lease-ms", "150");
     val _h = registerJobHandler("jc3", "", { data ->
-        val _p = pause(400);
+        val _r = raiseFlag("jc3-running");
+        if (waitUntil(10000, { -> flagged("jc3-release") }) == false) @panic("jc3: the other node never released the handler");
         "slow"
     });
     val _t = registerTrigger(trig("jc3", "jc3", MisfirePolicy.FireNow, 0), "");
@@ -97,10 +115,12 @@ test "jobstore: a handler that outlives its lease renews it and is not taken ove
     val results = await async.runAll([
         { -> async { tickOn(ds, "slow-node") } },
         { -> async {
-            val _w = pause(120);
-            val _a = advanceJobClock(1000);
-            val _v = pause(120);
-            tickOn(ds, "other")
+            val running = waitUntil(10000, { -> flagged("jc3-running") });
+            val now = advanceJobClock(1000);
+            val renewed = running && waitUntil(10000, { -> leaseUntil(ds, "jc3") > now });
+            val other = if (renewed) tickOn(ds, "other") else if (running) -2 else -1;
+            val _g = raiseFlag("jc3-release");
+            other
         } },
     ]);
     val _z = done();
@@ -142,10 +162,10 @@ test "jobstore: the scheduler loop ticks on its own and stops" {
     val _t = registerTrigger(trig("jc6", "jc6", MisfirePolicy.FireNow, 0), "");
     val _c = setJobClock(instantOf("2026-09-20T03:00:01Z"));
     val _s = startJobScheduler(ds, "looper");
-    val _w = pause(200);
+    val ticked = waitUntil(10000, { -> counted("jc6") >= 1 && jobStatusOn(ds, "jc6") == "waiting" });
     val stopped = stopJobScheduler("looper");
     val _z = done();
-    assert stopped == 1 && counted("jc6") == 1;
+    assert ticked && stopped == 1 && counted("jc6") == 1, counted("jc6").toString();
 }
 
 // ── step 4 ──────────────────────────────────────────────────────────────────
