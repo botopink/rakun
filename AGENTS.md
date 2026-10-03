@@ -2899,7 +2899,7 @@ policy, HS256 and Basic; front 79 plugs in only through
 ## Entities and derived queries — `modules/rakun-data/src/orm/` (front 78)
 
 - **`#[entity("table")]`** (`orm/entity.bp`) on a record gives it (decision 216
-  of 1.0.11-beta) the meta `@typeinfo(T).meta.entity.table` / `.columns`, the
+  of 1.0.11-beta) the meta `@typeInfo(T).meta.entity.table` / `.columns`, the
   associated type `T.Columns` with `T.columns()` (column-name constants), and
   the members `T.fromRow(r)`, `T.params(c)`, the writes
   `T.insert/update/delete(sql, c)` (each in a transaction; `…In(tx, …)` twins),

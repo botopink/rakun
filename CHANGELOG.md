@@ -10,7 +10,7 @@
   `City.columns()` (the associated type `City.Columns`, was `CityColumns` /
   `CityCol()`), and under `#[revisions]` `City.revisionsOf/revisionAt/
   revisionNumbers`; the table and the columns are meta
-  (`@typeinfo(City).meta.entity.table`). `__rkEntity_<T>_*`, `<T>Meta()` and
+  (`@typeInfo(City).meta.entity.table`). `__rkEntity_<T>_*`, `<T>Meta()` and
   `<T>Col()` are gone.
 - `#[entityRepository]` / `#[derived]`: `<Repo>.<m>Sql()`, `<Repo>.<m>CountSql()`,
   `<Repo>.<m>Derived(sql, …)` (were `__rkDerivedSql_` / `__rkDerivedCount_` /
