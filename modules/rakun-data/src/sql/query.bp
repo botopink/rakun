@@ -3,17 +3,17 @@
 ////
 //// A method in a `type` body must have a body, so the Spring Data shape — a
 //// bodyless `#[query("…")] pub fn findById(…);` — does not parse. `#[query]` is
-//// therefore a METHOD-level decorator that emits a module-level helper, and the
-//// method's body calls it:
+//// therefore a METHOD-level decorator that gives the owning type a member
+//// (decision 216 of 1.0.11-beta), and the method's body calls it:
 ////
 ////     #[query("SELECT id, name FROM users WHERE id = :id")]
 ////     pub fn findById(self: Self, id: i32) -> ?Row {
-////         return self.sql.single(__rkQuery_findById(), [param("id", id.toString())]);
+////         return self.sql.single(UserRepository.findByIdSql(), [param("id", id.toString())]);
 ////     }
 ////
-//// emits
+//// gives
 ////
-////     pub fn __rkQuery_findById() -> string { return "SELECT id, name FROM users WHERE id = :id"; }
+////     UserRepository.findByIdSql() -> string     "SELECT id, name FROM users WHERE id = :id"
 ////     val __rkQueryReg_findById = rkRegisterQuery("findById", "SELECT …");
 ////
 //// What the decorator buys over an inline string:
@@ -32,9 +32,9 @@
 //// NOT checked: the placeholder count against the method's parameters — a
 //// method-level `@Decl` exposes no parameter list (language gap, README).
 ////
-//// Two methods of the same name in ONE module collide on `__rkQuery_<name>`
-//// and the build fails on the duplicate definition (erlc: "function
-//// '__rkQuery_<name>'/0 already defined"). That is the right failure and it is
+//// Two `#[query]` methods of the same name in ONE module collide on the
+//// registration `__rkQueryReg_<name>` and the build fails on the duplicate
+//// definition. That is the right failure and it is
 //// not worked around: rename one method or move one repository to its own
 //// module.
 ////
@@ -49,7 +49,7 @@ pub declare fn rkRegisteredQueries() -> string[];
 
 pub fn query(comptime decl: @Decl, sql: string) {
     val literal = sql.replaceAll("\\", "\\\\").replaceAll("\"", "\\\"").replaceAll("\n", "\\n");
-    @emit("pub fn __rkQuery_" + decl.name + "() -> string { return \"" + literal + "\"; }");
+    decl.addMember("pub fn " + decl.name + "Sql() -> string { return \"" + literal + "\"; }");
     @emit("val __rkQueryReg_" + decl.name + " = rkRegisterQuery(\"" + decl.name + "\", \"" + literal + "\");");
     val trimmed = sql.trim();
     val head = trimmed.replaceAll("\n", " ").replaceAll("\t", " ").replaceAll("(", " ").split(" ").at(0).unwrapOr("").toUpper();

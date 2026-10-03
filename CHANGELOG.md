@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### Decorator outputs (botopink decision 216, front 130)
+
+- `#[entity]` gives the record members instead of loose functions:
+  `City.fromRow(r)`, `City.params(c)`, `City.insert/update/delete(sql, c)` and
+  their `…In(tx, …)` twins, `City.byId(sql, id)`, `City.entityMeta()`,
+  `City.columns()` (the associated type `City.Columns`, was `CityColumns` /
+  `CityCol()`), and under `#[revisions]` `City.revisionsOf/revisionAt/
+  revisionNumbers`; the table and the columns are meta
+  (`@typeinfo(City).meta.entity.table`). `__rkEntity_<T>_*`, `<T>Meta()` and
+  `<T>Col()` are gone.
+- `#[entityRepository]` / `#[derived]`: `<Repo>.<m>Sql()`, `<Repo>.<m>CountSql()`,
+  `<Repo>.<m>Derived(sql, …)` (were `__rkDerivedSql_` / `__rkDerivedCount_` /
+  `__rkDerived_`); `#[belongsTo]`: `<R>.sql()` / `<R>.fromRow(r)`; `#[query]`:
+  `<Repo>.<m>Sql()` (was `__rkQuery_<m>()`), so two repositories of one module
+  may each declare a `#[query]` method of one name.
+- `#[cached]`: the twin is `<Name>.Cached(inner: …)` (was `Cached<Name>` and
+  `cached<Name>(inner)`); `#[halResource]`: `v.toHal(links)` (was
+  `<typeName>ToHal(v, links)`).
+
 ### The debt rows (botopink `03-rakun`)
 
 - JSON goes through std's `json`: `manifestDependencies` reads `botopink.json`

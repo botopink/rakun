@@ -2898,32 +2898,35 @@ policy, HS256 and Basic; front 79 plugs in only through
 
 ## Entities and derived queries — `modules/rakun-data/src/orm/` (front 78)
 
-- **`#[entity("table")]`** (`orm/entity.bp`) on a record emits into its module
-  `__rkEntity_<T>_table/_columns/_fromRow/_params`, the writes
-  `_insert/_update/_delete` (each in a transaction; `…In(tx, …)` twins),
-  `_byId`, `<T>Columns` + `<T>Col()` (column-name constants) and `<T>Meta()`
-  (an `EntityMeta`, registered with `rakun_orm` for front 77). Fields:
+- **`#[entity("table")]`** (`orm/entity.bp`) on a record gives it (decision 216
+  of 1.0.11-beta) the meta `@typeinfo(T).meta.entity.table` / `.columns`, the
+  associated type `T.Columns` with `T.columns()` (column-name constants), and
+  the members `T.fromRow(r)`, `T.params(c)`, the writes
+  `T.insert/update/delete(sql, c)` (each in a transaction; `…In(tx, …)` twins),
+  `T.byId(sql, id)` and `T.entityMeta()` (an `EntityMeta`, registered with
+  `rakun_orm` for front 77 by a module-load `val __rkEntityReg_<T>`). Fields:
   `#[id]` (one), `#[generated]` (`INSERT … RETURNING`), `#[column("x")]`
   (else snake_case), `#[version]` (i32, `WHERE … AND version = :v`, a stale
   write raises naming table, id and both versions), `#[createdAt]` /
   `#[updatedAt]` (ISO µs), `#[createdBy]` / `#[updatedBy]` (front 10's
   principal, `""` outside a request), `#[transient]`. Types: string, i32,
   bool. `#[revisions]` adds `<table>_revisions` (one row per write, same
-  transaction) and exactly three reads: `_revisionsOf`, `_revisionAt`,
-  `_revisionNumbers`.
+  transaction) and exactly three reads: `T.revisionsOf`, `T.revisionAt`,
+  `T.revisionNumbers`.
 - **`#[entityRepository("T")]` + `#[derived]`** (`orm/repository.bp`, the
   comptime half: no `Param` import there) parse the method name
   (find/findAll/findFirst/findTop/count/exists/delete, Distinct, And/Or left to
   right, the operator keywords, IgnoringCase / AllIgnoringCase, OrderBy) and
-  emit `__rkDerivedSql_<Repo>_<m>()` and `__rkDerived_<Repo>_<m>(sql, …)`,
+  give the repository type the members `<Repo>.<m>Sql()` and
+  `<Repo>.<m>Derived(sql, …)` (plus `<Repo>.<m>CountSql()` for a `Page<T>`),
   checking the parameter count and the return type; columns are read through
-  `<T>Col()`, so an unknown field fails the build there. A trailing
+  `T.columns()`, so an unknown field fails the build there. A trailing
   `Pageable` with `Page<T>` (page + count) or `Slice<T>` (size + 1).
   `#[belongsTo("Owner", "field", "Target", "field")]` on a record of the two
-  (`?Target` for a left join) emits `__rkJoin_<R>_sql()` / `_fromRow`.
+  (`?Target` for a left join) gives it `<R>.sql()` / `<R>.fromRow(r)`.
 - **Run time** (`orm/query.bp`): `Sort`, `Pageable`, `Page<T>`, `Slice<T>`,
   `pagedSql` (sort fields validated against the columns, size 0 refused), and
-  the typed builder `queryOf(<T>Meta()).where(<T>Col().x, Op.Eq, v)…toSql()` /
+  the typed builder `queryOf(T.entityMeta()).where(T.columns().x, Op.Eq, v)…toSql()` /
   `.fetch(sql)` — the same bytes a derived query produces.
 - The ETS arm (front 08's `rakun_sql.erl`) grew what the suite runs:
   `< > <= >=`, `BETWEEN`, `IS [NOT] NULL`, `[NOT] LIKE`, `[NOT] IN`,
@@ -3052,20 +3055,20 @@ on `rakun-web`. `modules/rakun` is untouched by this front.
 
 A method in a `type` body must have a body, so Spring Data's bodyless
 `#[query("…")] pub fn findById(…);` does not parse. `#[query("…")]` is a
-METHOD-level decorator that emits a module-level helper, and the method's body
-calls it:
+METHOD-level decorator that gives the owning type a member (decision 216 of
+1.0.11-beta), and the method's body calls it:
 
 ```bp
 #[repository]
 pub type UserRepository(sql: SqlTemplate) {
     #[query("SELECT id, name, email FROM users WHERE id = :id")]
     pub fn findById(self: Self, id: i32) -> ?Row {
-        return self.sql.single(__rkQuery_findById(), [param("id", id.toString())]);
+        return self.sql.single(UserRepository.findByIdSql(), [param("id", id.toString())]);
     }
 }
 ```
 
-emits `pub fn __rkQuery_findById() -> string` (the statement verbatim) and
+gives `UserRepository.findByIdSql() -> string` (the statement verbatim) and emits
 `val __rkQueryReg_findById = rkRegisterQuery("findById", "…")`. The statement is a
 declaration (a decorator argument is a literal, so it cannot be concatenated), it is
 registered (`rkRegisteredQueries()`, the inventory `/actuator/sql` and front 77's
@@ -3073,10 +3076,12 @@ linter read), and it is checked at comptime: empty, a leading keyword outside
 `SELECT / INSERT / UPDATE / DELETE / WITH / CALL`, and a `'` next to a placeholder
 (`':id`, `'$1`, `'?`; `'…'::type` is a cast and passes) each fail the build at the
 method. Not checked: the placeholder count against the parameters — a method-level
-`@Decl` has no parameter list. Two `#[query]` methods of one name in one module
-collide on `__rkQuery_<name>` and erlc refuses the duplicate — a refusal that
-surfaces where erlc runs (`botopink test` / `run`); `botopink build` does not run
-erlc and exits 0. A consumer imports `query`, `rkRegisterQuery`, `param`, the
+`@Decl` has no parameter list. Two `#[query]` methods of one name on two types of
+one module are two members (`A.findSql()`, `B.findSql()`) and both statements are
+registered under the method's name. A call to a member a type does not have —
+`City.revisionsOf(…)` on an entity without `#[revisions]`, `Ghost.entityMeta()` in a
+`#[belongsTo]` naming a non-entity — is the compiler's `unknown-associated-fn` at
+the call. A consumer imports `query`, `rkRegisterQuery`, `param`, the
 types it names (`SqlTemplate`, `Rows`, `Row`, `Param`) and `__rkMake_SqlTemplate`
 (the injectable template's factory) beside the core's stereotype imports.
 
@@ -3514,11 +3519,11 @@ Measured: `rakun-logging` 54 passed / 0 failed / 0 compile failures
 (`mediaType`, not `type`), `link(rel, href)`, `linksObject` (one key per `rel`
 in first-appearance order; a repeated `rel` is an array; empty `mediaType` /
 `title` omitted, `templated` only when true; std's `json` writes and escapes).
-`#[halResource]` on a record-shaped `type` emits
-`<typeName>ToHal(v, links) -> string` over `halObject` (fields in declaration
-order, `_links` last) and refuses AT COMPTIME a field it cannot render (a
-nested record, an array, an optional), naming the field and its type and
-emitting nothing; a module using it imports `halObject`, `halString`, `halInt`,
+`#[halResource]` on a record-shaped `type` gives it the method
+`v.toHal(links) -> string` over `halObject` (fields in declaration
+order, `_links` last; decision 216 of 1.0.11-beta) and refuses AT COMPTIME a
+field it cannot render (a nested record, an array, an optional), naming the
+field and its type and adding nothing; a module using it imports `halObject`, `halString`, `halInt`,
 `halBool`, `halFloat` and `Link`. `halCollection(rel, renderedItems, links)`:
 `_embedded` first (an empty one is `[]`), `_links` last. `linkTo(rel, pattern,
 params)` validates the pattern against the core router's paths and, when
@@ -4011,18 +4016,18 @@ resurrected a stale prerendered entry and started a second regeneration);
   Seams: `revalidatedTags()`, `revalidatedPaths()` (call order, never cleared
   implicitly), `clearRevalidated()`; `cacheTraceOn()` / `cacheTrace()`
   (`miss|hit|revalidate|bypass|error key=<ns>:<parts> [tags]`); `resetCaches()`.
-- **The twin** (`cached.bp`) — `#[cached]` on a `behavior` emits
-  `Cached<Name>(inner) implement <Name>` and `cached<Name>(inner)` into the
-  behavior's module: `#[cacheable(name)]` methods go through `cacheMethod` (key
+- **The twin** (`cached.bp`) — `#[cached]` on a `behavior` gives it the
+  associated type `<Name>.Cached(inner) implement <Name>` (decision 216 of
+  1.0.11-beta), constructed where a `<Name>` is wanted: `#[cacheable(name)]` methods go through `cacheMethod` (key
   `[method, args…]`, non-string args `toString()`d, rows tagged with the cache
   name, must return `string`), `#[cacheEvict(name, true)]` clears the cache and
   `(name, false)` the rows `[m, args…]` of every `#[cacheable(name)]` method `m`
   — both AFTER the delegate returns; unannotated methods delegate. The module
   imports `cacheMethod`, `cacheEvictAll`, `cacheEvictKeys`; another module
-  imports the emitted `cached<Name>` like any `pub fn`. `test/fixtures/twin` is
+  reaches `<Name>.Cached(inner: …)` through the behavior alone. `test/fixtures/twin` is
   the shape: the behavior, its implementation and the twin in one module, and
   `#[configuration]` + `#[bean] … -> ProductCatalog { return
-  cachedProductCatalog(self.real); }` injecting the twin into every
+  ProductCatalog.Cached(inner: self.real); }` injecting the twin into every
   `catalog: ProductCatalog` field.
 - **Endpoint and health** (`cache_endpoint.bp`) — `installCache()` refuses a bad
   configuration naming the key (`cacheConfigProblem()`), creates the listed

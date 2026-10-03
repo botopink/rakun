@@ -50,7 +50,7 @@ fn refused(name: string, source: string, needle: string) -> string {
 }
 
 test "orm build: a control project with an entity, a repository and the builder builds" {
-    val src = header() + city() + "#[entityRepository(\"City\")]\npub type CityRepo(sql: SqlTemplate) {\n    #[derived]\n    pub fn findByName(self: Self, name: string) -> City[] {\n        return __rkDerived_CityRepo_findByName(self.sql, name);\n    }\n}\n\npub fn q() -> string {\n    return queryOf(CityMeta()).where(CityCol().name, Op.Eq, \"x\").toSql();\n}\n";
+    val src = header() + city() + "#[entityRepository(\"City\")]\npub type CityRepo(sql: SqlTemplate) {\n    #[derived]\n    pub fn findByName(self: Self, name: string) -> City[] {\n        return CityRepo.findByNameDerived(self.sql, name);\n    }\n}\n\npub fn q() -> string {\n    return queryOf(City.entityMeta()).where(City.columns().name, Op.Eq, \"x\").toSql();\n}\n";
     val out = buildFixture("orm-ok", src);
     assert out.contains("exit=0"), out;
 }
@@ -66,20 +66,20 @@ test "orm build: a non-integer #[version] and an empty table name fail" {
 }
 
 test "orm build: a predicate consuming a different parameter count fails naming both counts" {
-    val src = city() + "#[entityRepository(\"City\")]\npub type CityRepo(sql: SqlTemplate) {\n    #[derived]\n    pub fn findByPopulationBetween(self: Self, low: i32) -> City[] {\n        return __rkDerived_CityRepo_findByPopulationBetween(self.sql, low);\n    }\n}\n";
+    val src = city() + "#[entityRepository(\"City\")]\npub type CityRepo(sql: SqlTemplate) {\n    #[derived]\n    pub fn findByPopulationBetween(self: Self, low: i32) -> City[] {\n        return CityRepo.findByPopulationBetweenDerived(self.sql, low);\n    }\n}\n";
     assert refused("orm-arity", src, "#[derived] CityRepo.findByPopulationBetween: the predicate `PopulationBetween` takes 2 parameter(s) and the method declares 1") == "";
 }
 
 test "orm build: a field the entity does not have is a compile error at the emitted column read" {
-    val src = city() + "#[entityRepository(\"City\")]\npub type CityRepo(sql: SqlTemplate) {\n    #[derived]\n    pub fn findByCiudad(self: Self, c: string) -> City[] {\n        return __rkDerived_CityRepo_findByCiudad(self.sql, c);\n    }\n}\n";
+    val src = city() + "#[entityRepository(\"City\")]\npub type CityRepo(sql: SqlTemplate) {\n    #[derived]\n    pub fn findByCiudad(self: Self, c: string) -> City[] {\n        return CityRepo.findByCiudadDerived(self.sql, c);\n    }\n}\n";
     val out = buildFixture("orm-field", header() + src);
-    assert out.contains("ciudad") && out.contains("CityColumns") && out.contains("exit=0") == false, out;
+    assert out.contains("unknown field 'ciudad'") && out.contains("Columns") && out.contains("exit=0") == false, out;
 }
 
-test "orm build: renaming a field breaks every CityCol() read, and an operator outside Op does not compile" {
-    val renamed = buildFixture("orm-rename", header() + city() + "pub fn q() -> string {\n    return CityCol().state;\n}\n");
+test "orm build: renaming a field breaks every City.columns() read, and an operator outside Op does not compile" {
+    val renamed = buildFixture("orm-rename", header() + city() + "pub fn q() -> string {\n    return City.columns().state;\n}\n");
     assert renamed.contains("state") && renamed.contains("exit=0") == false, renamed;
-    val op = buildFixture("orm-op", header() + city() + "pub fn q() -> string {\n    return queryOf(CityMeta()).where(CityCol().name, Op.Regexp, \"x\").toSql();\n}\n");
+    val op = buildFixture("orm-op", header() + city() + "pub fn q() -> string {\n    return queryOf(City.entityMeta()).where(City.columns().name, Op.Regexp, \"x\").toSql();\n}\n");
     assert op.contains("Regexp") && op.contains("exit=0") == false, op;
 }
 
@@ -92,12 +92,12 @@ test "orm build: belongsTo naming an unknown field or a non-entity fails" {
 }
 
 test "orm build: an unaudited entity has no revision reads" {
-    val out = buildFixture("orm-norev", header() + city() + "pub fn r(sql: SqlTemplate) -> i32 {\n    return __rkEntity_City_revisionsOf(sql, 1).length;\n}\n");
-    assert out.contains("__rkEntity_City_revisionsOf") && out.contains("exit=0") == false, out;
+    val out = buildFixture("orm-norev", header() + city() + "pub fn r(sql: SqlTemplate) -> i32 {\n    return City.revisionsOf(sql, 1).length;\n}\n");
+    assert out.contains("unknown-associated-fn") && out.contains("revisionsOf") && out.contains("exit=0") == false, out;
 }
 
 test "orm build: the revision surface is exactly three reads and no restore" {
     val src: string = fs.readText("src/orm/entity.bp").unwrapOr("");
-    for (["_revisionsOf(", "_revisionNumbers(", "_revisionAt("]) { r -> assert src.contains(r), r; };
+    for (["pub fn revisionsOf(", "pub fn revisionNumbers(", "pub fn revisionAt("]) { r -> assert src.contains(r), r; };
     assert src.contains("restore") == false && src.contains("_revert") == false;
 }

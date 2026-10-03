@@ -2,10 +2,10 @@
 ////
 //// A decorator cannot wrap the body it annotates, so the Spring half is a
 //// TWIN, the shape onze's `#[mock]` and rakun-data's `#[transactional]` use.
-//// `#[cached]` on a `behavior` reflects its methods and emits, into the
-//// behavior's module:
+//// `#[cached]` on a `behavior` reflects its methods and gives the behavior an
+//// associated type (decision 216 of 1.0.11-beta):
 ////
-////     pub type CachedProductCatalog(inner: ProductCatalog) implement ProductCatalog {
+////     ProductCatalog.Cached(inner: ProductCatalog) implement ProductCatalog {
 ////         pub fn productJson(self: Self, id: string) -> string {
 ////             return cacheMethod("products", ["productJson", id], { -> self.inner.productJson(id) });
 ////         }
@@ -18,7 +18,9 @@
 ////             return self.inner.slugFor(id);
 ////         }
 ////     }
-////     pub fn cachedProductCatalog(inner: ProductCatalog) -> ProductCatalog { … }
+////
+//// constructed as `ProductCatalog.Cached(inner: real)` wherever a
+//// `ProductCatalog` is wanted.
 ////
 //// A method with no cache annotation is delegated unchanged and never touches
 //// the store. Eviction runs AFTER the delegate returns, so a delegate that
@@ -27,8 +29,9 @@
 //// behavior — the key its own arguments build under each reader.
 ////
 //// The module carrying `#[cached]` imports `cacheMethod`, `cacheEvictAll` and
-//// `cacheEvictKeys` (spliced code resolves names where it is spliced). Another
-//// module imports the emitted `cached<Name>` like any `pub fn`.
+//// `cacheEvictKeys` (the twin's bodies resolve names in that module). Another
+//// module reaches `ProductCatalog.Cached(inner: …)` through `ProductCatalog`
+//// alone — the twin travels with the behavior.
 ////
 //// A decorator body can call no function, so the checks are inline.
 
@@ -109,12 +112,11 @@ pub fn cached(comptime decl: @Decl) {
         };
         methods.push(sig + " {\n        " + body + "\n    }");
     });
-    if (decl.kind != DeclKind.Behavior) decl.fail("#[cached] must annotate a behavior - it reflects the behavior's method signatures and emits the Cached" + decl.name + " twin that implements it");
+    if (decl.kind != DeclKind.Behavior) decl.fail("#[cached] must annotate a behavior - it reflects the behavior's method signatures and gives it the " + decl.name + ".Cached twin that implements it");
     if (twice != "") decl.fail("#[cached]: " + twice + " carries both #[cacheable] and #[cacheEvict] - one cache role per method");
     if (badReturn != "") decl.fail("#[cached]: " + badReturn + " - a #[cacheable] method returns string, the only value the store holds");
     if (lossy != "") decl.fail("#[cached] cannot forward " + lossy + ": reflection gave no type for it, so the twin cannot redeclare it");
-    @emit("pub type Cached" + decl.name + "(inner: " + decl.name + ") implement " + decl.name + " {\n    " + methods.join("\n\n    ") + "\n}");
-    @emit("pub fn cached" + decl.name + "(inner: " + decl.name + ") -> " + decl.name + " {\n    return Cached" + decl.name + "(inner: inner);\n}");
+    decl.addType("Cached", "(inner: " + decl.name + ") implement " + decl.name + " {\n    " + methods.join("\n\n    ") + "\n}");
 }
 
 pub fn cacheable(comptime decl: @Decl, name: string) {

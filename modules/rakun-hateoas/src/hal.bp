@@ -2,12 +2,12 @@
 ////
 //// SERIALIZATION IS COMPTIME, because it cannot be run time: std has no way
 //// to walk an arbitrary record, but a decorator reads `decl.fields`.
-//// `#[halResource]` on a record-shaped `type` emits
-//// `pub fn <typeName>ToHal(v: <TypeName>, links: Array<Link>) -> string` —
+//// `#[halResource]` on a record-shaped `type` gives it the method
+//// `v.toHal(links: Array<Link>) -> string` (decision 216 of 1.0.11-beta) —
 //// strings quoted and escaped (std's `json.quote`), `i32` / `i64` / `f64` /
 //// `bool` bare, in declaration order, `_links` last — and REFUSES at comptime a
 //// field whose type it cannot render (a nested record, an array, an
-//// optional), naming the field and the type, emitting nothing.
+//// optional), naming the field and the type, adding nothing.
 ////
 //// A LINK SET renders one object keyed by `rel`: two links with one `rel`
 //// become an array in insertion order (HAL; a naive object build silently
@@ -105,8 +105,7 @@ pub fn halResource(comptime decl: @Decl) {
             if (bad == "") bad = f.name + ": " + f.typeName;
         } else parts.push("#(\"" + f.name + "\", " + render + ")");
     });
-    val fnName = decl.name.slice(0, 1).toLower() + decl.name.slice(1, decl.name.length);
-    if (bad == "") @emit("pub fn " + fnName + "ToHal(v: " + decl.name + ", links: Array<Link>) -> string { return halObject([" + parts.join(", ") + "], links); }");
+    if (bad == "") decl.addMember("pub fn toHal(self: Self, links: Array<Link>) -> string { val v = self; return halObject([" + parts.join(", ") + "], links); }");
     if (decl.kind != DeclKind.Type) decl.fail("#[halResource] must annotate a type");
     if (decl.variants.length > 0) decl.fail("#[halResource] must annotate a type with fields, not an enum");
     if (bad != "") decl.fail("#[halResource] cannot render the field " + bad + " - a HAL resource renders string, i32, i64, f64 and bool fields; a nested record, an array or an optional is refused rather than rendered wrong");
