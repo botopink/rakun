@@ -19,7 +19,9 @@ fn load(what: string) -> string {
 
 // LANGUAGE GAP: no module-level annotation, so a file-level `'use cache'` is a
 // module-level `val` holding the default policy.
-val catalogCached = cacheWith(cachePolicy(CacheScope.Shared, "gr-module", cacheLife("days"), ["catalog"]));
+val catalogCached = cacheWith(
+    cachePolicy(CacheScope.Shared, "gr-module", cacheLife("days"), ["catalog"]),
+);
 
 fn catalogPage(page: string) -> string {
     return catalogCached(["catalogPage", page], { -> load("page") });
@@ -27,9 +29,24 @@ fn catalogPage(page: string) -> string {
 
 test "granularity: cacheFn and the equivalent cacheThrough share one key and one row" {
     val _b = boot();
-    val viaFn = cacheFn("gr-products", ["productsJson", "1"], cacheLife("hours"), ["products"], { -> load("fn") });
-    val policy = cachePolicy(CacheScope.Shared, "gr-products", cacheLife("hours"), ["products"]);
-    val viaThrough = cacheThrough(policy, ["productsJson", "1"], { -> load("through") });
+    val viaFn = cacheFn(
+        "gr-products",
+        ["productsJson", "1"],
+        cacheLife("hours"),
+        ["products"],
+        { -> load("fn") },
+    );
+    val policy = cachePolicy(
+        CacheScope.Shared,
+        "gr-products",
+        cacheLife("hours"),
+        ["products"],
+    );
+    val viaThrough = cacheThrough(
+        policy,
+        ["productsJson", "1"],
+        { -> load("through") },
+    );
     assert viaFn == "fn1" && viaThrough == "fn1";
     assert cacheSize("gr-products") == 1;
     assert rkCacheKeysOf("gr-products").length == 1;
@@ -39,18 +56,44 @@ test "granularity: cacheFn honours the kill switch" {
     val _b = boot();
     val _n = rkSetProp("rakun.cache.type", "none");
     val _r = resetCaches();
-    val a = cacheFn("gr-killed", ["k"], cacheLife("hours"), [], { -> load("x") });
-    val b = cacheFn("gr-killed", ["k"], cacheLife("hours"), [], { -> load("x") });
+    val a = cacheFn(
+        "gr-killed",
+        ["k"],
+        cacheLife("hours"),
+        [],
+        { -> load("x") },
+    );
+    val b = cacheFn(
+        "gr-killed",
+        ["k"],
+        cacheLife("hours"),
+        [],
+        { -> load("x") },
+    );
     assert a == "x1" && b == "x2";
     assert cacheSize("gr-killed") == 0;
 }
 
 test "granularity: a data-level and a UI-level cache over one datum hold two rows and one tag reaches both" {
     val _b = boot();
-    val data = cachePolicy(CacheScope.Shared, "gr-data", cacheLife("hours"), ["products"]);
-    val ui = cachePolicy(CacheScope.Shared, "gr-ui", cacheLife("minutes"), ["products"]);
+    val data = cachePolicy(
+        CacheScope.Shared,
+        "gr-data",
+        cacheLife("hours"),
+        ["products"],
+    );
+    val ui = cachePolicy(
+        CacheScope.Shared,
+        "gr-ui",
+        cacheLife("minutes"),
+        ["products"],
+    );
     val json = cacheThrough(data, ["productsJson", "1"], { -> load("json") });
-    val html = cacheThrough(ui, ["productListHtml", "1"], { -> "<ul>" + cacheThrough(data, ["productsJson", "1"], { -> load("json") }) + "</ul>" });
+    val html = cacheThrough(
+        ui,
+        ["productListHtml", "1"],
+        { -> "<ul>" + cacheThrough(data, ["productsJson", "1"], { -> load("json") }) + "</ul>" },
+    );
     assert json == "json1";
     assert html == "<ul>json1</ul>";
     assert cacheSize("gr-data") == 1 && cacheSize("gr-ui") == 1;

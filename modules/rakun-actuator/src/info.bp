@@ -24,12 +24,7 @@ import {rakunVersion, versionOf} from "rakun/version_set";
 import {moduleList, manifestName} from "rakun/autoconfig_registry";
 import {io.fs} from "std";
 import {json} from "std";
-import {
-    EndpointResponse,
-    rkRegisterInfoContributor,
-    rkRegisterEndpoint,
-    infoContributorIds,
-} from "rakun";
+import {EndpointResponse, rkRegisterInfoContributor, rkRegisterEndpoint, infoContributorIds} from "rakun";
 
 #[@External.Erlang("rakun_actuator", "info_merge")]
 pub declare fn rkActuatorInfoMerge(ids: string) -> string;
@@ -49,8 +44,18 @@ pub declare fn rkActuatorProcessFacts() -> string;
 #[@External.Erlang("rakun_actuator", "build_facts")]
 pub declare fn rkActuatorBuildFacts() -> string;
 
-pub fn infoConflictProblem(key: string, first: string, second: string) -> string {
-    return "rakun-actuator: the info key `" + key + "` is contributed by both `" + first + "` and `" + second + "` - contributions merge by top-level key, and one of them would silently replace the other";
+pub fn infoConflictProblem(
+    key: string,
+    first: string,
+    second: string,
+) -> string {
+    return "rakun-actuator: the info key `"
+        + key
+        + "` is contributed by both `"
+        + first
+        + "` and `"
+        + second
+        + "` - contributions merge by top-level key, and one of them would silently replace the other";
 }
 
 // `ok\t<json>` or `conflict\t<key>\t<a>\t<b>` from the host.
@@ -74,34 +79,97 @@ pub fn infoJson() -> string {
 
 pub fn infoRead(req: Request) -> EndpointResponse {
     val body: string = infoJson();
-    if (body == "") return EndpointResponse(
-        status: 500,
+    if (body == "")
+        return EndpointResponse(
+            status: 500,
+            contentType: "application/json",
+            body: json.object([#("error", json.quote(infoConflict()))]),
+        );
+    return EndpointResponse(
+        status: 200,
         contentType: "application/json",
-        body: json.object([#("error", json.quote(infoConflict()))]),
+        body: body,
     );
-    return EndpointResponse(status: 200, contentType: "application/json", body: body);
 }
 
 pub fn buildInfo() -> string {
     val f: string[] = rkActuatorBuildFacts().split("\t");
-    return json.object([#("build", json.object([#("name", json.quote(f.at(0) ?? "")), #("version", json.quote(f.at(1) ?? ""))]))]);
+    return json.object(
+        [
+            #(
+                "build",
+                json.object(
+                    [
+                        #("name", json.quote(f.at(0) ?? "")),
+                        #("version", json.quote(f.at(1) ?? "")),
+                    ],
+                ),
+            ),
+        ],
+    );
 }
 
 // `{"rakun": {"version": …, "modules": {<name>: <version>, …}}}` — the modules
 // are the resolved dependencies the version set pins, in resolution order.
 pub fn rakunInfo() -> string {
-    val resolved: string[] = if (fs.exists(manifestName())) moduleList() else [];
+    val resolved: string[] = if (fs.exists(manifestName()))
+        moduleList()
+    else
+        [];
     val pinned = resolved.filter({ n -> versionOf(n) != "" });
-    val modules = json.object(pinned.map({ n -> #(n, json.quote(versionOf(n))) }));
-    return json.object([#("rakun", json.object([#("version", json.quote(rakunVersion())), #("modules", modules)]))]);
+    val modules = json.object(
+        pinned.map({ n -> #(n, json.quote(versionOf(n))) }),
+    );
+    return json.object(
+        [
+            #(
+                "rakun",
+                json.object(
+                    [
+                        #("version", json.quote(rakunVersion())),
+                        #("modules", modules),
+                    ],
+                ),
+            ),
+        ],
+    );
 }
 
 pub fn registerInfoBuiltins() -> i32 {
-    val _r = rkRegisterInfoContributor("rakun", "rakun-actuator", { -> rakunInfo() });
-    val _b = rkRegisterInfoContributor("build", "rakun-actuator", { -> buildInfo() });
-    val _o = rkRegisterInfoContributor("otp", "rakun-actuator", { -> rkActuatorOtpFacts() });
-    val _s = rkRegisterInfoContributor("os", "rakun-actuator", { -> rkActuatorOsFacts() });
-    val _p = rkRegisterInfoContributor("process", "rakun-actuator", { -> rkActuatorProcessFacts() });
-    val _e = rkRegisterInfoContributor("env", "rakun-actuator", { -> rkActuatorEnvInfo() });
-    return rkRegisterEndpoint("info", "rakun-actuator", "read", { req -> infoRead(req) });
+    val _r = rkRegisterInfoContributor(
+        "rakun",
+        "rakun-actuator",
+        { -> rakunInfo() },
+    );
+    val _b = rkRegisterInfoContributor(
+        "build",
+        "rakun-actuator",
+        { -> buildInfo() },
+    );
+    val _o = rkRegisterInfoContributor(
+        "otp",
+        "rakun-actuator",
+        { -> rkActuatorOtpFacts() },
+    );
+    val _s = rkRegisterInfoContributor(
+        "os",
+        "rakun-actuator",
+        { -> rkActuatorOsFacts() },
+    );
+    val _p = rkRegisterInfoContributor(
+        "process",
+        "rakun-actuator",
+        { -> rkActuatorProcessFacts() },
+    );
+    val _e = rkRegisterInfoContributor(
+        "env",
+        "rakun-actuator",
+        { -> rkActuatorEnvInfo() },
+    );
+    return rkRegisterEndpoint(
+        "info",
+        "rakun-actuator",
+        "read",
+        { req -> infoRead(req) },
+    );
 }

@@ -10,6 +10,7 @@ import {fixture.fixtureStart, fixture.fixtureStop, fixture.fixtureMessages, fixt
 
 #[@External.Erlang("""(fun(__Ms) -> timer:sleep(__Ms), 0 end)($0)""")]
 declare fn pause(ms: i32) -> i32;
+
 #[@External.Erlang("""erlang:monotonic_time(millisecond)""")]
 declare fn nowMs() -> i32;
 
@@ -25,7 +26,16 @@ fn configure(port: i32, concurrency: i32, attempts: i32, backoff: i32) -> i32 {
 }
 
 fn done() -> i32 {
-    for (["host", "port", "timeout", "queue.concurrency", "retry.max-attempts", "retry.backoff-ms"]) { k -> val _u = rkSetProp("rakun.mail." + k, ""); };
+    for ([
+        "host",
+        "port",
+        "timeout",
+        "queue.concurrency",
+        "retry.max-attempts",
+        "retry.backoff-ms",
+    ]) { k ->
+        val _u = rkSetProp("rakun.mail." + k, "");
+    }
     return resetMailQueue();
 }
 
@@ -34,12 +44,23 @@ fn drain(ms: i32) -> i32 {
     while (mailPending() > 0 && waited < ms) {
         val _w = pause(20);
         waited = waited + 20;
-    };
+    }
     return mailPending();
 }
 
 fn note(subject: string) -> Mail {
-    return Mail(sender: "app@example.com", to: ["bob@example.com"], cc: [], bcc: [], replyTo: "", subject: subject, text: "t", html: "", attachments: [], headers: []);
+    return Mail(
+        sender: "app@example.com",
+        to: ["bob@example.com"],
+        cc: [],
+        bcc: [],
+        replyTo: "",
+        subject: subject,
+        text: "t",
+        html: "",
+        attachments: [],
+        headers: [],
+    );
 }
 
 test "queue: send returns before any socket is opened" {
@@ -74,12 +95,19 @@ test "queue: a retryable failure is retried with backoff to the ceiling, then de
     val id = send(note("retry"));
     val left = drain(5000);
     val took = nowMs() - start;
-    val attempts = mailLog().filter({ l -> l.contains(id + " attempt") }).length;
+    val attempts = mailLog().filter(
+        { l -> l.contains(id + " attempt") },
+    ).length;
     val dead = mailDeadLetters().filter({ d -> d.startsWith(id + "\t") });
     val _f = fixtureStop(port);
     val _z = done();
-    assert left == 0 && attempts == 3 && took >= 300, attempts.toString() + " " + took.toString();
-    assert dead.length == 1 && (dead.at(0) ?? "").startsWith(id + "\tretryable\tMAIL FROM answered 451"), dead.join("|");
+    assert left == 0 && attempts == 3 && took >= 300, attempts.toString()
+        + " "
+        + took.toString();
+    assert dead.length == 1
+        && (dead.at(0) ?? "").startsWith(
+            id + "\tretryable\tMAIL FROM answered 451",
+        ), dead.join("|");
 }
 
 test "queue: a permanent failure goes straight to dead-letter without retries" {
@@ -87,11 +115,16 @@ test "queue: a permanent failure goes straight to dead-letter without retries" {
     val _c = configure(port, 1, 5, 100);
     val id = send(note("bad rcpt"));
     val _d = drain(3000);
-    val attempts = mailLog().filter({ l -> l.contains(id + " attempt") }).length;
+    val attempts = mailLog().filter(
+        { l -> l.contains(id + " attempt") },
+    ).length;
     val dead = mailDeadLetters().filter({ d -> d.startsWith(id + "\t") });
     val _f = fixtureStop(port);
     val _z = done();
-    assert attempts == 1 && (dead.at(0) ?? "").contains("permanent\tRCPT TO answered 550"), dead.join("|");
+    assert attempts == 1
+        && (dead.at(0) ?? "").contains(
+            "permanent\tRCPT TO answered 550",
+        ), dead.join("|");
 }
 
 test "queue: N queued messages open at most the configured number of connections" {
@@ -101,22 +134,28 @@ test "queue: N queued messages open at most the configured number of connections
     while (i < 6) {
         val _s = send(note("m" + i.toString()));
         i = i + 1;
-    };
+    }
     val left = drain(10000);
     val peak = fixturePeak(port);
     val delivered = fixtureMessages(port).length;
     val stats = mailQueueStats();
     val _f = fixtureStop(port);
     val _z = done();
-    assert left == 0 && delivered == 6 && peak <= 2 && peak >= 1 && stats.contains("peak=2"), stats + " fixture peak " + peak.toString();
+    assert left == 0
+        && delivered == 6
+        && peak <= 2
+        && peak >= 1
+        && stats.contains("peak=2"), stats + " fixture peak " + peak.toString();
 }
 
 fn rollbackOne() -> string {
-    return attempt({ -> sqlTemplate("mailtx").transaction({ t ->
-        val _p = publishMailAfterCommit("mailtx", note("rolled back"));
-        if (true) @panic("rollback");
-        0
-    }) });
+    return attempt({ ->
+        sqlTemplate("mailtx").transaction({ t ->
+            val _p = publishMailAfterCommit("mailtx", note("rolled back"));
+            if (true) @panic("rollback");
+            0;
+        });
+    });
 }
 
 test "queue: a mail through front 83's outbox is sent once per relay pass, and never after a rollback" {
@@ -124,7 +163,9 @@ test "queue: a mail through front 83's outbox is sent once per relay pass, and n
     val _c = configure(port, 2, 1, 10);
     val _s = startDataSource("mailtx", "ets:memory", 2, 5000, "eager");
     val _i = installOutbox("mailtx");
-    val _t = sqlTemplate("mailtx").transaction({ t -> publishMailAfterCommit("mailtx", note("committed")) });
+    val _t = sqlTemplate("mailtx").transaction(
+        { t -> publishMailAfterCommit("mailtx", note("committed")) },
+    );
     val refused = rollbackOne();
     val first = relayTick("mailtx", mailRelayPublisher());
     val second = relayTick("mailtx", mailRelayPublisher());
@@ -132,6 +173,12 @@ test "queue: a mail through front 83's outbox is sent once per relay pass, and n
     val stats = mailQueueStats();
     val _f = fixtureStop(port);
     val _z = done();
-    assert refused.contains("rollback") && first == 1 && second == 0 && msgs.length == 1 && (msgs.at(0) ?? "").contains("Subject: committed"), msgs.join("\n---\n");
+    assert refused.contains("rollback")
+        && first == 1
+        && second == 0
+        && msgs.length == 1
+        && (msgs.at(0) ?? "").contains("Subject: committed"), msgs.join(
+        "\n---\n",
+    );
     assert stats.contains("sent=0"), stats;
 }

@@ -24,26 +24,53 @@ fn skew() -> i32 {
 // The authorities a token's claims carry.
 pub fn authoritiesOf(claims: string) -> string[] {
     var out: string[] = [];
-    for (oauthClaim(claims, "scope").split(" ").filter({ s -> s != "" })) { s -> out.push("SCOPE_" + s); };
-    for (oauthClaim(claims, "roles").split(" ").filter({ r -> r != "" })) { r -> out.push("ROLE_" + r); };
+    for (oauthClaim(claims, "scope").split(" ").filter({ s -> s != "" })) { s ->
+        out.push("SCOPE_" + s);
+    }
+    for (oauthClaim(claims, "roles").split(" ").filter({ r -> r != "" })) { r ->
+        out.push("ROLE_" + r);
+    }
     return out;
 }
 
-pub fn verifyAccessToken(e: ProviderEndpoints, audience: string, token: string) -> @Result<Authentication, string> {
+pub fn verifyAccessToken(
+    e: ProviderEndpoints,
+    audience: string,
+    token: string,
+) -> @Result<Authentication, string> {
     val v = verifySigned(e, token);
-    if (v.startsWith("error\t")) throw "rakun oauth2: the bearer token fails its " + v.slice(6, v.length()) + " check";
+    if (v.startsWith("error\t"))
+        throw "rakun oauth2: the bearer token fails its "
+            + v.slice(6, v.length())
+            + " check";
     val claims = v.slice(3, v.length());
-    val aud = if (audience == "") oauthClaim(claims, "aud").split(" ").at(0) ?? "" else audience;
+    val aud = if (audience == "") {
+        oauthClaim(claims, "aud").split(" ").at(0) ?? "";
+    } else audience;
     val bad = oauthCheckClaims(claims, e.issuer, aud, "", oauthNow(), skew());
-    if (bad != "") throw "rakun oauth2: the bearer token's " + bad + " claim does not hold";
-    return authenticatedAs(oauthClaim(claims, "sub"), authoritiesOf(claims), "bearer");
+    if (bad != "")
+        throw "rakun oauth2: the bearer token's "
+            + bad
+            + " claim does not hold";
+    return authenticatedAs(
+        oauthClaim(claims, "sub"),
+        authoritiesOf(claims),
+        "bearer",
+    );
 }
 
 // Bearer tokens are verified against provider `providerId`'s issuer; an
 // empty `audience` accepts any audience the token names.
 pub fn installResourceServer(providerId: string, audience: string) -> i32 {
     val p: ?OAuth2Provider = provider(providerId);
-    if (p == null) @panic("rakun oauth2: installResourceServer names `" + providerId + "`, which is not a registered provider");
+    if (p == null)
+        @panic(
+            "rakun oauth2: installResourceServer names `"
+                + providerId
+                + "`, which is not a registered provider",
+        );
     val e = discover(p);
-    return installBearerVerifier({ token -> verifyAccessToken(e, audience, token) });
+    return installBearerVerifier(
+        { token -> verifyAccessToken(e, audience, token) },
+    );
 }

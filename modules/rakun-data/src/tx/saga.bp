@@ -30,34 +30,88 @@ pub type SagaState(id: string, name: string, status: string, step: i32, context:
 
 #[@External.Erlang("""(fun(__Ms) -> timer:sleep(__Ms), 0 end)($0)""")]
 declare fn pause(ms: i32) -> i32;
+
 #[@External.Erlang("""(fun() -> integer_to_binary(erlang:unique_integer([positive, monotonic])) end)()""")]
 declare fn freshId() -> string;
+
 #[@External.Erlang("""(fun(__F, __C) -> try {ok, __F(__C)} catch _:{panic, __R} when is_binary(__R) -> {error, __R}; _:__R -> {error, iolist_to_binary(io_lib:format("~p", [__R]))} end end)($0, $1)""")]
-declare fn tryStep(work: fn(ctx: string) -> string, ctx: string) -> @Result<string, string>;
+declare fn tryStep(
+    work: fn(ctx: string) -> string,
+    ctx: string,
+) -> @Result<string, string>;
 
 pub fn installSagas(ds: string) -> i32 {
-    return sqlTemplate(ds).update("CREATE TABLE IF NOT EXISTS rakun_saga (id text, name text, status text, step integer, ctx text, history text)", []);
+    return sqlTemplate(ds).update(
+        "CREATE TABLE IF NOT EXISTS rakun_saga (id text, name text, status text, step integer, ctx text, history text)",
+        [],
+    );
 }
 
 fn save(ds: string, st: SagaState) -> i32 {
     val sql = sqlTemplate(ds);
-    val _d = sql.update("DELETE FROM rakun_saga WHERE id = :id", [param("id", st.id)]);
-    return sql.update("INSERT INTO rakun_saga (id, name, status, step, ctx, history) VALUES (:id, :n, :s, :step, :c, :h)", [param("id", st.id), param("n", st.name), param("s", st.status), param("step", st.step.toString()), param("c", st.context), param("h", st.history.join("\n"))]);
+    val _d = sql.update(
+        "DELETE FROM rakun_saga WHERE id = :id",
+        [param("id", st.id)],
+    );
+    return sql.update(
+        "INSERT INTO rakun_saga (id, name, status, step, ctx, history) VALUES (:id, :n, :s, :step, :c, :h)",
+        [
+            param("id", st.id),
+            param("n", st.name),
+            param("s", st.status),
+            param("step", st.step.toString()),
+            param("c", st.context),
+            param("h", st.history.join("\n")),
+        ],
+    );
 }
 
 pub fn sagaStateOn(ds: string, id: string) -> SagaState {
-    val rows: Rows = sqlTemplate(ds).query("SELECT id, name, status, step, ctx, history FROM rakun_saga WHERE id = :id", [param("id", id)]);
+    val rows: Rows = sqlTemplate(ds).query(
+        "SELECT id, name, status, step, ctx, history FROM rakun_saga WHERE id = :id",
+        [param("id", id)],
+    );
     val r = rows.first();
-    if (r == null) return SagaState(id: id, name: "", status: "unknown", step: 0, context: "", history: []);
+    if (r == null)
+        return SagaState(
+            id: id,
+            name: "",
+            status: "unknown",
+            step: 0,
+            context: "",
+            history: [],
+        );
     val row = r;
-    return SagaState(id: id, name: row.get("name"), status: row.get("status"), step: row.int("step"), context: row.get("ctx"), history: row.get("history").split("\n").filter({ h -> h != "" }));
+    return SagaState(
+        id: id,
+        name: row.get("name"),
+        status: row.get("status"),
+        step: row.int("step"),
+        context: row.get("ctx"),
+        history: row.get("history").split("\n").filter({ h -> h != "" }),
+    );
 }
 
-fn with(st: SagaState, status: string, step: i32, ctx: string, entry: string) -> SagaState {
+fn with(
+    st: SagaState,
+    status: string,
+    step: i32,
+    ctx: string,
+    entry: string,
+) -> SagaState {
     var h: string[] = [];
-    for (st.history) { x -> h.push(x); };
+    for (st.history) { x ->
+        h.push(x);
+    }
     if (entry != "") h.push(entry);
-    return SagaState(id: st.id, name: st.name, status: status, step: step, context: ctx, history: h);
+    return SagaState(
+        id: st.id,
+        name: st.name,
+        status: status,
+        step: step,
+        context: ctx,
+        history: h,
+    );
 }
 
 fn compensate(ds: string, s: Saga, st0: SagaState, upTo: i32) -> SagaState {
@@ -65,27 +119,53 @@ fn compensate(ds: string, s: Saga, st0: SagaState, upTo: i32) -> SagaState {
     var i = upTo - 1;
     var stuck = false;
     while (i >= 0 && stuck == false) {
-        val step = s.steps.at(i) ?? SagaStep(name: "", run: { c -> c }, compensate: { c -> c });
+        val step = s.steps.at(i) ?? SagaStep(
+            name: "",
+            run: { c -> c },
+            compensate: { c -> c },
+        );
         var tries = 0;
         var done = false;
         while (done == false && tries <= s.retries) {
             val r = tryStep(step.compensate, st.context);
             if (r.isOk()) {
                 done = true;
-                st = with(st, "compensating", i, st.context, "compensate:" + step.name + ":ok");
+                st = with(
+                    st,
+                    "compensating",
+                    i,
+                    st.context,
+                    "compensate:" + step.name + ":ok",
+                );
             } else {
                 tries = tries + 1;
-                st = with(st, "compensating", i, st.context, "compensate:" + step.name + ":failed:" + (case r { Ok(v) -> ""; Error(e) -> e; }));
-                if (tries <= s.retries) {
-                    val _p = pause(s.backoffMs);
-                };
-            };
+                st = with(
+                    st,
+                    "compensating",
+                    i,
+                    st.context,
+                    "compensate:"
+                        + step.name
+                        + ":failed:"
+                        + (case r {
+                            Ok(v) -> "";
+                            Error(e) -> e;
+                        }),
+                );
+                if (tries <= s.retries) val _p = pause(s.backoffMs);
+            }
             val _s = save(ds, st);
-        };
+        }
         if (done == false) stuck = true;
         i = i - 1;
-    };
-    val final = with(st, if (stuck) "needs_attention" else "compensated", st.step, st.context, "");
+    }
+    val final = with(
+        st,
+        if (stuck) "needs_attention" else "compensated",
+        st.step,
+        st.context,
+        "",
+    );
     val _f = save(ds, final);
     return final;
 }
@@ -95,17 +175,39 @@ pub fn runFrom(ds: string, s: Saga, st0: SagaState) -> SagaState {
     var st = st0;
     var failed = false;
     while (failed == false && st.step < s.steps.length) {
-        val step = s.steps.at(st.step) ?? SagaStep(name: "", run: { c -> c }, compensate: { c -> c });
+        val step = s.steps.at(st.step) ?? SagaStep(
+            name: "",
+            run: { c -> c },
+            compensate: { c -> c },
+        );
         val r = tryStep(step.run, st.context);
         if (r.isOk()) {
-            st = with(st, "running", st.step + 1, r.unwrapOr(st.context), "forward:" + step.name + ":ok");
+            st = with(
+                st,
+                "running",
+                st.step + 1,
+                r.unwrapOr(st.context),
+                "forward:" + step.name + ":ok",
+            );
             val _s = save(ds, st);
         } else {
             failed = true;
-            st = with(st, "compensating", st.step, st.context, "forward:" + step.name + ":failed:" + (case r { Ok(v) -> ""; Error(e) -> e; }));
+            st = with(
+                st,
+                "compensating",
+                st.step,
+                st.context,
+                "forward:"
+                    + step.name
+                    + ":failed:"
+                    + (case r {
+                        Ok(v) -> "";
+                        Error(e) -> e;
+                    }),
+            );
             val _t = save(ds, st);
-        };
-    };
+        }
+    }
     if (failed) return compensate(ds, s, st, st.step);
     val done = with(st, "completed", st.step, st.context, "");
     val _d = save(ds, done);
@@ -114,7 +216,14 @@ pub fn runFrom(ds: string, s: Saga, st0: SagaState) -> SagaState {
 
 // Persists a new run of `s` and runs it; answers its id.
 pub fn startSagaOn(ds: string, s: Saga, ctx: string) -> string {
-    val st = SagaState(id: s.name + "-" + freshId(), name: s.name, status: "running", step: 0, context: ctx, history: []);
+    val st = SagaState(
+        id: s.name + "-" + freshId(),
+        name: s.name,
+        status: "running",
+        step: 0,
+        context: ctx,
+        history: [],
+    );
     val _s = save(ds, st);
     val _r = runFrom(ds, s, st);
     return st.id;
@@ -123,16 +232,28 @@ pub fn startSagaOn(ds: string, s: Saga, ctx: string) -> string {
 // Every saga still `running` whose definition is among `defs` continues from
 // its persisted step (after a coordinator restart). Answers how many.
 pub fn resumeSagas(ds: string, defs: Saga[]) -> i32 {
-    val openRows: Rows = sqlTemplate(ds).query("SELECT id, name FROM rakun_saga WHERE status = 'running'", []);
+    val openRows: Rows = sqlTemplate(ds).query(
+        "SELECT id, name FROM rakun_saga WHERE status = 'running'",
+        [],
+    );
     val open = openRows.toList();
     var n = 0;
     for (open) { r ->
         val def = defs.filter({ d -> d.name == r.get("name") });
         if (def.length > 0) {
-            val _r = runFrom(ds, def.at(0) ?? Saga(name: "", steps: [], retries: 0, backoffMs: 0), sagaStateOn(ds, r.get("id")));
+            val _r = runFrom(
+                ds,
+                def.at(0) ?? Saga(
+                    name: "",
+                    steps: [],
+                    retries: 0,
+                    backoffMs: 0,
+                ),
+                sagaStateOn(ds, r.get("id")),
+            );
             n = n + 1;
-        };
-    };
+        }
+    }
     return n;
 }
 

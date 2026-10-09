@@ -6,8 +6,10 @@ import {stream.pipeline.Stage, stream.pipeline.Source, stream.pipeline.Sink, str
 
 #[@External.Erlang("""(fun(__X) -> __X end)($0)""")]
 declare fn wide(n: i32) -> i64;
+
 #[@External.Erlang("""(fun(__K) -> persistent_term:put({st, __K}, persistent_term:get({st, __K}, 0) + 1), 0 end)($0)""")]
 declare fn tick(key: string) -> i32;
+
 #[@External.Erlang("""(fun(__K) -> persistent_term:get({st, __K}, 0) end)($0)""")]
 declare fn ticks(key: string) -> i32;
 
@@ -24,17 +26,24 @@ test "stages: no stages leaves the items unchanged" {
 }
 
 test "stages: a filter that keeps nothing answers an empty array" {
-    assert runStages([Stage.Filter(name: "none", keep: { s -> false })], ["x", "y"]).length == 0;
+    assert runStages(
+        [Stage.Filter(name: "none", keep: { s -> false })],
+        ["x", "y"],
+    ).length
+        == 0;
 }
 
 test "stages: a split of three feeds three items to the next stage" {
-    val out = runStages([
-        Stage.Split(name: "split", explode: { s -> s.split(",") }),
-        Stage.Transform(name: "count", apply: { s ->
-            val _t = tick("split-count");
-            s
-        }),
-    ], ["a,b,c"]);
+    val out = runStages(
+        [
+            Stage.Split(name: "split", explode: { s -> s.split(",") }),
+            Stage.Transform(name: "count", apply: { s ->
+                val _t = tick("split-count");
+                s;
+            }),
+        ],
+        ["a,b,c"],
+    );
     assert out.length == 3 && ticks("split-count") == 3;
 }
 
@@ -46,34 +55,75 @@ test "stages: filter-then-transform and transform-then-filter differ" {
 }
 
 test "stages: two stages of one name are refused at registration" {
-    val p = Pipeline(name: "dup", source: Source.Queue(destination: "in", prefetch: 1), stages: [upper(), Stage.Transform(name: "upper", apply: { s -> s })], sink: Sink.Collect(name: "out"));
-    assert pipelineProblem(p) == "rakun-stream: pipeline dup names two stages `upper` - a stage name is unique within its pipeline";
+    val p = Pipeline(
+        name: "dup",
+        source: Source.Queue(destination: "in", prefetch: 1),
+        stages: [upper(), Stage.Transform(name: "upper", apply: { s -> s })],
+        sink: Sink.Collect(name: "out"),
+    );
+    assert pipelineProblem(p)
+        == "rakun-stream: pipeline dup names two stages `upper` - a stage name is unique within its pipeline";
 }
 
 test "stages: aggregate and route" {
-    val agg = runStages([Stage.Aggregate(name: "by-letter", key: { s -> s.slice(0, 1) }, windowMs: 1000)], ["ab", "ac", "bd"]).join(",");
-    val routed = runStages([Stage.Route(name: "route", pick: { s -> if (s.length() > 2) "long" else "short" })], ["ab", "abc"]).join("|");
+    val agg = runStages(
+        [
+            Stage.Aggregate(
+                name: "by-letter",
+                key: { s -> s.slice(0, 1) },
+                windowMs: 1000,
+            ),
+        ],
+        ["ab", "ac", "bd"],
+    ).join(",");
+    val routed = runStages(
+        [
+            Stage.Route(
+                name: "route",
+                pick: { s -> if (s.length() > 2) "long" else "short" },
+            ),
+        ],
+        ["ab", "abc"],
+    ).join("|");
     assert agg == "a=2,b=1" && routed == "short\tab|long\tabc";
 }
 
 // ── step 5 ──────────────────────────────────────────────────────────────────
 
 test "windows: an event at start + windowMs belongs to the next window" {
-    assert windowStart(wide(1000), 1000) == wide(1000) && windowStart(wide(1999), 1000) == wide(1000) && windowStart(wide(2000), 1000) == wide(2000);
+    assert windowStart(wide(1000), 1000) == wide(1000)
+        && windowStart(wide(1999), 1000) == wide(1000)
+        && windowStart(wide(2000), 1000) == wide(2000);
     assert windowKey("k", wide(2000)) == "k@2000";
 }
 
 test "windows: a sliding window of width W and step S writes an event into W / S windows" {
-    val starts = slidingStarts(wide(2500), 3000, 1000).map({ x -> x.toString() }).join(",");
+    val starts = slidingStarts(wide(2500), 3000, 1000)
+        .map({ x -> x.toString() })
+        .join(",");
     assert starts == "0,1000,2000", starts;
 }
 
 // ── step 7 ──────────────────────────────────────────────────────────────────
 
 test "graph: source, each stage and the sink, one edge per adjacent pair, derived from the value" {
-    val p = Pipeline(name: "g", source: Source.Queue(destination: "orders", prefetch: 1), stages: [upper(), onlyA()], sink: Sink.Collect(name: "out"));
+    val p = Pipeline(
+        name: "g",
+        source: Source.Queue(destination: "orders", prefetch: 1),
+        stages: [upper(), onlyA()],
+        sink: Sink.Collect(name: "out"),
+    );
     val edges = graphOf(p).map({ e -> e._0 + ">" + e._1 }).join(",");
-    val more = Pipeline(name: "g", source: p.source, stages: [upper(), onlyA(), Stage.Split(name: "split", explode: { s -> [s] })], sink: p.sink);
+    val more = Pipeline(
+        name: "g",
+        source: p.source,
+        stages: [
+            upper(),
+            onlyA(),
+            Stage.Split(name: "split", explode: { s -> [s] }),
+        ],
+        sink: p.sink,
+    );
     assert edges == "queue:orders>upper,upper>only-a,only-a>collect:out", edges;
     assert graphOf(more).length == 4;
 }

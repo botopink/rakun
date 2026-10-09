@@ -61,12 +61,13 @@ fn splitAuthorities(list: string) -> string[] {
     for (list.split(",")) { piece ->
         val t: string = piece.trim();
         if (t != "") out.push(t);
-    };
+    }
     return out;
 }
 
 pub fn holdsAnyOf(auth: Authentication, list: string) -> bool {
-    return splitAuthorities(list).filter({ a -> hasAuthority(auth, a) }).length > 0;
+    return splitAuthorities(list).filter({ a -> hasAuthority(auth, a) }).length
+        > 0;
 }
 
 // `required` is `permitAll`, `authenticated`, or a comma list of authorities
@@ -80,9 +81,11 @@ pub fn rkRequireAuthority(label: string, required: string) -> i32 {
     if (auth.authenticated == false) {
         val _d = rkSecNoteDecision("denied secured " + shown);
         return raiseProblem(unauthorizedTag(), label);
-    };
-    if ((required == "") || (required == "authenticated")) return rkSecNoteDecision("granted secured authenticated");
-    if (holdsAnyOf(auth, required)) return rkSecNoteDecision("granted secured " + required);
+    }
+    if ((required == "") || (required == "authenticated"))
+        return rkSecNoteDecision("granted secured authenticated");
+    if (holdsAnyOf(auth, required))
+        return rkSecNoteDecision("granted secured " + required);
     val _n = rkSecNoteDecision("denied secured " + required);
     return raiseProblem(forbiddenTag(), required);
 }
@@ -91,24 +94,44 @@ pub fn rkRequireAuthority(label: string, required: string) -> i32 {
 
 pub fn secured(comptime decl: @Decl, comptime authorities: string) {
     val bare = authorities.replaceAll("\"", "").trim();
-    val odd = bare.contains("(") || bare.contains(" ") || bare.contains("'") || bare.contains("#");
-    if (decl.kind != DeclKind.Method && decl.kind != DeclKind.Type) decl.fail("#[secured] must annotate a method, or the type, of a #[methodSecurity] type");
-    if (bare == "") decl.fail("#[secured] needs at least one authority - #[secured(\"ROLE_ADMIN\")] or #[secured(\"ROLE_A,ROLE_B\")]");
-    if (odd) decl.fail("#[secured] takes authority names, comma-separated (ROLE_A,ROLE_B) - an expression is #[preAuthorize], which is not ported");
+    val odd = bare.contains("(")
+        || bare.contains(" ")
+        || bare.contains("'")
+        || bare.contains("#");
+    if (decl.kind != DeclKind.Method && decl.kind != DeclKind.Type)
+        decl.fail(
+            "#[secured] must annotate a method, or the type, of a #[methodSecurity] type",
+        );
+    if (bare == "")
+        decl.fail(
+            "#[secured] needs at least one authority - #[secured(\"ROLE_ADMIN\")] or #[secured(\"ROLE_A,ROLE_B\")]",
+        );
+    if (odd)
+        decl.fail(
+            "#[secured] takes authority names, comma-separated (ROLE_A,ROLE_B) - an expression is #[preAuthorize], which is not ported",
+        );
 }
 
 pub fn permitAll(comptime decl: @Decl) {
-    if (decl.kind != DeclKind.Method && decl.kind != DeclKind.Type) decl.fail("#[permitAll] must annotate a method, or the type, of a #[methodSecurity] type");
+    if (decl.kind != DeclKind.Method && decl.kind != DeclKind.Type)
+        decl.fail(
+            "#[permitAll] must annotate a method, or the type, of a #[methodSecurity] type",
+        );
 }
 
 pub fn preAuthorize(comptime decl: @Decl, comptime expression: string) {
-    decl.fail("#[preAuthorize] is not ported: expression-based security needs an expression language and botopink has none. Supported forms: #[secured(\"ROLE\")], #[secured(\"ROLE_A,ROLE_B\")] (any of) and #[permitAll]; write a subject check as ordinary code in the method");
+    decl.fail(
+        "#[preAuthorize] is not ported: expression-based security needs an expression language and botopink has none. Supported forms: #[secured(\"ROLE\")], #[secured(\"ROLE_A,ROLE_B\")] (any of) and #[permitAll]; write a subject check as ordinary code in the method",
+    );
 }
 
 pub fn methodSecurity(comptime decl: @Decl) {
     var typeRequirement = "authenticated";
     decl.annotations.forEach({ a ->
-        val s = if (a.name == "secured") a.args.join("").replaceAll("\"", "").replaceAll(" ", "") else typeRequirement;
+        val s = if (a.name == "secured")
+            a.args.join("").replaceAll("\"", "").replaceAll(" ", "")
+        else
+            typeRequirement;
         typeRequirement = s;
         val p = if (a.name == "permitAll") "permitAll" else typeRequirement;
         typeRequirement = p;
@@ -118,11 +141,17 @@ pub fn methodSecurity(comptime decl: @Decl) {
     decl.methods.forEach({ m ->
         var required = typeRequirement;
         m.annotations.forEach({ a ->
-            val s = if (a.name == "secured") a.args.join("").replaceAll("\"", "").replaceAll(" ", "") else required;
+            val s = if (a.name == "secured")
+                a.args.join("").replaceAll("\"", "").replaceAll(" ", "")
+            else
+                required;
             required = s;
             val p = if (a.name == "permitAll") "permitAll" else required;
             required = p;
-            val e = if (a.name == "preAuthorize" && expression == "") decl.name + "." + m.name else expression;
+            val e = if (a.name == "preAuthorize" && expression == "")
+                decl.name + "." + m.name
+            else
+                expression;
             expression = e;
         });
         var params: Array<string> = [];
@@ -131,20 +160,71 @@ pub fn methodSecurity(comptime decl: @Decl) {
             if (p.name != "self") {
                 params.push(p.name + ": " + p.typeName);
                 args.push(p.name);
-            };
+            }
         });
         val ret = m.returnType;
         val call = "self.inner." + m.name + "(" + args.join(", ") + ")";
-        val head = if (params.length > 0) "pub fn " + m.name + "(self: Self, " + params.join(", ") + ")" else "pub fn " + m.name + "(self: Self)";
+        val head = if (params.length > 0)
+            "pub fn " + m.name + "(self: Self, " + params.join(", ") + ")"
+        else
+            "pub fn " + m.name + "(self: Self)";
         val sig = if (ret != "") head + " -> " + ret else head;
-        val guard = "val _sec = rkRequireAuthority(\"" + decl.name + "." + m.name + "\", \"" + required + "\");";
-        val body = if (ret != "") guard + "\n        return " + call + ";" else guard + "\n        " + call + ";";
+        val guard = "val _sec = rkRequireAuthority(\""
+            + decl.name
+            + "."
+            + m.name
+            + "\", \""
+            + required
+            + "\");";
+        val body = if (ret != "")
+            guard + "\n        return " + call + ";"
+        else
+            guard + "\n        " + call + ";";
         methods.push(sig + " {\n        " + body + "\n    }");
     });
-    val make = "pub fn make() -> " + decl.name + "Sec {\n        return rkSingleton(\"" + decl.name + "Sec\", { -> " + decl.name + "Sec(inner: " + decl.name + ".make()) });\n    }";
-    @emit("pub type " + decl.name + "Sec(inner: " + decl.name + ") {\n    " + make + "\n\n    " + methods.join("\n\n    ") + "\n}");
-    @emit("val __rkSec_" + decl.name + " = rkRegisterBean(\"" + decl.name + "Sec\", \"\", \"singleton\", false, false, \"" + decl.name + "\", { -> " + decl.name + "Sec.make() });");
-    if (decl.kind != DeclKind.Type) decl.fail("#[methodSecurity] must annotate a type - a decorator cannot wrap a method body, so the check lives on the <Type>Sec proxy the type-level marker emits");
-    if (decl.variants.length > 0) decl.fail("#[methodSecurity] must annotate a type with fields or methods, not an enum - an enum has no methods to secure");
-    if (expression != "") decl.fail("#[preAuthorize] is not ported: expression-based security needs an expression language and botopink has none (" + expression + "). Supported forms: #[secured(\"ROLE\")], #[secured(\"ROLE_A,ROLE_B\")] (any of) and #[permitAll]; write a subject check as ordinary code in the method");
+    val make = "pub fn make() -> "
+        + decl.name
+        + "Sec {\n        return rkSingleton(\""
+        + decl.name
+        + "Sec\", { -> "
+        + decl.name
+        + "Sec(inner: "
+        + decl.name
+        + ".make()) });\n    }";
+    @emit(
+        "pub type "
+            + decl.name
+            + "Sec(inner: "
+            + decl.name
+            + ") {\n    "
+            + make
+            + "\n\n    "
+            + methods.join("\n\n    ")
+            + "\n}",
+    );
+    @emit(
+        "val __rkSec_"
+            + decl.name
+            + " = rkRegisterBean(\""
+            + decl.name
+            + "Sec\", \"\", \"singleton\", false, false, \""
+            + decl.name
+            + "\", { -> "
+            + decl.name
+            + "Sec.make() });",
+    );
+    if (decl.kind != DeclKind.Type)
+        decl.fail(
+            "#[methodSecurity] must annotate a type - a decorator cannot wrap a method body, so the check lives on the <Type>Sec proxy the type-level marker emits",
+        );
+    if (decl.variants.length > 0)
+        decl.fail(
+            "#[methodSecurity] must annotate a type with fields or methods, not an enum - an enum has no methods to secure",
+        );
+    if (expression != "")
+        decl.fail(
+            "#[preAuthorize] is not ported: expression-based security needs an expression language and botopink has none ("
+                + expression
+                + "). Supported forms: #[secured(\"ROLE\")], #[secured(\"ROLE_A,ROLE_B\")] (any of) and #[permitAll]; write a subject check as ordinary code in the method",
+        );
 }

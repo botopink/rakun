@@ -7,19 +7,26 @@ import {ws.ws.wsClient, ws.ws.WsClient, ws.ws.wsCall, ws.ws.wsClientProblem, ws.
 
 #[@External.Erlang("""(fun(__K, __V) -> persistent_term:put({rakun_ws_seen, __K}, __V), 0 end)($0, $1)""")]
 declare fn seen(key: string, value: string) -> i32;
+
 #[@External.Erlang("""(fun(__K) -> persistent_term:get({rakun_ws_seen, __K}, <<>>) end)($0)""")]
 declare fn saw(key: string) -> string;
+
 #[@External.Erlang("""(fun(__Ms) -> timer:sleep(__Ms), 0 end)($0)""")]
 declare fn pause(ms: i32) -> i32;
 
 fn stub(path: string, headers: string, body: string) -> Response {
     val _h = seen("headers", headers);
-    if (path == "/fault") return Response.withStatus(500, faultEnvelope("1.1", true, "no such invoice"));
-    if (path == "/html") return Response.withStatus(500, "<html>proxy error</html>");
-    if (path == "/slow") {
-        val _p = pause(1500);
-    };
-    return Response.ok(soapEnvelope("1.1", "<r:Answer xmlns:r=\"urn:x\">ok</r:Answer>"));
+    if (path == "/fault")
+        return Response.withStatus(
+            500,
+            faultEnvelope("1.1", true, "no such invoice"),
+        );
+    if (path == "/html")
+        return Response.withStatus(500, "<html>proxy error</html>");
+    if (path == "/slow") val _p = pause(1500);
+    return Response.ok(
+        soapEnvelope("1.1", "<r:Answer xmlns:r=\"urn:x\">ok</r:Answer>"),
+    );
 }
 
 fn serve() -> string {
@@ -34,26 +41,48 @@ fn serve() -> string {
 }
 
 fn errOf(r: @Result<string, SoapFault>) -> SoapFault {
-    return case r { Ok(v) -> SoapFault(code: "", reason: "", actor: "", detail: ""); Error(e) -> e; };
+    return case r {
+        Ok(v) -> SoapFault(code: "", reason: "", actor: "", detail: "");
+        Error(e) -> e;
+    };
 }
 
 test "client: 1.1 sends SOAPAction, 1.2 folds the action into the Content-Type" {
     val base = serve();
-    val _1 = wsCall(wsClient(base + "/ok", "1.1", 2000), "urn:getInvoice", "<q/>");
+    val _1 = wsCall(
+        wsClient(base + "/ok", "1.1", 2000),
+        "urn:getInvoice",
+        "<q/>",
+    );
     val h11 = saw("headers");
-    val _2 = wsCall(wsClient(base + "/ok", "1.2", 2000), "urn:getInvoice", "<q/>");
+    val _2 = wsCall(
+        wsClient(base + "/ok", "1.2", 2000),
+        "urn:getInvoice",
+        "<q/>",
+    );
     val h12 = saw("headers");
-    assert h11.toLower().contains("soapaction") && h11.contains("urn:getInvoice") && h11.contains("text/xml"), h11;
-    assert h12.contains("application/soap+xml") && h12.contains("action=") && h12.toLower().contains("soapaction") == false, h12;
+    assert h11.toLower().contains("soapaction")
+        && h11.contains("urn:getInvoice")
+        && h11.contains("text/xml"), h11;
+    assert h12.contains("application/soap+xml")
+        && h12.contains("action=")
+        && h12.toLower().contains("soapaction") == false, h12;
 }
 
 test "client: 200 is Ok, a 500 fault is the decoded fault, a 500 that is not a fault is a transport fault" {
     val base = serve();
     val ok = wsCall(wsClient(base + "/ok", "1.1", 2000), "a", "<q/>");
-    val fault = errOf(wsCall(wsClient(base + "/fault", "1.1", 2000), "a", "<q/>"));
-    val html = errOf(wsCall(wsClient(base + "/html", "1.1", 2000), "a", "<q/>"));
+    val fault = errOf(
+        wsCall(wsClient(base + "/fault", "1.1", 2000), "a", "<q/>"),
+    );
+    val html = errOf(
+        wsCall(wsClient(base + "/html", "1.1", 2000), "a", "<q/>"),
+    );
     assert ok.unwrapOr("") == "<r:Answer xmlns:r=\"urn:x\">ok</r:Answer>";
-    assert fault.code == "soapenv:Client" && fault.reason == "no such invoice" && html.code == "transport" && html.reason.contains("not a SOAP fault"), html.reason;
+    assert fault.code == "soapenv:Client"
+        && fault.reason == "no such invoice"
+        && html.code == "transport"
+        && html.reason.contains("not a SOAP fault"), html.reason;
 }
 
 test "client: a timeout is a transport error, never a fault" {
@@ -65,7 +94,13 @@ test "client: a timeout is a transport error, never a fault" {
 test "security: a UsernameToken carries username, PasswordText, a fresh nonce and Created; two calls differ" {
     val base = serve();
     val _p = rkSetProp("rakun.ws.security.allow-plain-http", "true");
-    val c = WsClient(endpoint: base + "/ok", version: "1.1", timeoutMs: 2000, username: "billing", password: "s3cret");
+    val c = WsClient(
+        endpoint: base + "/ok",
+        version: "1.1",
+        timeoutMs: 2000,
+        username: "billing",
+        password: "s3cret",
+    );
     val _1 = wsCall(c, "a", "<q/>");
     val _2 = wsCall(c, "a", "<q/>");
     val _u = rkSetProp("rakun.ws.security.allow-plain-http", "");
@@ -74,13 +109,34 @@ test "security: a UsernameToken carries username, PasswordText, a fresh nonce an
     val b = sent.at(sent.length - 1) ?? "";
     val nonceA = a.slice(a.indexOf("<wsse:Nonce>"), a.indexOf("</wsse:Nonce>"));
     val nonceB = b.slice(b.indexOf("<wsse:Nonce>"), b.indexOf("</wsse:Nonce>"));
-    assert a.contains("<wsse:Username>billing</wsse:Username>") && a.contains("#PasswordText\">s3cret</wsse:Password>") && a.contains("<wsu:Created>") && nonceA != "" && nonceA != nonceB, a;
+    assert a.contains("<wsse:Username>billing</wsse:Username>")
+        && a.contains("#PasswordText\">s3cret</wsse:Password>")
+        && a.contains("<wsu:Created>")
+        && nonceA != ""
+        && nonceA != nonceB, a;
 }
 
 test "security: PasswordText over plain HTTP is refused unless the development override is set" {
-    val c = WsClient(endpoint: "http://billing.internal/ws", version: "1.1", timeoutMs: 100, username: "u", password: "p");
-    assert wsClientProblem(c).contains("would cross http://billing.internal/ws in the clear - use https:// (rakun.ws.security.allow-plain-http=true is for development only)");
-    assert wsClientProblem(WsClient(endpoint: "https://billing.internal/ws", version: "1.1", timeoutMs: 100, username: "u", password: "p")) == "";
+    val c = WsClient(
+        endpoint: "http://billing.internal/ws",
+        version: "1.1",
+        timeoutMs: 100,
+        username: "u",
+        password: "p",
+    );
+    assert wsClientProblem(c).contains(
+        "would cross http://billing.internal/ws in the clear - use https:// (rakun.ws.security.allow-plain-http=true is for development only)",
+    );
+    assert wsClientProblem(
+        WsClient(
+            endpoint: "https://billing.internal/ws",
+            version: "1.1",
+            timeoutMs: 100,
+            username: "u",
+            password: "p",
+        ),
+    )
+        == "";
 }
 
 // ── endpoints ───────────────────────────────────────────────────────────────
@@ -90,16 +146,32 @@ fn wsdl() -> string {
 }
 
 fn mount(path: string) -> i32 {
-    return publishEndpoint(path, wsdl(), [
-        #("GetInvoice", { b ->
-            val state = if (b.contains("<id>7</id>")) { "paid" } else { "open" };
-            return "<m:Invoice xmlns:m=\"urn:billing\">" + state + "</m:Invoice>";
-        }),
-        #("Explode", { b ->
-            if (true) @panic("ledger offline");
-            ""
-        }),
-    ], "1.1");
+    return publishEndpoint(
+        path,
+        wsdl(),
+        [
+            #(
+                "GetInvoice",
+                { b ->
+                    val state = if (b.contains("<id>7</id>"))
+                        "paid"
+                    else
+                        "open";
+                    return "<m:Invoice xmlns:m=\"urn:billing\">"
+                        + state
+                        + "</m:Invoice>";
+                },
+            ),
+            #(
+                "Explode",
+                { b ->
+                    if (true) @panic("ledger offline");
+                    "";
+                },
+            ),
+        ],
+        "1.1",
+    );
 }
 
 fn post(path: string, body: string) -> Response {
@@ -108,20 +180,51 @@ fn post(path: string, body: string) -> Response {
 
 test "endpoint: dispatches on the wrapped element and serves the WSDL unmodified" {
     val _m = mount("/ws/billing");
-    val res = post("/ws/billing", soapEnvelope("1.1", "<m:GetInvoice xmlns:m=\"urn:billing\"><id>7</id></m:GetInvoice>"));
+    val res = post(
+        "/ws/billing",
+        soapEnvelope(
+            "1.1",
+            "<m:GetInvoice xmlns:m=\"urn:billing\"><id>7</id></m:GetInvoice>",
+        ),
+    );
     val w = rkDispatchHttp("GET", "/ws/billing", "{}", "{\"wsdl\":\"\"}", "");
-    assert res.status == 200 && res.body.contains("<m:Invoice xmlns:m=\"urn:billing\">paid</m:Invoice>"), res.body;
-    assert w.status == 200 && w.body == wsdl() && contentHash(w.body) == contentHash(wsdl());
+    assert res.status == 200
+        && res.body.contains(
+            "<m:Invoice xmlns:m=\"urn:billing\">paid</m:Invoice>",
+        ), res.body;
+    assert w.status == 200
+        && w.body == wsdl()
+        && contentHash(w.body) == contentHash(wsdl());
 }
 
 test "endpoint: no matching operation, a malformed envelope and a raising operation each answer a fault" {
     val _m = mount("/ws/faults");
-    val nomatch = post("/ws/faults", soapEnvelope("1.1", "<m:Refund xmlns:m=\"urn:billing\"/>"));
+    val nomatch = post(
+        "/ws/faults",
+        soapEnvelope("1.1", "<m:Refund xmlns:m=\"urn:billing\"/>"),
+    );
     val malformed = post("/ws/faults", "<not-soap");
-    val raised = post("/ws/faults", soapEnvelope("1.1", "<m:Explode xmlns:m=\"urn:billing\"/>"));
-    val after = post("/ws/faults", soapEnvelope("1.1", "<m:GetInvoice xmlns:m=\"urn:billing\"><id>1</id></m:GetInvoice>"));
-    assert nomatch.status == 500 && nomatch.body.contains("soapenv:Client") && nomatch.body.contains("no operation takes the element `Refund`"), nomatch.body;
-    assert malformed.status == 500 && malformed.body.contains("soapenv:Client") && raised.body.contains("soapenv:Server") && raised.body.contains("ledger offline") && after.body.contains(">open<");
+    val raised = post(
+        "/ws/faults",
+        soapEnvelope("1.1", "<m:Explode xmlns:m=\"urn:billing\"/>"),
+    );
+    val after = post(
+        "/ws/faults",
+        soapEnvelope(
+            "1.1",
+            "<m:GetInvoice xmlns:m=\"urn:billing\"><id>1</id></m:GetInvoice>",
+        ),
+    );
+    assert nomatch.status == 500
+        && nomatch.body.contains("soapenv:Client")
+        && nomatch.body.contains(
+            "no operation takes the element `Refund`",
+        ), nomatch.body;
+    assert malformed.status == 500
+        && malformed.body.contains("soapenv:Client")
+        && raised.body.contains("soapenv:Server")
+        && raised.body.contains("ledger offline")
+        && after.body.contains(">open<");
 }
 
 test "endpoint: an incoming UsernameToken is verified, and a replayed nonce is rejected" {
@@ -130,11 +233,18 @@ test "endpoint: an incoming UsernameToken is verified, and a replayed nonce is r
     val _p = rkSetProp("rakun.ws.security.password", "s3cret");
     val token = "<wsse:Security xmlns:wsse=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd\"><wsse:UsernameToken><wsse:Username>billing</wsse:Username><wsse:Password>s3cret</wsse:Password><wsse:Nonce>n-1</wsse:Nonce><wsse:Created>2026-09-26T00:00:00Z</wsse:Created></wsse:UsernameToken></wsse:Security>";
     val body = "<m:GetInvoice xmlns:m=\"urn:billing\"><id>7</id></m:GetInvoice>";
-    val env = "<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\"><soapenv:Header>" + token + "</soapenv:Header><soapenv:Body>" + body + "</soapenv:Body></soapenv:Envelope>";
+    val env = "<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\"><soapenv:Header>"
+        + token
+        + "</soapenv:Header><soapenv:Body>"
+        + body
+        + "</soapenv:Body></soapenv:Envelope>";
     val first = post("/ws/secure", env);
     val replay = post("/ws/secure", env);
     val none = post("/ws/secure", soapEnvelope("1.1", body));
     val _x = rkSetProp("rakun.ws.security.username", "");
     val _y = rkSetProp("rakun.ws.security.password", "");
-    assert first.status == 200 && replay.body.contains("nonce was already used") && none.body.contains("a UsernameToken is required"), first.body + replay.body;
+    assert first.status == 200
+        && replay.body.contains("nonce was already used")
+        && none.body.contains("a UsernameToken is required"), first.body
+        + replay.body;
 }

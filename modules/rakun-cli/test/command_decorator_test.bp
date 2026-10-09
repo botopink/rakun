@@ -3,7 +3,7 @@
 //// one-file fixture project (the `build_test` shape).
 
 import {testing.asserts} from "std";
-import {io: {fs, process, env}} from "std";
+import {io.fs, io.process, io.env} from "std";
 import {service, repository, rkScan, rkSingleton, rkEnter, rkDone, rkResolve, rkAddBean, rkInstallBeans} from "rakun";
 import {collections.Dict} from "std";
 import {plugins.cliCommand, plugins.cliCommands, plugins.rkCliRegister, plugins.pluginNames, plugins.forgetPlugin};
@@ -46,7 +46,8 @@ test "plugin: an annotated method is in rakun help with its summary, and rakun s
     val _beans = rkInstallBeans(beans());
     val help = helpLines().join("\n");
     val _c = clearCliOutput();
-    assert pluginNames().indexOf("seed") >= 0 && help.contains("  seed - load the demo orders"), help;
+    assert pluginNames().indexOf("seed") >= 0
+        && help.contains("  seed - load the demo orders"), help;
     assert runCli(["seed"]) == 0;
 }
 
@@ -59,11 +60,18 @@ test "plugin: a raise is exit 1 with the reason printed" {
     val _beans = rkInstallBeans(beans());
     val _c = clearCliOutput();
     val status = runCli(["explode"]);
-    assert status == 1 && cliOutput().filter({ l -> l.contains("the seed file is missing") }).length == 1;
+    assert status == 1
+        && cliOutput().filter(
+            { l -> l.contains("the seed file is missing") },
+        ).length
+            == 1;
 }
 
 test "plugin: a second registration of one name is refused, naming both declarations" {
-    try asserts.throwsWith({ -> rkCliRegister("seed", "again", "Other.seed", { args -> 0 }) }, "the command `seed` is declared twice - Seeder.seed and Other.seed");
+    try asserts.throwsWith(
+        { -> rkCliRegister("seed", "again", "Other.seed", { args -> 0 }) },
+        "the command `seed` is declared twice - Seeder.seed and Other.seed",
+    );
 }
 
 // ── build refusals ──────────────────────────────────────────────────────────
@@ -75,18 +83,37 @@ fn root() -> string {
 
 fn compiler() -> string {
     val b: string = env.read("BOTOPINK_BIN") ?? "";
-    return if (b != "") b else process.cwd() + "/../../../botopink-lang/zig-out/bin/botopink";
+    return if (b != "")
+        b
+    else
+        process.cwd() + "/../../../botopink-lang/zig-out/bin/botopink";
 }
 
 fn buildFixture(name: string, source: string) -> string {
     val dir = root() + "/" + name;
     val here = process.cwd();
-    val _m = process.runShell("rm -rf '" + dir + "' && mkdir -p '" + dir + "/src'");
-    val deps = ["rakun", "rakun-web", "rakun-actuator"].map({ d -> "    \"" + d + "\": { \"path\": \"" + here + "/../" + d + "\" }" });
-    val manifest = "{\n  \"name\": \"" + name + "\",\n  \"version\": \"0.0.1\",\n  \"src\": \"src/\",\n  \"entry\": \"root.bp\",\n  \"target\": \"erlang\",\n  \"targets\": [\"erlang\"],\n  \"dependencies\": {\n" + deps.join(",\n") + ",\n    \"rakun-cli\": { \"path\": \"" + here + "\" }\n  }\n}\n";
+    val _m = process.runShell(
+        "rm -rf '" + dir + "' && mkdir -p '" + dir + "/src'",
+    );
+    val deps = ["rakun", "rakun-web", "rakun-actuator"].map(
+        { d -> "    \"" + d + "\": { \"path\": \"" + here + "/../" + d + "\" }" },
+    );
+    val manifest = "{\n  \"name\": \""
+        + name
+        + "\",\n  \"version\": \"0.0.1\",\n  \"src\": \"src/\",\n  \"entry\": \"root.bp\",\n  \"target\": \"erlang\",\n  \"targets\": [\"erlang\"],\n  \"dependencies\": {\n"
+        + deps.join(",\n")
+        + ",\n    \"rakun-cli\": { \"path\": \""
+        + here
+        + "\" }\n  }\n}\n";
     val _j = fs.writeText(dir + "/botopink.json", manifest);
     val _s = fs.writeText(dir + "/src/root.bp", source);
-    return process.runShell("cd '" + dir + "' && '" + compiler() + "' build --target erlang --out out 2>&1 < /dev/null; echo \"exit=$?\"");
+    return process.runShell(
+        "cd '"
+            + dir
+            + "' && '"
+            + compiler()
+            + "' build --target erlang --out out 2>&1 < /dev/null; echo \"exit=$?\"",
+    );
 }
 
 fn header() -> string {
@@ -94,11 +121,26 @@ fn header() -> string {
 }
 
 test "plugin build: #[cliCommand] on anything but a method is a located error" {
-    val out = buildFixture("cli-fn", header() + "#[cliCommand(\"x\", \"y\")]\npub fn loose(args: Array<string>) -> i32 {\n    return 0;\n}\n");
-    assert out.contains("#[cliCommand] must annotate a method of a #[cliCommands] type") && out.contains("src/root.bp:") && out.contains("exit=0") == false, out;
+    val out = buildFixture(
+        "cli-fn",
+        header()
+            + "#[cliCommand(\"x\", \"y\")]\npub fn loose(args: Array<string>) -> i32 {\n    return 0;\n}\n",
+    );
+    assert out.contains(
+        "#[cliCommand] must annotate a method of a #[cliCommands] type",
+    )
+        && out.contains("src/root.bp:")
+        && out.contains("exit=0") == false, out;
 }
 
 test "plugin build: two commands of one name in a type fail at build, naming both methods" {
-    val out = buildFixture("cli-dup", header() + "#[service]\n#[cliCommands]\npub type Tools() {\n    #[cliCommand(\"seed\", \"a\")]\n    pub fn one(self: Self, args: Array<string>) -> i32 {\n        return 0;\n    }\n    #[cliCommand(\"seed\", \"b\")]\n    pub fn two(self: Self, args: Array<string>) -> i32 {\n        return 0;\n    }\n}\n");
-    assert out.contains("two commands of Tools are named \"seed\" - Tools.one and Tools.two") && out.contains("exit=0") == false, out;
+    val out = buildFixture(
+        "cli-dup",
+        header()
+            + "#[service]\n#[cliCommands]\npub type Tools() {\n    #[cliCommand(\"seed\", \"a\")]\n    pub fn one(self: Self, args: Array<string>) -> i32 {\n        return 0;\n    }\n    #[cliCommand(\"seed\", \"b\")]\n    pub fn two(self: Self, args: Array<string>) -> i32 {\n        return 0;\n    }\n}\n",
+    );
+    assert out.contains(
+        "two commands of Tools are named \"seed\" - Tools.one and Tools.two",
+    )
+        && out.contains("exit=0") == false, out;
 }

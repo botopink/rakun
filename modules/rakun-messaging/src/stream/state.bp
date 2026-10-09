@@ -10,21 +10,32 @@ import {param, Row, Rows, sqlTemplate} from "rakun-data";
 pub behavior StateStore {
     fn lookup(self: Self, key: string) -> ?string;
     fn put(self: Self, key: string, value: string) -> i32;
-    fn fold(self: Self, prefix: string, init: string, step: fn(acc: string, value: string) -> string) -> string;
+    fn fold(
+        self: Self,
+        prefix: string,
+        init: string,
+        step: fn(acc: string, value: string) -> string,
+    ) -> string;
 }
 
 #[@External.Erlang("""(fun() -> case ets:whereis(rakun_stream_state) of undefined -> __Me = self(), spawn(fun() -> ets:new(rakun_stream_state, [named_table, public, ordered_set]), __Me ! rakun_state_ready, receive stop -> ok end end), receive rakun_state_ready -> ok after 2000 -> ok end, 0; _ -> 0 end end)()""")]
 declare fn etsEnsure() -> i32;
+
 #[@External.Erlang("""(fun(__K) -> case ets:lookup(rakun_stream_state, __K) of [{_, __V}] -> __V; [] -> undefined end end)($0)""")]
 declare fn etsGet(key: string) -> ?string;
+
 #[@External.Erlang("""(fun(__K, __V) -> ets:insert(rakun_stream_state, {__K, __V}), 1 end)($0, $1)""")]
 declare fn etsPut(key: string, value: string) -> i32;
+
 #[@External.Erlang("""(fun(__P) -> [__V || {__K, __V} <- ets:tab2list(rakun_stream_state), binary:match(__K, __P) =:= {0, byte_size(__P)}] end)($0)""")]
 declare fn etsValues(prefix: string) -> string[];
+
 #[@External.Erlang("""(fun(__P) -> [ets:delete(rakun_stream_state, __K) || {__K, _} <- ets:tab2list(rakun_stream_state), binary:match(__K, __P) =:= {0, byte_size(__P)}], 0 end)($0)""")]
 pub declare fn etsForget(prefix: string) -> i32;
+
 #[@External.Erlang("""(fun(__T) -> logger:warning("~ts", [__T]), persistent_term:put(rakun_stream_log, persistent_term:get(rakun_stream_log, []) ++ [__T]), 0 end)($0)""")]
 pub declare fn streamLog(line: string) -> i32;
+
 #[@External.Erlang("""persistent_term:get(rakun_stream_log, [])""")]
 pub declare fn streamLogLines() -> string[];
 
@@ -37,16 +48,27 @@ pub type EtsState(pipeline: string) implement StateStore {
         return etsPut(self.pipeline + "/" + key, value);
     }
 
-    pub fn fold(self: Self, prefix: string, init: string, step: fn(acc: string, value: string) -> string) -> string {
+    pub fn fold(
+        self: Self,
+        prefix: string,
+        init: string,
+        step: fn(acc: string, value: string) -> string,
+    ) -> string {
         var acc = init;
-        for (etsValues(self.pipeline + "/" + prefix)) { v -> acc = step(acc, v); };
+        for (etsValues(self.pipeline + "/" + prefix)) { v ->
+            acc = step(acc, v);
+        }
         return acc;
     }
 }
 
 pub fn etsState(pipeline: string) -> EtsState {
     val _e = etsEnsure();
-    val _l = streamLog("rakun-stream: pipeline " + pipeline + " keeps its state in ETS - a restart or a rebalance that moves its partitions loses every key (the SQL arm keeps them)");
+    val _l = streamLog(
+        "rakun-stream: pipeline "
+            + pipeline
+            + " keeps its state in ETS - a restart or a rebalance that moves its partitions loses every key (the SQL arm keeps them)",
+    );
     return EtsState(pipeline: pipeline);
 }
 
@@ -56,7 +78,10 @@ pub fn stateSchemaSql() -> string {
 
 pub type SqlState(pipeline: string, datasource: string) implement StateStore {
     pub fn lookup(self: Self, key: string) -> ?string {
-        val rows: Rows = sqlTemplate(self.datasource).query("SELECT svalue FROM rakun_stream_state WHERE skey = :k", [param("k", self.pipeline + "/" + key)]);
+        val rows: Rows = sqlTemplate(self.datasource).query(
+            "SELECT svalue FROM rakun_stream_state WHERE skey = :k",
+            [param("k", self.pipeline + "/" + key)],
+        );
         val r: ?Row = rows.first();
         if (r == null) return null;
         return r.get("svalue");
@@ -65,16 +90,32 @@ pub type SqlState(pipeline: string, datasource: string) implement StateStore {
     pub fn put(self: Self, key: string, value: string) -> i32 {
         val sql = sqlTemplate(self.datasource);
         val k = self.pipeline + "/" + key;
-        val n = sql.update("UPDATE rakun_stream_state SET svalue = :v WHERE skey = :k", [param("v", value), param("k", k)]);
+        val n = sql.update(
+            "UPDATE rakun_stream_state SET svalue = :v WHERE skey = :k",
+            [param("v", value), param("k", k)],
+        );
         if (n > 0) return n;
-        return sql.update("INSERT INTO rakun_stream_state (skey, svalue) VALUES (:k, :v)", [param("k", k), param("v", value)]);
+        return sql.update(
+            "INSERT INTO rakun_stream_state (skey, svalue) VALUES (:k, :v)",
+            [param("k", k), param("v", value)],
+        );
     }
 
-    pub fn fold(self: Self, prefix: string, init: string, step: fn(acc: string, value: string) -> string) -> string {
-        val rows: Rows = sqlTemplate(self.datasource).query("SELECT skey, svalue FROM rakun_stream_state ORDER BY skey", []);
+    pub fn fold(
+        self: Self,
+        prefix: string,
+        init: string,
+        step: fn(acc: string, value: string) -> string,
+    ) -> string {
+        val rows: Rows = sqlTemplate(self.datasource).query(
+            "SELECT skey, svalue FROM rakun_stream_state ORDER BY skey",
+            [],
+        );
         val p = self.pipeline + "/" + prefix;
         var acc = init;
-        for (rows.toList()) { r -> if (r.get("skey").startsWith(p)) acc = step(acc, r.get("svalue")); };
+        for (rows.toList()) { r ->
+            if (r.get("skey").startsWith(p)) acc = step(acc, r.get("svalue"));
+        }
         return acc;
     }
 }

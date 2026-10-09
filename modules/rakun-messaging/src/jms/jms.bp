@@ -59,8 +59,13 @@ fn destinationName(d: Destination) -> string {
 pub fn armFor(url: string) -> string {
     val u = url.toLower();
     if (u.startsWith("amqp://") || u.startsWith("amqps://")) return "amqp10";
-    if (u.startsWith("stomp://") || u.startsWith("stomp+ssl://")) return "stomp";
-    @panic("rakun jms: rakun.jms.url `" + redactedUrl(url) + "` has an unsupported scheme - amqp:// (amqps://) or stomp:// (stomp+ssl://)");
+    if (u.startsWith("stomp://") || u.startsWith("stomp+ssl://"))
+        return "stomp";
+    @panic(
+        "rakun jms: rakun.jms.url `"
+            + redactedUrl(url)
+            + "` has an unsupported scheme - amqp:// (amqps://) or stomp:// (stomp+ssl://)",
+    );
 }
 
 // The URL with any `user:password@` replaced by `***@`.
@@ -70,7 +75,9 @@ pub fn redactedUrl(url: string) -> string {
     val rest = url.slice(scheme + 3, url.length());
     val at = rest.indexOf("@");
     if (at < 0) return url;
-    return url.slice(0, scheme + 3) + "***@" + rest.slice(at + 1, rest.length());
+    return url.slice(0, scheme + 3)
+        + "***@"
+        + rest.slice(at + 1, rest.length());
 }
 
 fn hostPort(url: string) -> #(string, i32) {
@@ -86,14 +93,19 @@ fn hostPort(url: string) -> #(string, i32) {
 
 #[@External.Erlang("""(fun(__S) -> try binary_to_integer(__S) catch _:_ -> 0 end end)($0)""")]
 declare fn toInt(s: string) -> i32;
+
 #[@External.Erlang("""(fun(__N) -> rakun_ssl:get(__N, <<"client">>) =/= <<>> orelse rakun_ssl:get(__N, <<"listener">>) =/= <<>> end)($0)""")]
 declare fn bundleRegistered(name: string) -> bool;
+
 #[@External.Erlang("""(fun(__T) -> logger:notice("~ts", [__T]), persistent_term:put(rakun_jms_log, persistent_term:get(rakun_jms_log, []) ++ [__T]), 0 end)($0)""")]
 declare fn note(line: string) -> i32;
+
 #[@External.Erlang("""persistent_term:get(rakun_jms_log, [])""")]
 pub declare fn jmsLog() -> string[];
+
 #[@External.Erlang("""(fun(__C) -> persistent_term:put(rakun_jms_conn, __C), 0 end)($0)""")]
 declare fn storeConn(conn: string) -> i32;
+
 #[@External.Erlang("""persistent_term:get(rakun_jms_conn, <<>>)""")]
 pub declare fn jmsConnection() -> string;
 
@@ -102,13 +114,24 @@ pub fn jmsConfigProblem() -> string {
     val url = rkProp("rakun.jms.url").trim();
     if (url == "") return "rakun jms: rakun.jms.url is not set";
     val u = url.toLower();
-    val known = u.startsWith("amqp://") || u.startsWith("amqps://") || u.startsWith("stomp://") || u.startsWith("stomp+ssl://");
-    if (known == false) return "rakun jms: rakun.jms.url `" + redactedUrl(url) + "` has an unsupported scheme - amqp:// (amqps://) or stomp:// (stomp+ssl://)";
-    if (armFor(url) == "amqp10") return "rakun jms: the AMQP 1.0 arm needs amqp10_client, an OTP application a sidecar cannot load - use a stomp:// URL (ActiveMQ and Artemis both speak STOMP)";
+    val known = u.startsWith("amqp://")
+        || u.startsWith("amqps://")
+        || u.startsWith("stomp://")
+        || u.startsWith("stomp+ssl://");
+    if (known == false)
+        return "rakun jms: rakun.jms.url `"
+            + redactedUrl(url)
+            + "` has an unsupported scheme - amqp:// (amqps://) or stomp:// (stomp+ssl://)";
+    if (armFor(url) == "amqp10")
+        return "rakun jms: the AMQP 1.0 arm needs amqp10_client, an OTP application a sidecar cannot load - use a stomp:// URL (ActiveMQ and Artemis both speak STOMP)";
     val bundle = rkProp("rakun.jms.ssl.bundle").trim();
-    val bundleNote = if (bundle == "") { "" } else { " - `" + bundle + "` is not one" };
-    if (u.startsWith("stomp+ssl://") && (bundle == "" || bundleRegistered(bundle) == false)) return "rakun jms: stomp+ssl:// needs rakun.jms.ssl.bundle naming a registered front 74 bundle" + bundleNote;
-    if (rkProp("rakun.jms.embedded").trim() == "true") return "rakun jms: an embedded broker is refused - run the broker as its own service";
+    val bundleNote = if (bundle == "") "" else " - `" + bundle + "` is not one";
+    if (u.startsWith("stomp+ssl://")
+        && (bundle == "" || bundleRegistered(bundle) == false))
+        return "rakun jms: stomp+ssl:// needs rakun.jms.ssl.bundle naming a registered front 74 bundle"
+            + bundleNote;
+    if (rkProp("rakun.jms.embedded").trim() == "true")
+        return "rakun jms: an embedded broker is refused - run the broker as its own service";
     return "";
 }
 
@@ -118,11 +141,31 @@ pub fn startJms() -> i32 {
     val url = rkProp("rakun.jms.url").trim();
     val hp = hostPort(url);
     val beat = toInt(rkProp("rakun.jms.heart-beat-ms").trim());
-    val bundle = if (url.toLower().startsWith("stomp+ssl://")) rkProp("rakun.jms.ssl.bundle").trim() else "";
-    val c = rkJmsConnect(hp._0, hp._1, rkProp("rakun.jms.user").trim(), rkProp("rakun.jms.password"), beat, bundle);
-    if (c.startsWith("error:")) @panic("rakun jms: cannot connect to " + redactedUrl(url) + " - " + c.slice(6, c.length()));
+    val bundle = if (url.toLower().startsWith("stomp+ssl://"))
+        rkProp("rakun.jms.ssl.bundle").trim()
+    else
+        "";
+    val c = rkJmsConnect(
+        hp._0,
+        hp._1,
+        rkProp("rakun.jms.user").trim(),
+        rkProp("rakun.jms.password"),
+        beat,
+        bundle,
+    );
+    if (c.startsWith("error:"))
+        @panic(
+            "rakun jms: cannot connect to "
+                + redactedUrl(url)
+                + " - "
+                + c.slice(6, c.length()),
+        );
     val _l = note("rakun jms: connected to " + redactedUrl(url));
-    val _h = rkRegisterHealthIndicator("jms", "rakun-messaging", { -> jmsHealth() });
+    val _h = rkRegisterHealthIndicator(
+        "jms",
+        "rakun-messaging",
+        { -> jmsHealth() },
+    );
     return storeConn(c);
 }
 
@@ -136,25 +179,65 @@ pub fn stopJms() -> i32 {
 // ── sending ─────────────────────────────────────────────────────────────────
 
 pub fn jmsSend(destination: Destination, body: string) -> i32 {
-    if (destinationName(destination).trim() == "") @panic("rakun jms: a send needs a destination name");
-    val err = rkJmsSend(jmsConnection(), destinationPath(destination), body, []);
-    if (err != "") @panic("rakun jms: the send to " + destinationPath(destination) + " failed - " + err);
+    if (destinationName(destination).trim() == "")
+        @panic("rakun jms: a send needs a destination name");
+    val err = rkJmsSend(
+        jmsConnection(),
+        destinationPath(destination),
+        body,
+        [],
+    );
+    if (err != "")
+        @panic(
+            "rakun jms: the send to "
+                + destinationPath(destination)
+                + " failed - "
+                + err,
+        );
     return 0;
 }
 
-pub fn jmsRequest(destination: Destination, body: string, timeoutMs: i32) -> @Result<string, string> {
-    return rkJmsRequest(jmsConnection(), destinationPath(destination), body, timeoutMs);
+pub fn jmsRequest(
+    destination: Destination,
+    body: string,
+    timeoutMs: i32,
+) -> @Result<string, string> {
+    return rkJmsRequest(
+        jmsConnection(),
+        destinationPath(destination),
+        body,
+        timeoutMs,
+    );
 }
 
 // ── listening ───────────────────────────────────────────────────────────────
 
-fn deliveryFor(path: string, body: string, headers: Array<#(string, string)>) -> Delivery {
-    val corr = headers.filter({ h -> h._0 == "correlation-id" }).map({ h -> h._1 }).at(0) ?? "";
-    val msg = Message(broker: "jms", destination: path, key: corr, payload: body, headersJson: "{}", offset: rkMsgWide(-1));
+fn deliveryFor(
+    path: string,
+    body: string,
+    headers: Array<#(string, string)>,
+) -> Delivery {
+    val corr = headers
+        .filter({ h -> h._0 == "correlation-id" })
+        .map({ h -> h._1 })
+        .at(0) ?? "";
+    val msg = Message(
+        broker: "jms",
+        destination: path,
+        key: corr,
+        payload: body,
+        headersJson: "{}",
+        offset: rkMsgWide(-1),
+    );
     return Delivery(message: msg, headers: headers, body: body);
 }
 
-fn handle(path: string, body: string, headers: Array<#(string, string)>, handler: fn(d: Delivery) -> Outcome) -> bool {
+fn handle(
+    path: string,
+    body: string,
+    headers: Array<#(string, string)>,
+    handler: fn(d: Delivery) -> Outcome,
+) -> bool {
     val outcome = handler(deliveryFor(path, body, headers));
     return case outcome {
         Done -> true;
@@ -164,25 +247,79 @@ fn handle(path: string, body: string, headers: Array<#(string, string)>, handler
 }
 
 fn deadLetter(path: string, body: string, reason: string) -> bool {
-    val letter = deadLetterJson(DeadLetter(destination: path, body: body, reason: reason, attempt: 1, firstSeenMs: rkMsgWide(0)));
+    val letter = deadLetterJson(
+        DeadLetter(
+            destination: path,
+            body: body,
+            reason: reason,
+            attempt: 1,
+            firstSeenMs: rkMsgWide(0),
+        ),
+    );
     return rkJmsSend(jmsConnection(), path + ".dlq", letter, []) == "";
 }
 
 // Subscribes `name` to `destination` and registers it in front 15's registry
 // (broker `jms`). `ack` is auto | client | client-individual; `durable` names
 // a durable topic subscription; `selector` is handed to the broker.
-pub fn jmsListen(name: string, destination: Destination, ack: string, selector: string, durable: string, handler: fn(d: Delivery) -> Outcome) -> i32 {
+pub fn jmsListen(
+    name: string,
+    destination: Destination,
+    ack: string,
+    selector: string,
+    durable: string,
+    handler: fn(d: Delivery) -> Outcome,
+) -> i32 {
     val path = destinationPath(destination);
-    if (durable != "" && rkProp("rakun.jms.client-id").trim() == "") @panic("rakun jms: the durable subscription `" + durable + "` of " + name + " needs rakun.jms.client-id - without a stable client id it would silently be a non-durable one");
-    val _t = if (rkProp("rakun.messaging.jms.transport").trim() == "") rkSetProp("rakun.messaging.jms.transport", "memory") else 0;
-    val _e = rkSetProp("rakun.messaging.listener." + name + ".enabled", "false");
-    val _r = rkRegisterListenerAs(name, "jms", path, selector, name, { msg -> 0 });
+    if (durable != "" && rkProp("rakun.jms.client-id").trim() == "")
+        @panic(
+            "rakun jms: the durable subscription `"
+                + durable
+                + "` of "
+                + name
+                + " needs rakun.jms.client-id - without a stable client id it would silently be a non-durable one",
+        );
+    val _t = if (rkProp("rakun.messaging.jms.transport").trim() == "")
+        rkSetProp("rakun.messaging.jms.transport", "memory")
+    else
+        0;
+    val _e = rkSetProp(
+        "rakun.messaging.listener." + name + ".enabled",
+        "false",
+    );
+    val _r = rkRegisterListenerAs(
+        name,
+        "jms",
+        path,
+        selector,
+        name,
+        { msg -> 0 },
+    );
     var extra: Array<#(string, string)> = [];
     if (selector != "") extra.push(#("selector", selector));
     if (durable != "") extra.push(#("activemq.subscriptionName", durable));
-    val err = rkJmsSubscribe(jmsConnection(), name, path, if (ack == "") "client-individual" else ack, extra, { body, headers -> handle(path, body, headers, handler) });
-    val selectorNote = if (selector != "") { " (the selector is the broker's: client-side filtering is not a fallback)" } else { "" };
-    if (err != "") @panic("rakun jms: the broker refused the subscription " + name + " to " + path + " - " + err + selectorNote);
+    val err = rkJmsSubscribe(
+        jmsConnection(),
+        name,
+        path,
+        if (ack == "") "client-individual" else ack,
+        extra,
+        { body, headers -> handle(path, body, headers, handler) },
+    );
+    val selectorNote = if (selector != "")
+        " (the selector is the broker's: client-side filtering is not a fallback)"
+    else
+        "";
+    if (err != "")
+        @panic(
+            "rakun jms: the broker refused the subscription "
+                + name
+                + " to "
+                + path
+                + " - "
+                + err
+                + selectorNote,
+        );
     return 0;
 }
 
@@ -196,7 +333,14 @@ pub fn jmsUnlisten(name: string) -> i32 {
 pub fn jmsHealth() -> Health {
     val c = jmsConnection();
     val url = redactedUrl(rkProp("rakun.jms.url").trim());
-    if (c != "" && rkJmsAlive(c)) return Health(status: "UP", details: "{\"url\":\"" + url + "\"}");
-    val reason = if (c == "") { "not connected" } else { "the STOMP connection closed" };
-    return Health(status: "DOWN", details: "{\"url\":\"" + url + "\",\"error\":\"" + reason + "\"}");
+    if (c != "" && rkJmsAlive(c))
+        return Health(status: "UP", details: "{\"url\":\"" + url + "\"}");
+    val reason = if (c == "")
+        "not connected"
+    else
+        "the STOMP connection closed";
+    return Health(
+        status: "DOWN",
+        details: "{\"url\":\"" + url + "\",\"error\":\"" + reason + "\"}",
+    );
 }

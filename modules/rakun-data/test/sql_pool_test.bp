@@ -10,18 +10,9 @@
 //// never the pool the next one reads.
 
 import {testing.asserts} from "std";
-import {io: {clock}} from "std";
+import {io.clock} from "std";
 import {async, async.Gate} from "std";
-import {
-    datasource.PooledDataSource,
-    datasource.PoolStats,
-    datasource.startDataSource,
-    datasource.poolStats,
-    datasource.rkPoolStats,
-    datasource.rkPoolKillSlot,
-    datasource.rkPoolSettle,
-    datasource.rkDataSleep,
-};
+import {datasource.PooledDataSource, datasource.PoolStats, datasource.startDataSource, datasource.poolStats, datasource.rkPoolStats, datasource.rkPoolKillSlot, datasource.rkPoolSettle, datasource.rkDataSleep};
 import {sql.params.Param, sql.params.param};
 import {sql.rows.Row, sql.rows.Rows};
 import {sql.template.SqlTemplate, sql.template.Tx, sql.template.sqlTemplate, sql.template.rkSqlSpawnBorrower};
@@ -94,7 +85,7 @@ fn busyAndWaiting(name: string) -> string {
         val _s = rkDataSleep(1);
         polls = polls + 1;
         s = poolStats(name);
-    };
+    }
     return s.busy.toString() + "|" + s.waiting.toString();
 }
 
@@ -113,7 +104,10 @@ test "pool: a checkout with an empty free list waits and then fails after connec
     val start = clock.monotonicMillis();
     val answers = await sql.transaction({ tx -> probeInside(sql) });
     val elapsed = clock.monotonicMillis() - start;
-    try asserts.contains(answers.join(""), "no connection available from datasource 'tiny' within 150 ms (pool size 1, all in use)");
+    try asserts.contains(
+        answers.join(""),
+        "no connection available from datasource 'tiny' within 150 ms (pool size 1, all in use)",
+    );
     assert elapsed >= 150;
 }
 
@@ -130,11 +124,13 @@ test "pool: rkPoolStats reports size, in-use and waiting" {
     val sql = sqlTemplate("watched");
     val held = async.newGate();
     val observed = async.newGate();
-    val answers = await async.runAll([
-        { -> holding(sql, held, observed) },
-        { -> borrowWhenHeld(sql, held) },
-        { -> observeWaiting("watched", held, observed) },
-    ]);
+    val answers = await async.runAll(
+        [
+            { -> holding(sql, held, observed) },
+            { -> borrowWhenHeld(sql, held) },
+            { -> observeWaiting("watched", held, observed) },
+        ],
+    );
     // The borrower waited, then got the connection once the transaction
     // ended: its statement succeeded (no error text).
     assert answers.join(",") == "held,,1|1", answers.join(",");
@@ -152,15 +148,25 @@ test "pool: a connection process killed while idle is restarted and the pool ret
     val free = rkPoolSettle("killed", 1000);
     assert free == 3;
     assert poolStats("killed").size == 3;
-    val _c = sqlTemplate("killed").update("CREATE TABLE after_kill (id int)", []);
-    assert sqlTemplate("killed").query("SELECT id FROM after_kill", []).rowCount() == 0;
+    val _c = sqlTemplate("killed").update(
+        "CREATE TABLE after_kill (id int)",
+        [],
+    );
+    assert sqlTemplate("killed")
+        .query("SELECT id FROM after_kill", [])
+        .rowCount()
+        == 0;
 }
 
 test "pool: a borrower that dies mid-query has its connection reclaimed and its transaction rolled back" {
     val _d = startDataSource("orphan", "ets:memory", 2, 500, "eager");
     val sql = sqlTemplate("orphan");
     val _c = sql.update("CREATE TABLE ledger (id int)", []);
-    val spawned = rkSqlSpawnBorrower("orphan", "INSERT INTO ledger (id) VALUES ($1)", ["9"]);
+    val spawned = rkSqlSpawnBorrower(
+        "orphan",
+        "INSERT INTO ledger (id) VALUES ($1)",
+        ["9"],
+    );
     assert spawned == 1;
     val free = rkPoolSettle("orphan", 1000);
     assert free == 2;

@@ -39,7 +39,11 @@ import {sql.rows.SqlOutcome, sql.rows.Row, sql.rows.Rows};
 // ── the host cells (`src/sidecars/rakun_sql.erl`) ────────────────────────────
 
 #[@External.Erlang("rakun_sql", "exec")]
-pub declare fn rkSqlExec(name: string, statement: string, values: string[]) -> SqlOutcome;
+pub declare fn rkSqlExec(
+    name: string,
+    statement: string,
+    values: string[],
+) -> SqlOutcome;
 
 #[@External.Erlang("rakun_sql", "tx_run")]
 pub declare fn rkSqlTxRun<T>(name: string, label: string, work: fn() -> T) -> T;
@@ -51,7 +55,11 @@ pub declare fn rkSqlTxOpen(name: string) -> bool;
 pub declare fn rkSqlWithRollback<T>(name: string, work: fn() -> T) -> T;
 
 #[@External.Erlang("rakun_sql", "spawn_borrower")]
-pub declare fn rkSqlSpawnBorrower(name: string, statement: string, values: string[]) -> i32;
+pub declare fn rkSqlSpawnBorrower(
+    name: string,
+    statement: string,
+    values: string[],
+) -> i32;
 
 #[@External.Erlang("rakun_sql", "drop_all")]
 pub declare fn rkSqlDropAll(name: string) -> i32;
@@ -74,7 +82,13 @@ pub declare fn rkSqlLogOff() -> i32;
 // ── one statement ────────────────────────────────────────────────────────────
 
 fn failedOutcome(reason: string) -> SqlOutcome {
-    return SqlOutcome(ok: false, error: reason, columns: [], rows: [], count: 0);
+    return SqlOutcome(
+        ok: false,
+        error: reason,
+        columns: [],
+        rows: [],
+        count: 0,
+    );
 }
 
 // Bind, log, run. A binding refusal never reaches the driver.
@@ -84,7 +98,7 @@ pub fn runStatement(name: string, sql: string, params: Param[]) -> SqlOutcome {
     if (bound.problem != "") return failedOutcome(bound.problem) else {
         val _l = rkSqlLog(sql + "  params=[" + paramsLine(params) + "]");
         return rkSqlExec(name, bound.sql, bound.values);
-    };
+    }
 }
 
 fn rowsOf(o: SqlOutcome) -> Rows {
@@ -99,17 +113,31 @@ fn raising(o: SqlOutcome) -> SqlOutcome {
 // `null` on no row, the row on one, a raise naming the statement on more.
 fn singleOf(o: SqlOutcome, sql: string) -> ?Row {
     val rows = rowsOf(raising(o));
-    if (rows.rowCount() > 1) @panic("rakun-data: single() expected at most one row and got " + rows.rowCount().toString() + " - statement: " + sql);
+    if (rows.rowCount() > 1)
+        @panic(
+            "rakun-data: single() expected at most one row and got "
+                + rows.rowCount().toString()
+                + " - statement: "
+                + sql,
+        );
     return rows.first();
 }
 
-pub fn tryQueryOn(name: string, sql: string, params: Param[]) -> @Result<Rows, string> {
+pub fn tryQueryOn(
+    name: string,
+    sql: string,
+    params: Param[],
+) -> @Result<Rows, string> {
     val o = runStatement(name, sql, params);
     if (o.ok == false) throw o.error;
     return rowsOf(o);
 }
 
-pub fn tryUpdateOn(name: string, sql: string, params: Param[]) -> @Result<i32, string> {
+pub fn tryUpdateOn(
+    name: string,
+    sql: string,
+    params: Param[],
+) -> @Result<i32, string> {
     val o = runStatement(name, sql, params);
     if (o.ok == false) throw o.error;
     return o.count;
@@ -117,7 +145,16 @@ pub fn tryUpdateOn(name: string, sql: string, params: Param[]) -> @Result<i32, s
 
 pub fn propagationProblem(propagation: string) -> string {
     val p = propagation.toUpper().replaceAll("-", "_");
-    return if (p == "REQUIRED") "" else if (p == "REQUIRES_NEW" || p == "NESTED") "rakun-data: transaction propagation " + p + " is not implemented - rakun-data ships REQUIRED only (a nested transaction joins the open one); REQUIRES_NEW and NESTED (savepoints) are refused rather than ignored" else "rakun-data: unknown transaction propagation '" + propagation + "' - rakun-data ships REQUIRED only";
+    return if (p == "REQUIRED")
+        ""
+    else if (p == "REQUIRES_NEW" || p == "NESTED")
+        "rakun-data: transaction propagation "
+            + p
+            + " is not implemented - rakun-data ships REQUIRED only (a nested transaction joins the open one); REQUIRES_NEW and NESTED (savepoints) are refused rather than ignored"
+    else
+        "rakun-data: unknown transaction propagation '"
+            + propagation
+            + "' - rakun-data ships REQUIRED only";
 }
 
 // ── the template ─────────────────────────────────────────────────────────────
@@ -143,18 +180,30 @@ pub type SqlTemplate(dataSourceName: string) {
     // also why this does not re-wrap (compiler finding, AGENTS.md; if methods
     // start wrapping, this becomes `return try …` or decision 119's
     // pass-through).
-    pub fn tryQuery(self: Self, sql: string, params: Param[]) -> @Result<Rows, string> {
+    pub fn tryQuery(
+        self: Self,
+        sql: string,
+        params: Param[],
+    ) -> @Result<Rows, string> {
         return tryQueryOn(self.dataSourceName, sql, params);
     }
 
-    pub fn tryUpdate(self: Self, sql: string, params: Param[]) -> @Result<i32, string> {
+    pub fn tryUpdate(
+        self: Self,
+        sql: string,
+        params: Param[],
+    ) -> @Result<i32, string> {
         return tryUpdateOn(self.dataSourceName, sql, params);
     }
 
     pub fn transaction<T>(self: Self, work: fn(tx: Tx) -> T) -> T {
         val _e = ensureDataSource(self.dataSourceName);
         val ds = self.dataSourceName;
-        return rkSqlTxRun(ds, "transaction", { -> work(Tx(dataSourceName: ds)) });
+        return rkSqlTxRun(
+            ds,
+            "transaction",
+            { -> work(Tx(dataSourceName: ds)) },
+        );
     }
 
     // A transaction that is ALWAYS rolled back: what a test wraps its body in
@@ -177,7 +226,11 @@ pub type SqlTemplate(dataSourceName: string) {
         return self.update(sql, params);
     }
 
-    pub fn singleAsync(self: Self, sql: string, params: Param[]) -> @Task<?Row> {
+    pub fn singleAsync(
+        self: Self,
+        sql: string,
+        params: Param[],
+    ) -> @Task<?Row> {
         return self.single(sql, params);
     }
 }

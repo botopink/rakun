@@ -21,7 +21,10 @@ import {tracing.rkMetricsSpanTake};
 pub declare fn rkMetricsOtlpMetrics(service: string) -> string;
 
 #[@External.Erlang("rakun_metrics", "otlp_traces_json")]
-pub declare fn rkMetricsOtlpTraces(service: string, spansJsonArray: string) -> string;
+pub declare fn rkMetricsOtlpTraces(
+    service: string,
+    spansJsonArray: string,
+) -> string;
 
 #[@External.Erlang("rakun_metrics", "otlp_start")]
 declare fn rkMetricsOtlpStart(stepMillis: i32, push: fn() -> i32) -> i32;
@@ -42,7 +45,11 @@ pub declare fn rkMetricsFailureCount() -> i32;
 pub declare fn rkMetricsStatsdLines() -> string;
 
 #[@External.Erlang("rakun_metrics", "statsd_send")]
-pub declare fn rkMetricsStatsdSend(host: string, port: i32, payload: string) -> i32;
+pub declare fn rkMetricsStatsdSend(
+    host: string,
+    port: i32,
+    payload: string,
+) -> i32;
 
 #[@External.Erlang("""(fun(__S) -> try binary_to_integer(__S) catch _:_ -> 0 end end)($0)""")]
 declare fn toInt(s: string) -> i32;
@@ -54,13 +61,21 @@ fn serviceName() -> string {
 
 // The client a push uses: front 74's bundle for an `https` endpoint.
 pub fn otlpClient(endpoint: string) -> RestClient {
-    val b = RestClient.builder().defaultHeader("content-type", "application/json");
+    val b = RestClient
+        .builder()
+        .defaultHeader("content-type", "application/json");
     val bundle = rkProp("rakun.metrics.export.otlp.ssl-bundle");
-    return if (endpoint.startsWith("https://") && bundle != "") b.sslBundle(bundle).build() else b.build();
+    return if (endpoint.startsWith("https://") && bundle != "")
+        b.sslBundle(bundle).build()
+    else
+        b.build();
 }
 
 fn trimmed(endpoint: string) -> string {
-    return if (endpoint.endsWith("/")) endpoint.slice(0, endpoint.length() - 1) else endpoint;
+    return if (endpoint.endsWith("/"))
+        endpoint.slice(0, endpoint.length() - 1)
+    else
+        endpoint;
 }
 
 // One push: the metrics body, then the buffered spans when there are any.
@@ -70,9 +85,19 @@ pub fn otlpPushOnce() -> i32 {
     if (endpoint == "") return 0;
     val _quiet = rkSpanSetFlags("00");
     val client = otlpClient(endpoint);
-    val m: ClientResponse = client.post(endpoint + "/v1/metrics", rkMetricsOtlpMetrics(serviceName())).retrieve();
+    val m: ClientResponse = client
+        .post(endpoint + "/v1/metrics", rkMetricsOtlpMetrics(serviceName()))
+        .retrieve();
     val spans = rkMetricsSpanTake();
-    val t: ClientResponse = if (spans == "[]") ClientResponse(status: 200, body: "", headersJson: "{}") else client.post(endpoint + "/v1/traces", rkMetricsOtlpTraces(serviceName(), spans)).retrieve();
+    val t: ClientResponse = if (spans == "[]")
+        ClientResponse(status: 200, body: "", headersJson: "{}")
+    else
+        client
+            .post(
+                endpoint + "/v1/traces",
+                rkMetricsOtlpTraces(serviceName(), spans),
+            )
+            .retrieve();
     if (m.isOk() && t.isOk()) return 0;
     val why = if (m.isOk()) t.body else m.body;
     val _n = rkMetricsFailureNote(endpoint + ": " + why);
@@ -87,7 +112,7 @@ pub fn startOtlpExport() -> bool {
     if (step <= 0 || endpoint == "") {
         val _s = rkMetricsOtlpStop();
         return false;
-    };
+    }
     val _p = rkMetricsOtlpStart(step, { -> otlpPushOnce() });
     return rkMetricsOtlpRunning();
 }

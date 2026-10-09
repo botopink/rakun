@@ -50,10 +50,16 @@ pub fn transactional(comptime decl: @Decl) {
         m.annotations.forEach({ a ->
             val p = if (a.name == "noTransaction") true else plain;
             plain = p;
-            val q = if (a.name == "propagation") a.args.join("").replaceAll("\"", "").toUpper() else prop;
+            val q = if (a.name == "propagation")
+                a.args.join("").replaceAll("\"", "").toUpper()
+            else
+                prop;
             prop = q;
         });
-        val badProp = if (prop != "REQUIRED" && refused == "") decl.name + "." + m.name + " asks for propagation " + prop else refused;
+        val badProp = if (prop != "REQUIRED" && refused == "")
+            decl.name + "." + m.name + " asks for propagation " + prop
+        else
+            refused;
         refused = badProp;
         var params: Array<string> = [];
         var args: Array<string> = [];
@@ -61,34 +67,88 @@ pub fn transactional(comptime decl: @Decl) {
             if (p.name != "self") {
                 params.push(p.name + ": " + p.typeName);
                 args.push(p.name);
-            };
+            }
         });
         val ret = m.returnType;
         val call = "self.inner." + m.name + "(" + args.join(", ") + ")";
         val label = decl.name + "." + m.name;
-        val head = if (params.length > 0) "pub fn " + m.name + "(self: Self, " + params.join(", ") + ")" else "pub fn " + m.name + "(self: Self)";
+        val head = if (params.length > 0)
+            "pub fn " + m.name + "(self: Self, " + params.join(", ") + ")"
+        else
+            "pub fn " + m.name + "(self: Self)";
         val sig = if (ret != "") head + " -> " + ret else head;
-        val wrapped = "rkTxRun(\"" + label + "\", \"required\", { -> " + call + " })";
-        val voidWrapped = "val _tx = rkTxRun(\"" + label + "\", \"required\", { -> " + call + "; 0 });";
+        val wrapped = "rkTxRun(\""
+            + label
+            + "\", \"required\", { -> "
+            + call
+            + " })";
+        val voidWrapped = "val _tx = rkTxRun(\""
+            + label
+            + "\", \"required\", { -> "
+            + call
+            + "; 0 });";
         val body = if (plain) {
             if (ret != "") "return " + call + ";" else call + ";";
-        } else {
-            if (ret != "") "return " + wrapped + ";" else voidWrapped;
-        };
+        } else if (ret != "") "return " + wrapped + ";" else voidWrapped;
         methods.push(sig + " {\n        " + body + "\n    }");
     });
-    val make = "pub fn make() -> " + decl.name + "Tx {\n        return rkSingleton(\"" + decl.name + "Tx\", { -> " + decl.name + "Tx(inner: " + decl.name + ".make()) });\n    }";
-    @emit("pub type " + decl.name + "Tx(inner: " + decl.name + ") {\n    " + make + "\n\n    " + methods.join("\n\n    ") + "\n}");
-    @emit("val __rkTx_" + decl.name + " = rkRegisterBean(\"" + decl.name + "Tx\", \"\", \"singleton\", false, false, \"" + decl.name + "\", { -> " + decl.name + "Tx.make() });");
-    if (decl.kind != DeclKind.Type) decl.fail("#[transactional] must annotate a type - a decorator cannot wrap a method body, so the transaction lives on the <Type>Tx proxy the type-level marker emits");
-    if (decl.variants.length > 0) decl.fail("#[transactional] must annotate a type with fields, not an enum");
-    if (refused != "") decl.fail("#[transactional]: " + refused + " - only REQUIRED is implemented (a nested call joins the open transaction); REQUIRES_NEW and NESTED (savepoints) are not implemented and are refused rather than ignored");
+    val make = "pub fn make() -> "
+        + decl.name
+        + "Tx {\n        return rkSingleton(\""
+        + decl.name
+        + "Tx\", { -> "
+        + decl.name
+        + "Tx(inner: "
+        + decl.name
+        + ".make()) });\n    }";
+    @emit(
+        "pub type "
+            + decl.name
+            + "Tx(inner: "
+            + decl.name
+            + ") {\n    "
+            + make
+            + "\n\n    "
+            + methods.join("\n\n    ")
+            + "\n}",
+    );
+    @emit(
+        "val __rkTx_"
+            + decl.name
+            + " = rkRegisterBean(\""
+            + decl.name
+            + "Tx\", \"\", \"singleton\", false, false, \""
+            + decl.name
+            + "\", { -> "
+            + decl.name
+            + "Tx.make() });",
+    );
+    if (decl.kind != DeclKind.Type)
+        decl.fail(
+            "#[transactional] must annotate a type - a decorator cannot wrap a method body, so the transaction lives on the <Type>Tx proxy the type-level marker emits",
+        );
+    if (decl.variants.length > 0)
+        decl.fail(
+            "#[transactional] must annotate a type with fields, not an enum",
+        );
+    if (refused != "")
+        decl.fail(
+            "#[transactional]: "
+                + refused
+                + " - only REQUIRED is implemented (a nested call joins the open transaction); REQUIRES_NEW and NESTED (savepoints) are not implemented and are refused rather than ignored",
+        );
 }
 
 pub fn noTransaction(comptime decl: @Decl) {
-    if (decl.kind != DeclKind.Method) decl.fail("#[noTransaction] must annotate a method of a #[transactional] type");
+    if (decl.kind != DeclKind.Method)
+        decl.fail(
+            "#[noTransaction] must annotate a method of a #[transactional] type",
+        );
 }
 
 pub fn propagation(comptime decl: @Decl, comptime name: string) {
-    if (decl.kind != DeclKind.Method) decl.fail("#[propagation] must annotate a method of a #[transactional] type");
+    if (decl.kind != DeclKind.Method)
+        decl.fail(
+            "#[propagation] must annotate a method of a #[transactional] type",
+        );
 }

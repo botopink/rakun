@@ -29,15 +29,7 @@ import {Request, Response, listenersFor} from "rakun";
 import {rkRegisterListener} from "rakun/events";
 import {WebRequest, Chain, registerFilter, orderMetrics, chainNames} from "rakun-web";
 import {json} from "std";
-import {
-    EndpointResponse,
-    Span,
-    startSpan,
-    endSpan,
-    continueTrace,
-    rkSpanClear,
-    rkRegisterEndpoint,
-} from "rakun";
+import {EndpointResponse, Span, startSpan, endSpan, continueTrace, rkSpanClear, rkRegisterEndpoint} from "rakun";
 
 #[@External.Erlang("rakun_actuator", "run_instrumentation")]
 pub declare fn rkActuatorRunInstrumentation() -> string;
@@ -72,12 +64,17 @@ pub type StartupStep(
 pub fn startupSteps() -> StartupStep[] {
     var out: StartupStep[] = [];
     val wire: string = rkActuatorSteps();
-    if (wire != "") {
+    if (wire != "")
         for (wire.split("\n")) { line ->
             val f: string[] = line.split("\t");
-            out.push(StartupStep(step: f.at(0) ?? "", startedAtMillis: f.at(1) ?? "", durationMillis: f.at(2) ?? ""));
-        };
-    };
+            out.push(
+                StartupStep(
+                    step: f.at(0) ?? "",
+                    startedAtMillis: f.at(1) ?? "",
+                    durationMillis: f.at(2) ?? "",
+                ),
+            );
+        }
     return out;
 }
 
@@ -95,21 +92,46 @@ pub fn installBootTiming() -> i32 {
     var mine = false;
     for (listenersFor("ApplicationStarting")) { l ->
         if (l.owner == "rakun-actuator") mine = true;
-    };
+    }
     if (mine) return 0;
-    val _a = rkRegisterListener("ApplicationStarting", "rakun-actuator", { ev -> onStarting() });
-    val _b = rkRegisterListener("ApplicationPrepared", "rakun-actuator", { ev -> rkActuatorBootMark("context.prepare") });
-    val _c = rkRegisterListener("ApplicationStarted", "rakun-actuator", { ev -> rkActuatorBootMark("eager.init") });
-    val _d = rkRegisterListener("ApplicationReady", "rakun-actuator", { ev -> rkActuatorBootMark("application.ready") });
+    val _a = rkRegisterListener(
+        "ApplicationStarting",
+        "rakun-actuator",
+        { ev -> onStarting() },
+    );
+    val _b = rkRegisterListener(
+        "ApplicationPrepared",
+        "rakun-actuator",
+        { ev -> rkActuatorBootMark("context.prepare") },
+    );
+    val _c = rkRegisterListener(
+        "ApplicationStarted",
+        "rakun-actuator",
+        { ev -> rkActuatorBootMark("eager.init") },
+    );
+    val _d = rkRegisterListener(
+        "ApplicationReady",
+        "rakun-actuator",
+        { ev -> rkActuatorBootMark("application.ready") },
+    );
     return 1;
 }
 
 pub fn startupRead(req: Request) -> EndpointResponse {
-    return EndpointResponse(status: 200, contentType: "application/json", body: rkActuatorStepsJson());
+    return EndpointResponse(
+        status: 200,
+        contentType: "application/json",
+        body: rkActuatorStepsJson(),
+    );
 }
 
 pub fn registerStartupEndpoint() -> i32 {
-    return rkRegisterEndpoint("startup", "rakun-actuator", "read", { req -> startupRead(req) });
+    return rkRegisterEndpoint(
+        "startup",
+        "rakun-actuator",
+        "read",
+        { req -> startupRead(req) },
+    );
 }
 
 // ── the http.server.request span ────────────────────────────────────────────
@@ -117,7 +139,9 @@ pub fn registerStartupEndpoint() -> i32 {
 pub fn spanEntry(req: WebRequest, chain: Chain) -> Response {
     val _c = rkSpanClear();
     val _t = continueTrace(req.header("traceparent"));
-    val attributes = json.object([#("method", json.quote(req.method)), #("path", json.quote(req.path))]);
+    val attributes = json.object(
+        [#("method", json.quote(req.method)), #("path", json.quote(req.path))],
+    );
     val span: Span = startSpan("http.server.request", attributes);
     val res: Response = chain.next(req);
     val _e = endSpan(span, res.status.toString());
@@ -131,5 +155,9 @@ pub fn spanEntryName() -> string {
 
 pub fn installSpanEntry() -> i32 {
     if (chainNames().indexOf(spanEntryName()) >= 0) return 0;
-    return registerFilter(spanEntryName(), orderMetrics(), { req, chain -> spanEntry(req, chain) });
+    return registerFilter(
+        spanEntryName(),
+        orderMetrics(),
+        { req, chain -> spanEntry(req, chain) },
+    );
 }

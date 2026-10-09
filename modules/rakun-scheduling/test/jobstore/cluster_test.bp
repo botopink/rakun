@@ -8,21 +8,22 @@
 import {async} from "std";
 import {rkSetProp} from "rakun";
 import {startDataSource, param, Rows, sqlTemplate} from "rakun-data";
-import {
-    jobstore.store.Trigger, jobstore.store.MisfirePolicy, jobstore.store.installJobStore, jobstore.store.registerTrigger, jobstore.store.registerJobHandler, jobstore.store.jobStatusOn,
-    jobstore.store.setJobClock, jobstore.store.advanceJobClock, jobstore.store.clearJobClock, jobstore.store.instantOf, jobstore.store.jobClock,
-};
+import {jobstore.store.Trigger, jobstore.store.MisfirePolicy, jobstore.store.installJobStore, jobstore.store.registerTrigger, jobstore.store.registerJobHandler, jobstore.store.jobStatusOn, jobstore.store.setJobClock, jobstore.store.advanceJobClock, jobstore.store.clearJobClock, jobstore.store.instantOf, jobstore.store.jobClock};
 import {cron.rkI64};
 import {jobstore.scheduler.tickOn, jobstore.scheduler.historyOf, jobstore.scheduler.executionsOf, jobstore.scheduler.pruneHistory, jobstore.scheduler.killAfterAcquire, jobstore.scheduler.jitterMs, jobstore.scheduler.jobLog, jobstore.scheduler.startJobScheduler, jobstore.scheduler.stopJobScheduler};
 
 #[@External.Erlang("""(fun(__N) -> persistent_term:put({rakun_jt_count, __N}, persistent_term:get({rakun_jt_count, __N}, 0) + 1), persistent_term:get({rakun_jt_count, __N}) end)($0)""")]
 declare fn bump(name: string) -> i32;
+
 #[@External.Erlang("""(fun(__N) -> persistent_term:get({rakun_jt_count, __N}, 0) end)($0)""")]
 declare fn counted(name: string) -> i32;
+
 #[@External.Erlang("""(fun(__F) -> __Me = self(), {__Pid, __Mon} = spawn_monitor(fun() -> __F() end), receive {'DOWN', __Mon, process, __Pid, __R} -> case __R of killed -> <<"killed">>; normal -> <<"normal">>; _ -> <<"crashed">> end after 5000 -> <<"timeout">> end end)($0)""")]
 declare fn inProcess(work: fn() -> i32) -> string;
+
 #[@External.Erlang("""(fun(__N) -> persistent_term:put({rakun_jt_flag, __N}, true), 0 end)($0)""")]
 declare fn raiseFlag(name: string) -> i32;
+
 #[@External.Erlang("""(fun(__N) -> persistent_term:get({rakun_jt_flag, __N}, false) end)($0)""")]
 declare fn flagged(name: string) -> bool;
 // Polls `probe` every 5 ms of wall time until it holds (true) or `ms` passed
@@ -39,13 +40,35 @@ fn fresh(name: string) -> string {
 }
 
 fn done() -> i32 {
-    for (["datasource", "lease-ms", "fire-all-ceiling", "interval-ms", "misfire-threshold-ms"]) { k -> val _u = rkSetProp("rakun.scheduling.jobstore." + k, ""); };
+    for ([
+        "datasource",
+        "lease-ms",
+        "fire-all-ceiling",
+        "interval-ms",
+        "misfire-threshold-ms",
+    ]) { k ->
+        val _u = rkSetProp("rakun.scheduling.jobstore." + k, "");
+    }
     val _c = clearJobClock();
     return 0;
 }
 
-fn trig(name: string, job: string, misfire: MisfirePolicy, retries: i32) -> Trigger {
-    return Trigger(name: name, job: job, cron: "0 0 3 * * *", startAt: rkI64(0), endAt: rkI64(0), misfire: misfire, retries: retries, backoffMs: 1);
+fn trig(
+    name: string,
+    job: string,
+    misfire: MisfirePolicy,
+    retries: i32,
+) -> Trigger {
+    return Trigger(
+        name: name,
+        job: job,
+        cron: "0 0 3 * * *",
+        startAt: rkI64(0),
+        endAt: rkI64(0),
+        misfire: misfire,
+        retries: retries,
+        backoffMs: 1,
+    );
 }
 
 fn counting(job: string) -> i32 {
@@ -53,7 +76,10 @@ fn counting(job: string) -> i32 {
 }
 
 fn leaseUntil(ds: string, trig: string) -> i64 {
-    val rows: Rows = sqlTemplate(ds).query("SELECT lease_until FROM rakun_job_trigger WHERE name = :n", [param("n", trig)]);
+    val rows: Rows = sqlTemplate(ds).query(
+        "SELECT lease_until FROM rakun_job_trigger WHERE name = :n",
+        [param("n", trig)],
+    );
     return rows.toList().map({ r -> r.long("lease_until") }).at(0) ?? rkI64(0);
 }
 
@@ -68,18 +94,42 @@ test "jobstore: three nodes with one trigger due fire it once, and the winner is
     val _h = counting("jc1");
     val _t = registerTrigger(trig("jc1", "jc1", MisfirePolicy.FireNow, 0), "");
     val _c = setJobClock(instantOf("2026-09-20T03:00:01Z"));
-    val fired = await async.runAll([
-        { -> async { tickOn(ds, "node-a") } },
-        { -> async { tickOn(ds, "node-b") } },
-        { -> async { tickOn(ds, "node-c") } },
-    ]);
+    val fired = await async.runAll(
+        [
+            { ->
+                async {
+                    tickOn(ds, "node-a");
+                };
+            },
+            { ->
+                async {
+                    tickOn(ds, "node-b");
+                };
+            },
+            { ->
+                async {
+                    tickOn(ds, "node-c");
+                };
+            },
+        ],
+    );
     val total = fired.fold(0, { acc, n -> acc + n });
     val runs = executionsOf(ds, "jc1");
-    val winner = if ((fired.at(0) ?? 0) == 1) "node-a" else if ((fired.at(1) ?? 0) == 1) "node-b" else "node-c";
+    val winner = if ((fired.at(0) ?? 0) == 1)
+        "node-a"
+    else if ((fired.at(1) ?? 0) == 1)
+        "node-b"
+    else
+        "node-c";
     val state = jobStatusOn(ds, "jc1");
     val _z = done();
-    assert total == 1 && counted("jc1") == 1 && runs.length == 1 && state == "waiting", total.toString();
-    assert (historyOf(ds, "jc1").at(0) ?? "").contains("owner=" + winner), historyOf(ds, "jc1").join(";");
+    assert total == 1
+        && counted("jc1") == 1
+        && runs.length == 1
+        && state == "waiting", total.toString();
+    assert (historyOf(ds, "jc1").at(0) ?? "").contains(
+        "owner=" + winner,
+    ), historyOf(ds, "jc1").join(";");
 }
 
 test "jobstore: a node killed after acquiring is taken over after its lease, and the takeover is recorded" {
@@ -95,8 +145,16 @@ test "jobstore: a node killed after acquiring is taken over after its lease, and
     val _a = advanceJobClock(61000);
     val late = tickOn(ds, "survivor");
     val _z = done();
-    assert how == "killed" && held == "acquired" && early == 0 && late == 1 && counted("jc2") == 1, how + " " + held;
-    assert outcomes(ds, "jc2") == "takeover,success" && (historyOf(ds, "jc2").at(0) ?? "").contains("from dying"), historyOf(ds, "jc2").join(";");
+    assert how == "killed"
+        && held == "acquired"
+        && early == 0
+        && late == 1
+        && counted("jc2") == 1, how + " " + held;
+    assert outcomes(ds, "jc2") == "takeover,success"
+        && (historyOf(ds, "jc2").at(0) ?? "").contains("from dying"), historyOf(
+        ds,
+        "jc2",
+    ).join(";");
 }
 
 test "jobstore: a handler that outlives its lease renews it and is not taken over" {
@@ -108,24 +166,45 @@ test "jobstore: a handler that outlives its lease renews it and is not taken ove
     val _l = rkSetProp("rakun.scheduling.jobstore.lease-ms", "150");
     val _h = registerJobHandler("jc3", "", { data ->
         val _r = raiseFlag("jc3-running");
-        if (waitUntil(10000, { -> flagged("jc3-release") }) == false) @panic("jc3: the other node never released the handler");
-        "slow"
+        if (waitUntil(10000, { -> flagged("jc3-release") }) == false)
+            @panic("jc3: the other node never released the handler");
+        "slow";
     });
     val _t = registerTrigger(trig("jc3", "jc3", MisfirePolicy.FireNow, 0), "");
     val _c = setJobClock(instantOf("2026-09-20T03:00:01Z"));
-    val results = await async.runAll([
-        { -> async { tickOn(ds, "slow-node") } },
-        { -> async {
-            val running = waitUntil(10000, { -> flagged("jc3-running") });
-            val now = advanceJobClock(1000);
-            val renewed = running && waitUntil(10000, { -> leaseUntil(ds, "jc3") > now });
-            val other = if (renewed) tickOn(ds, "other") else if (running) -2 else -1;
-            val _g = raiseFlag("jc3-release");
-            other
-        } },
-    ]);
+    val results = await async.runAll(
+        [
+            { ->
+                async {
+                    tickOn(ds, "slow-node");
+                };
+            },
+            { ->
+                async {
+                    val running = waitUntil(
+                        10000,
+                        { -> flagged("jc3-running") },
+                    );
+                    val now = advanceJobClock(1000);
+                    val renewed = running
+                        && waitUntil(10000, { -> leaseUntil(ds, "jc3") > now });
+                    val other = if (renewed)
+                        tickOn(ds, "other")
+                    else if (running)
+                        -2
+                    else
+                        -1;
+                    val _g = raiseFlag("jc3-release");
+                    other;
+                };
+            },
+        ],
+    );
     val _z = done();
-    assert results.join(",") == "1,0" && outcomes(ds, "jc3") == "success", results.join(",") + " " + outcomes(ds, "jc3");
+    assert results.join(",") == "1,0"
+        && outcomes(ds, "jc3") == "success", results.join(",")
+        + " "
+        + outcomes(ds, "jc3");
 }
 
 test "jobstore: ticks are jittered per node, within a quarter of the interval" {
@@ -139,21 +218,31 @@ test "jobstore: ticks are jittered per node, within a quarter of the interval" {
 test "jobstore: an unreachable store logs once per interval, and the node recovers without a restart" {
     val _i = rkSetProp("rakun.scheduling.jobstore.interval-ms", "1000");
     val _c = setJobClock(instantOf("2026-09-20T00:00:00Z"));
-    val before = jobLog().filter({ l -> l.contains("node-u cannot reach") }).length;
+    val before = jobLog().filter(
+        { l -> l.contains("node-u cannot reach") },
+    ).length;
     val _1 = tickOn("jc-missing", "node-u");
     val _2 = tickOn("jc-missing", "node-u");
     val _a = advanceJobClock(400);
     val _3 = tickOn("jc-missing", "node-u");
-    val mid = jobLog().filter({ l -> l.contains("node-u cannot reach") }).length;
+    val mid = jobLog().filter(
+        { l -> l.contains("node-u cannot reach") },
+    ).length;
     val _b = advanceJobClock(700);
     val _4 = tickOn("jc-missing", "node-u");
-    val after = jobLog().filter({ l -> l.contains("node-u cannot reach") }).length;
+    val after = jobLog().filter(
+        { l -> l.contains("node-u cannot reach") },
+    ).length;
     val _s = startDataSource("jc-missing", "ets:memory", 2, 5000, "eager");
     val _j = installJobStore("jc-missing");
     val _5 = tickOn("jc-missing", "node-u");
-    val recovered = jobLog().filter({ l -> l.contains("node-u reaches the job store again") }).length;
+    val recovered = jobLog().filter(
+        { l -> l.contains("node-u reaches the job store again") },
+    ).length;
     val _z = done();
-    assert mid - before == 1 && after - before == 2 && recovered == 1, mid.toString() + "/" + after.toString();
+    assert mid - before == 1
+        && after - before == 2
+        && recovered == 1, mid.toString() + "/" + after.toString();
 }
 
 test "jobstore: the scheduler loop ticks on its own and stops" {
@@ -163,10 +252,15 @@ test "jobstore: the scheduler loop ticks on its own and stops" {
     val _t = registerTrigger(trig("jc6", "jc6", MisfirePolicy.FireNow, 0), "");
     val _c = setJobClock(instantOf("2026-09-20T03:00:01Z"));
     val _s = startJobScheduler(ds, "looper");
-    val ticked = waitUntil(10000, { -> counted("jc6") >= 1 && jobStatusOn(ds, "jc6") == "waiting" });
+    val ticked = waitUntil(
+        10000,
+        { -> counted("jc6") >= 1 && jobStatusOn(ds, "jc6") == "waiting" },
+    );
     val stopped = stopJobScheduler("looper");
     val _z = done();
-    assert ticked && stopped == 1 && counted("jc6") == 1, counted("jc6").toString();
+    assert ticked && stopped == 1 && counted("jc6") == 1, counted(
+        "jc6",
+    ).toString();
 }
 
 // ── step 4 ──────────────────────────────────────────────────────────────────
@@ -180,13 +274,18 @@ test "jobstore: FireNow on a missed window fires once and resumes the schedule" 
     val _d = setJobClock(instantOf("2026-09-24T03:00:01Z"));
     val m = tickOn(ds, "n");
     val _z = done();
-    assert n == 1 && m == 1 && counted("jm1") == 2, historyOf(ds, "jm1").join(";");
+    assert n == 1 && m == 1 && counted("jm1") == 2, historyOf(ds, "jm1").join(
+        ";",
+    );
 }
 
 test "jobstore: SkipToNext fires nothing for missed windows and fires at the next one" {
     val ds = fresh("jm2");
     val _h = counting("jm2");
-    val _t = registerTrigger(trig("jm2", "jm2", MisfirePolicy.SkipToNext, 0), "");
+    val _t = registerTrigger(
+        trig("jm2", "jm2", MisfirePolicy.SkipToNext, 0),
+        "",
+    );
     val _c = setJobClock(instantOf("2026-09-23T03:00:01Z"));
     val n = tickOn(ds, "n");
     val _e = setJobClock(instantOf("2026-09-23T12:00:00Z"));
@@ -194,7 +293,14 @@ test "jobstore: SkipToNext fires nothing for missed windows and fires at the nex
     val _d = setJobClock(instantOf("2026-09-24T03:00:01Z"));
     val m = tickOn(ds, "n");
     val _z = done();
-    assert n == 0 && early == 0 && m == 1 && counted("jm2") == 1 && outcomes(ds, "jm2") == "misfire-skipped,success", outcomes(ds, "jm2");
+    assert n == 0
+        && early == 0
+        && m == 1
+        && counted("jm2") == 1
+        && outcomes(ds, "jm2") == "misfire-skipped,success", outcomes(
+        ds,
+        "jm2",
+    );
 }
 
 test "jobstore: FireAll over three missed windows fires three times, in order" {
@@ -205,7 +311,10 @@ test "jobstore: FireAll over three missed windows fires three times, in order" {
     val n = tickOn(ds, "n");
     val hist = historyOf(ds, "jm3");
     val _z = done();
-    assert n == 3 && (hist.at(0) ?? "").contains("2026-09-20") && (hist.at(1) ?? "").contains("2026-09-21") && (hist.at(2) ?? "").contains("2026-09-22"), hist.join(";");
+    assert n == 3
+        && (hist.at(0) ?? "").contains("2026-09-20")
+        && (hist.at(1) ?? "").contains("2026-09-21")
+        && (hist.at(2) ?? "").contains("2026-09-22"), hist.join(";");
 }
 
 test "jobstore: FireAll past its ceiling stops there and records how many windows it skipped" {
@@ -217,14 +326,24 @@ test "jobstore: FireAll past its ceiling stops there and records how many window
     val n = tickOn(ds, "n");
     val hist = historyOf(ds, "jm4");
     val _z = done();
-    assert n == 2 && outcomes(ds, "jm4") == "error,success,success" && (hist.at(0) ?? "").contains("FireAll ceiling 2 reached - 3 missed windows skipped"), hist.join(";");
+    assert n == 2
+        && outcomes(ds, "jm4") == "error,success,success"
+        && (hist.at(0) ?? "").contains(
+            "FireAll ceiling 2 reached - 3 missed windows skipped",
+        ), hist.join(";");
 }
 
 test "jobstore: the misfire policy is the trigger's own - two triggers of one job differ" {
     val ds = fresh("jm5");
     val _h = counting("jm5");
-    val _a = registerTrigger(trig("jm5-all", "jm5", MisfirePolicy.FireAll, 0), "");
-    val _b = registerTrigger(trig("jm5-skip", "jm5", MisfirePolicy.SkipToNext, 0), "");
+    val _a = registerTrigger(
+        trig("jm5-all", "jm5", MisfirePolicy.FireAll, 0),
+        "",
+    );
+    val _b = registerTrigger(
+        trig("jm5-skip", "jm5", MisfirePolicy.SkipToNext, 0),
+        "",
+    );
     val _c = setJobClock(instantOf("2026-09-21T03:00:01Z"));
     val n = tickOn(ds, "n");
     val _z = done();
@@ -238,7 +357,7 @@ test "jobstore: a raising handler is retried to its ceiling, then failed with th
     val _h = registerJobHandler("jr1", "", { data ->
         val n = bump("jr1");
         if (n <= 3) @panic("ledger locked");
-        "ok"
+        "ok";
     });
     val _t = registerTrigger(trig("jr1", "jr1", MisfirePolicy.FireNow, 2), "");
     val _c = setJobClock(instantOf("2026-09-20T03:00:01Z"));
@@ -249,7 +368,9 @@ test "jobstore: a raising handler is retried to its ceiling, then failed with th
     val _2 = tickOn(ds, "n");
     val hist = historyOf(ds, "jr1");
     val _z = done();
-    assert first == "failed,failed,failed" && state == "waiting" && (hist.at(2) ?? "").contains("attempt=3 reason=ledger locked"), first;
+    assert first == "failed,failed,failed"
+        && state == "waiting"
+        && (hist.at(2) ?? "").contains("attempt=3 reason=ledger locked"), first;
     assert outcomes(ds, "jr1") == "failed,failed,failed,success";
 }
 
@@ -258,13 +379,16 @@ test "jobstore: retries stop when the next window is due - no retry storm" {
     val _h = registerJobHandler("jr2", "", { data ->
         val _a = advanceJobClock(12 * 3600000);
         if (true) @panic("slow failure");
-        "never"
+        "never";
     });
     val _t = registerTrigger(trig("jr2", "jr2", MisfirePolicy.FireNow, 5), "");
     val _c = setJobClock(instantOf("2026-09-20T03:00:01Z"));
     val _1 = tickOn(ds, "n");
     val _z = done();
-    assert outcomes(ds, "jr2") == "failed,failed,abandoned", outcomes(ds, "jr2");
+    assert outcomes(ds, "jr2") == "failed,failed,abandoned", outcomes(
+        ds,
+        "jr2",
+    );
 }
 
 test "jobstore: every execution has a history row with node, start, end and outcome, pruned by retention in bounded passes" {
@@ -274,10 +398,15 @@ test "jobstore: every execution has a history row with node, start, end and outc
     val _c = setJobClock(instantOf("2026-09-22T03:00:01Z"));
     val _1 = tickOn(ds, "node-h");
     val runs = executionsOf(ds, "jr3");
-    val complete = runs.filter({ e -> e.node == "node-h" && e.started > rkI64(0) && e.ended >= e.started && e.outcome == "success" }).length;
+    val complete = runs.filter(
+        { e -> e.node == "node-h" && e.started > rkI64(0) && e.ended >= e.started && e.outcome == "success" },
+    ).length;
     val _a = advanceJobClock(10000);
     val p1 = pruneHistory(ds, 5000, 2);
     val p2 = pruneHistory(ds, 5000, 2);
     val _z = done();
-    assert complete == 3 && p1 == 2 && p2 == 1 && executionsOf(ds, "jr3").length == 0;
+    assert complete == 3
+        && p1 == 2
+        && p2 == 1
+        && executionsOf(ds, "jr3").length == 0;
 }

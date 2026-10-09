@@ -10,7 +10,9 @@ import {reliability.dispatch.Delivery, reliability.dispatch.deliveryOf, reliabil
 
 fn clean() -> i32 {
     val _s = stopMessaging();
-    for (["amqp", "kafka", "redis", "stream"]) { a -> val _t = rkSetProp("rakun.messaging." + a + ".transport", "memory"); };
+    for (["amqp", "kafka", "redis", "stream"]) { a ->
+        val _t = rkSetProp("rakun.messaging." + a + ".transport", "memory");
+    }
     val _r = resetReliability();
     return resetMessaging();
 }
@@ -26,12 +28,26 @@ fn fast(name: string, attempts: string) -> i32 {
 }
 
 fn unset(name: string) -> i32 {
-    for (["retry.initial-interval", "retry.max-interval", "retry.max-attempts", "dead-letter"]) { k -> val _u = set(name, k, ""); };
+    for ([
+        "retry.initial-interval",
+        "retry.max-interval",
+        "retry.max-attempts",
+        "dead-letter",
+    ]) { k ->
+        val _u = set(name, k, "");
+    }
     return 0;
 }
 
 fn msg(payload: string) -> Message {
-    return Message(broker: "amqp", destination: "q", key: "", payload: payload, headersJson: "{}", offset: rkMsgWide(-1));
+    return Message(
+        broker: "amqp",
+        destination: "q",
+        key: "",
+        payload: payload,
+        headersJson: "{}",
+        offset: rkMsgWide(-1),
+    );
 }
 
 fn record(tag: string, d: Delivery) -> i32 {
@@ -53,7 +69,7 @@ test "attempt: a redelivery carries x-rakun-attempt one higher than the failed d
     val _f = fast("ra", "3");
     val _l = reliableListener("ra", "amqp", "ra", "", { d ->
         val _r = record("ra", d);
-        if (attemptOf(d) < 2) Outcome.Retry(reason: "busy") else Outcome.Done
+        if (attemptOf(d) < 2) Outcome.Retry(reason: "busy") else Outcome.Done;
     });
     val _s = startReliability();
     val _b = startMessaging();
@@ -64,7 +80,13 @@ test "attempt: a redelivery carries x-rakun-attempt one higher than the failed d
     val cnt0 = rkMsgCount("ra:order-1@1");
     val cnt1 = rkMsgCount("ra:order-1@2");
     val _z = clean();
-    assert both && cnt0 == 1 && sent == 2, both.toString() + " " + cnt0.toString() + " " + cnt1.toString() + " " + sent.toString();
+    assert both && cnt0 == 1 && sent == 2, both.toString()
+        + " "
+        + cnt0.toString()
+        + " "
+        + cnt1.toString()
+        + " "
+        + sent.toString();
 }
 
 test "attempt: the count survives killing the consumers between deliveries" {
@@ -74,10 +96,12 @@ test "attempt: the count survives killing the consumers between deliveries" {
     val _l = reliableListener("rk", "amqp", "rk", "", { d ->
         val _r = record("rk", d);
         val n = attemptOf(d);
-        if (n == 2) {
-            val _w = rkMsgWaitUntil(5000, { -> rkProp("test.rk.release") == "1" });
-        };
-        if (n < 3) Outcome.Retry(reason: "busy") else Outcome.Done
+        if (n == 2)
+            val _w = rkMsgWaitUntil(
+                5000,
+                { -> rkProp("test.rk.release") == "1" },
+            );
+        if (n < 3) Outcome.Retry(reason: "busy") else Outcome.Done;
     });
     val _s = startReliability();
     val _b = startMessaging();
@@ -91,14 +115,23 @@ test "attempt: the count survives killing the consumers between deliveries" {
     val twice = rkMsgCount("rk:x@2");
     val _u = unset("rk");
     val _z = clean();
-    assert second && third && once == 1 && twice == 2, once.toString() + " " + twice.toString();
+    assert second && third && once == 1 && twice == 2, once.toString()
+        + " "
+        + twice.toString();
 }
 
 test "attempt: a non-numeric header counts as attempt 1 and is logged once" {
-    val bad = msg(redeliveryPayload(1, rkMsgWide(5), "body").replaceAll("x-rakun-attempt=1", "x-rakun-attempt=many"));
+    val bad = msg(
+        redeliveryPayload(1, rkMsgWide(5), "body").replaceAll(
+            "x-rakun-attempt=1",
+            "x-rakun-attempt=many",
+        ),
+    );
     val a = attemptOf(deliveryOf(bad));
     val b = attemptOf(deliveryOf(bad));
-    val logged = reliabilityLog().filter({ l -> l.contains("x-rakun-attempt `many`") }).length;
+    val logged = reliabilityLog().filter(
+        { l -> l.contains("x-rakun-attempt `many`") },
+    ).length;
     assert a == 1 && b == 1 && logged == 1 && deliveryOf(bad).body == "body";
 }
 
@@ -107,16 +140,33 @@ test "attempt: a non-numeric header counts as attempt 1 and is logged once" {
 test "dlq: exhausted retries publish the envelope to <destination>.dlq with the original destination" {
     val _c = clean();
     val _f = fast("rd", "2");
-    val _l = reliableListener("rd", "amqp", "rd", "", { d -> Outcome.Retry(reason: "still busy") });
+    val _l = reliableListener(
+        "rd",
+        "amqp",
+        "rd",
+        "",
+        { d -> Outcome.Retry(reason: "still busy") },
+    );
     val _s = startReliability();
     val _b = startMessaging();
     val _p = publish("amqp", "rd", "order-9");
-    val lettered = rkMsgWaitUntil(3000, { -> published("amqp").filter({ l -> l.startsWith("rd.dlq|") }).length == 1 });
-    val letter = published("amqp").filter({ l -> l.startsWith("rd.dlq|") }).at(0) ?? "";
-    val warned = reliabilityLog().filter({ l -> l.contains("listener rd dead-lettered") }).length;
+    val lettered = rkMsgWaitUntil(
+        3000,
+        { -> published("amqp").filter({ l -> l.startsWith("rd.dlq|") }).length == 1 },
+    );
+    val letter = published("amqp")
+        .filter({ l -> l.startsWith("rd.dlq|") })
+        .at(0) ?? "";
+    val warned = reliabilityLog().filter(
+        { l -> l.contains("listener rd dead-lettered") },
+    ).length;
     val _u = unset("rd");
     val _z = clean();
-    assert lettered && letter.contains("{\"destination\":\"rd\",\"body\":\"order-9\",\"reason\":\"still busy\",\"attempt\":2,") && warned == 1, letter;
+    assert lettered
+        && letter.contains(
+            "{\"destination\":\"rd\",\"body\":\"order-9\",\"reason\":\"still busy\",\"attempt\":2,",
+        )
+        && warned == 1, letter;
 }
 
 test "dlq: a failed dead-letter publish leaves the original unacknowledged, and it is redelivered" {
@@ -125,14 +175,17 @@ test "dlq: a failed dead-letter publish leaves the original unacknowledged, and 
     val _o = rkSetProp("test.dlq.ok", "");
     val _l = reliableListenerWith("rf", "amqp", "rf", "", { d ->
         val _r = rkMsgBump("rf:seen");
-        Outcome.Reject(reason: "malformed")
+        Outcome.Reject(reason: "malformed");
     }, { b, dest, k, payload -> if (rkProp("test.dlq.ok") == "1") InProcessBroker(arm: b).publish(dest, k, payload) else 1 });
     val _s = startReliability();
     val _b = startMessaging();
     val _p = publish("amqp", "rf", "poison");
     val again = rkMsgWaitUntil(3000, { -> rkMsgCount("rf:seen") >= 2 });
     val _ok = rkSetProp("test.dlq.ok", "1");
-    val settled = rkMsgWaitUntil(3000, { -> published("amqp").filter({ l -> l.startsWith("rf.dlq|") }).length == 1 });
+    val settled = rkMsgWaitUntil(
+        3000,
+        { -> published("amqp").filter({ l -> l.startsWith("rf.dlq|") }).length == 1 },
+    );
     val _u = unset("rf");
     val _z = clean();
     assert again && settled;
@@ -144,15 +197,20 @@ test "dlq: the dead-letter destination is configurable, and the listener does no
     val _d = set("rc", "dead-letter", "graveyard");
     val _l = reliableListener("rc", "amqp", "rc", "", { d ->
         val _r = rkMsgBump("rc:" + d.body);
-        Outcome.Reject(reason: "no")
+        Outcome.Reject(reason: "no");
     });
     val _s = startReliability();
     val _b = startMessaging();
     val _p = publish("amqp", "rc", "m1");
-    val lettered = rkMsgWaitUntil(3000, { -> published("amqp").filter({ l -> l.startsWith("graveyard|") }).length == 1 });
+    val lettered = rkMsgWaitUntil(
+        3000,
+        { -> published("amqp").filter({ l -> l.startsWith("graveyard|") }).length == 1 },
+    );
     val _w = rkMsgWaitUntil(200, { -> false });
     val consumed = rkMsgCount("rc:m1");
-    val subscribed = rkMsgListenerDestinations().filter({ d -> d == "graveyard" || d == "rc.dlq" }).length;
+    val subscribed = rkMsgListenerDestinations().filter(
+        { d -> d == "graveyard" || d == "rc.dlq" },
+    ).length;
     val _u = unset("rc");
     val _z = clean();
     assert lettered && consumed == 1 && subscribed == 0;

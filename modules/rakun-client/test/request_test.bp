@@ -31,26 +31,32 @@ declare fn sleepMs(ms: i32) -> i32;
 declare fn replyHeader(name: string, value: string) -> i32;
 
 fn record(method: string, path: string) -> i32 {
-    return rkSetProp("test.client.log", rkProp("test.client.log") + method + " " + path + "\n");
+    return rkSetProp(
+        "test.client.log",
+        rkProp("test.client.log") + method + " " + path + "\n",
+    );
 }
 
-fn stub(method: string, path: string, headersJson: string, body: string) -> Response {
+fn stub(
+    method: string,
+    path: string,
+    headersJson: string,
+    body: string,
+) -> Response {
     val _l = record(method, path);
     val parts = path.split("/");
     val head = parts.at(1) ?? "";
     val arg = parts.at(2) ?? "";
-    val res = if (head == "status") {
+    val res = if (head == "status")
         Response.withStatus(toI32(arg), "status " + arg)
-    } else if (head == "slow") {
+    else if (head == "slow") {
         val _s = sleepMs(toI32(arg));
-        Response.ok("slow")
+        Response.ok("slow");
     } else if (head == "hop") {
         val target = if (arg == "self") "/hop/self" else "/echo/landed";
         val _h = replyHeader("location", target);
-        Response.withStatus(302, "moved")
-    } else {
-        Response.ok(method + " " + path + "|" + headersJson + "|" + body)
-    };
+        Response.withStatus(302, "moved");
+    } else Response.ok(method + " " + path + "|" + headersJson + "|" + body);
     return res;
 }
 
@@ -74,7 +80,11 @@ fn base() -> string {
 }
 
 fn client() -> RestClient {
-    return RestClient.builder().baseUrl(base()).defaultHeader("accept", "application/json").build();
+    return RestClient
+        .builder()
+        .baseUrl(base())
+        .defaultHeader("accept", "application/json")
+        .build();
 }
 
 fn resetLog() -> i32 {
@@ -93,11 +103,18 @@ test "request: every verb reaches the transport with its own verb" {
     val head = c.head("/echo/v").retrieve();
     assert head.status == 200;
     assert head.body == "";
-    try asserts.equals(rkProp("test.client.log"), "GET /echo/v\nPOST /echo/v\nPUT /echo/v\nPATCH /echo/v\nDELETE /echo/v\nOPTIONS /echo/v\nHEAD /echo/v\n");
+    try asserts.equals(
+        rkProp("test.client.log"),
+        "GET /echo/v\nPOST /echo/v\nPUT /echo/v\nPATCH /echo/v\nDELETE /echo/v\nOPTIONS /echo/v\nHEAD /echo/v\n",
+    );
 }
 
 test "request: default headers and request headers both arrive, the body intact" {
-    val res = client().post("/echo/orders", "{\"sku\":\"a\"}").header("content-type", "application/json").header("x-tag", "t1").retrieve();
+    val res = client()
+        .post("/echo/orders", "{\"sku\":\"a\"}")
+        .header("content-type", "application/json")
+        .header("x-tag", "t1")
+        .retrieve();
     assert res.status == 200;
     try asserts.contains(res.body, "\"accept\":\"application/json\"");
     try asserts.contains(res.body, "\"content-type\":\"application/json\"");
@@ -106,8 +123,15 @@ test "request: default headers and request headers both arrive, the body intact"
 }
 
 test "request: the transport owns Host and Content-Length" {
-    val res = client().post("/echo/own", "abc").header("host", "evil.example").header("content-length", "99").retrieve();
-    try asserts.contains(res.body, "\"host\":\"127.0.0.1:" + port().toString() + "\"");
+    val res = client()
+        .post("/echo/own", "abc")
+        .header("host", "evil.example")
+        .header("content-length", "99")
+        .retrieve();
+    try asserts.contains(
+        res.body,
+        "\"host\":\"127.0.0.1:" + port().toString() + "\"",
+    );
     try asserts.contains(res.body, "\"content-length\":\"3\"");
     assert res.body.endsWith("|abc");
 }
@@ -162,7 +186,11 @@ test "request: a read timeout answers status -1 with the reason in the body" {
 }
 
 test "request: a refused connection answers status -1 naming the failure" {
-    val res = RestClient.builder().build().get("http://127.0.0.1:1/x").retrieve();
+    val res = RestClient
+        .builder()
+        .build()
+        .get("http://127.0.0.1:1/x")
+        .retrieve();
     assert res.status == -1;
     try asserts.contains(res.body, "econnrefused");
 }
@@ -177,7 +205,10 @@ test "request: the outbound request carries a traceparent continuing the caller'
     val outer: Span = startSpan("test.outer", "{}");
     val res = client().get("/echo/traced").retrieve();
     val _e = endSpan(outer, "ok");
-    try asserts.contains(res.body, "\"traceparent\":\"00-" + outer.traceId + "-");
+    try asserts.contains(
+        res.body,
+        "\"traceparent\":\"00-" + outer.traceId + "-",
+    );
     assert res.body.contains(outer.spanId) == false;
 }
 
@@ -193,17 +224,26 @@ test "request: redirects are not followed by default" {
 }
 
 test "request: a followed redirect lands on the resolved location" {
-    val follow = RestClient.builder().baseUrl(base()).redirects("follow").build();
+    val follow = RestClient
+        .builder()
+        .baseUrl(base())
+        .redirects("follow")
+        .build();
     val res = follow.get("/hop/local").retrieve();
     assert res.status == 200;
     assert res.body.startsWith("GET /echo/landed|");
 }
 
 test "request: a redirect loop stops at max-redirects" {
-    val looping = RestClient.builder().redirects("follow").maxRedirects(2).build();
+    val looping = RestClient
+        .builder()
+        .redirects("follow")
+        .maxRedirects(2)
+        .build();
     val _r = resetLog();
     val res = looping.get(base() + "/hop/self").retrieve();
     assert res.status == -1;
     try asserts.contains(res.body, "more than 2 redirects");
-    assert rkProp("test.client.log") == "GET /hop/self\nGET /hop/self\nGET /hop/self\n";
+    assert rkProp("test.client.log")
+        == "GET /hop/self\nGET /hop/self\nGET /hop/self\n";
 }

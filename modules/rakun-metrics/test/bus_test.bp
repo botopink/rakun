@@ -39,12 +39,21 @@ fn raising() -> i32 {
 }
 
 test "bus: a handler that raises is detached, logged once, and the emitter never sees it" {
-    val _a = attach("bus2.bad", "rakun.bus2.work.stop", { e, m, d -> raising() });
+    val _a = attach(
+        "bus2.bad",
+        "rakun.bus2.work.stop",
+        { e, m, d -> raising() },
+    );
     val _x = execute("rakun.bus2.work.stop", "{}", "{}");
     val _y = execute("rakun.bus2.work.stop", "{}", "{}");
-    val mine = rkTelemetryFailures().filter({ f -> f.startsWith("rakun.bus2.work.stop\tbus2.bad\t") });
+    val mine = rkTelemetryFailures().filter(
+        { f -> f.startsWith("rakun.bus2.work.stop\tbus2.bad\t") },
+    );
     assert mine.length == 1, rkTelemetryFailures().join("|");
-    assert rkTelemetryHandlers().filter({ h -> h.startsWith("bus2.bad\t") }).length == 0;
+    assert rkTelemetryHandlers().filter(
+        { h -> h.startsWith("bus2.bad\t") },
+    ).length
+        == 0;
 }
 
 #[@External.Erlang("""(fun() -> _ = ets:new(rakun_fake_telemetry, [named_table, public, set]), __Src = "-module(telemetry). -export([attach/4, detach/1, execute/3]). attach(Id, E, F, C) -> ets:insert(rakun_fake_telemetry, {Id, E, F, C}), ok. detach(Id) -> ets:delete(rakun_fake_telemetry, Id), ok. execute(E, M, D) -> [F(E, M, D, C) || {_, E2, F, C} <- ets:tab2list(rakun_fake_telemetry), E2 =:= E], ok. ", {ok, __Toks, _} = erl_scan:string(__Src), __Split = fun __Sp([], _A, __O) -> lists:reverse(__O); __Sp([{dot, _} = __D | __T], __A, __O) -> __Sp(__T, [], [lists:reverse([__D | __A]) | __O]); __Sp([__H | __T], __A, __O) -> __Sp(__T, [__H | __A], __O) end, __Forms = [begin {ok, __F} = erl_parse:parse_form(__Ts), __F end || __Ts <- __Split(__Toks, [], [])], {ok, telemetry, __Bin} = compile:forms(__Forms, []), {module, telemetry} = code:load_binary(telemetry, "telemetry.erl", __Bin), 1 end)()""")]
@@ -60,11 +69,23 @@ test "bus: with telemetry loadable, a handler attached through either path recei
     val _r = rkSetProp("test.bus3.a", "");
     val _s = rkSetProp("test.bus3.b", "");
     val _l = loadFakeTelemetry();
-    val _a = attach("bus3.a", "rakun.bus3.work.stop", { e, m, d -> bump("test.bus3.a") });
-    val _b = attachDirect("bus3.b", "rakun.bus3.work.stop", { -> bump("test.bus3.b") });
+    val _a = attach(
+        "bus3.a",
+        "rakun.bus3.work.stop",
+        { e, m, d -> bump("test.bus3.a") },
+    );
+    val _b = attachDirect(
+        "bus3.b",
+        "rakun.bus3.work.stop",
+        { -> bump("test.bus3.b") },
+    );
     val _x = execute("rakun.bus3.work.stop", "{}", "{}");
     val _u = unloadFakeTelemetry();
-    assert prop("test.bus3.a") == "1" && prop("test.bus3.b") == "1", prop("test.bus3.a") + "/" + prop("test.bus3.b");
+    assert prop("test.bus3.a") == "1" && prop("test.bus3.b") == "1", prop(
+        "test.bus3.a",
+    )
+        + "/"
+        + prop("test.bus3.b");
 }
 
 fn userPage(req: Request) -> Response {
@@ -73,24 +94,37 @@ fn userPage(req: Request) -> Response {
 
 test "bus: http.server.requests carries the registered route pattern, never the concrete path" {
     val _i = installAutomaticMeters();
-    val _r = rkRegisterRoute("GET", "/bus4/users/:name", { req -> userPage(req) });
+    val _r = rkRegisterRoute(
+        "GET",
+        "/bus4/users/:name",
+        { req -> userPage(req) },
+    );
     val res = rkDispatchHttp("GET", "/bus4/users/ana", "{}", "{}", "");
     assert res.status == 200;
     val text = prometheusTextFor("http.server.requests");
     assert text.contains("route=\"/bus4/users/:name\""), text;
     assert text.contains("/bus4/users/ana") == false;
-    assert text.contains("http_server_requests_seconds_count{method=\"GET\",route=\"/bus4/users/:name\",status=\"200\"} 1"), text;
+    assert text.contains(
+        "http_server_requests_seconds_count{method=\"GET\",route=\"/bus4/users/:name\",status=\"200\"} 1",
+    ), text;
 }
 
 test "bus: a subsystem that emits nothing has no series" {
     val _i = installAutomaticMeters();
-    assert meterNames().filter({ n -> n.startsWith("sql.") || n.startsWith("scheduled.") }).length == 0;
+    assert meterNames().filter(
+        { n -> n.startsWith("sql.") || n.startsWith("scheduled.") },
+    ).length
+        == 0;
 }
 
 test "bus: every automatic event is rakun.<subsystem>.<operation>.<phase>" {
-    for (automaticMeters()) { m -> assert eventNameProblem(m.event) == "", m.event; };
+    for (automaticMeters()) { m ->
+        assert eventNameProblem(m.event) == "", m.event;
+    }
     assert automaticMeters().length == 7;
     assert eventNameProblem("rakun.http.request") != "";
     assert eventNameProblem("app.http.request.stop") != "";
-    assert eventNameProblem("rakun.http.request.done").contains("start, stop or exception");
+    assert eventNameProblem("rakun.http.request.done").contains(
+        "start, stop or exception",
+    );
 }

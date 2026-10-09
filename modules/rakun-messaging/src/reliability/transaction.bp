@@ -14,14 +14,24 @@ import {messaging_host.rkMsgPublish};
 
 #[@External.Erlang("""(fun(__P) -> case get(rakun_rel_tx) of undefined -> ok; _ -> erlang:error({panic, <<"rakun-messaging: withProducerTransaction is already open in this process - producer transactions do not nest">>}) end, __N = erlang:unique_integer([positive, monotonic]), __Id = <<__P/binary, (integer_to_binary(__N))/binary>>, put(rakun_rel_tx, {__Id, []}), persistent_term:put(rakun_rel_last_txid, __Id), __Id end)($0)""")]
 declare fn txBegin(prefix: string) -> string;
+
 #[@External.Erlang("""(fun() -> case get(rakun_rel_tx) of undefined -> []; {_, __L} -> erase(rakun_rel_tx), lists:reverse(__L) end end)()""")]
 declare fn txTake() -> Array<#(string, string, string, string)>;
+
 #[@External.Erlang("""(fun() -> erase(rakun_rel_tx), 0 end)()""")]
 declare fn txDrop() -> i32;
+
 #[@External.Erlang("""(fun(__A, __D, __K, __V) -> case get(rakun_rel_tx) of undefined -> false; {__Id, __L} -> put(rakun_rel_tx, {__Id, [{__A, __D, __K, __V} | __L]}), true end end)($0, $1, $2, $3)""")]
-declare fn txHold(arm: string, destination: string, key: string, payload: string) -> bool;
+declare fn txHold(
+    arm: string,
+    destination: string,
+    key: string,
+    payload: string,
+) -> bool;
+
 #[@External.Erlang("""(fun(__F) -> try {ok, __F()} catch _:{panic, __R} when is_binary(__R) -> {error, __R}; _:__R -> {error, iolist_to_binary(io_lib:format("~p", [__R]))} end end)($0)""")]
 declare fn guardedBody(body: fn() -> i32) -> @Result<i32, string>;
+
 #[@External.Erlang("""persistent_term:get(rakun_rel_last_txid, <<>>)""")]
 pub declare fn lastTransactionalId() -> string;
 
@@ -30,7 +40,12 @@ pub fn amqpTransactionProblem() -> string {
 }
 
 // Inside a transaction: held until commit. Outside: an ordinary publish.
-pub fn transactionalSend(arm: string, destination: string, key: string, payload: string) -> i32 {
+pub fn transactionalSend(
+    arm: string,
+    destination: string,
+    key: string,
+    payload: string,
+) -> i32 {
     if (arm == "amqp") @panic(amqpTransactionProblem());
     if (txHold(arm, destination, key, payload)) return 0;
     return rkMsgPublish(arm, destination, key, payload);
@@ -41,9 +56,14 @@ pub fn withProducerTransaction(prefix: string, body: fn() -> i32) -> i32 {
     val r = guardedBody(body);
     if (r.isError()) {
         val _d = txDrop();
-        val reason = case r { Ok(v) -> ""; Error(e) -> e; };
+        val reason = case r {
+            Ok(v) -> "";
+            Error(e) -> e;
+        };
         @panic(reason);
-    };
-    for (txTake()) { s -> val _p = rkMsgPublish(s._0, s._1, s._2, s._3); };
+    }
+    for (txTake()) { s ->
+        val _p = rkMsgPublish(s._0, s._1, s._2, s._3);
+    }
     return r.unwrapOr(0);
 }

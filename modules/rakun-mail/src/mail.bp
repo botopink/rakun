@@ -69,34 +69,68 @@ pub type Mail(
 
 #[@External.Erlang("rakun_mail", "compose")]
 declare fn rkMailCompose(m: Mail, domain: string) -> string;
+
 #[@External.Erlang("rakun_mail", "envelope_rcpts")]
 declare fn rkMailRcpts(m: Mail) -> string[];
+
 #[@External.Erlang("rakun_mail", "address_of")]
 pub declare fn addressOf(address: string) -> string;
+
 #[@External.Erlang("""(fun(__S, __F, __R, __M) -> case rakun_mail:send(__S, {rakun_mail:address_of(__F), __R, __M}) of ok -> <<>>; __E -> __E end end)($0, $1, $2, $3)""")]
-declare fn rkMailSend(server: MailServer, sender: string, rcpts: string[], message: string) -> string;
+declare fn rkMailSend(
+    server: MailServer,
+    sender: string,
+    rcpts: string[],
+    message: string,
+) -> string;
+
 #[@External.Erlang("rakun_mail", "probe")]
 declare fn rkMailProbe(server: MailServer, timeoutMs: i32) -> string;
+
 #[@External.Erlang("rakun_mail", "transport_problem")]
 declare fn rkMailTransportProblem(transport: string) -> string;
+
 #[@External.Erlang("""rakun_mail:configure($0, {$1, $2, $3})""")]
-declare fn rkMailConfigure(server: MailServer, concurrency: i32, attempts: i32, backoffMs: i32) -> i32;
+declare fn rkMailConfigure(
+    server: MailServer,
+    concurrency: i32,
+    attempts: i32,
+    backoffMs: i32,
+) -> i32;
+
 #[@External.Erlang("rakun_mail", "enqueue")]
-declare fn rkMailEnqueue(id: string, sender: string, rcpts: string[], message: string) -> string;
+declare fn rkMailEnqueue(
+    id: string,
+    sender: string,
+    rcpts: string[],
+    message: string,
+) -> string;
+
 #[@External.Erlang("rakun_mail", "queue_stats")]
 pub declare fn mailQueueStats() -> string;
+
 #[@External.Erlang("rakun_mail", "dead_letters")]
 pub declare fn mailDeadLetters() -> string[];
+
 #[@External.Erlang("rakun_mail", "reset_queue")]
 pub declare fn resetMailQueue() -> i32;
+
 #[@External.Erlang("rakun_mail", "pending")]
 pub declare fn mailPending() -> i32;
+
 #[@External.Erlang("rakun_mail", "log_lines")]
 pub declare fn mailLog() -> string[];
+
 #[@External.Erlang("rakun_mail", "pack")]
-declare fn rkMailPack(sender: string, rcpts: string[], message: string) -> string;
+declare fn rkMailPack(
+    sender: string,
+    rcpts: string[],
+    message: string,
+) -> string;
+
 #[@External.Erlang("rakun_mail", "deliver_packed")]
 declare fn rkMailDeliverPacked(server: MailServer, payload: string) -> string;
+
 #[@External.Erlang("""(fun() -> <<"m-", (integer_to_binary(erlang:unique_integer([positive, monotonic])))/binary>> end)()""")]
 declare fn freshId() -> string;
 
@@ -116,11 +150,19 @@ pub fn tlsModeOf(name: string) -> TlsMode {
     if (n == "starttls") return TlsMode.StartTls;
     if (n == "implicit") return TlsMode.Implicit;
     if (n == "none" || n == "") return TlsMode.None;
-    @panic("rakun mail: rakun.mail.tls is `" + name + "` - none, starttls or implicit");
+    @panic(
+        "rakun mail: rakun.mail.tls is `"
+            + name
+            + "` - none, starttls or implicit",
+    );
 }
 
 pub fn tlsModeName(m: TlsMode) -> string {
-    return case m { None -> "none"; StartTls -> "starttls"; Implicit -> "implicit"; };
+    return case m {
+        None -> "none";
+        StartTls -> "starttls";
+        Implicit -> "implicit";
+    };
 }
 
 // `rakun.mail.{host, port, username, password, tls, ssl.bundle,
@@ -150,8 +192,16 @@ pub fn mailConfigProblem() -> string {
     val t = rkMailTransportProblem(prop("transport", "smtp"));
     if (t != "") return t;
     val s = mailServer();
-    val shortest = [s.connectTimeoutMs, s.readTimeoutMs, s.writeTimeoutMs].fold(s.connectTimeoutMs, { acc, x -> if (x < acc) x else acc });
-    if (healthTimeoutMs() >= shortest) return "rakun mail: rakun.mail.health.timeout-ms (" + healthTimeoutMs().toString() + ") must be shorter than every send timeout (the shortest is " + shortest.toString() + " ms) - a hanging server must not hang /actuator/health";
+    val shortest = [s.connectTimeoutMs, s.readTimeoutMs, s.writeTimeoutMs].fold(
+        s.connectTimeoutMs,
+        { acc, x -> if (x < acc) x else acc },
+    );
+    if (healthTimeoutMs() >= shortest)
+        return "rakun mail: rakun.mail.health.timeout-ms ("
+            + healthTimeoutMs().toString()
+            + ") must be shorter than every send timeout (the shortest is "
+            + shortest.toString()
+            + " ms) - a hanging server must not hang /actuator/health";
     return "";
 }
 
@@ -159,14 +209,21 @@ pub fn mailConfigProblem() -> string {
 pub fn configureMail() -> i32 {
     val problem = mailConfigProblem();
     if (problem != "") @panic(problem);
-    return rkMailConfigure(mailServer(), intProp("queue.concurrency", 2), intProp("retry.max-attempts", 3), intProp("retry.backoff-ms", 1000));
+    return rkMailConfigure(
+        mailServer(),
+        intProp("queue.concurrency", 2),
+        intProp("retry.max-attempts", 3),
+        intProp("retry.backoff-ms", 1000),
+    );
 }
 
 // ── composition ─────────────────────────────────────────────────────────────
 
 pub fn composeMessage(m: Mail) -> string {
-    if (m.sender.trim() == "") @panic("rakun mail: a mail needs a sender address (the From header)");
-    if (m.to.length + m.cc.length + m.bcc.length == 0) @panic("rakun mail: a mail needs at least one recipient");
+    if (m.sender.trim() == "")
+        @panic("rakun mail: a mail needs a sender address (the From header)");
+    if (m.to.length + m.cc.length + m.bcc.length == 0)
+        @panic("rakun mail: a mail needs at least one recipient");
     return rkMailCompose(m, prop("message-id-domain", "rakun.local"));
 }
 
@@ -179,12 +236,22 @@ pub fn envelopeRecipients(m: Mail) -> string[] {
 // Composes and delivers `m` now, on this process: "" or `<kind>\t<reason>`
 // (`permanent` or `retryable`).
 pub fn deliverNow(server: MailServer, m: Mail) -> string {
-    return rkMailSend(server, m.sender, envelopeRecipients(m), composeMessage(m));
+    return rkMailSend(
+        server,
+        m.sender,
+        envelopeRecipients(m),
+        composeMessage(m),
+    );
 }
 
 // Composes `m` and queues it; answers its id. Opens no socket.
 pub fn send(m: Mail) -> string {
-    return rkMailEnqueue(freshId(), m.sender, envelopeRecipients(m), composeMessage(m));
+    return rkMailEnqueue(
+        freshId(),
+        m.sender,
+        envelopeRecipients(m),
+        composeMessage(m),
+    );
 }
 
 // ── front 83's outbox ───────────────────────────────────────────────────────
@@ -196,7 +263,20 @@ pub fn mailTopic() -> string {
 // Enrols `m` in the caller's transaction on `ds`: composed now, sent by the
 // outbox relay after the commit, and never if it rolls back.
 pub fn publishMailAfterCommit(ds: string, m: Mail) -> i32 {
-    return publishAfterCommitOn(ds, OutboxMessage(aggregate: "mail", topic: mailTopic(), key: m.sender, payload: rkMailPack(m.sender, envelopeRecipients(m), composeMessage(m)), headers: []));
+    return publishAfterCommitOn(
+        ds,
+        OutboxMessage(
+            aggregate: "mail",
+            topic: mailTopic(),
+            key: m.sender,
+            payload: rkMailPack(
+                m.sender,
+                envelopeRecipients(m),
+                composeMessage(m),
+            ),
+            headers: [],
+        ),
+    );
 }
 
 // The relay's publisher for mail rows: delivers the packed message directly
@@ -207,7 +287,8 @@ pub fn mailRelayPublisher() -> fn(topic: string, key: string, payload: string) -
 }
 
 fn relayOne(topic: string, payload: string) -> string {
-    if (topic != mailTopic()) return "rakun mail: the mail publisher received topic `" + topic + "`";
+    if (topic != mailTopic())
+        return "rakun mail: the mail publisher received topic `" + topic + "`";
     return rkMailDeliverPacked(mailServer(), payload);
 }
 
@@ -219,10 +300,31 @@ pub fn mailHealth() -> Health {
     val s = mailServer();
     val r = rkMailProbe(s, healthTimeoutMs());
     val parts = r.split("\t");
-    val common = "\"host\":\"" + s.host + "\",\"port\":" + s.port.toString() + ",\"tls\":\"" + tlsModeName(s.tlsMode) + "\"";
-    if ((parts.at(0) ?? "") == "UP") return Health(status: "UP", details: "{" + common + ",\"tlsNegotiated\":" + (parts.at(1) ?? "false") + "}");
+    val common = "\"host\":\""
+        + s.host
+        + "\",\"port\":"
+        + s.port.toString()
+        + ",\"tls\":\""
+        + tlsModeName(s.tlsMode)
+        + "\"";
+    if ((parts.at(0) ?? "") == "UP")
+        return Health(
+            status: "UP",
+            details: "{"
+                + common
+                + ",\"tlsNegotiated\":"
+                + (parts.at(1) ?? "false")
+                + "}",
+        );
     val reason = parts.slice(2, parts.length).join(" ");
-    return Health(status: "DOWN", details: "{" + common + ",\"error\":\"" + reason.replaceAll("\\", "\\\\").replaceAll("\"", "\\\"") + "\"}");
+    return Health(
+        status: "DOWN",
+        details: "{"
+            + common
+            + ",\"error\":\""
+            + reason.replaceAll("\\", "\\\\").replaceAll("\"", "\\\"")
+            + "\"}",
+    );
 }
 
 pub fn mountMail() -> i32 {

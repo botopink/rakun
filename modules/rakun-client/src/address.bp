@@ -85,13 +85,19 @@ fn inAny(addr: string, ranges: Array<string>) -> bool {
 pub fn addressAllowed(policy: AddressPolicy, addr: string) -> bool {
     val canonical = rkClientNormalize(addr);
     val parsed = canonical != "";
-    val admitted = parsed && ((inAny(canonical, builtinDeny()) == false) || inAny(canonical, policy.allow));
+    val admitted = parsed
+        && ((inAny(canonical, builtinDeny()) == false)
+            || inAny(canonical, policy.allow));
     return admitted && (inAny(canonical, policy.deny) == false);
 }
 
 // The refusal text for a host whose addresses were `addrs`.
 pub fn blockedProblem(host: string, addr: string) -> string {
-    return "rakun-client: address " + addr + " of host " + host + " is blocked by the address filter (server-side request forgery protection) - an operator re-admits a range with rakun.http.clients.allow";
+    return "rakun-client: address "
+        + addr
+        + " of host "
+        + host
+        + " is blocked by the address filter (server-side request forgery protection) - an operator re-admits a range with rakun.http.clients.allow";
 }
 
 // Resolve `host`, check every address, answer what to dial or why not.
@@ -99,22 +105,37 @@ pub fn checkHost(policy: AddressPolicy, host: string) -> AddressCheck {
     val raw = rkClientResolve(host);
     val addrs = if (raw == "") [] else raw.split("\n");
     val refused = addrs.filter({ a -> addressAllowed(policy, a) == false });
-    val v4 = addrs.filter({ a -> a.contains(".") && (a.contains(":") == false) });
+    val v4 = addrs.filter(
+        { a -> a.contains(".") && (a.contains(":") == false) },
+    );
     val first = v4.at(0) ?? (addrs.at(0) ?? "");
-    val refusal = if (raw == "") {
+    val refusal = if (raw == "")
         "rakun-client: host " + host + " did not resolve"
-    } else {
-        if (refused.length > 0) blockedProblem(host, refused.at(0) ?? "") else ""
-    };
+    else if (refused.length > 0)
+        blockedProblem(host, refused.at(0) ?? "")
+    else
+        "";
     return AddressCheck(addr: first, refusal: refusal);
 }
 
 // The configured lists must be CIDR ranges; a typo that silently matches
 // nothing would widen or narrow the filter without anyone noticing.
 pub fn policyProblem() -> string {
-    val allow = csv(rkProp("rakun.http.clients.allow")).filter({ r -> rkClientValidCidr(r) == false });
-    val deny = csv(rkProp("rakun.http.clients.deny")).filter({ r -> rkClientValidCidr(r) == false });
-    val a = if (allow.length > 0) "rakun.http.clients.allow: `" + allow.join(",") + "` is not a CIDR range" else "";
-    val d = if (deny.length > 0) "rakun.http.clients.deny: `" + deny.join(",") + "` is not a CIDR range" else "";
+    val allow = csv(rkProp("rakun.http.clients.allow")).filter(
+        { r -> rkClientValidCidr(r) == false },
+    );
+    val deny = csv(rkProp("rakun.http.clients.deny")).filter(
+        { r -> rkClientValidCidr(r) == false },
+    );
+    val a = if (allow.length > 0)
+        "rakun.http.clients.allow: `"
+            + allow.join(",")
+            + "` is not a CIDR range"
+    else
+        "";
+    val d = if (deny.length > 0)
+        "rakun.http.clients.deny: `" + deny.join(",") + "` is not a CIDR range"
+    else
+        "";
     return [a, d].filter({ s -> s != "" }).join("\n");
 }

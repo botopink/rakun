@@ -33,11 +33,7 @@
 
 import {Response, rkProp, rkRoutePaths} from "rakun";
 import {regex, regex.Regex, encoding} from "std";
-import {
-    url_rules: {PathRules, RedirectRule, canonicalize, clientHref, writeRedirectTable},
-    table.parseTable,
-    match.matchPath,
-} from "routing";
+import {url_rules.PathRules, url_rules.RedirectRule, url_rules.canonicalize, url_rules.clientHref, url_rules.writeRedirectTable, table.parseTable, match.matchPath} from "routing";
 import {filter.WebRequest, filter.Chain, filter.withHeader, filter.retarget, filter.registerFilter, filter.orderUrlRules, filter.sentinelStatus};
 
 // ── step 1: matchers ────────────────────────────────────────────────────────
@@ -57,7 +53,10 @@ fn segmentsOf(path: string) -> string[] {
 fn paramName(seg: string) -> string {
     if (seg.startsWith(":") == false) return "";
     val bare: string = seg.slice(1, seg.length);
-    if (bare.endsWith("*")) return bare.slice(0, bare.length - 1) else return bare;
+    if (bare.endsWith("*"))
+        return bare.slice(0, bare.length - 1)
+    else
+        return bare;
 }
 
 fn isRest(seg: string) -> bool {
@@ -72,28 +71,34 @@ pub fn isRawRegex(source: string) -> bool {
 
 // Source in, anchored regex plus capture names (declaration order) out.
 pub fn sourceToPattern(source: string) -> @Result<#(string, string[]), string> {
-    if (source.startsWith("/") == false) throw "rakun-web: a rule source starts with a slash, and `" + source + "` does not";
+    if (source.startsWith("/") == false)
+        throw "rakun-web: a rule source starts with a slash, and `"
+            + source
+            + "` does not";
     if (isRawRegex(source)) return #("^" + source + "$", []);
     var body = "";
     var names: string[] = [];
     for (segmentsOf(source)) { seg ->
         val name: string = paramName(seg);
-        if (name == "") {
-            body = body + "/" + regex.escapeLiteral(seg);
-        } else if (isRest(seg)) {
+        if (name == "")
+            body = body + "/" + regex.escapeLiteral(seg)
+        else if (isRest(seg)) {
             names.push(name);
             body = body + "(?:/(.*))?";
         } else {
             names.push(name);
             body = body + "/([^/]+)";
-        };
-    };
+        }
+    }
     val anchored: string = if (body == "") "^/$" else "^" + body + "$";
     return #(anchored, names);
 }
 
 pub fn matcherProblem(source: string, why: string) -> string {
-    return "rakun-web: the rule source `" + source + "` is not a pattern - " + why;
+    return "rakun-web: the rule source `"
+        + source
+        + "` is not a pattern - "
+        + why;
 }
 
 pub fn matcher(source: string) -> @Result<Matcher, string> {
@@ -101,14 +106,19 @@ pub fn matcher(source: string) -> @Result<Matcher, string> {
     if (translated.isError()) {
         val assert Error(e) = translated;
         throw e;
-    };
+    }
     val pair = translated.unwrapOr(#("", []));
     val compiled = regex.compile(pair._0);
     if (compiled.isError()) {
         val assert Error(why) = compiled;
         throw matcherProblem(source, why);
-    };
-    return Matcher(source: source, pattern: pair._0, params: pair._1, compiled: compiled.unwrapOr(Regex(handle: noHandle())));
+    }
+    return Matcher(
+        source: source,
+        pattern: pair._0,
+        params: pair._1,
+        compiled: compiled.unwrapOr(Regex(handle: noHandle())),
+    );
 }
 
 #[@External.Erlang("""undefined""")]
@@ -126,7 +136,7 @@ pub fn capturesOf(m: Matcher, pathname: string) -> Array<#(string, string)> {
     for (m.params) { name ->
         out.push(#(name, groups.at(i) ?? ""));
         i = i + 1;
-    };
+    }
     return out;
 }
 
@@ -143,20 +153,30 @@ pub fn encodeValue(value: string) -> string {
     return value.split("/").map({ s -> encoding.percentEncode(s) }).join("/");
 }
 
-pub fn interpolate(destination: string, m: Matcher, pathname: string) -> string {
+pub fn interpolate(
+    destination: string,
+    m: Matcher,
+    pathname: string,
+) -> string {
     val caps = capturesOf(m, pathname);
     var out: string[] = [];
     val lead: string = if (destination.startsWith("/")) "/" else "";
     for (destination.split("/")) { seg ->
         val name: string = paramName(seg);
-        if (name == "") out.push(seg) else out.push(encodeValue(captureValue(caps, name)));
-    };
+        if (name == "")
+            out.push(seg)
+        else
+            out.push(encodeValue(captureValue(caps, name)));
+    }
     val joined: string = out.join("/");
     return joined;
 }
 
 pub fn destinationNames(destination: string) -> string[] {
-    return destination.split("/").map({ s -> paramName(s) }).filter({ n -> n != "" });
+    return destination
+        .split("/")
+        .map({ s -> paramName(s) })
+        .filter({ n -> n != "" });
 }
 
 // ── step 4: rewrites ────────────────────────────────────────────────────────
@@ -167,16 +187,24 @@ pub type RewriteRule(
 )
 
 pub fn isExternal(destination: string) -> bool {
-    return destination.startsWith("http://") || destination.startsWith("https://") || destination.startsWith("//");
+    return destination.startsWith("http://")
+        || destination.startsWith("https://")
+        || destination.startsWith("//");
 }
 
 pub fn hostOfUrl(url: string) -> string {
-    val rest: string = if (url.startsWith("//")) url.slice(2, url.length) else (url.split("://").at(1) ?? "");
+    val rest: string = if (url.startsWith("//"))
+        url.slice(2, url.length)
+    else
+        (url.split("://").at(1) ?? "");
     return ((rest.split("/").at(0) ?? "").split(":").at(0) ?? "").toLower();
 }
 
 pub fn allowedOrigins() -> string[] {
-    return rkProp("rakun.rules.allowedOrigins").split(",").map({ o -> hostOfUrl(normalizeOrigin(o.trim())) }).filter({ h -> h != "" });
+    return rkProp("rakun.rules.allowedOrigins")
+        .split(",")
+        .map({ o -> hostOfUrl(normalizeOrigin(o.trim())) })
+        .filter({ h -> h != "" });
 }
 
 fn normalizeOrigin(o: string) -> string {
@@ -202,7 +230,10 @@ pub type UrlRules(
 )
 
 pub fn pathRulesOf(rules: UrlRules) -> PathRules {
-    return PathRules(basePath: rules.basePath, trailingSlash: rules.trailingSlash);
+    return PathRules(
+        basePath: rules.basePath,
+        trailingSlash: rules.trailingSlash,
+    );
 }
 
 pub type CompiledRules(
@@ -225,23 +256,51 @@ pub fn continueOutcome() -> RuleOutcome {
 }
 
 fn pipeProblem(kind: string, source: string, destination: string) -> string {
-    return "rakun-web: the " + kind + " rule `" + source + "` -> `" + destination + "` contains a `|` - it could not cross in the redirect table";
+    return "rakun-web: the "
+        + kind
+        + " rule `"
+        + source
+        + "` -> `"
+        + destination
+        + "` contains a `|` - it could not cross in the redirect table";
 }
 
-fn missingCaptureProblem(source: string, destination: string, name: string) -> string {
-    return "rakun-web: the rule `" + source + "` -> `" + destination + "` names `:" + name + "`, which its source does not capture";
+fn missingCaptureProblem(
+    source: string,
+    destination: string,
+    name: string,
+) -> string {
+    return "rakun-web: the rule `"
+        + source
+        + "` -> `"
+        + destination
+        + "` names `:"
+        + name
+        + "`, which its source does not capture";
 }
 
 fn selfRedirectProblem(source: string, destination: string) -> string {
-    return "rakun-web: the redirect `" + source + "` -> `" + destination + "` matches its own destination - it would loop";
+    return "rakun-web: the redirect `"
+        + source
+        + "` -> `"
+        + destination
+        + "` matches its own destination - it would loop";
 }
 
 fn unknownRewriteTargetProblem(source: string, destination: string) -> string {
-    return "rakun-web: the rewrite `" + source + "` -> `" + destination + "` targets a path no route answers";
+    return "rakun-web: the rewrite `"
+        + source
+        + "` -> `"
+        + destination
+        + "` targets a path no route answers";
 }
 
 fn offListOriginProblem(destination: string, host: string) -> string {
-    return "rakun-web: the rewrite to `" + destination + "` names the host `" + host + "`, which is not on rakun.rules.allowedOrigins";
+    return "rakun-web: the rewrite to `"
+        + destination
+        + "` names the host `"
+        + host
+        + "`, which is not on rakun.rules.allowedOrigins";
 }
 
 // The route table front 22 keeps, read through its host when `rakun-app` is in
@@ -251,12 +310,18 @@ declare fn appTableWire() -> string;
 
 // A sample path for a destination: every `:name` becomes `x`.
 fn samplePath(destination: string) -> string {
-    return destination.split("/").map({ s -> if (paramName(s) == "") s else "x" }).join("/");
+    return destination
+        .split("/")
+        .map({ s -> if (paramName(s) == "") s else "x" })
+        .join("/");
 }
 
 pub fn routeAnswers(path: string) -> bool {
     val inApp: bool = matchPath(parseTable(appTableWire()), path) != null;
-    val inCore: bool = rkRoutePaths().split(", ").filter({ r -> (r.split(" ").at(1) ?? "") == path }).length > 0;
+    val inCore: bool = rkRoutePaths()
+        .split(", ")
+        .filter({ r -> (r.split(" ").at(1) ?? "") == path }).length
+        > 0;
     return inApp || inCore;
 }
 
@@ -266,15 +331,15 @@ pub fn rulesProblem(rules: UrlRules) -> string {
     for (rules.redirects) { r ->
         val p: string = redirectProblem(r);
         if (problem == "") problem = p;
-    };
+    }
     for (rules.rewrites) { r ->
         val p: string = rewriteProblem(r);
         if (problem == "") problem = p;
-    };
+    }
     for (rules.headers) { h ->
         val p: string = headerProblem(h);
         if (problem == "") problem = p;
-    };
+    }
     return problem;
 }
 
@@ -283,44 +348,64 @@ fn compileProblem(source: string) -> string {
     if (m.isError()) {
         val assert Error(e) = m;
         return e;
-    };
+    }
     return "";
 }
 
 fn missingCapture(source: string, destination: string) -> string {
-    val params: string[] = sourceToPattern(source).map({ p -> p._1 }).unwrapOr([]);
+    val params: string[] = sourceToPattern(source)
+        .map({ p -> p._1 })
+        .unwrapOr([]);
     var missing = "";
     for (destinationNames(destination)) { n ->
-        if ((missing == "") && (params.filter({ p -> p == n }).length == 0)) missing = n;
-    };
-    if (missing == "") return "" else return missingCaptureProblem(source, destination, missing);
+        if ((missing == "") && (params.filter({ p -> p == n }).length == 0))
+            missing = n;
+    }
+    if (missing == "")
+        return ""
+    else
+        return missingCaptureProblem(source, destination, missing);
 }
 
 fn redirectProblem(r: RedirectRule) -> string {
-    if (r.source.contains("|") || r.destination.contains("|")) return pipeProblem("redirect", r.source, r.destination);
+    if (r.source.contains("|") || r.destination.contains("|"))
+        return pipeProblem("redirect", r.source, r.destination);
     val c: string = compileProblem(r.source);
     if (c != "") return c;
     val missing: string = missingCapture(r.source, r.destination);
     if (missing != "") return missing;
-    val m: Matcher = matcher(r.source).unwrapOr(Matcher(source: "", pattern: "", params: [], compiled: Regex(handle: noHandle())));
-    if (matches(m, r.destination) || matches(m, samplePath(r.destination))) return selfRedirectProblem(r.source, r.destination);
+    val m: Matcher = matcher(r.source).unwrapOr(
+        Matcher(
+            source: "",
+            pattern: "",
+            params: [],
+            compiled: Regex(handle: noHandle()),
+        ),
+    );
+    if (matches(m, r.destination) || matches(m, samplePath(r.destination)))
+        return selfRedirectProblem(r.source, r.destination);
     return "";
 }
 
 fn rewriteProblem(r: RewriteRule) -> string {
-    if (r.source.contains("|") || r.destination.contains("|")) return pipeProblem("rewrite", r.source, r.destination);
+    if (r.source.contains("|") || r.destination.contains("|"))
+        return pipeProblem("rewrite", r.source, r.destination);
     val c: string = compileProblem(r.source);
     if (c != "") return c;
     val missing: string = missingCapture(r.source, r.destination);
     if (missing != "") return missing;
     if (isExternal(r.destination)) return externalProblem(r.destination);
-    if (routeAnswers(samplePath(r.destination)) == false) return unknownRewriteTargetProblem(r.source, r.destination);
+    if (routeAnswers(samplePath(r.destination)) == false)
+        return unknownRewriteTargetProblem(r.source, r.destination);
     return "";
 }
 
 fn externalProblem(destination: string) -> string {
     val host: string = hostOfUrl(destination);
-    if (allowedOrigins().filter({ o -> o == host }).length > 0) return "" else return offListOriginProblem(destination, host);
+    if (allowedOrigins().filter({ o -> o == host }).length > 0)
+        return ""
+    else
+        return offListOriginProblem(destination, host);
 }
 
 fn headerProblem(h: HeaderRule) -> string {
@@ -328,7 +413,14 @@ fn headerProblem(h: HeaderRule) -> string {
 }
 
 fn mustMatcher(source: string) -> Matcher {
-    return matcher(source).unwrapOr(Matcher(source: "", pattern: "", params: [], compiled: Regex(handle: noHandle())));
+    return matcher(source).unwrapOr(
+        Matcher(
+            source: "",
+            pattern: "",
+            params: [],
+            compiled: Regex(handle: noHandle()),
+        ),
+    );
 }
 
 // Every matcher compiled once; the first bad rule an `Error` naming it, and
@@ -361,8 +453,13 @@ pub fn rewriteFor(c: CompiledRules, pathname: string) -> ?string {
     return interpolate(hit._1.destination, hit._0, pathname);
 }
 
-pub fn headersFor(c: CompiledRules, pathname: string) -> Array<#(string, string)> {
-    return c.headers.filter({ p -> matches(p._0, pathname) }).map({ p -> #(p._1.name, p._1.value) });
+pub fn headersFor(
+    c: CompiledRules,
+    pathname: string,
+) -> Array<#(string, string)> {
+    return c.headers
+        .filter({ p -> matches(p._0, pathname) })
+        .map({ p -> #(p._1.name, p._1.value) });
 }
 
 // The first four steps of the order, as data: canonicalize, then the first
@@ -371,13 +468,31 @@ pub fn applyRules(c: CompiledRules, pathname: string) -> RuleOutcome {
     val canonical: string = canonicalize(pathRulesOfCompiled(c), pathname);
     val redirectHits = c.redirects.filter({ p -> matches(p._0, canonical) });
     if (redirectHits.length > 0) {
-        val hit = redirectHits.at(0) ?? (c.redirects.at(0) ?? #(mustMatcher("/"), RedirectRule(source: "", destination: "", permanent: false)));
-        val location: string = interpolate(hit._1.destination, hit._0, canonical);
+        val hit = redirectHits.at(0) ?? (c.redirects.at(0) ?? #(
+            mustMatcher("/"),
+            RedirectRule(source: "", destination: "", permanent: false),
+        ));
+        val location: string = interpolate(
+            hit._1.destination,
+            hit._0,
+            canonical,
+        );
         val status: i32 = if (hit._1.permanent) 308 else 307;
-        return RuleOutcome(kind: "redirect", location: location, status: status, target: "");
-    };
+        return RuleOutcome(
+            kind: "redirect",
+            location: location,
+            status: status,
+            target: "",
+        );
+    }
     val target: string = rewriteFor(c, canonical) ?? "";
-    if (target == "") return RuleOutcome(kind: "", location: "", status: 0, target: canonical);
+    if (target == "")
+        return RuleOutcome(
+            kind: "",
+            location: "",
+            status: 0,
+            target: canonical,
+        );
     val kind: string = if (isExternal(target)) "proxy" else "rewrite";
     return RuleOutcome(kind: kind, location: "", status: 0, target: target);
 }
@@ -408,7 +523,9 @@ declare fn toStatus(s: string) -> i32;
 declare fn rkProxyStore(handler: fn(req: WebRequest) -> RuleOutcome) -> i32;
 
 #[@External.Erlang("""persistent_term:get(rakun_web_proxy, $0)""")]
-declare fn rkProxyOr(fallback: fn(req: WebRequest) -> RuleOutcome) -> fn(req: WebRequest) -> RuleOutcome;
+declare fn rkProxyOr(
+    fallback: fn(req: WebRequest) -> RuleOutcome,
+) -> fn(req: WebRequest) -> RuleOutcome;
 
 #[@External.Erlang("""(fun() -> _ = persistent_term:erase(rakun_web_proxy), 0 end)()""")]
 pub declare fn rkProxyClear() -> i32;
@@ -425,27 +542,50 @@ fn noProxy(req: WebRequest) -> RuleOutcome {
 
 // ── the chain entry ─────────────────────────────────────────────────────────
 
-pub fn urlRulesEntry(c: CompiledRules, req: WebRequest, chain: Chain) -> Response {
+pub fn urlRulesEntry(
+    c: CompiledRules,
+    req: WebRequest,
+    chain: Chain,
+) -> Response {
     val fromRules: RuleOutcome = applyRules(c, req.target);
     val proxyFn = rkProxyOr({ r -> noProxy(r) });
-    val fromProxy: RuleOutcome = if (fromRules.kind == "") proxyFn(retarget(req, fromRules.target)) else continueOutcome();
+    val fromProxy: RuleOutcome = if (fromRules.kind == "")
+        proxyFn(retarget(req, fromRules.target))
+    else
+        continueOutcome();
     val out: RuleOutcome = if (fromProxy.kind != "") fromProxy else fromRules;
     val canonical: string = canonicalize(pathRulesOfCompiled(c), req.target);
     if (out.kind == "redirect") {
-        val location: string = if (isExternal(out.location)) out.location else clientHref(pathRulesOfCompiled(c), out.location);
-        return withHeader(Response(status: out.status, body: ""), "Location", location);
-    };
-    val res: Response = if (out.kind == "proxy") proxied(req.method, out.target) else chain.next(retarget(req, if (out.kind == "rewrite") out.target else canonical));
+        val location: string = if (isExternal(out.location))
+            out.location
+        else
+            clientHref(pathRulesOfCompiled(c), out.location);
+        return withHeader(
+            Response(status: out.status, body: ""),
+            "Location",
+            location,
+        );
+    }
+    val res: Response = if (out.kind == "proxy")
+        proxied(req.method, out.target)
+    else
+        chain.next(
+            retarget(req, if (out.kind == "rewrite") out.target else canonical),
+        );
     if (res.status == sentinelStatus()) return res;
     for (headersFor(c, canonical)) { h ->
         val _w = withHeader(res, h._0, h._1);
-    };
+    }
     return res;
 }
 
 // Install a compiled rule set as the chain's `url-rules` entry (order −250).
 pub fn installUrlRules(c: CompiledRules) -> i32 {
-    return registerFilter("url-rules", orderUrlRules(), { req, chain -> urlRulesEntry(c, req, chain) });
+    return registerFilter(
+        "url-rules",
+        orderUrlRules(),
+        { req, chain -> urlRulesEntry(c, req, chain) },
+    );
 }
 
 // The redirect table as it crosses to the browser in the payload.

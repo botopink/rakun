@@ -35,7 +35,16 @@ fn done() -> i32 {
 }
 
 fn nightly(name: string) -> Trigger {
-    return Trigger(name: name, job: name, cron: "0 0 3 * * *", startAt: rkI64(0), endAt: rkI64(0), misfire: MisfirePolicy.FireAll, retries: 0, backoffMs: 0);
+    return Trigger(
+        name: name,
+        job: name,
+        cron: "0 0 3 * * *",
+        startAt: rkI64(0),
+        endAt: rkI64(0),
+        misfire: MisfirePolicy.FireAll,
+        retries: 0,
+        backoffMs: 0,
+    );
 }
 
 // Runs first: nothing has mounted the job store yet.
@@ -45,12 +54,19 @@ test "quartz: absent, not empty, when the job store is not mounted" {
 
 test "quartz: lists every job with its group, triggers and next fire time" {
     val ds = fresh("qe1");
-    val _t = registerTrigger(nightly("invoices"), jobData([#("period", "2026-09")]));
+    val _t = registerTrigger(
+        nightly("invoices"),
+        jobData([#("period", "2026-09")]),
+    );
     val res = get("/actuator/quartz");
     val _z = done();
     assert res.status == 200 && endpointIds().indexOf("quartz") >= 0, res.body;
-    assert res.body.contains("\"group\":\"DEFAULT\",\"name\":\"invoices\",\"state\":\"active\""), res.body;
-    assert res.body.contains("\"triggers\":[{\"cron\":\"0 0 3 * * *\",\"misfire\":\"FireAll\",\"name\":\"invoices\",\"nextFireTime\":\"2026-09-20T03:00:00Z\",\"previousFireTime\":null,\"state\":\"waiting\"}]"), res.body;
+    assert res.body.contains(
+        "\"group\":\"DEFAULT\",\"name\":\"invoices\",\"state\":\"active\"",
+    ), res.body;
+    assert res.body.contains(
+        "\"triggers\":[{\"cron\":\"0 0 3 * * *\",\"misfire\":\"FireAll\",\"name\":\"invoices\",\"nextFireTime\":\"2026-09-20T03:00:00Z\",\"previousFireTime\":null,\"state\":\"waiting\"}]",
+    ), res.body;
 }
 
 test "quartz: a job's executions are readable newest first, bounded" {
@@ -66,20 +82,38 @@ test "quartz: a job's executions are readable newest first, bounded" {
     assert res.status == 200 && missing.status == 404, res.body;
     val first = res.body.indexOf("2026-09-22T03:00:00");
     val second = res.body.indexOf("2026-09-21T03:00:00");
-    assert first > 0 && second > first && res.body.indexOf("2026-09-20T03:00:00") < 0, res.body;
+    assert first > 0
+        && second > first
+        && res.body.indexOf("2026-09-20T03:00:00") < 0, res.body;
 }
 
 test "quartz: job data is sanitized by front 76's rules - masked by default, a secret-named key masked even when values are shown" {
     val ds = fresh("qe3");
-    val _t0 = registerTrigger(nightly("plain"), jobData([#("period", "2026-09")]));
+    val _t0 = registerTrigger(
+        nightly("plain"),
+        jobData([#("period", "2026-09")]),
+    );
     val hidden = get("/actuator/quartz");
-    val _v = rkSetProp("rakun.management.endpoint.quartz.show-values", "always");
-    val _t = registerTrigger(nightly("sync"), jobData([#("apiToken", "s3cr3t"), #("period", "2026-09")]));
+    val _v = rkSetProp(
+        "rakun.management.endpoint.quartz.show-values",
+        "always",
+    );
+    val _t = registerTrigger(
+        nightly("sync"),
+        jobData([#("apiToken", "s3cr3t"), #("period", "2026-09")]),
+    );
     val res = get("/actuator/quartz");
     val _w = rkSetProp("rakun.management.endpoint.quartz.show-values", "");
     val _z = done();
-    assert hidden.body.contains("\"value\":\"2026-09\"") == false && hidden.body.contains("\"value\":\"******\"") && res.body.contains("s3cr3t") == false && res.body.contains("{\"key\":\"period\",\"value\":\"2026-09\"}"), res.body;
-    assert res.body.contains("{\"key\":\"apiToken\",\"value\":\"******\"}"), res.body;
+    assert hidden.body.contains("\"value\":\"2026-09\"") == false
+        && hidden.body.contains("\"value\":\"******\"")
+        && res.body.contains("s3cr3t") == false
+        && res.body.contains(
+            "{\"key\":\"period\",\"value\":\"2026-09\"}",
+        ), res.body;
+    assert res.body.contains(
+        "{\"key\":\"apiToken\",\"value\":\"******\"}",
+    ), res.body;
 }
 
 test "quartz: read-only - no route fires or deletes a job" {
@@ -88,7 +122,9 @@ test "quartz: read-only - no route fires or deletes a job" {
     val fire = rkDispatchHttp("POST", "/actuator/quartz/ro", "{}", "{}", "");
     val del = rkDispatchHttp("DELETE", "/actuator/quartz/ro", "{}", "{}", "");
     val _z = done();
-    assert fire.status >= 400 && del.status >= 400, fire.status.toString() + "/" + del.status.toString();
+    assert fire.status >= 400 && del.status >= 400, fire.status.toString()
+        + "/"
+        + del.status.toString();
 }
 
 test "quartz: the per-job route answers 404 when quartz is not exposed" {

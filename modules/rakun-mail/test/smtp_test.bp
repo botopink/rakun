@@ -11,12 +11,16 @@ import {fixture.fixtureStart, fixture.fixtureStop, fixture.fixtureMessages, fixt
 
 #[@External.Erlang("""(fun() -> __D = string:trim(os:cmd("mktemp -d")), __Q = fun(__C) -> os:cmd("cd " ++ __D ++ " && " ++ __C ++ " 2>/dev/null") end, __Q("openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=rakun-mail-test-ca -keyout ca.key -out ca.pem"), __Q("printf 'subjectAltName=DNS:localhost' > leaf.ext"), __Q("openssl req -newkey rsa:2048 -nodes -subj /CN=localhost -keyout key.pem -out leaf.csr"), __Q("openssl x509 -req -in leaf.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 2 -extfile leaf.ext -out cert.pem"), __Q("openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=stranger -keyout stranger.key -out stranger.pem"), unicode:characters_to_binary(__D) end)()""")]
 declare fn issueMaterial() -> string;
+
 #[@External.Erlang("""(fun(__Ms) -> timer:sleep(__Ms), 0 end)($0)""")]
 declare fn pause(ms: i32) -> i32;
+
 #[@External.Erlang("""erlang:monotonic_time(millisecond)""")]
 declare fn nowMs() -> i32;
+
 #[@External.Erlang("""(fun(__F, __N) -> ok = file:write_file(unicode:characters_to_list(__F), crypto:strong_rand_bytes(__N)), __F end)($0, $1)""")]
 declare fn randomFile(file: string, bytes: i32) -> string;
+
 #[@External.Erlang("""(fun() -> string:trim(unicode:characters_to_binary(os:cmd("mktemp -d"))) end)()""")]
 declare fn tempDir() -> string;
 
@@ -36,17 +40,48 @@ fn trust(name: string, caFile: string) -> string {
 }
 
 fn tlsOpts(extra: string[]) -> string[] {
-    var out: string[] = ["cert=" + material() + "/cert.pem", "key=" + material() + "/key.pem"];
-    for (extra) { e -> out.push(e); };
+    var out: string[] = [
+        "cert=" + material() + "/cert.pem",
+        "key=" + material() + "/key.pem",
+    ];
+    for (extra) { e ->
+        out.push(e);
+    }
     return out;
 }
 
-fn server(port: i32, mode: TlsMode, user: string, bundle: string) -> MailServer {
-    return MailServer(host: "localhost", port: port, username: user, password: if (user == "") "" else "hunter2-secret", tlsMode: mode, bundle: bundle, connectTimeoutMs: 2000, readTimeoutMs: 2000, writeTimeoutMs: 2000);
+fn server(
+    port: i32,
+    mode: TlsMode,
+    user: string,
+    bundle: string,
+) -> MailServer {
+    return MailServer(
+        host: "localhost",
+        port: port,
+        username: user,
+        password: if (user == "") "" else "hunter2-secret",
+        tlsMode: mode,
+        bundle: bundle,
+        connectTimeoutMs: 2000,
+        readTimeoutMs: 2000,
+        writeTimeoutMs: 2000,
+    );
 }
 
 fn simple(subject: string) -> Mail {
-    return Mail(sender: "App <app@example.com>", to: ["bob@example.com"], cc: [], bcc: [], replyTo: "", subject: subject, text: "hello", html: "", attachments: [], headers: []);
+    return Mail(
+        sender: "App <app@example.com>",
+        to: ["bob@example.com"],
+        cc: [],
+        bcc: [],
+        replyTo: "",
+        subject: subject,
+        text: "hello",
+        html: "",
+        attachments: [],
+        headers: [],
+    );
 }
 
 fn has(lines: string[], needle: string) -> bool {
@@ -66,7 +101,21 @@ fn setServer(port: i32, tls: string, bundle: string) -> i32 {
 }
 
 fn clearServer() -> i32 {
-    for (["host", "port", "tls", "ssl.bundle", "username", "password", "health.timeout-ms", "timeout", "queue.concurrency", "retry.max-attempts", "retry.backoff-ms"]) { k -> val _u = rkSetProp("rakun.mail." + k, ""); };
+    for ([
+        "host",
+        "port",
+        "tls",
+        "ssl.bundle",
+        "username",
+        "password",
+        "health.timeout-ms",
+        "timeout",
+        "queue.concurrency",
+        "retry.max-attempts",
+        "retry.backoff-ms",
+    ]) { k ->
+        val _u = rkSetProp("rakun.mail." + k, "");
+    }
     return 0;
 }
 
@@ -78,7 +127,12 @@ test "smtp: EHLO, AUTH PLAIN, MAIL FROM, RCPT TO, DATA and QUIT complete against
     val t = fixtureTranscript(port);
     val _s = fixtureStop(port);
     assert r == "", r;
-    assert has(t, "EHLO ") && has(t, "MAIL FROM:<app@example.com>") && has(t, "RCPT TO:<bob@example.com>") && has(t, "DATA") && has(t, "QUIT") && has(t, "AUTH-USED PLAIN app hunter2-secret"), t.join(" | ");
+    assert has(t, "EHLO ")
+        && has(t, "MAIL FROM:<app@example.com>")
+        && has(t, "RCPT TO:<bob@example.com>")
+        && has(t, "DATA")
+        && has(t, "QUIT")
+        && has(t, "AUTH-USED PLAIN app hunter2-secret"), t.join(" | ");
 }
 
 test "smtp: AUTH LOGIN is used when the server offers it and not PLAIN" {
@@ -86,43 +140,123 @@ test "smtp: AUTH LOGIN is used when the server offers it and not PLAIN" {
     val r = deliverNow(server(port, TlsMode.None, "app", ""), simple("hi"));
     val t = fixtureTranscript(port);
     val _s = fixtureStop(port);
-    assert r == "" && has(t, "AUTH-USED LOGIN app hunter2-secret") && has(t, "AUTH PLAIN") == false, t.join(" | ");
+    assert r == ""
+        && has(t, "AUTH-USED LOGIN app hunter2-secret")
+        && has(t, "AUTH PLAIN") == false, t.join(" | ");
 }
 
 test "smtp: StartTls upgrades the connection, and refuses a server that does not advertise STARTTLS" {
     val bundle = trust("mailca", material() + "/ca.pem");
     val port = fixtureStart(tlsOpts(["starttls"]));
-    val r = deliverNow(server(port, TlsMode.StartTls, "", bundle), simple("over tls"));
+    val r = deliverNow(
+        server(port, TlsMode.StartTls, "", bundle),
+        simple("over tls"),
+    );
     val msgs = fixtureMessages(port);
     val _s = fixtureStop(port);
-    assert r == "" && msgs.length == 1 && (msgs.at(0) ?? "").split("\n").at(0) == "app@example.com\tbob@example.com\ttrue", msgs.join("\n");
+    assert r == ""
+        && msgs.length == 1
+        && (msgs.at(0) ?? "").split("\n").at(0)
+            == "app@example.com\tbob@example.com\ttrue", msgs.join("\n");
     val plain = fixtureStart([]);
-    val refused = deliverNow(server(plain, TlsMode.StartTls, "", bundle), simple("never"));
+    val refused = deliverNow(
+        server(plain, TlsMode.StartTls, "", bundle),
+        simple("never"),
+    );
     val t = fixtureTranscript(plain);
     val _p = fixtureStop(plain);
-    assert kindOf(refused) == "permanent" && refused.contains("does not advertise it - no key permits continuing in the clear") && has(t, "MAIL FROM") == false, refused;
+    assert kindOf(refused) == "permanent"
+        && refused.contains(
+            "does not advertise it - no key permits continuing in the clear",
+        )
+        && has(t, "MAIL FROM") == false, refused;
 }
 
 test "smtp: Implicit is TLS from the first byte, on the configured bundle" {
     val bundle = trust("mailca", material() + "/ca.pem");
     val port = fixtureStart(tlsOpts(["implicit"]));
-    val r = deliverNow(server(port, TlsMode.Implicit, "", bundle), simple("implicit"));
+    val r = deliverNow(
+        server(port, TlsMode.Implicit, "", bundle),
+        simple("implicit"),
+    );
     val msgs = fixtureMessages(port);
     val _s = fixtureStop(port);
-    assert r == "" && (msgs.at(0) ?? "").contains("\ttrue\n"), r + " " + msgs.join("\n");
+    assert r == "" && (msgs.at(0) ?? "").contains("\ttrue\n"), r
+        + " "
+        + msgs.join("\n");
 }
 
 test "smtp: the connect, read and write timeouts fire independently, each named" {
-    val c = deliverNow(MailServer(host: "10.255.255.1", port: 25, username: "", password: "", tlsMode: TlsMode.None, bundle: "", connectTimeoutMs: 200, readTimeoutMs: 5000, writeTimeoutMs: 5000), simple("x"));
+    val c = deliverNow(
+        MailServer(
+            host: "10.255.255.1",
+            port: 25,
+            username: "",
+            password: "",
+            tlsMode: TlsMode.None,
+            bundle: "",
+            connectTimeoutMs: 200,
+            readTimeoutMs: 5000,
+            writeTimeoutMs: 5000,
+        ),
+        simple("x"),
+    );
     val silent = fixtureStart(["silent"]);
-    val r = deliverNow(MailServer(host: "localhost", port: silent, username: "", password: "", tlsMode: TlsMode.None, bundle: "", connectTimeoutMs: 5000, readTimeoutMs: 200, writeTimeoutMs: 5000), simple("x"));
+    val r = deliverNow(
+        MailServer(
+            host: "localhost",
+            port: silent,
+            username: "",
+            password: "",
+            tlsMode: TlsMode.None,
+            bundle: "",
+            connectTimeoutMs: 5000,
+            readTimeoutMs: 200,
+            writeTimeoutMs: 5000,
+        ),
+        simple("x"),
+    );
     val _s = fixtureStop(silent);
     val slow = fixtureStart(["slow-data=4000"]);
     val big = randomFile(tempDir() + "/big.bin", 12000000);
-    val m = Mail(sender: "app@example.com", to: ["bob@example.com"], cc: [], bcc: [], replyTo: "", subject: "big", text: "x", html: "", attachments: [Attachment(filename: "big.bin", contentType: "application/octet-stream", path: big, inline: false, cid: "")], headers: []);
-    val w = deliverNow(MailServer(host: "localhost", port: slow, username: "", password: "", tlsMode: TlsMode.None, bundle: "", connectTimeoutMs: 5000, readTimeoutMs: 5000, writeTimeoutMs: 300), m);
+    val m = Mail(
+        sender: "app@example.com",
+        to: ["bob@example.com"],
+        cc: [],
+        bcc: [],
+        replyTo: "",
+        subject: "big",
+        text: "x",
+        html: "",
+        attachments: [
+            Attachment(
+                filename: "big.bin",
+                contentType: "application/octet-stream",
+                path: big,
+                inline: false,
+                cid: "",
+            ),
+        ],
+        headers: [],
+    );
+    val w = deliverNow(
+        MailServer(
+            host: "localhost",
+            port: slow,
+            username: "",
+            password: "",
+            tlsMode: TlsMode.None,
+            bundle: "",
+            connectTimeoutMs: 5000,
+            readTimeoutMs: 5000,
+            writeTimeoutMs: 300,
+        ),
+        m,
+    );
     val _w = fixtureStop(slow);
-    assert c.contains("connect-timeout") && r.contains("read-timeout") && w.contains("write-timeout"), c + " / " + r + " / " + w;
+    assert c.contains("connect-timeout")
+        && r.contains("read-timeout")
+        && w.contains("write-timeout"), c + " / " + r + " / " + w;
 }
 
 test "smtp: a 5xx fails permanently and a 4xx retryably" {
@@ -132,7 +266,10 @@ test "smtp: a 5xx fails permanently and a 4xx retryably" {
     val p4 = fixtureStart(["fail=MAIL:451"]);
     val r4 = deliverNow(server(p4, TlsMode.None, "", ""), simple("x"));
     val _b = fixtureStop(p4);
-    assert kindOf(r5) == "permanent" && r5.contains("RCPT TO answered 550") && kindOf(r4) == "retryable" && r4.contains("MAIL FROM answered 451"), r5 + " / " + r4;
+    assert kindOf(r5) == "permanent"
+        && r5.contains("RCPT TO answered 550")
+        && kindOf(r4) == "retryable"
+        && r4.contains("MAIL FROM answered 451"), r5 + " / " + r4;
 }
 
 test "smtp: credentials appear in no log line, error or health detail" {
@@ -148,13 +285,18 @@ test "smtp: credentials appear in no log line, error or health detail" {
     while (mailPending() > 0 && waited < 50) {
         val _w = pause(20);
         waited = waited + 1;
-    };
+    }
     val health = mailHealth();
-    val out = direct + mailLog().join("\n") + mailDeadLetters().join("\n") + health.details;
+    val out = direct
+        + mailLog().join("\n")
+        + mailDeadLetters().join("\n")
+        + health.details;
     val _f = fixtureStop(port);
     val _z = clearServer();
     assert direct.contains("535") && mailDeadLetters().length >= 0, direct;
-    assert out.contains("hunter2") == false && out.contains("aHVudGVyMi1zZWNyZXQ") == false && health.details.contains("\"app\"") == false, out;
+    assert out.contains("hunter2") == false
+        && out.contains("aHVudGVyMi1zZWNyZXQ") == false
+        && health.details.contains("\"app\"") == false, out;
 }
 
 // ── step 5 ──────────────────────────────────────────────────────────────────
@@ -174,8 +316,14 @@ test "health: UP when EHLO and STARTTLS complete, and nothing is sent" {
     val msgs = fixtureMessages(port);
     val _f = fixtureStop(port);
     val _z = clearServer();
-    assert h.status == "UP" && h.details.contains("\"tls\":\"starttls\"") && h.details.contains("\"tlsNegotiated\":true") && h.details.contains("\"port\":" + port.toString()), h.details;
-    assert msgs.length == 0 && has(t, "MAIL") == false && has(t, "STARTTLS") && has(t, "QUIT"), t.join(" | ");
+    assert h.status == "UP"
+        && h.details.contains("\"tls\":\"starttls\"")
+        && h.details.contains("\"tlsNegotiated\":true")
+        && h.details.contains("\"port\":" + port.toString()), h.details;
+    assert msgs.length == 0
+        && has(t, "MAIL") == false
+        && has(t, "STARTTLS")
+        && has(t, "QUIT"), t.join(" | ");
 }
 
 test "health: DOWN with a reason when the connection or the TLS negotiation fails" {
@@ -189,8 +337,10 @@ test "health: DOWN with a reason when the connection or the TLS negotiation fail
     val tls = mailHealth();
     val _f = fixtureStop(port);
     val _z = clearServer();
-    assert refused.status == "DOWN" && refused.details.contains("connect"), refused.details;
-    assert tls.status == "DOWN" && tls.details.contains("TLS negotiation failed"), tls.details;
+    assert refused.status == "DOWN"
+        && refused.details.contains("connect"), refused.details;
+    assert tls.status == "DOWN"
+        && tls.details.contains("TLS negotiation failed"), tls.details;
 }
 
 test "health: the check has its own timeout, shorter than the send timeouts" {
@@ -205,11 +355,16 @@ test "health: the check has its own timeout, shorter than the send timeouts" {
     val _f = fixtureStop(silent);
     val _z = clearServer();
     assert h.status == "DOWN" && took < 1500, took.toString() + " " + h.details;
-    assert problem.contains("rakun.mail.health.timeout-ms (6000) must be shorter than every send timeout (the shortest is 5000 ms)"), problem;
+    assert problem.contains(
+        "rakun.mail.health.timeout-ms (6000) must be shorter than every send timeout (the shortest is 5000 ms)",
+    ), problem;
 }
 
 test "smtp: rakun.mail.transport=gen_smtp without its adapter refuses the boot, naming the module - no fallback" {
     val _t = rkSetProp("rakun.mail.transport", "gen_smtp");
-    try asserts.throwsWith({ -> configureMail() }, "rakun.mail.transport=gen_smtp names the adapter module rakun_mail_gen_smtp, which is not loadable");
+    try asserts.throwsWith(
+        { -> configureMail() },
+        "rakun.mail.transport=gen_smtp names the adapter module rakun_mail_gen_smtp, which is not loadable",
+    );
     val _u = rkSetProp("rakun.mail.transport", "");
 }

@@ -69,22 +69,33 @@ pub fn stepOf(s: Stage, item: string) -> Array<string> {
 }
 
 fn isAggregate(s: Stage) -> bool {
-    return case s { Aggregate(name, key, windowMs) -> true; _ -> false; };
+    return case s {
+        Aggregate(name, key, windowMs) -> true;
+        _ -> false;
+    };
 }
 
 fn countKeys(keys: Array<string>) -> Array<string> {
     var order: Array<string> = [];
-    for (keys) { k -> if (order.indexOf(k) < 0) order.push(k); };
-    return order.map({ k -> k + "=" + keys.filter({ x -> x == k }).length.toString() });
+    for (keys) { k ->
+        if (order.indexOf(k) < 0) order.push(k);
+    }
+    return order.map(
+        { k -> k + "=" + keys.filter({ x -> x == k }).length.toString() },
+    );
 }
 
 pub fn runStages(stages: Array<Stage>, items: Array<string>) -> Array<string> {
     var current = items;
     for (stages) { s ->
         var next: Array<string> = [];
-        for (current) { item -> for (stepOf(s, item)) { o -> next.push(o); }; };
+        for (current) { item ->
+            for (stepOf(s, item)) { o ->
+                next.push(o);
+            }
+        }
         current = if (isAggregate(s)) countKeys(next) else next;
-    };
+    }
     return current;
 }
 
@@ -92,9 +103,17 @@ pub fn runStages(stages: Array<Stage>, items: Array<string>) -> Array<string> {
 pub fn pipelineProblem(p: Pipeline) -> string {
     val names = p.stages.map({ s -> stageName(s) });
     val empty = names.filter({ n -> n.trim() == "" }).length;
-    if (empty > 0) return "rakun-stream: pipeline " + p.name + " has a stage with no name - every stage is named (the graph and the dead letters name it)";
+    if (empty > 0)
+        return "rakun-stream: pipeline "
+            + p.name
+            + " has a stage with no name - every stage is named (the graph and the dead letters name it)";
     val dup = names.filter({ n -> names.filter({ m -> m == n }).length > 1 });
-    if (dup.length > 0) return "rakun-stream: pipeline " + p.name + " names two stages `" + (dup.at(0) ?? "") + "` - a stage name is unique within its pipeline";
+    if (dup.length > 0)
+        return "rakun-stream: pipeline "
+            + p.name
+            + " names two stages `"
+            + (dup.at(0) ?? "")
+            + "` - a stage name is unique within its pipeline";
     return "";
 }
 
@@ -108,7 +127,11 @@ pub fn windowKey(key: string, start: i64) -> string {
 }
 
 #[@External.Erlang("""(fun(__A, __W, __S) -> __Last = __A - (__A rem __S), [__X || __X <- lists:seq(__Last - __W + __S, __Last, __S), __X =< __A, __A < __X + __W] end)($0, $1, $2)""")]
-pub declare fn slidingStarts(atMs: i64, widthMs: i32, stepMs: i32) -> Array<i64>;
+pub declare fn slidingStarts(
+    atMs: i64,
+    widthMs: i32,
+    stepMs: i32,
+) -> Array<i64>;
 
 // ── the graph ───────────────────────────────────────────────────────────────
 
@@ -130,13 +153,15 @@ pub fn sinkName(s: Sink) -> string {
 // `source → stage1 → … → sink`, one edge per adjacent pair, in order.
 pub fn graphOf(p: Pipeline) -> Array<#(string, string)> {
     var nodes: Array<string> = [sourceName(p.source)];
-    for (p.stages) { s -> nodes.push(stageName(s)); };
+    for (p.stages) { s ->
+        nodes.push(stageName(s));
+    }
     nodes.push(sinkName(p.sink));
     var edges: Array<#(string, string)> = [];
     var i = 0;
     while (i + 1 < nodes.length) {
         edges.push(#(nodes.at(i) ?? "", nodes.at(i + 1) ?? ""));
         i = i + 1;
-    };
+    }
     return edges;
 }

@@ -3,19 +3,23 @@
 //// BOTOPINK_TEST_TMPDIR, and the scaffold is verified by RUNNING its tests.
 
 import {testing.asserts} from "std";
-import {io: {fs, process, env}} from "std";
+import {io.fs, io.process, io.env} from "std";
 import {rkSetProp} from "rakun";
 import {cli.runCli, cli.cliOutput, cli.clearCliOutput, cli.cliInvocations};
 
 fn root() -> string {
     val tmp: string = env.read("BOTOPINK_TEST_TMPDIR") ?? "";
-    if (tmp == "") @panic("BOTOPINK_TEST_TMPDIR is not set - run under botopink test");
+    if (tmp == "")
+        @panic("BOTOPINK_TEST_TMPDIR is not set - run under botopink test");
     return tmp + "/rakun-cli-scaffold";
 }
 
 fn compiler() -> string {
     val b: string = env.read("BOTOPINK_BIN") ?? "";
-    return if (b != "") b else process.cwd() + "/../../../botopink-lang/zig-out/bin/botopink";
+    return if (b != "")
+        b
+    else
+        process.cwd() + "/../../../botopink-lang/zig-out/bin/botopink";
 }
 
 fn setUp() -> i32 {
@@ -27,7 +31,9 @@ fn setUp() -> i32 {
 }
 
 fn tearDown() -> i32 {
-    for (["botopink", "rakun", "templates", "onze"]) { k -> val _u = rkSetProp("rakun.cli." + k, ""); };
+    for (["botopink", "rakun", "templates", "onze"]) { k ->
+        val _u = rkSetProp("rakun.cli." + k, "");
+    }
     return 0;
 }
 
@@ -37,7 +43,9 @@ fn tree(dir: string) -> string[] {
 }
 
 fn leftovers(dir: string) -> string {
-    return process.runShell("grep -rn '@@' '" + dir + "' --exclude-dir=.botopinkbuild | head -3");
+    return process.runShell(
+        "grep -rn '@@' '" + dir + "' --exclude-dir=.botopinkbuild | head -3",
+    );
 }
 
 test "new: a plain project has its manifest, main, configuration, health endpoint and one test, and its tests pass" {
@@ -47,16 +55,26 @@ test "new: a plain project has its manifest, main, configuration, health endpoin
     val files = tree(dir).join(",");
     val left = leftovers(dir);
     val tested = runCli(["test", "--dir", dir]);
-    val invoked = cliInvocations().filter({ l -> l.contains(" test --target erlang (in " + dir + ")") }).length;
+    val invoked = cliInvocations().filter(
+        { l -> l.contains(" test --target erlang (in " + dir + ")") },
+    ).length;
     val _t = tearDown();
-    assert status == 0 && files == "application.yaml,botopink.json,src/health.bp,src/main.bp,test/health_test.bp", files;
+    assert status == 0
+        && files
+            == "application.yaml,botopink.json,src/health.bp,src/main.bp,test/health_test.bp", files;
     assert left == "", left;
     assert tested == 0 && invoked == 1, cliOutput().join("\n");
 }
 
 test "new: an existing non-empty directory is refused with exit 2" {
     val _s = setUp();
-    val _m = process.runShell("mkdir -p '" + root() + "/taken' && echo x > '" + root() + "/taken/keep.txt'");
+    val _m = process.runShell(
+        "mkdir -p '"
+            + root()
+            + "/taken' && echo x > '"
+            + root()
+            + "/taken/keep.txt'",
+    );
     val status = runCli(["new", "taken", "--dir", root()]);
     val kept = tree(root() + "/taken").join(",");
     val _t = tearDown();
@@ -65,37 +83,60 @@ test "new: an existing non-empty directory is refused with exit 2" {
 
 test "new: --template library has no Rakun.run and no listener configuration, and its test passes" {
     val _s = setUp();
-    val status = runCli(["new", "shared", "--template", "library", "--dir", root()]);
+    val status = runCli(
+        ["new", "shared", "--template", "library", "--dir", root()],
+    );
     val dir = root() + "/shared";
     val sources = process.runShell("cat '" + dir + "'/src/*.bp");
     val files = tree(dir).join(",");
     val tested = runCli(["test", "--dir", dir]);
     val _t = tearDown();
-    assert status == 0 && sources.contains("Rakun.run") == false && files.contains("application.yaml") == false && tested == 0, files;
+    assert status == 0
+        && sources.contains("Rakun.run") == false
+        && files.contains("application.yaml") == false
+        && tested == 0, files;
 }
 
 test "new: --template full-stack documents onze dev, and refuses without onze" {
     val _s = setUp();
     val _a = rkSetProp("rakun.cli.onze", "absent");
-    val refused = runCli(["new", "shop", "--template", "full-stack", "--dir", root()]);
+    val refused = runCli(
+        ["new", "shop", "--template", "full-stack", "--dir", root()],
+    );
     val _p = rkSetProp("rakun.cli.onze", "/usr/local/bin/onze");
-    val made = runCli(["new", "shop", "--template", "full-stack", "--dir", root()]);
+    val made = runCli(
+        ["new", "shop", "--template", "full-stack", "--dir", root()],
+    );
     val readme = fs.readText(root() + "/shop/README.md").unwrapOr("");
     val _t = tearDown();
-    assert refused == 2 && made == 0 && readme.contains("Develop with `onze dev`") && leftovers(root() + "/shop") == "";
+    assert refused == 2
+        && made == 0
+        && readme.contains("Develop with `onze dev`")
+        && leftovers(root() + "/shop") == "";
 }
 
 test "test: forwards --filter and the runner's status; a project that does not compile is exit 3" {
     val _s = setUp();
     val _n = runCli(["new", "broken", "--dir", root()]);
     val dir = root() + "/broken";
-    val filtered = runCli(["test", "--dir", dir, "--filter", "no test is named this"]);
+    val filtered = runCli(
+        ["test", "--dir", dir, "--filter", "no test is named this"],
+    );
     val _w = fs.writeText(dir + "/src/health.bp", "this is not botopink");
     val broken = runCli(["test", "--dir", dir]);
     val built = runCli(["build", "--dir", dir]);
-    val passed = cliInvocations().filter({ l -> l.contains("--filter no test is named this") }).length;
+    val passed = cliInvocations().filter(
+        { l -> l.contains("--filter no test is named this") },
+    ).length;
     val _t = tearDown();
-    assert filtered == 0 && passed == 1 && broken == 3 && built == 3, filtered.toString() + " " + broken.toString() + " " + built.toString();
+    assert filtered == 0
+        && passed == 1
+        && broken == 3
+        && built == 3, filtered.toString()
+        + " "
+        + broken.toString()
+        + " "
+        + built.toString();
 }
 
 test "build: the release artefact is front 81's tarball, and exit 0" {
@@ -104,9 +145,17 @@ test "build: the release artefact is front 81's tarball, and exit 0" {
     val dir = root() + "/shipped";
     val status = runCli(["build", "--dir", dir]);
     val tar = dir + "/.rakun/release/shipped-0.0.1.tar";
-    val listing = process.runShell("tar -tf '" + tar + "' 2>&1 | grep -E '^(bin|releases)/' | sort");
+    val listing = process.runShell(
+        "tar -tf '" + tar + "' 2>&1 | grep -E '^(bin|releases)/' | sort",
+    );
     val _t = tearDown();
-    assert status == 0 && fs.exists(tar) && listing.contains("bin/shipped") && listing.contains("releases/0.0.1/shipped.rel"), cliOutput().join("\n") + listing;
+    assert status == 0
+        && fs.exists(tar)
+        && listing.contains("bin/shipped")
+        && listing.contains("releases/0.0.1/shipped.rel"), cliOutput().join(
+        "\n",
+    )
+        + listing;
 }
 
 test "run: --watch without rakun-data (devtools) is a usage error naming it" {
@@ -115,10 +164,15 @@ test "run: --watch without rakun-data (devtools) is a usage error naming it" {
     val status = runCli(["run", "--watch", "--dir", root() + "/watched"]);
     val said = cliOutput().join("\n");
     val _t = tearDown();
-    assert status == 2 && said.contains("--watch needs rakun-data (front 80's devtools)"), said;
+    assert status == 2
+        && said.contains(
+            "--watch needs rakun-data (front 80's devtools)",
+        ), said;
 }
 
 test "boundary: rakun-cli carries no bundler, no asset pipeline and no reference to onze's repository" {
-    val hits = process.runShell("grep -rniE 'esbuild|webpack|rollup|repository/onze' src templates botopink.json | head -3");
+    val hits = process.runShell(
+        "grep -rniE 'esbuild|webpack|rollup|repository/onze' src templates botopink.json | head -3",
+    );
     assert hits == "", hits;
 }

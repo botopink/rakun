@@ -4,32 +4,42 @@
 
 import {testing.asserts} from "std";
 import {rkProp, rkSetProp} from "rakun";
-import {
-    audit.audit.AuditEvent, audit.audit.MemoryAuditRepository, audit.audit.SqlAuditRepository, audit.audit.memoryAuditRepository, audit.audit.sqlAuditRepository,
-    audit.audit.installAuditSql, audit.audit.auditWriteFailures, audit.audit.auditSchemaSql, audit.audit.auditTableOwner,
-};
+import {audit.audit.AuditEvent, audit.audit.MemoryAuditRepository, audit.audit.SqlAuditRepository, audit.audit.memoryAuditRepository, audit.audit.sqlAuditRepository, audit.audit.installAuditSql, audit.audit.auditWriteFailures, audit.audit.auditSchemaSql, audit.audit.auditTableOwner};
 
 #[@External.Erlang("""(fun(__X) -> __X end)($0)""")]
 declare fn wide(n: i32) -> i64;
+
 #[@External.Erlang("""(fun(__S) -> persistent_term:put(rakun_test_sql_log, persistent_term:get(rakun_test_sql_log, []) ++ [__S]), 0 end)($0)""")]
 declare fn logSql(sql: string) -> i32;
+
 #[@External.Erlang("""persistent_term:get(rakun_test_sql_log, [])""")]
 declare fn sqlLog() -> string[];
+
 #[@External.Erlang("""(fun(__R) -> persistent_term:put(rakun_test_sql_rows, persistent_term:get(rakun_test_sql_rows, []) ++ [__R]), 1 end)($0)""")]
 declare fn keepRow(row: Array<string>) -> i32;
+
 #[@External.Erlang("""persistent_term:get(rakun_test_sql_rows, [])""")]
 declare fn rows() -> Array<Array<string>>;
+
 #[@External.Erlang("""(fun() -> persistent_term:erase(rakun_test_sql_rows), persistent_term:erase(rakun_test_sql_log), 0 end)()""")]
 declare fn resetSql() -> i32;
+
 #[@External.Erlang("""(fun(__F) -> __P = spawn(fun() -> __F(), receive stop -> ok end end), timer:sleep(50), exit(__P, kill), 0 end)($0)""")]
 declare fn inDoomedProcess(work: fn() -> i32) -> i32;
 
 fn ev(at: i32, who: string, kind: string) -> AuditEvent {
-    return AuditEvent(atMs: wide(at), principal: who, kind: kind, data: [#("remoteAddress", "10.0.0.1")]);
+    return AuditEvent(
+        atMs: wide(at),
+        principal: who,
+        kind: kind,
+        data: [#("remoteAddress", "10.0.0.1")],
+    );
 }
 
 fn kinds(es: Array<AuditEvent>) -> string {
-    return es.map({ e -> e.principal + "/" + e.kind + "@" + e.atMs.toString() }).join(",");
+    return es
+        .map({ e -> e.principal + "/" + e.kind + "@" + e.atMs.toString() })
+        .join(",");
 }
 
 fn param(ps: Array<#(string, string)>, k: string) -> string {
@@ -40,17 +50,21 @@ fn param(ps: Array<#(string, string)>, k: string) -> string {
 // SELECT with all of them (the WHERE is asserted on the text).
 fn fakeSql(failWrites: bool) -> i32 {
     val _r = resetSql();
-    return installAuditSql(
-        { sql, ps ->
-            val _l = logSql(sql);
-            rows()
-        },
-        { sql, ps ->
-            val _l = logSql(sql);
-            if (failWrites) @panic("database unavailable");
-            keepRow([param(ps, "at"), param(ps, "principal"), param(ps, "kind"), param(ps, "data")])
-        },
-    );
+    return installAuditSql({ sql, ps ->
+        val _l = logSql(sql);
+        rows();
+    }, { sql, ps ->
+        val _l = logSql(sql);
+        if (failWrites) @panic("database unavailable");
+        keepRow(
+            [
+                param(ps, "at"),
+                param(ps, "principal"),
+                param(ps, "kind"),
+                param(ps, "data"),
+            ],
+        );
+    });
 }
 
 // ── step 1 ──────────────────────────────────────────────────────────────────
@@ -60,7 +74,8 @@ test "audit: find with no filter answers every event, newest last" {
     val _a = repo.record(ev(1, "ana", "AUTHENTICATION_SUCCESS"));
     val _b = repo.record(ev(2, "bob", "AUTHENTICATION_FAILURE"));
     val _c = repo.record(ev(3, "ana", "AUTHENTICATION_FAILURE"));
-    assert kinds(repo.find("", wide(0), "")) == "ana/AUTHENTICATION_SUCCESS@1,bob/AUTHENTICATION_FAILURE@2,ana/AUTHENTICATION_FAILURE@3";
+    assert kinds(repo.find("", wide(0), ""))
+        == "ana/AUTHENTICATION_SUCCESS@1,bob/AUTHENTICATION_FAILURE@2,ana/AUTHENTICATION_FAILURE@3";
 }
 
 test "audit: principal and kind filter, and together they intersect" {
@@ -68,9 +83,12 @@ test "audit: principal and kind filter, and together they intersect" {
     val _a = repo.record(ev(1, "ana", "AUTHENTICATION_SUCCESS"));
     val _b = repo.record(ev(2, "bob", "AUTHENTICATION_FAILURE"));
     val _c = repo.record(ev(3, "ana", "AUTHENTICATION_FAILURE"));
-    assert kinds(repo.find("ana", wide(0), "")) == "ana/AUTHENTICATION_SUCCESS@1,ana/AUTHENTICATION_FAILURE@3";
-    assert kinds(repo.find("", wide(0), "AUTHENTICATION_FAILURE")) == "bob/AUTHENTICATION_FAILURE@2,ana/AUTHENTICATION_FAILURE@3";
-    assert kinds(repo.find("ana", wide(0), "AUTHENTICATION_FAILURE")) == "ana/AUTHENTICATION_FAILURE@3";
+    assert kinds(repo.find("ana", wide(0), ""))
+        == "ana/AUTHENTICATION_SUCCESS@1,ana/AUTHENTICATION_FAILURE@3";
+    assert kinds(repo.find("", wide(0), "AUTHENTICATION_FAILURE"))
+        == "bob/AUTHENTICATION_FAILURE@2,ana/AUTHENTICATION_FAILURE@3";
+    assert kinds(repo.find("ana", wide(0), "AUTHENTICATION_FAILURE"))
+        == "ana/AUTHENTICATION_FAILURE@3";
 }
 
 test "audit: afterMs is exclusive" {
@@ -82,13 +100,21 @@ test "audit: afterMs is exclusive" {
 
 test "audit: an event with empty data round-trips through both arms" {
     val mem = memoryAuditRepository(3);
-    val _m = mem.record(AuditEvent(atMs: wide(9), principal: "ana", kind: "LOGOUT", data: []));
+    val _m = mem.record(
+        AuditEvent(atMs: wide(9), principal: "ana", kind: "LOGOUT", data: []),
+    );
     val _f = fakeSql(false);
     val sql = sqlAuditRepository("audit_events");
-    val _s = sql.record(AuditEvent(atMs: wide(9), principal: "ana", kind: "LOGOUT", data: []));
+    val _s = sql.record(
+        AuditEvent(atMs: wide(9), principal: "ana", kind: "LOGOUT", data: []),
+    );
     val back = sql.find("", wide(0), "");
     val first = mem.find("", wide(0), "");
-    assert first.length == 1 && (first.at(0) ?? ev(0, "", "")).data.length == 0 && back.length == 1 && (back.at(0) ?? ev(0, "", "")).data.length == 0 && (back.at(0) ?? ev(0, "", "")).principal == "ana";
+    assert first.length == 1
+        && (first.at(0) ?? ev(0, "", "")).data.length == 0
+        && back.length == 1
+        && (back.at(0) ?? ev(0, "", "")).data.length == 0
+        && (back.at(0) ?? ev(0, "", "")).principal == "ana";
 }
 
 // ── step 2 ──────────────────────────────────────────────────────────────────
@@ -99,8 +125,11 @@ test "audit: capacity + 5 writes keep capacity events, dropping the five oldest,
     while (i <= 9) {
         val _r = repo.record(ev(i, "u", "K"));
         i = i + 1;
-    };
-    val kept = repo.find("", wide(0), "").map({ e -> e.atMs.toString() }).join(",");
+    }
+    val kept = repo
+        .find("", wide(0), "")
+        .map({ e -> e.atMs.toString() })
+        .join(",");
     val d1 = repo.dropped();
     val _x = repo.record(ev(10, "u", "K"));
     assert kept == "6,7,8,9" && d1 == 5 && repo.dropped() == 6, kept;
@@ -109,7 +138,8 @@ test "audit: capacity + 5 writes keep capacity events, dropping the five oldest,
 test "audit: the ring survives the process that recorded into it" {
     val repo = memoryAuditRepository(5);
     val _k = inDoomedProcess({ -> repo.record(ev(1, "ana", "LOGOUT")) });
-    assert repo.find("", wide(0), "").length == 1 && auditTableOwner(repo.table) != "";
+    assert repo.find("", wide(0), "").length == 1
+        && auditTableOwner(repo.table) != "";
 }
 
 test "audit: two repositories never share a table" {
@@ -127,7 +157,8 @@ test "audit sql: the repository never creates its table - the schema is a migrat
     val _r = repo.record(ev(1, "ana", "LOGOUT"));
     val _q = repo.find("", wide(0), "");
     assert sqlLog().filter({ s -> s.toUpper().contains("CREATE") }).length == 0;
-    assert auditSchemaSql("audit_events") == "CREATE TABLE audit_events (at_ms integer, principal text, kind text, data text)";
+    assert auditSchemaSql("audit_events")
+        == "CREATE TABLE audit_events (at_ms integer, principal text, kind text, data text)";
 }
 
 test "audit sql: find pushes principal, kind and instant into the WHERE" {
@@ -135,7 +166,9 @@ test "audit sql: find pushes principal, kind and instant into the WHERE" {
     val repo = sqlAuditRepository("audit_events");
     val _q = repo.find("ana", wide(100), "AUTHENTICATION_FAILURE");
     val sql = sqlLog().at(0) ?? "";
-    assert sql.contains("WHERE at_ms > :after AND principal = :principal AND kind = :kind"), sql;
+    assert sql.contains(
+        "WHERE at_ms > :after AND principal = :principal AND kind = :kind",
+    ), sql;
 }
 
 test "audit sql: dropped is 0, and a failed write is logged and counted, never raised" {

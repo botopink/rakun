@@ -38,7 +38,11 @@ pub declare fn rkActuatorInvoke<Q>(id: string, req: Q) -> ?EndpointResponse;
 pub declare fn rkActuatorCacheGet(id: string) -> ?EndpointResponse;
 
 #[@External.Erlang("rakun_actuator", "cache_put")]
-pub declare fn rkActuatorCachePut(id: string, ttlMillis: i32, res: EndpointResponse) -> i32;
+pub declare fn rkActuatorCachePut(
+    id: string,
+    ttlMillis: i32,
+    res: EndpointResponse,
+) -> i32;
 
 #[@External.Erlang("rakun_actuator", "cache_reset")]
 pub declare fn rkActuatorCacheReset() -> i32;
@@ -67,19 +71,26 @@ pub declare fn rkActuatorRestart() -> i32;
 // ── configuration ───────────────────────────────────────────────────────────
 
 pub fn basePathProblem(raw: string) -> string {
-    return "rakun-actuator: rakun.management.endpoints.web.base-path is `" + raw + "` - it must start with a slash, must not end with one, and must not be the root (the root would put every endpoint id beside the application's own routes)";
+    return "rakun-actuator: rakun.management.endpoints.web.base-path is `"
+        + raw
+        + "` - it must start with a slash, must not end with one, and must not be the root (the root would put every endpoint id beside the application's own routes)";
 }
 
 pub fn basePath() -> string {
     val raw: string = rkProp("rakun.management.endpoints.web.base-path").trim();
     val base: string = if (raw == "") "/actuator" else raw;
-    if ((base.startsWith("/") == false) || base.endsWith("/") || base.contains(" ")) @panic(basePathProblem(raw));
+    if ((base.startsWith("/") == false)
+        || base.endsWith("/")
+        || base.contains(" "))
+        @panic(basePathProblem(raw));
     return base;
 }
 
 // The path segment an id answers at: its `path-mapping` when one is set.
 pub fn segmentFor(id: string) -> string {
-    val mapped: string = rkProp("rakun.management.endpoints.web.path-mapping." + id).trim();
+    val mapped: string = rkProp(
+        "rakun.management.endpoints.web.path-mapping." + id,
+    ).trim();
     return if (mapped == "") id else mapped;
 }
 
@@ -89,12 +100,15 @@ pub fn idForSegment(segment: string) -> string {
     var found = "";
     for (endpointIds()) { id ->
         if (segmentFor(id) == segment) found = id;
-    };
+    }
     return found;
 }
 
 pub fn cacheTtlMillis(id: string) -> i32 {
-    val d: Duration = rkPropDuration("rakun.management.endpoint." + id + ".cache.time-to-live", "millis");
+    val d: Duration = rkPropDuration(
+        "rakun.management.endpoint." + id + ".cache.time-to-live",
+        "millis",
+    );
     return d.millis;
 }
 
@@ -116,7 +130,9 @@ pub fn exposed(id: string) -> bool {
 // ── the route ───────────────────────────────────────────────────────────────
 
 pub fn notFoundProblem(segment: string, path: string) -> Response {
-    return problemResponse(problemFor(404, "no endpoint registered as " + segment, path));
+    return problemResponse(
+        problemFor(404, "no endpoint registered as " + segment, path),
+    );
 }
 
 pub fn render(res: EndpointResponse) -> Response {
@@ -132,9 +148,7 @@ pub fn readEndpoint(id: string, req: Request) -> ?EndpointResponse {
     val hit: ?EndpointResponse = if (ttl > 0) rkActuatorCacheGet(id) else null;
     if (hit != null) return hit;
     val fresh: ?EndpointResponse = rkActuatorInvoke(id, req);
-    if (fresh != null) {
-        val _p = rkActuatorCachePut(id, ttl, fresh);
-    };
+    if (fresh != null) val _p = rkActuatorCachePut(id, ttl, fresh);
     return fresh;
 }
 
@@ -144,9 +158,11 @@ pub fn readEndpoint(id: string, req: Request) -> ?EndpointResponse {
 pub fn serveActuator(req: Request) -> Response {
     val base: string = basePath();
     val segment: string = req.param("endpoint");
-    if (req.path != base + "/" + segment) return notFoundProblem(segment, req.path);
+    if (req.path != base + "/" + segment)
+        return notFoundProblem(segment, req.path);
     val id: string = idForSegment(segment);
-    if ((id == "") || (exposed(id) == false)) return notFoundProblem(segment, req.path);
+    if ((id == "") || (exposed(id) == false))
+        return notFoundProblem(segment, req.path);
     val res: ?EndpointResponse = readEndpoint(id, req);
     if (res == null) return notFoundProblem(segment, req.path);
     return render(filtered(id, res));
@@ -158,7 +174,11 @@ pub fn serveActuator(req: Request) -> Response {
 declare fn rkProbesFilterApply(id: string, body: string) -> string;
 
 pub fn filtered(id: string, res: EndpointResponse) -> EndpointResponse {
-    return EndpointResponse(status: res.status, contentType: res.contentType, body: rkProbesFilterApply(id, res.body));
+    return EndpointResponse(
+        status: res.status,
+        contentType: res.contentType,
+        body: rkProbesFilterApply(id, res.body),
+    );
 }
 
 // Registers the ONE route for the current base path. Idempotent per base path:
@@ -169,7 +189,11 @@ pub fn mountRoute() -> i32 {
     val base: string = basePath();
     val _c = mountCors(base);
     if (rkActuatorMetaGet("mounted " + base) == "1") return 0;
-    val _r = rkRegisterRoute("GET", base + "/:endpoint", { req -> serveActuator(req) });
+    val _r = rkRegisterRoute(
+        "GET",
+        base + "/:endpoint",
+        { req -> serveActuator(req) },
+    );
     return rkActuatorMetaPut("mounted " + base, "1");
 }
 
@@ -181,9 +205,13 @@ pub fn mountRoute() -> i32 {
 // mapping: the global policy (deny-all by default) applies.
 
 pub fn mountCors(base: string) -> i32 {
-    val origins: string = rkProp("rakun.management.endpoints.web.cors.allowed-origins").trim();
+    val origins: string = rkProp(
+        "rakun.management.endpoints.web.cors.allowed-origins",
+    ).trim();
     if (origins == "") return 0;
-    val methods0: string = rkProp("rakun.management.endpoints.web.cors.allowed-methods").trim();
+    val methods0: string = rkProp(
+        "rakun.management.endpoints.web.cors.allowed-methods",
+    ).trim();
     val methods: string = if (methods0 == "") "GET" else methods0;
     val key: string = "cors " + base + " " + origins + " " + methods;
     if (rkActuatorMetaGet(key) == "1") return 0;

@@ -14,7 +14,7 @@
 //// none of them the cells FAIL saying so — they never pass vacuously.
 
 import {testing.asserts} from "std";
-import {io: {fs, process, env}} from "std";
+import {io.fs, io.process, io.env} from "std";
 
 // This run's own scratch directory, `""` outside `botopink test`. `botopink
 // test` names it in `BOTOPINK_TEST_TMPDIR` — unique to the run and the target,
@@ -37,22 +37,43 @@ fn dep(name: string, dir: string) -> string {
 
 fn compileFixture(name: string, source: string, command: string) -> string {
     val root = fixtureRoot();
-    return if (root == "") "BOTOPINK_TEST_TMPDIR is not set: run this suite under `botopink test`" else compileFixtureIn(root + "/" + name, name, source, command);
+    return if (root == "")
+        "BOTOPINK_TEST_TMPDIR is not set: run this suite under `botopink test`"
+    else
+        compileFixtureIn(root + "/" + name, name, source, command);
 }
 
-fn compileFixtureIn(dir: string, name: string, source: string, command: string) -> string {
+fn compileFixtureIn(
+    dir: string,
+    name: string,
+    source: string,
+    command: string,
+) -> string {
     val here = process.cwd();
-    val _m = process.runShell("rm -rf '" + dir + "' && mkdir -p '" + dir + "/src'");
+    val _m = process.runShell(
+        "rm -rf '" + dir + "' && mkdir -p '" + dir + "/src'",
+    );
     val deps: string[] = [
         dep("rakun", here + "/../rakun"),
         dep("rakun-web", here + "/../rakun-web"),
         dep("rakun-data", here + "/../rakun-data"),
         dep("rakun-security", here),
     ];
-    val manifest = "{\n  \"name\": \"" + name + "\",\n  \"version\": \"0.0.1\",\n  \"src\": \"src/\",\n  \"entry\": \"root.bp\",\n  \"target\": \"erlang\",\n  \"targets\": [\"erlang\"],\n  \"dependencies\": {\n" + deps.join(",\n") + "\n  }\n}\n";
+    val manifest = "{\n  \"name\": \""
+        + name
+        + "\",\n  \"version\": \"0.0.1\",\n  \"src\": \"src/\",\n  \"entry\": \"root.bp\",\n  \"target\": \"erlang\",\n  \"targets\": [\"erlang\"],\n  \"dependencies\": {\n"
+        + deps.join(",\n")
+        + "\n  }\n}\n";
     val _j = fs.writeText(dir + "/botopink.json", manifest);
     val _s = fs.writeText(dir + "/src/root.bp", source);
-    return process.runShell(compilerCommand() + "cd '" + dir + "' && \"$B\" " + command + " 2>&1 < /dev/null; echo \"exit=$?\"");
+    return process.runShell(
+        compilerCommand()
+            + "cd '"
+            + dir
+            + "' && \"$B\" "
+            + command
+            + " 2>&1 < /dev/null; echo \"exit=$?\"",
+    );
 }
 
 fn buildFixture(name: string, source: string) -> string {
@@ -64,7 +85,10 @@ fn header() -> string {
 }
 
 fn securedType(marker: string) -> string {
-    return header() + "#[service]\n#[methodSecurity]\n#[managed]\npub type FixService() {\n    " + marker + "\n    pub fn one(self: Self) -> i32 {\n        return 1;\n    }\n}\n";
+    return header()
+        + "#[service]\n#[methodSecurity]\n#[managed]\npub type FixService() {\n    "
+        + marker
+        + "\n    pub fn one(self: Self) -> i32 {\n        return 1;\n    }\n}\n";
 }
 
 // ── the refusals ────────────────────────────────────────────────────────────
@@ -75,28 +99,50 @@ test "build: a well-formed #[methodSecurity] type builds" {
 }
 
 test "build: #[preAuthorize] fails at comptime saying expression security is not ported and naming the supported forms" {
-    val out = buildFixture("preauthorize", securedType("#[preAuthorize(\"hasRole('ADMIN') or #userId == authentication.principal\")]"));
-    try asserts.contains(out, "#[preAuthorize] is not ported: expression-based security needs an expression language");
-    try asserts.contains(out, "Supported forms: #[secured(\"ROLE\")], #[secured(\"ROLE_A,ROLE_B\")] (any of) and #[permitAll]");
+    val out = buildFixture(
+        "preauthorize",
+        securedType(
+            "#[preAuthorize(\"hasRole('ADMIN') or #userId == authentication.principal\")]",
+        ),
+    );
+    try asserts.contains(
+        out,
+        "#[preAuthorize] is not ported: expression-based security needs an expression language",
+    );
+    try asserts.contains(
+        out,
+        "Supported forms: #[secured(\"ROLE\")], #[secured(\"ROLE_A,ROLE_B\")] (any of) and #[permitAll]",
+    );
     try asserts.contains(out, "src/root.bp:");
     try asserts.notContains(out, "exit=0");
 }
 
 test "build: #[methodSecurity] on an enum-shaped type fails at comptime" {
-    val src = header() + "#[methodSecurity]\npub type FixColor {\n    Red,\n    Green,\n}\n";
+    val src = header()
+        + "#[methodSecurity]\npub type FixColor {\n    Red,\n    Green,\n}\n";
     val out = buildFixture("enum", src);
-    try asserts.contains(out, "#[methodSecurity] must annotate a type with fields or methods, not an enum");
+    try asserts.contains(
+        out,
+        "#[methodSecurity] must annotate a type with fields or methods, not an enum",
+    );
     try asserts.notContains(out, "exit=0");
 }
 
 test "build: #[secured] with an expression instead of authority names fails at comptime" {
-    val out = buildFixture("expression", securedType("#[secured(\"hasRole('ADMIN')\")]"));
-    try asserts.contains(out, "#[secured] takes authority names, comma-separated");
+    val out = buildFixture(
+        "expression",
+        securedType("#[secured(\"hasRole('ADMIN')\")]"),
+    );
+    try asserts.contains(
+        out,
+        "#[secured] takes authority names, comma-separated",
+    );
     try asserts.notContains(out, "exit=0");
 }
 
 test "build: an array parameter and a generic return are forwarded with their spelled types" {
-    val src = header() + "#[service]\n#[methodSecurity]\n#[managed]\npub type FixSpelled() {\n    pub fn many(self: Self, ids: i32[]) -> i32 {\n        return ids.length;\n    }\n    pub fn names(self: Self, xs: Array<string>) -> Array<string> {\n        return xs;\n    }\n}\n";
+    val src = header()
+        + "#[service]\n#[methodSecurity]\n#[managed]\npub type FixSpelled() {\n    pub fn many(self: Self, ids: i32[]) -> i32 {\n        return ids.length;\n    }\n    pub fn names(self: Self, xs: Array<string>) -> Array<string> {\n        return xs;\n    }\n}\n";
     val out = buildFixture("spelled", src);
     try asserts.notContains(out, "cannot forward");
     try asserts.contains(out, "exit=0");
@@ -258,7 +304,11 @@ test "example: a secured method called outside a request is a hard failure" {
 }
 
 test "build: the front's example builds and its tests pass as a consumer of the package" {
-    val out = compileFixture("example", exampleSource(), "test --target erlang");
+    val out = compileFixture(
+        "example",
+        exampleSource(),
+        "test --target erlang",
+    );
     try asserts.contains(out, "8 passed, 0 failed");
     try asserts.contains(out, "exit=0");
 }

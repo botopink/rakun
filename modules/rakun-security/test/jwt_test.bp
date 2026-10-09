@@ -9,20 +9,7 @@ import {Response, rkReqSleep} from "rakun";
 import {resetChain, runChain, rkChainSetTerminal, problemLog} from "rakun-web";
 import {principal.Authentication, principal.Principal, principal.anonymous, principal.currentAuthentication};
 import {policy.SecurityPolicy, policy.PathRule};
-import {
-    jwt.JwtConfig,
-    jwt.jwtConfig,
-    jwt.jwtConfigProblem,
-    jwt.verifyJwtAt,
-    jwt.verifyJwt,
-    jwt.nowSecondsF,
-    jwt.signJwt,
-    jwt.hs256Header,
-    jwt.signatureOf,
-    jwt.signatureMatches,
-    jwt.skewOf,
-    jwt.rkSecNowSeconds,
-};
+import {jwt.JwtConfig, jwt.jwtConfig, jwt.jwtConfigProblem, jwt.verifyJwtAt, jwt.verifyJwt, jwt.nowSecondsF, jwt.signJwt, jwt.hs256Header, jwt.signatureOf, jwt.signatureMatches, jwt.skewOf, jwt.rkSecNowSeconds};
 import {security_filter.installSecurityWith, security_filter.securityBoot};
 
 fn secret() -> string {
@@ -52,7 +39,9 @@ fn claims(sub: string, exp: i32, extra: #(string, string)[]) -> string {
         #("roles", json.array([json.quote("ROLE_USER")])),
         #("exp", exp.toString()),
     ];
-    for (extra) { e -> members.push(e); };
+    for (extra) { e ->
+        members.push(e);
+    }
     return json.object(members);
 }
 
@@ -65,7 +54,9 @@ fn valid() -> string {
 }
 
 fn headerOf(alg: string) -> string {
-    return json.object([#("alg", json.quote(alg)), #("typ", json.quote("JWT"))]);
+    return json.object(
+        [#("alg", json.quote(alg)), #("typ", json.quote("JWT"))],
+    );
 }
 
 fn parts(token: string) -> string[] {
@@ -89,22 +80,83 @@ fn mutateOne(sig: string) -> string {
 fn negativeTable() -> #(string, string)[] {
     val t: string = valid();
     val sig: string = part(t, 2);
-    val rs256Input: string = encoding.base64UrlEncode(headerOf("RS256")) + "." + part(t, 1);
+    val rs256Input: string = encoding.base64UrlEncode(headerOf("RS256"))
+        + "."
+        + part(t, 1);
     return [
         #("expired", signed(claims("ana", now() - 60, []))),
-        #("not-yet-valid", signed(claims("ana", now() + 3600, [#("nbf", (now() + 120).toString())]))),
-        #("alg none", encoding.base64UrlEncode(headerOf("none")) + "." + part(t, 1) + "."),
-        #("alg RS256 with an HS256 signature", rs256Input + "." + signatureOf(secret(), rs256Input)),
-        #("wrong issuer", signed(claims("ana", now() + 3600, [#("iss", json.quote("https://evil.test"))]))),
-        #("wrong audience", signed(claims("ana", now() + 3600, [#("iss", json.quote("https://issuer.test")), #("aud", json.quote("other-api"))]))),
-        #("one-byte-mutated signature", part(t, 0) + "." + part(t, 1) + "." + mutateOne(sig)),
-        #("wholly different signature", part(t, 0) + "." + part(t, 1) + "." + signatureOf("another-secret-0123456789abcdef-xx", part(t, 0) + "." + part(t, 1))),
-        #("tampered payload", part(t, 0) + "." + encoding.base64UrlEncode(claims("root", now() + 3600, [])) + "." + sig),
+        #(
+            "not-yet-valid",
+            signed(
+                claims(
+                    "ana",
+                    now() + 3600,
+                    [#("nbf", (now() + 120).toString())],
+                ),
+            ),
+        ),
+        #(
+            "alg none",
+            encoding.base64UrlEncode(headerOf("none")) + "." + part(t, 1) + ".",
+        ),
+        #(
+            "alg RS256 with an HS256 signature",
+            rs256Input + "." + signatureOf(secret(), rs256Input),
+        ),
+        #(
+            "wrong issuer",
+            signed(
+                claims(
+                    "ana",
+                    now() + 3600,
+                    [#("iss", json.quote("https://evil.test"))],
+                ),
+            ),
+        ),
+        #(
+            "wrong audience",
+            signed(
+                claims(
+                    "ana",
+                    now() + 3600,
+                    [
+                        #("iss", json.quote("https://issuer.test")),
+                        #("aud", json.quote("other-api")),
+                    ],
+                ),
+            ),
+        ),
+        #(
+            "one-byte-mutated signature",
+            part(t, 0) + "." + part(t, 1) + "." + mutateOne(sig),
+        ),
+        #(
+            "wholly different signature",
+            part(t, 0)
+                + "."
+                + part(t, 1)
+                + "."
+                + signatureOf(
+                    "another-secret-0123456789abcdef-xx",
+                    part(t, 0) + "." + part(t, 1),
+                ),
+        ),
+        #(
+            "tampered payload",
+            part(t, 0)
+                + "."
+                + encoding.base64UrlEncode(claims("root", now() + 3600, []))
+                + "."
+                + sig,
+        ),
         #("two parts", part(t, 0) + "." + part(t, 1)),
         #("four parts", t + ".extra"),
         #("one part", "justonepart"),
         #("non-base64 payload", part(t, 0) + ".!!!*.@@" + "." + sig),
-        #("non-JSON header", encoding.base64UrlEncode("not json") + "." + part(t, 1) + "." + sig),
+        #(
+            "non-JSON header",
+            encoding.base64UrlEncode("not json") + "." + part(t, 1) + "." + sig,
+        ),
         #("empty", ""),
     ];
 }
@@ -118,25 +170,50 @@ fn strict() -> JwtConfig {
 // ── cells ───────────────────────────────────────────────────────────────────
 
 test "jwt: a valid HS256 token authenticates and its claims become the principal and authorities" {
-    val body: string = json.object([
-        #("sub", json.quote("ana")),
-        #("roles", json.array([json.quote("ROLE_USER"), json.quote("ROLE_AUDIT")])),
-        #("exp", (now() + 3600).toString()),
-    ]);
+    val body: string = json.object(
+        [
+            #("sub", json.quote("ana")),
+            #(
+                "roles",
+                json.array([json.quote("ROLE_USER"), json.quote("ROLE_AUDIT")]),
+            ),
+            #("exp", (now() + 3600).toString()),
+        ],
+    );
     val r = verifyJwtAt(signed(body), config("", ""), nowSecondsF());
     assert r.isOk();
     val a: Authentication = r.unwrapOr(anonymous());
     assert a.principal.name == "ana";
-    assert a.principal.authorities.join(",") == "ROLE_USER,ROLE_AUDIT", a.principal.authorities.join(",");
+    assert a.principal.authorities.join(",")
+        == "ROLE_USER,ROLE_AUDIT", a.principal.authorities.join(",");
     assert a.method == "jwt";
     assert a.authenticated;
 }
 
 test "jwt: the authorities claim and the prefix are configurable" {
-    val body: string = claims("ana", now() + 3600, [#("scope", json.quote("orders:read orders:write"))]);
-    val c = JwtConfig(secret: secret(), algorithm: "HS256", skewSeconds: 30, issuer: "", audience: "", authoritiesClaim: "scope", authorityPrefix: "SCOPE_");
-    val a: Authentication = verifyJwtAt(signed(body), c, nowSecondsF()).unwrapOr(anonymous());
-    assert a.principal.authorities.join(",") == "SCOPE_orders:read,SCOPE_orders:write", a.principal.authorities.join(",");
+    val body: string = claims(
+        "ana",
+        now() + 3600,
+        [#("scope", json.quote("orders:read orders:write"))],
+    );
+    val c = JwtConfig(
+        secret: secret(),
+        algorithm: "HS256",
+        skewSeconds: 30,
+        issuer: "",
+        audience: "",
+        authoritiesClaim: "scope",
+        authorityPrefix: "SCOPE_",
+    );
+    val a: Authentication = verifyJwtAt(
+        signed(body),
+        c,
+        nowSecondsF(),
+    ).unwrapOr(anonymous());
+    assert a.principal.authorities.join(",")
+        == "SCOPE_orders:read,SCOPE_orders:write", a.principal.authorities.join(
+        ",",
+    );
 }
 
 test "jwt: every entry of the negative table is rejected without raising" {
@@ -144,22 +221,48 @@ test "jwt: every entry of the negative table is rejected without raising" {
     for (negativeTable()) { row ->
         val r = verifyJwtAt(row.1, strict(), nowSecondsF());
         if (r.isOk()) accepted.push(row.0);
-    };
+    }
     assert accepted.length == 0, accepted.join(", ");
     assert negativeTable().length == 15;
 }
 
 test "jwt: the issuer and audience rows fail only because they are configured" {
-    val wrongIss: string = signed(claims("ana", now() + 3600, [#("iss", json.quote("https://evil.test"))]));
+    val wrongIss: string = signed(
+        claims(
+            "ana",
+            now() + 3600,
+            [#("iss", json.quote("https://evil.test"))],
+        ),
+    );
     assert verifyJwtAt(wrongIss, config("", ""), nowSecondsF()).isOk();
-    assert verifyJwtAt(wrongIss, config("https://issuer.test", ""), nowSecondsF()).isError();
-    val right: string = signed(claims("ana", now() + 3600, [#("iss", json.quote("https://issuer.test")), #("aud", json.array([json.quote("other"), json.quote("orders-api")]))]));
+    assert verifyJwtAt(
+        wrongIss,
+        config("https://issuer.test", ""),
+        nowSecondsF(),
+    ).isError();
+    val right: string = signed(
+        claims(
+            "ana",
+            now() + 3600,
+            [
+                #("iss", json.quote("https://issuer.test")),
+                #(
+                    "aud",
+                    json.array([json.quote("other"), json.quote("orders-api")]),
+                ),
+            ],
+        ),
+    );
     assert verifyJwtAt(right, strict(), nowSecondsF()).isOk();
 }
 
 test "jwt: alg none is rejected before signature verification" {
     val t: string = valid();
-    val none: string = encoding.base64UrlEncode(headerOf("none")) + "." + part(t, 1) + "." + part(t, 2);
+    val none: string = encoding.base64UrlEncode(headerOf("none"))
+        + "."
+        + part(t, 1)
+        + "."
+        + part(t, 2);
     // The reason names the algorithm, not the signature: the signature was
     // never looked at (it would even have verified against another header).
     val r = verifyJwtAt(none, config("", ""), nowSecondsF());
@@ -171,7 +274,9 @@ test "jwt: alg none is rejected before signature verification" {
 }
 
 test "jwt: an alg the configuration does not name is rejected even when the signature would verify" {
-    val input: string = encoding.base64UrlEncode(headerOf("HS512")) + "." + encoding.base64UrlEncode(claims("ana", now() + 3600, []));
+    val input: string = encoding.base64UrlEncode(headerOf("HS512"))
+        + "."
+        + encoding.base64UrlEncode(claims("ana", now() + 3600, []));
     val token: string = input + "." + signatureOf(secret(), input);
     assert signatureMatches(secret(), input, part(token, 2));
     val why: string = case verifyJwtAt(token, config("", ""), nowSecondsF()) {
@@ -183,8 +288,16 @@ test "jwt: an alg the configuration does not name is rejected even when the sign
 
 test "jwt: an expired token is rejected and one expiring within the skew window is accepted" {
     val c = config("", "");
-    assert verifyJwtAt(signed(claims("ana", now() - 60, [])), c, nowSecondsF()).isError();
-    assert verifyJwtAt(signed(claims("ana", now() - 10, [])), c, nowSecondsF()).isOk();
+    assert verifyJwtAt(
+        signed(claims("ana", now() - 60, [])),
+        c,
+        nowSecondsF(),
+    ).isError();
+    assert verifyJwtAt(
+        signed(claims("ana", now() - 10, [])),
+        c,
+        nowSecondsF(),
+    ).isOk();
     // A token with no exp at all lives forever and is refused.
     val noExp: string = signed(json.object([#("sub", json.quote("ana"))]));
     assert verifyJwtAt(noExp, c, nowSecondsF()).isError();
@@ -192,9 +305,27 @@ test "jwt: an expired token is rejected and one expiring within the skew window 
 
 test "jwt: a nbf in the future is rejected and one within the skew is accepted" {
     val c = config("", "");
-    assert verifyJwtAt(signed(claims("ana", now() + 3600, [#("nbf", (now() + 120).toString())])), c, nowSecondsF()).isError();
-    assert verifyJwtAt(signed(claims("ana", now() + 3600, [#("nbf", (now() + 10).toString())])), c, nowSecondsF()).isOk();
-    assert verifyJwtAt(signed(claims("ana", now() + 3600, [#("iat", (now() + 120).toString())])), c, nowSecondsF()).isError();
+    assert verifyJwtAt(
+        signed(
+            claims("ana", now() + 3600, [#("nbf", (now() + 120).toString())]),
+        ),
+        c,
+        nowSecondsF(),
+    ).isError();
+    assert verifyJwtAt(
+        signed(
+            claims("ana", now() + 3600, [#("nbf", (now() + 10).toString())]),
+        ),
+        c,
+        nowSecondsF(),
+    ).isOk();
+    assert verifyJwtAt(
+        signed(
+            claims("ana", now() + 3600, [#("iat", (now() + 120).toString())]),
+        ),
+        c,
+        nowSecondsF(),
+    ).isError();
 }
 
 test "jwt: a one-byte-different signature and a wholly different one both fail the constant-time compare" {
@@ -202,7 +333,12 @@ test "jwt: a one-byte-different signature and a wholly different one both fail t
     val input: string = part(t, 0) + "." + part(t, 1);
     assert signatureMatches(secret(), input, part(t, 2));
     assert signatureMatches(secret(), input, mutateOne(part(t, 2))) == false;
-    assert signatureMatches(secret(), input, signatureOf("another-secret-0123456789abcdef-xx", input)) == false;
+    assert signatureMatches(
+        secret(),
+        input,
+        signatureOf("another-secret-0123456789abcdef-xx", input),
+    )
+        == false;
     assert signatureMatches(secret(), input, "") == false;
 }
 
@@ -245,7 +381,9 @@ fn protectedChain() -> i32 {
     val _s = rkSetProp("rakun.security.jwt.secret", secret());
     val _i = rkSetProp("rakun.security.jwt.issuer", "https://issuer.test");
     val _a = rkSetProp("rakun.security.jwt.audience", "orders-api");
-    val _p = installSecurityWith(SecurityPolicy(rules: [], defaultRequirement: "authenticated"));
+    val _p = installSecurityWith(
+        SecurityPolicy(rules: [], defaultRequirement: "authenticated"),
+    );
     return rkChainSetTerminal({ method, path, headersWire, queryWire, body ->
         Response.ok("handled " + currentAuthentication().principal.name);
     });
@@ -263,10 +401,16 @@ test "jwt: every negative token answers 401 with the byte-identical body and nev
     var odd: string[] = [];
     var leaked: string[] = [];
     for (negativeTable()) { row ->
-        val res: Response = runChain("GET", "/orders", "authorization\tBearer " + row.1, "", "");
+        val res: Response = runChain(
+            "GET",
+            "/orders",
+            "authorization\tBearer " + row.1,
+            "",
+            "",
+        );
         if ((res.status != 401) || (res.body != baseline.body)) odd.push(row.0);
         if ((row.1 != "") && res.body.contains(row.1)) leaked.push(row.0);
-    };
+    }
     val _u = unsetIssuer();
     assert odd.length == 0, odd.join(", ");
     assert leaked.length == 0, leaked.join(", ");
@@ -275,8 +419,23 @@ test "jwt: every negative token answers 401 with the byte-identical body and nev
 
 test "jwt: a valid token through the entry reaches the handler as its principal" {
     val _c = protectedChain();
-    val t: string = signed(claims("ana", now() + 3600, [#("iss", json.quote("https://issuer.test")), #("aud", json.quote("orders-api"))]));
-    val res: Response = runChain("GET", "/orders", "authorization\tBearer " + t, "", "");
+    val t: string = signed(
+        claims(
+            "ana",
+            now() + 3600,
+            [
+                #("iss", json.quote("https://issuer.test")),
+                #("aud", json.quote("orders-api")),
+            ],
+        ),
+    );
+    val res: Response = runChain(
+        "GET",
+        "/orders",
+        "authorization\tBearer " + t,
+        "",
+        "",
+    );
     val _u = unsetIssuer();
     assert res.status == 200;
     assert res.body == "handled ana";

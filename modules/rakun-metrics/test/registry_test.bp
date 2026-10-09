@@ -3,10 +3,7 @@
 
 import {testing.asserts} from "std";
 import {rkSetProp} from "rakun";
-import {
-    registry.Tag, registry.Counter, registry.Timer, registry.counter, registry.gauge, registry.timer, registry.summary, registry.timed, registry.meterNames,
-    registry.prometheusTextFor, registry.rkMetricsCommonReload, registry.validateDistribution,
-};
+import {registry.Tag, registry.Counter, registry.Timer, registry.counter, registry.gauge, registry.timer, registry.summary, registry.timed, registry.meterNames, registry.prometheusTextFor, registry.rkMetricsCommonReload, registry.validateDistribution};
 import {vm.installVmMetrics};
 
 // A timer sample is an `i64` (decision 264); a literal is `i32`.
@@ -34,7 +31,8 @@ test "registry: tag order does not create a second series" {
     assert a.tagKey == b.tagKey && a.tagKey == "a=1,b=2";
     val _i = a.increment(1);
     val _j = b.increment(1);
-    assert prometheusTextFor("r2.") == "# TYPE r2_hits_total counter\nr2_hits_total{a=\"1\",b=\"2\"} 2\n";
+    assert prometheusTextFor("r2.")
+        == "# TYPE r2_hits_total counter\nr2_hits_total{a=\"1\",b=\"2\"} 2\n";
 }
 
 test "registry: a counter incremented from 1000 processes ends at exactly 1000" {
@@ -70,15 +68,24 @@ fn boom() -> i32 {
 test "registry: timed answers the closure's value and records a raise under outcome=error" {
     val v = timed("r5.work", [t("job", "a")], { -> 41 + 1 });
     assert v == 42;
-    try asserts.throwsWith({ -> timed("r5.work", [t("job", "a")], { -> boom() }) }, "boom");
+    try asserts.throwsWith(
+        { -> timed("r5.work", [t("job", "a")], { -> boom() }) },
+        "boom",
+    );
     val ok = timer("r5.work", [t("job", "a"), t("outcome", "ok")]);
     val bad = timer("r5.work", [t("outcome", "error"), t("job", "a")]);
     assert ok.count() == 1 && bad.count() == 1;
 }
 
 test "registry: a name the exposition format cannot carry is refused, naming the character" {
-    try asserts.throwsWith({ -> counter("r6 bad", []).count() }, "contains ` `");
-    try asserts.throwsWith({ -> counter("r6.b-ad", []).count() }, "contains `-`");
+    try asserts.throwsWith(
+        { -> counter("r6 bad", []).count() },
+        "contains ` `",
+    );
+    try asserts.throwsWith(
+        { -> counter("r6.b-ad", []).count() },
+        "contains `-`",
+    );
 }
 
 // ── step 6 ──────────────────────────────────────────────────────────────────
@@ -91,7 +98,8 @@ test "registry: a denied prefix is never registered and its writes are no-ops" {
     val _j = kept.increment(1);
     val _u = rkSetProp("rakun.metrics.enable.r7.http.client", "");
     assert c.tagKey == "!denied" && c.count() == 0;
-    assert meterNames().filter({ n -> n == "r7.http.client.requests" }).length == 0;
+    assert meterNames().filter({ n -> n == "r7.http.client.requests" }).length
+        == 0;
     assert meterNames().filter({ n -> n == "r7.http.clientele" }).length == 1;
 }
 
@@ -100,23 +108,31 @@ test "registry: a renamed tag key appears renamed" {
     val c = counter("r8.calls", [t("r8host", "a")]);
     val _i = c.increment(1);
     val _u = rkSetProp("rakun.metrics.rename.r8host", "");
-    assert prometheusTextFor("r8.") == "# TYPE r8_calls_total counter\nr8_calls_total{host=\"a\"} 1\n";
+    assert prometheusTextFor("r8.")
+        == "# TYPE r8_calls_total counter\nr8_calls_total{host=\"a\"} 1\n";
 }
 
 test "registry: SLO buckets sort ascending whatever the property's order, plus +Inf" {
-    val _s = rkSetProp("rakun.metrics.distribution.slo.r9.lat", "1s,100ms,500ms,200ms");
+    val _s = rkSetProp(
+        "rakun.metrics.distribution.slo.r9.lat",
+        "1s,100ms,500ms,200ms",
+    );
     val tm = timer("r9.lat", []);
     val _a = tm.record(wide(150000));
     val _b = tm.record(wide(2000000));
     val _u = rkSetProp("rakun.metrics.distribution.slo.r9.lat", "");
     val text = prometheusTextFor("r9.");
-    assert text == "# TYPE r9_lat_seconds histogram\nr9_lat_seconds_bucket{le=\"0.1\"} 0\nr9_lat_seconds_bucket{le=\"0.2\"} 1\nr9_lat_seconds_bucket{le=\"0.5\"} 1\nr9_lat_seconds_bucket{le=\"1.0\"} 1\nr9_lat_seconds_bucket{le=\"+Inf\"} 2\nr9_lat_seconds_count 2\nr9_lat_seconds_sum 2.15\n", text;
+    assert text
+        == "# TYPE r9_lat_seconds histogram\nr9_lat_seconds_bucket{le=\"0.1\"} 0\nr9_lat_seconds_bucket{le=\"0.2\"} 1\nr9_lat_seconds_bucket{le=\"0.5\"} 1\nr9_lat_seconds_bucket{le=\"1.0\"} 1\nr9_lat_seconds_bucket{le=\"+Inf\"} 2\nr9_lat_seconds_count 2\nr9_lat_seconds_sum 2.15\n", text;
     assert tm.maxMicros() == 2000000 && tm.totalMicros() == 2150000;
 }
 
 test "registry: an SLO the duration parser does not understand fails naming the property and the value" {
     val _s = rkSetProp("rakun.metrics.distribution.slo.r10.lat", "100ms,fast");
-    try asserts.throwsWith({ -> validateDistribution() }, "rakun.metrics.distribution.slo.r10.lat = `100ms,fast`: `fast` is not a duration");
+    try asserts.throwsWith(
+        { -> validateDistribution() },
+        "rakun.metrics.distribution.slo.r10.lat = `100ms,fast`: `fast` is not a duration",
+    );
     val _u = rkSetProp("rakun.metrics.distribution.slo.r10.lat", "");
 }
 
@@ -128,11 +144,17 @@ test "registry: common tags reach every series; one colliding with a meter's own
     val text = prometheusTextFor("r11.");
     val _v = installVmMetrics();
     val beam = prometheusTextFor("beam.processes.count");
-    try asserts.throwsWith({ -> counter("r11.other", [t("r11region", "eu")]).count() }, "the common tag `r11region` collides with the meter `r11.other`");
+    try asserts.throwsWith(
+        { -> counter("r11.other", [t("r11region", "eu")]).count() },
+        "the common tag `r11region` collides with the meter `r11.other`",
+    );
     val _u = rkSetProp("rakun.metrics.tags.r11region", "");
     val _m = rkMetricsCommonReload();
-    assert text == "# TYPE r11_calls_total counter\nr11_calls_total{a=\"1\",r11region=\"us-east-1\"} 1\n", text;
-    assert beam.contains("beam_processes_count{r11region=\"us-east-1\"} "), beam;
+    assert text
+        == "# TYPE r11_calls_total counter\nr11_calls_total{a=\"1\",r11region=\"us-east-1\"} 1\n", text;
+    assert beam.contains(
+        "beam_processes_count{r11region=\"us-east-1\"} ",
+    ), beam;
 }
 
 test "registry: a distribution summary is a timer without the unit" {
@@ -141,5 +163,6 @@ test "registry: a distribution summary is a timer without the unit" {
     val _a = s.record(wide(5));
     val _b = s.record(wide(50));
     val _u = rkSetProp("rakun.metrics.distribution.slo.r12.size", "");
-    assert prometheusTextFor("r12.") == "# TYPE r12_size histogram\nr12_size_bucket{le=\"10\"} 1\nr12_size_bucket{le=\"100\"} 2\nr12_size_bucket{le=\"+Inf\"} 2\nr12_size_count 2\nr12_size_sum 55\n";
+    assert prometheusTextFor("r12.")
+        == "# TYPE r12_size histogram\nr12_size_bucket{le=\"10\"} 1\nr12_size_bucket{le=\"100\"} 2\nr12_size_bucket{le=\"+Inf\"} 2\nr12_size_count 2\nr12_size_sum 55\n";
 }

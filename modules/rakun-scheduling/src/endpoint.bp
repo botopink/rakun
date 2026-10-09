@@ -34,12 +34,7 @@
 
 import {Request, Response, rkRegisterRoute} from "rakun";
 import {io.clock, json} from "std";
-import {
-    Health,
-    EndpointResponse,
-    rkRegisterHealthIndicator,
-    rkRegisterEndpoint,
-} from "rakun";
+import {Health, EndpointResponse, rkRegisterHealthIndicator, rkRegisterEndpoint} from "rakun";
 import {basePath, exposed, notFoundProblem, render} from "rakun-actuator/endpoint_host";
 import {cron.rkI64};
 import {registry.TaskInfo, registry.taskNames, registry.rkTaskInfo, registry.rkTaskExists, registry.rkRunTaskAsync};
@@ -56,32 +51,40 @@ fn instant(millis: i64) -> string {
 }
 
 pub fn taskJson(t: TaskInfo) -> string {
-    return json.object([
-        #("name", json.quote(t.name)),
-        #("trigger", json.quote(t.trigger)),
-        #("expression", json.quote(t.expression)),
-        #("enabled", if (t.enabled) "true" else "false"),
-        #("overlap", json.quote(t.overlap)),
-        #("lastStartedAt", instant(t.lastStartedAt)),
-        #("lastFinishedAt", instant(t.lastFinishedAt)),
-        #("lastResult", t.lastResult.toString()),
-        #("nextFireAt", instant(t.nextFireAt)),
-        #("runs", t.runs.toString()),
-        #("failures", t.failures.toString()),
-        #("missed", t.missed.toString()),
-        #("inFlight", t.inFlight.toString()),
-    ]);
+    return json.object(
+        [
+            #("name", json.quote(t.name)),
+            #("trigger", json.quote(t.trigger)),
+            #("expression", json.quote(t.expression)),
+            #("enabled", if (t.enabled) "true" else "false"),
+            #("overlap", json.quote(t.overlap)),
+            #("lastStartedAt", instant(t.lastStartedAt)),
+            #("lastFinishedAt", instant(t.lastFinishedAt)),
+            #("lastResult", t.lastResult.toString()),
+            #("nextFireAt", instant(t.nextFireAt)),
+            #("runs", t.runs.toString()),
+            #("failures", t.failures.toString()),
+            #("missed", t.missed.toString()),
+            #("inFlight", t.inFlight.toString()),
+        ],
+    );
 }
 
 // `{"tasks":[…]}`, sorted by name.
 pub fn listingJson() -> string {
     var items: string[] = [];
-    for (taskNames()) { n -> items.push(taskJson(rkTaskInfo(n))) };
+    for (taskNames()) { n ->
+        items.push(taskJson(rkTaskInfo(n)));
+    }
     return json.object([#("tasks", json.array(items))]);
 }
 
 pub fn scheduledTasksRead(req: Request) -> EndpointResponse {
-    return EndpointResponse(status: 200, contentType: "application/json", body: listingJson());
+    return EndpointResponse(
+        status: 200,
+        contentType: "application/json",
+        body: listingJson(),
+    );
 }
 
 // ── the write ───────────────────────────────────────────────────────────────
@@ -96,13 +99,18 @@ pub fn runPath() -> string {
 // Refused, with the host's 404 problem,
 // whenever the host does not expose `scheduledtasks`.
 pub fn scheduledTasksEndpoint(req: Request) -> Response {
-    if (exposed("scheduledtasks") == false) return notFoundProblem("scheduledtasks", req.path);
+    if (exposed("scheduledtasks") == false)
+        return notFoundProblem("scheduledtasks", req.path);
     val name: string = req.param("name");
     val isRun = (name != "") && req.path.endsWith("/" + name + "/run");
     if (isRun == false) return render(scheduledTasksRead(req));
-    if (rkTaskExists(name) == false) return notFoundProblem("scheduledtasks/" + name, req.path);
+    if (rkTaskExists(name) == false)
+        return notFoundProblem("scheduledtasks/" + name, req.path);
     val _r = rkRunTaskAsync(name);
-    return Response.withStatus(202, json.object([#("task", json.quote(name)), #("accepted", "true")]));
+    return Response.withStatus(
+        202,
+        json.object([#("task", json.quote(name)), #("accepted", "true")]),
+    );
 }
 
 // ── health ──────────────────────────────────────────────────────────────────
@@ -111,25 +119,52 @@ pub fn schedulingHealth() -> Health {
     val started: bool = rkSchedStarted();
     val enabled: bool = rkSchedGlobalEnabled();
     var dead: string[] = [];
-    if (started && enabled) {
+    if (started && enabled)
         for (taskNames()) { n ->
             val t: TaskInfo = rkTaskInfo(n);
             if (t.enabled && (rkSchedTimerAlive(n) == false)) dead.push(n);
-        };
-    };
+        }
     var quoted: string[] = [];
-    for (dead) { n -> quoted.push(json.quote(n)) };
-    val common = [#("started", if (started) "true" else "false"), #("enabled", if (enabled) "true" else "false")];
-    if (dead.length > 0) return Health(status: "DOWN", details: json.object([#("started", "true"), #("enabled", "true"), #("timersNotRunning", json.array(quoted))]));
+    for (dead) { n ->
+        quoted.push(json.quote(n));
+    }
+    val common = [
+        #("started", if (started) "true" else "false"),
+        #("enabled", if (enabled) "true" else "false"),
+    ];
+    if (dead.length > 0)
+        return Health(
+            status: "DOWN",
+            details: json.object(
+                [
+                    #("started", "true"),
+                    #("enabled", "true"),
+                    #("timersNotRunning", json.array(quoted)),
+                ],
+            ),
+        );
     return Health(status: "UP", details: json.object(common));
 }
 
 // ── mounting ────────────────────────────────────────────────────────────────
 
 pub fn mountScheduling() -> i32 {
-    val _h = rkRegisterHealthIndicator("scheduling", "rakun-scheduling", { -> schedulingHealth() });
-    val _e = rkRegisterEndpoint("scheduledtasks", "rakun-scheduling", "read,write", { req -> scheduledTasksRead(req) });
+    val _h = rkRegisterHealthIndicator(
+        "scheduling",
+        "rakun-scheduling",
+        { -> schedulingHealth() },
+    );
+    val _e = rkRegisterEndpoint(
+        "scheduledtasks",
+        "rakun-scheduling",
+        "read,write",
+        { req -> scheduledTasksRead(req) },
+    );
     val path: string = runPath();
     if (rkSchedMountOnce("route " + path) == false) return 0;
-    return rkRegisterRoute("POST", path, { req -> scheduledTasksEndpoint(req) });
+    return rkRegisterRoute(
+        "POST",
+        path,
+        { req -> scheduledTasksEndpoint(req) },
+    );
 }

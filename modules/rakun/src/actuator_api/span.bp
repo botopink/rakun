@@ -59,7 +59,13 @@ pub declare fn rkSpanSetFlags(flags: string) -> i32;
 pub declare fn rkSpanParent() -> string;
 
 #[@External.Erlang("rakun_actuator_api", "emit_start")]
-pub declare fn rkSpanEmitStart(name: string, traceId: string, spanId: string, parentId: string, attributes: string) -> i32;
+pub declare fn rkSpanEmitStart(
+    name: string,
+    traceId: string,
+    spanId: string,
+    parentId: string,
+    attributes: string,
+) -> i32;
 
 #[@External.Erlang("rakun_actuator_api", "emit_stop")]
 pub declare fn rkSpanEmitStop(
@@ -73,7 +79,9 @@ pub declare fn rkSpanEmitStop(
 ) -> i32;
 
 #[@External.Erlang("rakun_actuator_api", "subscribe")]
-pub declare fn rkSpanSubscribe(onEvent: fn(event: string, measurementsJson: string, metadataJson: string) -> i32) -> i32;
+pub declare fn rkSpanSubscribe(
+    onEvent: fn(event: string, measurementsJson: string, metadataJson: string) -> i32,
+) -> i32;
 
 #[@External.Erlang("rakun_actuator_api", "subscriber_count")]
 pub declare fn rkSpanSubscriberCount() -> i32;
@@ -105,8 +113,12 @@ pub fn startSpan(name: string, attributes: string) -> Span {
     val current: string = rkSpanCurrent();
     val parts: string[] = current.split("\t");
     val inTrace = current != "";
-    val traceId: string = if (inTrace) parts.at(0) ?? "" else rkSpanFreshTraceId();
-    val parentId: string = if (inTrace) parts.at(1) ?? "" else "";
+    val traceId: string = if (inTrace) {
+        parts.at(0) ?? "";
+    } else rkSpanFreshTraceId();
+    val parentId: string = if (inTrace) {
+        parts.at(1) ?? "";
+    } else "";
     val spanId: string = rkSpanFreshSpanId();
     val _p = rkSpanPush(traceId, spanId);
     val span = Span(
@@ -125,10 +137,20 @@ pub fn startSpan(name: string, attributes: string) -> Span {
 pub fn endSpan(span: Span, outcome: string) -> i32 {
     val _p = rkSpanPop(span.spanId);
     val elapsed: i64 = rkSpanNowMicros() - span.startedAt;
-    return rkSpanEmitStop(span.name, span.traceId, span.spanId, span.parentId, span.attributes, elapsed, outcome);
+    return rkSpanEmitStop(
+        span.name,
+        span.traceId,
+        span.spanId,
+        span.parentId,
+        span.attributes,
+        elapsed,
+        outcome,
+    );
 }
 
-pub fn subscribeSpans(onEvent: fn(event: string, measurementsJson: string, metadataJson: string) -> i32) -> i32 {
+pub fn subscribeSpans(
+    onEvent: fn(event: string, measurementsJson: string, metadataJson: string) -> i32,
+) -> i32 {
     return rkSpanSubscribe(onEvent);
 }
 
@@ -143,7 +165,12 @@ pub fn currentTraceparent() -> string {
     val current: string = rkSpanCurrent();
     if (current == "") return "";
     val parts: string[] = current.split("\t");
-    return "00-" + (parts.at(0) ?? "") + "-" + (parts.at(1) ?? "") + "-" + rkSpanFlags();
+    return "00-"
+        + (parts.at(0) ?? "")
+        + "-"
+        + (parts.at(1) ?? "")
+        + "-"
+        + rkSpanFlags();
 }
 
 fn isHex(s: string, size: i32) -> bool {
@@ -155,7 +182,7 @@ fn isHex(s: string, size: i32) -> bool {
         val digit = "0123456789abcdef".contains(c);
         if (digit == false) ok = false;
         if (c != "0") zero = false;
-    };
+    }
     return ok && (zero == false || size == 2);
 }
 
@@ -163,7 +190,9 @@ pub fn validTraceparent(header: string) -> bool {
     val parts: string[] = header.trim().split("-");
     if (parts.length != 4) return false;
     if ((parts.at(0) ?? "") != "00") return false;
-    return isHex(parts.at(1) ?? "", 32) && isHex(parts.at(2) ?? "", 16) && isHex(parts.at(3) ?? "", 2);
+    return isHex(parts.at(1) ?? "", 32)
+        && isHex(parts.at(2) ?? "", 16)
+        && isHex(parts.at(3) ?? "", 2);
 }
 
 // Makes a well-formed inbound header the parent of the next span in this

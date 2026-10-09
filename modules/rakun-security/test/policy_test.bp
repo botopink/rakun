@@ -9,20 +9,7 @@ import {testing.asserts, async, regex.Regex} from "std";
 import {Response, rkSetProp, rkReqSleep} from "rakun";
 import {resetChain, runChain, rkChainSetTerminal, registerFilter, orderCors, orderProblem, orderRequestId, chainOrdering, errorEntry, withHeader, headerValue, Matcher} from "rakun-web";
 import {principal.Authentication, principal.anonymous, principal.authenticatedAs, principal.currentAuthentication, principal.withAuthentication, principal.rkSecDecision, principal.outsideRequestProblem};
-import {
-    policy.PathRule,
-    policy.SecurityPolicy,
-    policy.CompiledPolicy,
-    policy.CompiledRule,
-    policy.Decision,
-    policy.compilePolicy,
-    policy.compileOrFail,
-    policy.decide,
-    policy.defaultPolicy,
-    policy.admits,
-    policy.requiredAuthority,
-    policy.permissiveDefaultProblem,
-};
+import {policy.PathRule, policy.SecurityPolicy, policy.CompiledPolicy, policy.CompiledRule, policy.Decision, policy.compilePolicy, policy.compileOrFail, policy.decide, policy.defaultPolicy, policy.admits, policy.requiredAuthority, policy.permissiveDefaultProblem};
 import {security_filter.installSecurityWith, security_filter.lastPrincipal};
 import {jwt.testToken};
 
@@ -34,7 +21,10 @@ fn rules() -> SecurityPolicy {
     return SecurityPolicy(
         rules: [
             PathRule(pattern: "/api/public/:path*", requirement: "permitAll"),
-            PathRule(pattern: "/api/admin/:path*", requirement: "hasRole:ADMIN"),
+            PathRule(
+                pattern: "/api/admin/:path*",
+                requirement: "hasRole:ADMIN",
+            ),
             PathRule(pattern: "/api/:path*", requirement: "authenticated"),
         ],
         defaultRequirement: "authenticated",
@@ -71,13 +61,18 @@ test "policy: rules match in declaration order and the first match wins" {
     assert render(p, "/api/orders/mine") == "/api/:path* authenticated";
     // The same two rules the other way round: the broad one now shadows the
     // narrow one, because order — not specificity — decides.
-    val shadowed: CompiledPolicy = compileOrFail(SecurityPolicy(
-        rules: [
-            PathRule(pattern: "/api/:path*", requirement: "authenticated"),
-            PathRule(pattern: "/api/admin/:path*", requirement: "hasRole:ADMIN"),
-        ],
-        defaultRequirement: "authenticated",
-    ));
+    val shadowed: CompiledPolicy = compileOrFail(
+        SecurityPolicy(
+            rules: [
+                PathRule(pattern: "/api/:path*", requirement: "authenticated"),
+                PathRule(
+                    pattern: "/api/admin/:path*",
+                    requirement: "hasRole:ADMIN",
+                ),
+            ],
+            defaultRequirement: "authenticated",
+        ),
+    );
     assert render(shadowed, "/api/admin/audit") == "/api/:path* authenticated";
 }
 
@@ -108,21 +103,32 @@ test "policy: defaultRequirement permitAll fails at boot" {
         val _i = installSecurityWith(open);
         0;
     }, "defaultRequirement is permitAll is refused");
-    assert permissiveDefaultProblem().contains("no way to make it public by default");
+    assert permissiveDefaultProblem().contains(
+        "no way to make it public by default",
+    );
 }
 
 test "policy: an unknown requirement or a pattern front 65 refuses fails at boot naming it" {
-    val odd = SecurityPolicy(rules: [PathRule(pattern: "/x", requirement: "hasRole")], defaultRequirement: "authenticated");
+    val odd = SecurityPolicy(
+        rules: [PathRule(pattern: "/x", requirement: "hasRole")],
+        defaultRequirement: "authenticated",
+    );
     try asserts.throwsWith({ ->
         val _c = compileOrFail(odd);
         0;
     }, "the rule for `/x` has the requirement `hasRole`");
-    val noSlash = SecurityPolicy(rules: [PathRule(pattern: "api", requirement: "permitAll")], defaultRequirement: "authenticated");
+    val noSlash = SecurityPolicy(
+        rules: [PathRule(pattern: "api", requirement: "permitAll")],
+        defaultRequirement: "authenticated",
+    );
     try asserts.throwsWith({ ->
         val _c = compileOrFail(noSlash);
         0;
     }, "a rule source starts with a slash");
-    val badRegex = SecurityPolicy(rules: [PathRule(pattern: "/(unclosed", requirement: "permitAll")], defaultRequirement: "authenticated");
+    val badRegex = SecurityPolicy(
+        rules: [PathRule(pattern: "/(unclosed", requirement: "permitAll")],
+        defaultRequirement: "authenticated",
+    );
     try asserts.throwsWith({ ->
         val _c = compileOrFail(badRegex);
         0;
@@ -130,14 +136,19 @@ test "policy: an unknown requirement or a pattern front 65 refuses fails at boot
 }
 
 test "policy: patterns are front 65's grammar - :name, :name* and a raw regex" {
-    val p: CompiledPolicy = compileOrFail(SecurityPolicy(
-        rules: [
-            PathRule(pattern: "/users/:id", requirement: "permitAll"),
-            PathRule(pattern: "/(v[0-9]+)/status", requirement: "permitAll"),
-            PathRule(pattern: "/a.b", requirement: "permitAll"),
-        ],
-        defaultRequirement: "authenticated",
-    ));
+    val p: CompiledPolicy = compileOrFail(
+        SecurityPolicy(
+            rules: [
+                PathRule(pattern: "/users/:id", requirement: "permitAll"),
+                PathRule(
+                    pattern: "/(v[0-9]+)/status",
+                    requirement: "permitAll",
+                ),
+                PathRule(pattern: "/a.b", requirement: "permitAll"),
+            ],
+            defaultRequirement: "authenticated",
+        ),
+    );
     assert render(p, "/users/7") == "/users/:id permitAll";
     assert render(p, "/users/7/orders") == "default authenticated";
     assert render(p, "/v2/status") == "/(v[0-9]+)/status permitAll";
@@ -147,7 +158,11 @@ test "policy: patterns are front 65's grammar - :name, :name* and a raw regex" {
 
 test "policy: requirements admit by authentication and authority" {
     val ana: Authentication = authenticatedAs("ana", ["ROLE_USER"], "jwt");
-    val root: Authentication = authenticatedAs("root", ["ROLE_ADMIN", "audit:read"], "jwt");
+    val root: Authentication = authenticatedAs(
+        "root",
+        ["ROLE_ADMIN", "audit:read"],
+        "jwt",
+    );
     assert admits("permitAll", anonymous());
     assert admits("authenticated", anonymous()) == false;
     assert admits("authenticated", ana);
@@ -163,16 +178,41 @@ test "policy: requirements admit by authentication and authority" {
 
 test "policy: the entry registers at -300 and runs before CORS and the error boundary" {
     val _c = chainWith(rules());
-    val _i = registerFilter("request-id", orderRequestId(), { req, chain -> chain.next(req) });
+    val _i = registerFilter(
+        "request-id",
+        orderRequestId(),
+        { req, chain -> chain.next(req) },
+    );
     // A CORS stand-in that would stamp every response it sees.
-    val _o = registerFilter("cors", orderCors(), { req, chain -> withHeader(chain.next(req), "Access-Control-Allow-Origin", "https://a.test") });
-    val _e = registerFilter("problem", orderProblem(), { req, chain -> errorEntry(req, chain) });
-    assert chainOrdering() == "request-id>security>cors>problem", chainOrdering();
-    val res: Response = runChain("GET", "/api/orders", "origin\thttps://a.test", "", "");
+    val _o = registerFilter(
+        "cors",
+        orderCors(),
+        { req, chain -> withHeader(chain.next(req), "Access-Control-Allow-Origin", "https://a.test") },
+    );
+    val _e = registerFilter(
+        "problem",
+        orderProblem(),
+        { req, chain -> errorEntry(req, chain) },
+    );
+    assert chainOrdering()
+        == "request-id>security>cors>problem", chainOrdering();
+    val res: Response = runChain(
+        "GET",
+        "/api/orders",
+        "origin\thttps://a.test",
+        "",
+        "",
+    );
     assert res.status == 401;
     // The refusal happened before CORS ever ran.
     assert headerValue("Access-Control-Allow-Origin") == "";
-    val ok: Response = runChain("GET", "/api/public/x", "origin\thttps://a.test", "", "");
+    val ok: Response = runChain(
+        "GET",
+        "/api/public/x",
+        "origin\thttps://a.test",
+        "",
+        "",
+    );
     assert ok.status == 200;
     assert headerValue("Access-Control-Allow-Origin") == "https://a.test";
 }
@@ -197,7 +237,10 @@ test "policy: the context is readable inside a request and a hard failure outsid
         0;
     }, "the security context was read outside a request");
     // `withAuthentication` is the explicit way in, and it restores on exit.
-    val inside: string = withAuthentication(authenticatedAs("job", [], "jwt"), { -> currentAuthentication().principal.name });
+    val inside: string = withAuthentication(
+        authenticatedAs("job", [], "jwt"),
+        { -> currentAuthentication().principal.name },
+    );
     assert inside == "job";
     try asserts.throwsWith({ ->
         val _a = currentAuthentication();
@@ -217,7 +260,13 @@ test "policy: a handler that raises does not leave its context behind" {
         Response.ok("ok");
     });
     try asserts.throwsWith({ ->
-        val _r = runChain("GET", "/api/public/boom", bearerWire(testToken("ana", [], 3600)), "", "");
+        val _r = runChain(
+            "GET",
+            "/api/public/boom",
+            bearerWire(testToken("ana", [], 3600)),
+            "",
+            "",
+        );
         0;
     }, "handler failed");
     try asserts.throwsWith({ ->
@@ -228,7 +277,13 @@ test "policy: a handler that raises does not leave its context behind" {
 
 fn servedAs(token: string, pause: i32) -> @Task<string> {
     val _t = echoAfter(pause);
-    val res: Response = runChain("GET", "/api/orders", bearerWire(token), "", "");
+    val res: Response = runChain(
+        "GET",
+        "/api/orders",
+        bearerWire(token),
+        "",
+        "",
+    );
     return res.body;
 }
 
@@ -245,10 +300,14 @@ test "policy: two concurrent requests never observe each other's context" {
     val bob = testToken("bob", ["ROLE_USER"], 3600);
     // Each request is its own process; the first sleeps inside the handler
     // while the second is served, so their lifetimes overlap.
-    val both = await async.runAll([
-        { -> servedAs(ana, 60) },
-        { -> servedAs(bob, 5) },
-        { -> servedAs(ana, 30) },
-    ]);
-    assert both.join(",") == "handled ana,handled bob,handled ana", both.join(",");
+    val both = await async.runAll(
+        [
+            { -> servedAs(ana, 60) },
+            { -> servedAs(bob, 5) },
+            { -> servedAs(ana, 30) },
+        ],
+    );
+    assert both.join(",") == "handled ana,handled bob,handled ana", both.join(
+        ",",
+    );
 }

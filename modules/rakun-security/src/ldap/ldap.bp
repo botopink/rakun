@@ -31,20 +31,54 @@ fn nobody() -> Principal {
     return Principal(name: "", authorities: []);
 }
 
-pub fn ldapAuthenticate(c: LdapConfig, user: string, password: string) -> LdapResult {
-    val wire = ldapBind(c.host, c.port, c.serviceDn, c.servicePassword, c.base, c.uidAttribute, c.userDnPattern, user, password);
-    if (wire.startsWith("authenticated\t") == false) return LdapResult(kind: wire, principal: nobody(), subject: "");
+pub fn ldapAuthenticate(
+    c: LdapConfig,
+    user: string,
+    password: string,
+) -> LdapResult {
+    val wire = ldapBind(
+        c.host,
+        c.port,
+        c.serviceDn,
+        c.servicePassword,
+        c.base,
+        c.uidAttribute,
+        c.userDnPattern,
+        user,
+        password,
+    );
+    if (wire.startsWith("authenticated\t") == false)
+        return LdapResult(kind: wire, principal: nobody(), subject: "");
     val f = wire.split("\t");
     val groups = (f.at(2) ?? "").split("\n").filter({ g -> g != "" });
-    return LdapResult(kind: "authenticated", principal: Principal(name: user, authorities: groups), subject: f.at(1) ?? "");
+    return LdapResult(
+        kind: "authenticated",
+        principal: Principal(name: user, authorities: groups),
+        subject: f.at(1) ?? "",
+    );
 }
 
 pub fn ldapHealth(c: LdapConfig) -> Health {
     val wire = ldapHealthWire(c.host, c.port, c.serviceDn, c.servicePassword);
-    if (wire == "UP") return Health(status: "UP", details: json.object([#("host", json.quote(c.host))]));
-    return healthDown(json.object([#("host", json.quote(c.host)), #("reason", json.quote(wire.slice(5, wire.length())))]));
+    if (wire == "UP")
+        return Health(
+            status: "UP",
+            details: json.object([#("host", json.quote(c.host))]),
+        );
+    return healthDown(
+        json.object(
+            [
+                #("host", json.quote(c.host)),
+                #("reason", json.quote(wire.slice(5, wire.length()))),
+            ],
+        ),
+    );
 }
 
 pub fn registerLdapHealth(c: LdapConfig) -> i32 {
-    return rkRegisterHealthIndicator("ldap", "rakun-security", { -> ldapHealth(c) });
+    return rkRegisterHealthIndicator(
+        "ldap",
+        "rakun-security",
+        { -> ldapHealth(c) },
+    );
 }

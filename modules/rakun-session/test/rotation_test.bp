@@ -24,15 +24,21 @@ fn boot(store: string) -> SessionRepository {
 fn issuedId() -> string {
     var out = "";
     for (cookieLines()) { line ->
-        val value: string = cookieFromHeader(line.split(";").at(0) ?? "", "SESSION");
+        val value: string = cookieFromHeader(
+            line.split(";").at(0) ?? "",
+            "SESSION",
+        );
         if (value != "") out = value.split(".").at(0) ?? "";
-    };
+    }
     return out;
 }
 
 test "rotation: rotate issues a new id, keeps every attribute, and the old id is gone" {
     val repo = boot("rot-plain");
-    val s: Session = repo.create("").withAttribute("cart", "[1]").withAttribute("theme", "dark");
+    val s: Session = repo
+        .create("")
+        .withAttribute("cart", "[1]")
+        .withAttribute("theme", "dark");
     val _p = repo.save(s);
     val next: Session = rotate(repo, s);
     assert next.id != s.id;
@@ -47,7 +53,8 @@ test "rotation: a planted session id is worth nothing after login" {
     val repo = boot("rot-fixation");
     // The attacker obtains a valid session and plants its cookie in the victim's browser.
     val planted: Session = repo.create("");
-    val cookie: string = "cookie\tSESSION=" + cookieValueFor(secret(), planted.id);
+    val cookie: string = "cookie\tSESSION="
+        + cookieValueFor(secret(), planted.id);
     val _t = rkChainSetTerminal({ method, path, hw, qw, body ->
         val s: Session = authenticateSession("victim");
         Response.ok(s.principal);
@@ -74,8 +81,16 @@ test "rotation: a handler reads currentSession without parsing a header" {
     val repo = boot("rot-read");
     val s: Session = repo.create("").withAttribute("cart", "[7]");
     val _p = repo.save(s);
-    val _t = rkChainSetTerminal({ method, path, hw, qw, body -> Response.ok(currentSession().attribute("cart")) });
-    val res: Response = runChain("GET", "/cart", "cookie\tSESSION=" + cookieValueFor(secret(), s.id), "", "");
+    val _t = rkChainSetTerminal(
+        { method, path, hw, qw, body -> Response.ok(currentSession().attribute("cart")) },
+    );
+    val res: Response = runChain(
+        "GET",
+        "/cart",
+        "cookie\tSESSION=" + cookieValueFor(secret(), s.id),
+        "",
+        "",
+    );
     assert res.body == "[7]";
     assert cookieLines().length == 0;
     val _z = resetChain();
@@ -83,12 +98,16 @@ test "rotation: a handler reads currentSession without parsing a header" {
 
 test "rotation: an anonymous GET that never asks creates no session" {
     val repo = boot("rot-anon");
-    val _t = rkChainSetTerminal({ method, path, hw, qw, body -> Response.ok("static") });
+    val _t = rkChainSetTerminal(
+        { method, path, hw, qw, body -> Response.ok("static") },
+    );
     val res: Response = runChain("GET", "/static.css", "", "", "");
     assert res.body == "static";
     assert cookieLines().length == 0;
     assert sessionOutcome() == "none";
-    val _a = rkChainSetTerminal({ method, path, hw, qw, body -> Response.ok(currentSession().id) });
+    val _a = rkChainSetTerminal(
+        { method, path, hw, qw, body -> Response.ok(currentSession().id) },
+    );
     val made: Response = runChain("GET", "/cart", "", "", "");
     assert issuedId() == made.body;
     val _z = resetChain();
@@ -100,10 +119,19 @@ test "rotation: lastAccessedAt moves once per request" {
     val _t = rkChainSetTerminal({ method, path, hw, qw, body ->
         val a: Session = currentSession();
         val b: Session = currentSession();
-        val moved = if (a.lastAccessedAt == b.lastAccessedAt) " same" else " moved";
+        val moved = if (a.lastAccessedAt == b.lastAccessedAt)
+            " same"
+        else
+            " moved";
         Response.ok(touchesThisRequest().toString() + moved);
     });
-    val res: Response = runChain("GET", "/x", "cookie\tSESSION=" + cookieValueFor(secret(), s.id), "", "");
+    val res: Response = runChain(
+        "GET",
+        "/x",
+        "cookie\tSESSION=" + cookieValueFor(secret(), s.id),
+        "",
+        "",
+    );
     assert res.body == "1 same";
     val _z = resetChain();
 }

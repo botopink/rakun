@@ -32,60 +32,142 @@ fn names(rows: Rows) -> string {
 
 test "ets: CREATE TABLE and INSERT work, and INSERT answers the row count" {
     val _d = startDataSource("tpl", "ets:memory", 2, 1000, "eager");
-    val _c = tpl().update("CREATE TABLE people (id int PRIMARY KEY, name text, team text, age int)", []);
-    val n = tpl().update("INSERT INTO people (id, name, team, age) VALUES (:id, :name, :team, :age)", [param("id", "1"), param("name", "ana"), param("team", "red"), param("age", "31")]);
+    val _c = tpl().update(
+        "CREATE TABLE people (id int PRIMARY KEY, name text, team text, age int)",
+        [],
+    );
+    val n = tpl().update(
+        "INSERT INTO people (id, name, team, age) VALUES (:id, :name, :team, :age)",
+        [
+            param("id", "1"),
+            param("name", "ana"),
+            param("team", "red"),
+            param("age", "31"),
+        ],
+    );
     assert n == 1;
-    val many = tpl().update("INSERT INTO people (id, name, team, age) VALUES (2, 'bob', 'blue', 25), (3, 'cleo', 'red', 40), (4, 'dan', 'blue', 19)", []);
+    val many = tpl().update(
+        "INSERT INTO people (id, name, team, age) VALUES (2, 'bob', 'blue', 25), (3, 'cleo', 'red', 40), (4, 'dan', 'blue', 19)",
+        [],
+    );
     assert many == 3;
 }
 
 test "ets: SELECT with WHERE col = :p answers the matching rows" {
-    val rows = tpl().query("SELECT id, name FROM people WHERE team = :team", [param("team", "red")]);
+    val rows = tpl().query(
+        "SELECT id, name FROM people WHERE team = :team",
+        [param("team", "red")],
+    );
     assert rows.rowCount() == 2;
     assert rows.columns.join(",") == "id,name";
     assert names(rows) == "ana,cleo";
 }
 
 test "ets: WHERE combines AND, OR and parentheses" {
-    val rows = tpl().query("SELECT name FROM people WHERE (team = 'blue' AND age = 25) OR name = :n ORDER BY name", [param("n", "cleo")]);
+    val rows = tpl().query(
+        "SELECT name FROM people WHERE (team = 'blue' AND age = 25) OR name = :n ORDER BY name",
+        [param("n", "cleo")],
+    );
     assert names(rows) == "bob,cleo";
-    val other = tpl().query("SELECT name FROM people WHERE team <> 'red' ORDER BY id", []);
+    val other = tpl().query(
+        "SELECT name FROM people WHERE team <> 'red' ORDER BY id",
+        [],
+    );
     assert names(other) == "bob,dan";
 }
 
 test "ets: ORDER BY sorts numbers as numbers, ascending and descending" {
-    assert names(tpl().query("SELECT name FROM people ORDER BY age", [])) == "dan,bob,ana,cleo";
-    assert names(tpl().query("SELECT name FROM people ORDER BY age DESC", [])) == "cleo,ana,bob,dan";
-    assert names(tpl().query("SELECT name FROM people ORDER BY team, name DESC", [])) == "dan,bob,cleo,ana";
-    assert names(tpl().query("SELECT name FROM people ORDER BY id LIMIT 2", [])) == "ana,bob";
+    assert names(tpl().query("SELECT name FROM people ORDER BY age", []))
+        == "dan,bob,ana,cleo";
+    assert names(tpl().query("SELECT name FROM people ORDER BY age DESC", []))
+        == "cleo,ana,bob,dan";
+    assert names(
+        tpl().query("SELECT name FROM people ORDER BY team, name DESC", []),
+    )
+        == "dan,bob,cleo,ana";
+    assert names(tpl().query("SELECT name FROM people ORDER BY id LIMIT 2", []))
+        == "ana,bob";
 }
 
 test "ets: UPDATE changes the matching rows and answers how many" {
-    val n = tpl().update("UPDATE people SET team = :team WHERE age = :age", [param("team", "green"), param("age", "19")]);
+    val n = tpl().update(
+        "UPDATE people SET team = :team WHERE age = :age",
+        [param("team", "green"), param("age", "19")],
+    );
     assert n == 1;
-    assert names(tpl().query("SELECT name FROM people WHERE team = 'green'", [])) == "dan";
+    assert names(
+        tpl().query("SELECT name FROM people WHERE team = 'green'", []),
+    )
+        == "dan";
 }
 
 test "ets: DELETE removes the matching rows and answers how many" {
-    val n = tpl().update("DELETE FROM people WHERE team = :team", [param("team", "green")]);
+    val n = tpl().update(
+        "DELETE FROM people WHERE team = :team",
+        [param("team", "green")],
+    );
     assert n == 1;
     var count = "";
-    if (tpl().single("SELECT COUNT(*) AS n FROM people", [])) { r -> count = r.get("n"); };
+    if (tpl().single("SELECT COUNT(*) AS n FROM people", [])) {
+        r ->
+        count = r.get("n");
+    }
     assert count == "3";
 }
 
 test "ets: a statement outside the subset fails naming the unsupported construct" {
-    try asserts.contains(errorOf(tpl().tryQuery("SELECT p.name FROM people p JOIN teams t ON p.team = t.id", [])), "unsupported construct");
-    try asserts.contains(errorOf(tpl().tryQuery("SELECT name FROM people JOIN teams ON team = id", [])), "unsupported construct 'JOIN'");
-    try asserts.contains(errorOf(tpl().tryQuery("SELECT name FROM people WHERE upper(name) = 'A'", [])), "unsupported construct 'UPPER'");
-    try asserts.contains(errorOf(tpl().tryQuery("SELECT team FROM people GROUP BY team", [])), "unsupported construct 'GROUP'");
-    try asserts.contains(errorOf(tpl().tryQuery("SELECT name FROM people WHERE name ILIKE 'a%'", [])), "unsupported construct 'ILIKE'");
-    try asserts.contains(errorOf(tpl().tryQuery("MERGE INTO people USING x", [])), "unsupported construct 'MERGE'");
+    try asserts.contains(
+        errorOf(
+            tpl().tryQuery(
+                "SELECT p.name FROM people p JOIN teams t ON p.team = t.id",
+                [],
+            ),
+        ),
+        "unsupported construct",
+    );
+    try asserts.contains(
+        errorOf(
+            tpl().tryQuery(
+                "SELECT name FROM people JOIN teams ON team = id",
+                [],
+            ),
+        ),
+        "unsupported construct 'JOIN'",
+    );
+    try asserts.contains(
+        errorOf(
+            tpl().tryQuery(
+                "SELECT name FROM people WHERE upper(name) = 'A'",
+                [],
+            ),
+        ),
+        "unsupported construct 'UPPER'",
+    );
+    try asserts.contains(
+        errorOf(tpl().tryQuery("SELECT team FROM people GROUP BY team", [])),
+        "unsupported construct 'GROUP'",
+    );
+    try asserts.contains(
+        errorOf(
+            tpl().tryQuery("SELECT name FROM people WHERE name ILIKE 'a%'", []),
+        ),
+        "unsupported construct 'ILIKE'",
+    );
+    try asserts.contains(
+        errorOf(tpl().tryQuery("MERGE INTO people USING x", [])),
+        "unsupported construct 'MERGE'",
+    );
 }
 
 test "ets: a table or column that does not exist is an error, never an empty result" {
-    try asserts.contains(errorOf(tpl().tryQuery("SELECT name FROM nobody", [])), "no table 'nobody'");
-    try asserts.contains(errorOf(tpl().tryQuery("SELECT shoe FROM people", [])), "has no column 'shoe'");
+    try asserts.contains(
+        errorOf(tpl().tryQuery("SELECT name FROM nobody", [])),
+        "no table 'nobody'",
+    );
+    try asserts.contains(
+        errorOf(tpl().tryQuery("SELECT shoe FROM people", [])),
+        "has no column 'shoe'",
+    );
 }
 
 // Two test blocks, each in a transaction that is always rolled back: the
@@ -108,28 +190,47 @@ test "ets: a test block wrapped in withRollback leaves nothing behind (2 of 2)" 
 // ── step 4: named parameters ─────────────────────────────────────────────────
 
 test "params: :name binds from the Param of the same name, in first-appearance order" {
-    val b = bindNamed("SELECT * FROM t WHERE b = :b AND a = :a", [param("a", "1"), param("b", "2")], "ets");
+    val b = bindNamed(
+        "SELECT * FROM t WHERE b = :b AND a = :a",
+        [param("a", "1"), param("b", "2")],
+        "ets",
+    );
     assert b.sql == "SELECT * FROM t WHERE b = $1 AND a = $2";
     assert b.values.join(",") == "2,1";
     assert b.problem == "";
 }
 
 test "params: the same :name used twice binds once and is passed once" {
-    val b = bindNamed("SELECT id FROM users WHERE id = :id OR parent = :id", [param("id", "7")], "postgresql");
+    val b = bindNamed(
+        "SELECT id FROM users WHERE id = :id OR parent = :id",
+        [param("id", "7")],
+        "postgresql",
+    );
     assert b.sql == "SELECT id FROM users WHERE id = $1 OR parent = $1";
     assert b.values.length == 1;
     assert b.names.join(",") == "id";
 }
 
 test "params: MySQL placeholders are positional, so a repeated name is passed per occurrence" {
-    val b = bindNamed("SELECT id FROM users WHERE id = :id OR parent = :id", [param("id", "7")], "mysql");
+    val b = bindNamed(
+        "SELECT id FROM users WHERE id = :id OR parent = :id",
+        [param("id", "7")],
+        "mysql",
+    );
     assert b.sql == "SELECT id FROM users WHERE id = ? OR parent = ?";
     assert b.values.join(",") == "7,7";
 }
 
 test "params: a quoted literal and a :: cast are not parameters" {
-    assert placeholderNames("SELECT ':nope', x::text FROM t WHERE a = :yes").join(",") == "yes";
-    val b = bindNamed("SELECT ':nope', x::text FROM t WHERE a = :yes", [param("yes", "1")], "ets");
+    assert placeholderNames(
+        "SELECT ':nope', x::text FROM t WHERE a = :yes",
+    ).join(",")
+        == "yes";
+    val b = bindNamed(
+        "SELECT ':nope', x::text FROM t WHERE a = :yes",
+        [param("yes", "1")],
+        "ets",
+    );
     assert b.sql == "SELECT ':nope', x::text FROM t WHERE a = $1";
 }
 
@@ -139,21 +240,36 @@ test "params: a :name with no Param fails naming it, and so does an unused Param
         0;
     }, "names :id but no Param 'id' was given");
     try asserts.throwsWith({ ->
-        val _r = tpl().query("SELECT name FROM people WHERE id = :id", [param("id", "1"), param("extra", "x")]);
+        val _r = tpl().query(
+            "SELECT name FROM people WHERE id = :id",
+            [param("id", "1"), param("extra", "x")],
+        );
         0;
     }, "Param 'extra' is not used by the statement");
     try asserts.throwsWith({ ->
-        val _r = tpl().query("SELECT name FROM people WHERE id = :id", [param("id", "1"), param("id", "2")]);
+        val _r = tpl().query(
+            "SELECT name FROM people WHERE id = :id",
+            [param("id", "1"), param("id", "2")],
+        );
         0;
     }, "Param 'id' is given twice");
 }
 
 test "params: a hostile value is bound as a value and changes nothing" {
     val hostile = "'; DROP TABLE people; --";
-    val n = tpl().update("INSERT INTO people (id, name, team, age) VALUES (:id, :name, 'x', 1)", [param("id", "9"), param("name", hostile)]);
+    val n = tpl().update(
+        "INSERT INTO people (id, name, team, age) VALUES (:id, :name, 'x', 1)",
+        [param("id", "9"), param("name", hostile)],
+    );
     assert n == 1;
     var name = "";
-    if (tpl().single("SELECT name FROM people WHERE id = :id", [param("id", "9")])) { r -> name = r.get("name"); };
+    if (tpl().single(
+        "SELECT name FROM people WHERE id = :id",
+        [param("id", "9")],
+    )) {
+        r ->
+        name = r.get("name");
+    }
     assert name == hostile;
     assert tpl().query("SELECT id FROM people", []).rowCount() == 4;
 }
@@ -161,9 +277,15 @@ test "params: a hostile value is bound as a value and changes nothing" {
 // ── step 4: single, Row coercions, the two surfaces ──────────────────────────
 
 test "template: single answers null on no row and fails naming the statement on two" {
-    val none = tpl().single("SELECT name FROM people WHERE id = :id", [param("id", "404")]);
+    val none = tpl().single(
+        "SELECT name FROM people WHERE id = :id",
+        [param("id", "404")],
+    );
     var found = false;
-    if (none) { r -> found = true; };
+    if (none) {
+        r ->
+        found = true;
+    }
     assert found == false;
     try asserts.throwsWith({ ->
         val _r = tpl().single("SELECT name FROM people WHERE team = 'red'", []);
@@ -192,11 +314,17 @@ test "template: tryUpdate answers the count or the Error" {
 
 test "rows: Row.int reads a number and fails naming a non-numeric column rather than answering 0" {
     var age = 0;
-    if (tpl().single("SELECT age, name FROM people WHERE id = 1", [])) { r -> age = r.int("age"); };
+    if (tpl().single("SELECT age, name FROM people WHERE id = 1", [])) {
+        r ->
+        age = r.int("age");
+    }
     assert age == 32;
     try asserts.throwsWith({ ->
         var n = 0;
-        if (tpl().single("SELECT age, name FROM people WHERE id = 1", [])) { r -> n = r.int("name"); };
+        if (tpl().single("SELECT age, name FROM people WHERE id = 1", [])) {
+            r ->
+            n = r.int("name");
+        }
         n;
     }, "column 'name' is 'ana', which is not an integer");
 }
@@ -204,7 +332,10 @@ test "rows: Row.int reads a number and fails naming a non-numeric column rather 
 test "rows: Row.get answers empty for an absent column and Row.bool refuses a non-boolean" {
     var got = "x";
     var flag = false;
-    if (tpl().single("SELECT name FROM people WHERE id = 1", [])) { r -> got = r.get("nothing"); };
+    if (tpl().single("SELECT name FROM people WHERE id = 1", [])) {
+        r ->
+        got = r.get("nothing");
+    }
     assert got == "";
     val row = Row(columns: ["active", "name"], values: ["t", "ana"]);
     assert row.bool("active");
@@ -219,13 +350,22 @@ test "rows: Rows answers rowCount, at, first and toList" {
     val rows = tpl().query("SELECT id, name FROM people ORDER BY id", []);
     assert rows.rowCount() == 4;
     var second = "";
-    if (rows.at(1)) { r -> second = r.get("name"); };
+    if (rows.at(1)) {
+        r ->
+        second = r.get("name");
+    }
     assert second == "bob";
     var first = "";
-    if (rows.first()) { r -> first = r.get("name"); };
+    if (rows.first()) {
+        r ->
+        first = r.get("name");
+    }
     assert first == "ana";
     var beyond = false;
-    if (rows.at(9)) { r -> beyond = true; };
+    if (rows.at(9)) {
+        r ->
+        beyond = true;
+    }
     assert beyond == false;
     assert rows.toList().map({ r -> r.get("id") }).join(",") == "1,2,3,9";
 }
@@ -234,14 +374,26 @@ test "rows: Rows answers rowCount, at, first and toList" {
 
 test "async: await queryAsync answers the same rows as query" {
     val direct = tpl().query("SELECT id, name FROM people ORDER BY id", []);
-    val later = await tpl().queryAsync("SELECT id, name FROM people ORDER BY id", []);
+    val later = await tpl().queryAsync(
+        "SELECT id, name FROM people ORDER BY id",
+        [],
+    );
     assert later.columns.join(",") == direct.columns.join(",");
     assert names(later) == names(direct);
-    val n = await tpl().updateAsync("UPDATE people SET age = 33 WHERE id = 1", []);
+    val n = await tpl().updateAsync(
+        "UPDATE people SET age = 33 WHERE id = 1",
+        [],
+    );
     assert n == 1;
     var name = "";
-    val one = await tpl().singleAsync("SELECT name FROM people WHERE id = 2", []);
-    if (one) { r -> name = r.get("name"); };
+    val one = await tpl().singleAsync(
+        "SELECT name FROM people WHERE id = 2",
+        [],
+    );
+    if (one) {
+        r ->
+        name = r.get("name");
+    }
     assert name == "bob";
 }
 
@@ -264,16 +416,21 @@ test "async: a raise inside an async query surfaces at the await" {
 // `rakun_sleep(200)` calls under an elapsed-time budget said the same only
 // while the machine was idle.)
 fn meetFor(sql: SqlTemplate, key: string, parties: i32) -> @Task<i32> {
-    return await sql.updateAsync("CALL rakun_meet(:key, :parties)", [param("key", key), param("parties", parties.toString())]);
+    return await sql.updateAsync(
+        "CALL rakun_meet(:key, :parties)",
+        [param("key", key), param("parties", parties.toString())],
+    );
 }
 
 test "async: two async queries from one request run concurrently and both complete" {
     val _d = startDataSource("async", "ets:memory", 2, 2000, "eager");
     val sql = sqlTemplate("async");
-    val done = await async.runAll([
-        { -> meetFor(sql, "two-async-queries", 2) },
-        { -> meetFor(sql, "two-async-queries", 2) },
-    ]);
+    val done = await async.runAll(
+        [
+            { -> meetFor(sql, "two-async-queries", 2) },
+            { -> meetFor(sql, "two-async-queries", 2) },
+        ],
+    );
     assert done.length == 2;
     assert poolStats("async").peak == 2;
 }

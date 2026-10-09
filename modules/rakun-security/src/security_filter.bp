@@ -32,19 +32,7 @@
 //// are dropped here, unread.
 
 import {Response} from "rakun";
-import {
-    WebRequest,
-    Chain,
-    withHeader,
-    registerFilter,
-    orderSecurity,
-    problemFor,
-    problemResponse,
-    ProblemDetail,
-    registerAdvice,
-    adviceTags,
-    Matcher,
-} from "rakun-web";
+import {WebRequest, Chain, withHeader, registerFilter, orderSecurity, problemFor, problemResponse, ProblemDetail, registerAdvice, adviceTags, Matcher} from "rakun-web";
 import {regex.Regex} from "std";
 import {principal.Authentication, principal.anonymous, principal.withAuthentication, principal.rkSecNoteDecision, principal.realm};
 import {policy.SecurityPolicy, policy.CompiledPolicy, policy.CompiledRule, policy.Decision, policy.providedPolicy, policy.compileOrFail, policy.decide, policy.admits, policy.requiredAuthority};
@@ -59,7 +47,10 @@ import {method_security.unauthorizedTag, method_security.forbiddenTag};
 // ── host cells ──────────────────────────────────────────────────────────────
 
 #[@External.Erlang("rakun_security", "guard")]
-pub declare fn rkSecGuard(work: fn() -> Response, onDenied: fn(tag: string, detail: string) -> Response) -> Response;
+pub declare fn rkSecGuard(
+    work: fn() -> Response,
+    onDenied: fn(tag: string, detail: string) -> Response,
+) -> Response;
 
 #[@External.Erlang("rakun_security", "slot_put")]
 pub declare fn rkSecSlotPut(key: string, value: string) -> i32;
@@ -74,14 +65,21 @@ pub declare fn rkSecSlot(key: string) -> string;
 pub type AuthOutcome(auth: Authentication, presented: bool, valid: bool)
 
 fn outcomeOf(r: @Result<Authentication, string>) -> AuthOutcome {
-    if (r.isError()) return AuthOutcome(auth: anonymous(), presented: true, valid: false);
-    return AuthOutcome(auth: r.unwrapOr(anonymous()), presented: true, valid: true);
+    if (r.isError())
+        return AuthOutcome(auth: anonymous(), presented: true, valid: false);
+    return AuthOutcome(
+        auth: r.unwrapOr(anonymous()),
+        presented: true,
+        valid: true,
+    );
 }
 
 // Front 79's resource server installs the bearer verifier (RS256 against an
 // issuer's JWKS); without one a bearer token is front 10's HS256 JWT.
 #[@External.Erlang("""(fun(__F) -> persistent_term:put(rakun_security_bearer, __F), 0 end)($0)""")]
-pub declare fn installBearerVerifier(verify: fn(token: string) -> @Result<Authentication, string>) -> i32;
+pub declare fn installBearerVerifier(
+    verify: fn(token: string) -> @Result<Authentication, string>,
+) -> i32;
 
 #[@External.Erlang("""(fun() -> persistent_term:erase(rakun_security_bearer), 0 end)()""")]
 pub declare fn clearBearerVerifier() -> i32;
@@ -93,15 +91,21 @@ pub declare fn bearerVerifierInstalled() -> bool;
 declare fn runBearerVerifier(token: string) -> @Result<Authentication, string>;
 
 fn verifyBearer(token: string) -> @Result<Authentication, string> {
-    return if (bearerVerifierInstalled()) runBearerVerifier(token) else verifyJwt(token);
+    return if (bearerVerifierInstalled())
+        runBearerVerifier(token)
+    else
+        verifyJwt(token);
 }
 
 pub fn authenticate(req: WebRequest) -> AuthOutcome {
     val header: string = req.header("authorization").trim();
-    if (header == "") return AuthOutcome(auth: anonymous(), presented: false, valid: true);
+    if (header == "")
+        return AuthOutcome(auth: anonymous(), presented: false, valid: true);
     val lower: string = header.toLower();
-    if (lower.startsWith("bearer ")) return outcomeOf(verifyBearer(header.slice(7, header.length()).trim()));
-    if (lower.startsWith("basic ")) return outcomeOf(verifyBasic(userDetailsService(), header));
+    if (lower.startsWith("bearer "))
+        return outcomeOf(verifyBearer(header.slice(7, header.length()).trim()));
+    if (lower.startsWith("basic "))
+        return outcomeOf(verifyBasic(userDetailsService(), header));
     return AuthOutcome(auth: anonymous(), presented: true, valid: false);
 }
 
@@ -128,7 +132,11 @@ fn instance() -> string {
 }
 
 pub fn unauthorizedProblem() -> ProblemDetail {
-    val _w = withHeader(Response(status: 401, body: ""), "WWW-Authenticate", challengeHeader());
+    val _w = withHeader(
+        Response(status: 401, body: ""),
+        "WWW-Authenticate",
+        challengeHeader(),
+    );
     return problemFor(401, unauthorizedDetail(), instance());
 }
 
@@ -184,51 +192,91 @@ fn schemeOf(req: WebRequest) -> string {
 
 fn auditAuthentication(req: WebRequest, outcome: AuthOutcome) -> i32 {
     if (outcome.presented == false) return 0;
-    if (outcome.valid && outcome.auth.authenticated) return rkAudit("AUTHENTICATION_SUCCESS", outcome.auth.principal.name, [#("remoteAddress", peerAddress()), #("type", schemeOf(req))]);
-    if (outcome.valid == false) return rkAudit("AUTHENTICATION_FAILURE", attemptedPrincipal(req), [#("remoteAddress", peerAddress()), #("type", schemeOf(req))]);
+    if (outcome.valid && outcome.auth.authenticated)
+        return rkAudit(
+            "AUTHENTICATION_SUCCESS",
+            outcome.auth.principal.name,
+            [#("remoteAddress", peerAddress()), #("type", schemeOf(req))],
+        );
+    if (outcome.valid == false)
+        return rkAudit(
+            "AUTHENTICATION_FAILURE",
+            attemptedPrincipal(req),
+            [#("remoteAddress", peerAddress()), #("type", schemeOf(req))],
+        );
     return 0;
 }
 
 fn auditDenied(req: WebRequest, auth: Authentication, required: string) -> i32 {
     val who = if (auth.authenticated) auth.principal.name else "anonymousUser";
-    return rkAudit("AUTHORIZATION_FAILURE", who, [#("path", req.path), #("requiredAuthority", required), #("remoteAddress", peerAddress())]);
+    return rkAudit(
+        "AUTHORIZATION_FAILURE",
+        who,
+        [
+            #("path", req.path),
+            #("requiredAuthority", required),
+            #("remoteAddress", peerAddress()),
+        ],
+    );
 }
 
 // Early returns stay at the top level of the body: a `return` in an `if`
 // nested in another `if` is dropped on erlang (a recorded compiler defect).
-pub fn securityEntry(p: CompiledPolicy, req: WebRequest, chain: Chain) -> Response {
+pub fn securityEntry(
+    p: CompiledPolicy,
+    req: WebRequest,
+    chain: Chain,
+) -> Response {
     val _p = rkSecSlotPut("path", req.path);
     val d: Decision = decide(p, req.path);
     val outcome: AuthOutcome = authenticate(req);
-    val who: string = if (outcome.valid && outcome.auth.authenticated) outcome.auth.principal.name else "-";
+    val who: string = if (outcome.valid && outcome.auth.authenticated)
+        outcome.auth.principal.name
+    else
+        "-";
     val _w = rkSecSlotPut("principal", who);
     val _au = auditAuthentication(req, outcome);
     if (outcome.valid == false) {
         val _i = rkSecNoteDecision("denied " + rendered(d));
-        val bearer = bearerVerifierInstalled() && req.header("authorization").trim().toLower().startsWith("bearer ");
-        return if (bearer) withHeader(unauthorizedResponse(), "WWW-Authenticate", "Bearer error=\"invalid_token\"") else unauthorizedResponse();
-    };
+        val bearer = bearerVerifierInstalled()
+            && req
+                .header("authorization")
+                .trim()
+                .toLower()
+                .startsWith("bearer ");
+        return if (bearer)
+            withHeader(
+                unauthorizedResponse(),
+                "WWW-Authenticate",
+                "Bearer error=\"invalid_token\"",
+            )
+        else
+            unauthorizedResponse();
+    }
     val auth: Authentication = outcome.auth;
     if (csrfPasses(req, auth.method) == false) {
         val _c = rkSecNoteDecision("denied csrf");
         return csrfResponse();
-    };
+    }
     val allowed: bool = admits(d.requirement, auth);
     val needsLogin: bool = (allowed == false) && (auth.authenticated == false);
     if (needsLogin) {
         val _a = rkSecNoteDecision("denied " + rendered(d));
         val _ad = auditDenied(req, auth, requiredAuthority(d.requirement));
         return unauthorizedResponse();
-    };
+    }
     if (allowed == false) {
         val _f = rkSecNoteDecision("denied " + rendered(d));
         val _fd = auditDenied(req, auth, requiredAuthority(d.requirement));
         return forbiddenResponse(requiredAuthority(d.requirement));
-    };
+    }
     val _g = rkSecNoteDecision("granted " + rendered(d));
     val _t = issueTokenCookie(req);
     return withAuthentication(auth, { ->
-        rkSecGuard({ -> chain.next(req) }, { tag, detail -> deniedResponse(tag, detail) });
+        rkSecGuard(
+            { -> chain.next(req) },
+            { tag, detail -> deniedResponse(tag, detail) },
+        );
     });
 }
 
@@ -258,8 +306,22 @@ pub fn securityBoot() -> i32 {
 // second registration of a tag.
 pub fn registerSecurityAdvice() -> i32 {
     val tags: string[] = adviceTags();
-    val _u = if (tags.indexOf(unauthorizedTag()) < 0) registerAdvice(unauthorizedTag(), "rakun-security", { detail -> unauthorizedProblem() }) else 0;
-    val _f = if (tags.indexOf(forbiddenTag()) < 0) registerAdvice(forbiddenTag(), "rakun-security", { detail -> forbiddenProblem(detail) }) else 0;
+    val _u = if (tags.indexOf(unauthorizedTag()) < 0)
+        registerAdvice(
+            unauthorizedTag(),
+            "rakun-security",
+            { detail -> unauthorizedProblem() },
+        )
+    else
+        0;
+    val _f = if (tags.indexOf(forbiddenTag()) < 0)
+        registerAdvice(
+            forbiddenTag(),
+            "rakun-security",
+            { detail -> forbiddenProblem(detail) },
+        )
+    else
+        0;
     return 0;
 }
 
@@ -274,5 +336,9 @@ pub fn installSecurityWith(policy: SecurityPolicy) -> i32 {
     val _b = securityBoot();
     val compiled: CompiledPolicy = compileOrFail(policy);
     val _a = registerSecurityAdvice();
-    return registerFilter("security", orderSecurity(), { req, chain -> securityEntry(compiled, req, chain) });
+    return registerFilter(
+        "security",
+        orderSecurity(),
+        { req, chain -> securityEntry(compiled, req, chain) },
+    );
 }

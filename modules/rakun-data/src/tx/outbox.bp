@@ -31,10 +31,13 @@ import {Param, param, Row, Rows, SqlTemplate, Tx, sqlTemplate};
 // milliseconds is beyond `i32`'s range, so arithmetic on it as an `i32` aborts).
 #[@External.Erlang("""(fun() -> erlang:system_time(millisecond) end)()""")]
 pub declare fn nowMs() -> i64;
+
 #[@External.Erlang("""(fun(__X) -> __X end)($0)""")]
 declare fn wide(n: i32) -> i64;
+
 #[@External.Erlang("""(fun() -> list_to_binary(pid_to_list(self()) ++ "@" ++ atom_to_list(node())) end)()""")]
 declare fn me() -> string;
+
 #[@External.Erlang("""(fun(__F) -> try __F(), <<>> catch _:{panic, __R} when is_binary(__R) -> __R; _:__R -> iolist_to_binary(io_lib:format("~p", [__R])) end end)($0)""")]
 pub declare fn attempt(work: fn() -> i32) -> string;
 // `bump` and `note` are read-modify-writes of one persistent_term shared by
@@ -44,12 +47,16 @@ pub declare fn attempt(work: fn() -> i32) -> string;
 // lock two relays lost a quarter of their log lines.
 #[@External.Erlang("""(fun(__N) -> global:trans({{rakun_tx_counter, __N}, self()}, fun() -> __V = persistent_term:get({rakun_tx_counter, __N}, 0) + 1, persistent_term:put({rakun_tx_counter, __N}, __V), __V end, [node()]) end)($0)""")]
 pub declare fn bump(name: string) -> i32;
+
 #[@External.Erlang("""(fun(__N) -> persistent_term:get({rakun_tx_counter, __N}, 0) end)($0)""")]
 pub declare fn counterOf(name: string) -> i32;
+
 #[@External.Erlang("""(fun(__T) -> logger:notice("~ts", [__T]), global:trans({rakun_tx_log, self()}, fun() -> persistent_term:put(rakun_tx_log, persistent_term:get(rakun_tx_log, []) ++ [__T]) end, [node()]), 0 end)($0)""")]
 pub declare fn note(line: string) -> i32;
+
 #[@External.Erlang("""persistent_term:get(rakun_tx_log, [])""")]
 pub declare fn txLog() -> string[];
+
 #[@External.Erlang("rakun_sql", "tx_open")]
 declare fn txOpen(ds: string) -> bool;
 
@@ -69,7 +76,9 @@ pub fn outboxSchema() -> string[] {
 }
 
 pub fn installOutbox(ds: string) -> i32 {
-    for (outboxSchema()) { s -> val _u = sqlTemplate(ds).update(s, []); };
+    for (outboxSchema()) { s ->
+        val _u = sqlTemplate(ds).update(s, []);
+    }
     return 0;
 }
 
@@ -83,13 +92,31 @@ fn encodeHeaders(hs: Array<#(string, string)>) -> string {
 
 // Enrols `m` in the current transaction on `ds`; refuses outside one.
 pub fn publishAfterCommitOn(ds: string, m: OutboxMessage) -> i32 {
-    if (txOpen(ds) == false) @panic("rakun-tx: publishAfterCommit was called outside a transaction - enrol the message in the transaction whose commit it follows (a direct publish is what the outbox exists to prevent)");
+    if (txOpen(ds) == false)
+        @panic(
+            "rakun-tx: publishAfterCommit was called outside a transaction - enrol the message in the transaction whose commit it follows (a direct publish is what the outbox exists to prevent)",
+        );
     val t = Tx(dataSourceName: ds);
-    val seq = t.query("SELECT id FROM rakun_outbox WHERE aggregate = :a", [param("a", m.aggregate)]).rowCount() + 1;
-    return t.update("INSERT INTO rakun_outbox (id, aggregate, seq, topic, msg_key, payload, headers, status, owner, attempts, next_at, last_error, created_at) VALUES (:id, :a, :seq, :topic, :k, :p, :h, 'pending', '', 0, 0, '', :now)", [
-        param("id", nextId(t, "rakun_outbox").toString()), param("a", m.aggregate), param("seq", seq.toString()),
-        param("topic", m.topic), param("k", m.key), param("p", m.payload), param("h", encodeHeaders(m.headers)), param("now", nowMs().toString()),
-    ]);
+    val seq = t
+        .query(
+            "SELECT id FROM rakun_outbox WHERE aggregate = :a",
+            [param("a", m.aggregate)],
+        )
+        .rowCount()
+        + 1;
+    return t.update(
+        "INSERT INTO rakun_outbox (id, aggregate, seq, topic, msg_key, payload, headers, status, owner, attempts, next_at, last_error, created_at) VALUES (:id, :a, :seq, :topic, :k, :p, :h, 'pending', '', 0, 0, '', :now)",
+        [
+            param("id", nextId(t, "rakun_outbox").toString()),
+            param("a", m.aggregate),
+            param("seq", seq.toString()),
+            param("topic", m.topic),
+            param("k", m.key),
+            param("p", m.payload),
+            param("h", encodeHeaders(m.headers)),
+            param("now", nowMs().toString()),
+        ],
+    );
 }
 
 pub fn publishAfterCommit(m: OutboxMessage) -> i32 {
@@ -100,11 +127,27 @@ pub fn publishAfterCommit(m: OutboxMessage) -> i32 {
 pub type OutboxRow(id: i32, aggregate: string, seq: i32, topic: string, key: string, payload: string, status: string, attempts: i32, lastError: string)
 
 fn rowOf(r: Row) -> OutboxRow {
-    return OutboxRow(id: r.int("id"), aggregate: r.get("aggregate"), seq: r.int("seq"), topic: r.get("topic"), key: r.get("msg_key"), payload: r.get("payload"), status: r.get("status"), attempts: r.int("attempts"), lastError: r.get("last_error"));
+    return OutboxRow(
+        id: r.int("id"),
+        aggregate: r.get("aggregate"),
+        seq: r.int("seq"),
+        topic: r.get("topic"),
+        key: r.get("msg_key"),
+        payload: r.get("payload"),
+        status: r.get("status"),
+        attempts: r.int("attempts"),
+        lastError: r.get("last_error"),
+    );
 }
 
 pub fn outboxRows(ds: string) -> OutboxRow[] {
-    return sqlTemplate(ds).query("SELECT id, aggregate, seq, topic, msg_key, payload, status, attempts, last_error FROM rakun_outbox ORDER BY id", []).toList().map({ r -> rowOf(r) });
+    return sqlTemplate(ds)
+        .query(
+            "SELECT id, aggregate, seq, topic, msg_key, payload, status, attempts, last_error FROM rakun_outbox ORDER BY id",
+            [],
+        )
+        .toList()
+        .map({ r -> rowOf(r) });
 }
 
 fn maxAttempts() -> i32 {
@@ -120,91 +163,195 @@ fn backoffMs(attempts: i32) -> i32 {
     while (i < attempts) {
         d = d * 2;
         i = i + 1;
-    };
+    }
     return d;
 }
 
 // One pass: every aggregate's lowest pending row that is due, claimed then
 // published. `publisher(topic, key, payload)` answers "" or the error.
 // Answers how many rows were sent.
-pub fn relayTick(ds: string, publisher: fn(topic: string, key: string, payload: string) -> string) -> i32 {
+pub fn relayTick(
+    ds: string,
+    publisher: fn(topic: string, key: string, payload: string) -> string,
+) -> i32 {
     val sql = sqlTemplate(ds);
     val now = nowMs();
-    val pending = sql.query("SELECT id, aggregate, seq, topic, msg_key, payload, status, attempts, last_error, next_at FROM rakun_outbox WHERE status = 'pending' ORDER BY seq", []).toList();
-    val blocked = sql.query("SELECT aggregate FROM rakun_outbox WHERE status = 'claimed'", []).toList().map({ r -> r.get("aggregate") });
+    val pending = sql
+        .query(
+            "SELECT id, aggregate, seq, topic, msg_key, payload, status, attempts, last_error, next_at FROM rakun_outbox WHERE status = 'pending' ORDER BY seq",
+            [],
+        )
+        .toList();
+    val blocked = sql
+        .query(
+            "SELECT aggregate FROM rakun_outbox WHERE status = 'claimed'",
+            [],
+        )
+        .toList()
+        .map({ r -> r.get("aggregate") });
     var seenAggregates: string[] = [];
     var sent = 0;
     for (pending) { r ->
         val row = rowOf(r);
         val due = r.long("next_at") <= now;
-        if (seenAggregates.indexOf(row.aggregate) < 0 && blocked.indexOf(row.aggregate) < 0) {
+        if (seenAggregates.indexOf(row.aggregate) < 0
+            && blocked.indexOf(row.aggregate) < 0) {
             seenAggregates.push(row.aggregate);
-            val claimed = if (due) sql.update("UPDATE rakun_outbox SET status = 'claimed', owner = :me WHERE id = :id AND status = 'pending'", [param("me", me()), param("id", row.id.toString())]) else 0;
+            val claimed = if (due)
+                sql.update(
+                    "UPDATE rakun_outbox SET status = 'claimed', owner = :me WHERE id = :id AND status = 'pending'",
+                    [param("me", me()), param("id", row.id.toString())],
+                )
+            else
+                0;
             if (claimed == 1) {
                 val err = publisher(row.topic, row.key, row.payload);
                 if (err == "") {
-                    val _s = sql.update("UPDATE rakun_outbox SET status = 'sent', owner = '', created_at = :now WHERE id = :id", [param("now", nowMs().toString()), param("id", row.id.toString())]);
+                    val _s = sql.update(
+                        "UPDATE rakun_outbox SET status = 'sent', owner = '', created_at = :now WHERE id = :id",
+                        [
+                            param("now", nowMs().toString()),
+                            param("id", row.id.toString()),
+                        ],
+                    );
                     sent = sent + 1;
                 } else {
                     val tries = row.attempts + 1;
-                    val status = if (tries >= maxAttempts()) "failed" else "pending";
-                    val _f = sql.update("UPDATE rakun_outbox SET status = :st, owner = '', attempts = :n, next_at = :next, last_error = :e WHERE id = :id", [param("st", status), param("n", tries.toString()), param("next", (nowMs() + wide(backoffMs(tries))).toString()), param("e", err), param("id", row.id.toString())]);
-                };
-            };
-        };
-    };
+                    val status = if (tries >= maxAttempts())
+                        "failed"
+                    else
+                        "pending";
+                    val _f = sql.update(
+                        "UPDATE rakun_outbox SET status = :st, owner = '', attempts = :n, next_at = :next, last_error = :e WHERE id = :id",
+                        [
+                            param("st", status),
+                            param("n", tries.toString()),
+                            param(
+                                "next",
+                                (nowMs() + wide(backoffMs(tries))).toString(),
+                            ),
+                            param("e", err),
+                            param("id", row.id.toString()),
+                        ],
+                    );
+                }
+            }
+        }
+    }
     return sent;
 }
 
-
-
 // Rows a dead relay left claimed go back to pending (at-least-once).
 pub fn reclaimStale(ds: string) -> i32 {
-    return sqlTemplate(ds).update("UPDATE rakun_outbox SET status = 'pending', owner = '' WHERE status = 'claimed'", []);
+    return sqlTemplate(ds).update(
+        "UPDATE rakun_outbox SET status = 'pending', owner = '' WHERE status = 'claimed'",
+        [],
+    );
 }
 
 // Deletes up to `batch` sent rows older than `retentionMs`.
 pub fn pruneSent(ds: string, retentionMs: i32, batch: i32) -> i32 {
     val sql = sqlTemplate(ds);
     val cutoff = nowMs() - wide(retentionMs);
-    val old = sql.query("SELECT id, created_at FROM rakun_outbox WHERE status = 'sent' ORDER BY id", []).toList().filter({ r -> r.long("created_at") <= cutoff }).slice(0, batch);
+    val old = sql
+        .query(
+            "SELECT id, created_at FROM rakun_outbox WHERE status = 'sent' ORDER BY id",
+            [],
+        )
+        .toList()
+        .filter({ r -> r.long("created_at") <= cutoff })
+        .slice(0, batch);
     var n = 0;
-    for (old) { r -> n = n + sql.update("DELETE FROM rakun_outbox WHERE id = :id", [param("id", r.get("id"))]); };
+    for (old) { r ->
+        n = n
+            + sql.update(
+                "DELETE FROM rakun_outbox WHERE id = :id",
+                [param("id", r.get("id"))],
+            );
+    }
     return n;
 }
 
 // ── the inbox ───────────────────────────────────────────────────────────────
 
 // `processed`, `duplicate`, or raises (the handler's raise, after rollback).
-pub fn consumeOnce(ds: string, group: string, messageId: string, handler: fn(tx: Tx) -> i32) -> string {
-    return sqlTemplate(ds).transaction({ t -> inboxStep(t, group, messageId, handler) });
+pub fn consumeOnce(
+    ds: string,
+    group: string,
+    messageId: string,
+    handler: fn(tx: Tx) -> i32,
+) -> string {
+    return sqlTemplate(ds).transaction(
+        { t -> inboxStep(t, group, messageId, handler) },
+    );
 }
 
-fn inboxStep(t: Tx, group: string, messageId: string, handler: fn(tx: Tx) -> i32) -> string {
-    val seen = t.query("SELECT message_id FROM rakun_inbox WHERE grp = :g AND message_id = :m", [param("g", group), param("m", messageId)]).rowCount();
+fn inboxStep(
+    t: Tx,
+    group: string,
+    messageId: string,
+    handler: fn(tx: Tx) -> i32,
+) -> string {
+    val seen = t
+        .query(
+            "SELECT message_id FROM rakun_inbox WHERE grp = :g AND message_id = :m",
+            [param("g", group), param("m", messageId)],
+        )
+        .rowCount();
     if (seen > 0) return "duplicate";
-    val _i = t.update("INSERT INTO rakun_inbox (grp, message_id, received_at) VALUES (:g, :m, :now)", [param("g", group), param("m", messageId), param("now", nowMs().toString())]);
+    val _i = t.update(
+        "INSERT INTO rakun_inbox (grp, message_id, received_at) VALUES (:g, :m, :now)",
+        [
+            param("g", group),
+            param("m", messageId),
+            param("now", nowMs().toString()),
+        ],
+    );
     val _h = handler(t);
     return "processed";
 }
 
 // The inbox retention must exceed the broker's redelivery window.
-pub fn inboxRetentionProblem(retentionMs: i32, redeliveryWindowMs: i32) -> string {
+pub fn inboxRetentionProblem(
+    retentionMs: i32,
+    redeliveryWindowMs: i32,
+) -> string {
     if (retentionMs > redeliveryWindowMs) return "";
-    return "rakun-tx: the inbox retention (" + retentionMs.toString() + " ms) must exceed the broker's redelivery window (" + redeliveryWindowMs.toString() + " ms) - a row pruned before the broker stops redelivering admits a duplicate";
+    return "rakun-tx: the inbox retention ("
+        + retentionMs.toString()
+        + " ms) must exceed the broker's redelivery window ("
+        + redeliveryWindowMs.toString()
+        + " ms) - a row pruned before the broker stops redelivering admits a duplicate";
 }
 
 // Deletes inbox rows older than `retentionMs`, refusing a retention that does
 // not exceed the broker's redelivery window. At most `batch` per call.
-pub fn pruneInbox(ds: string, retentionMs: i32, redeliveryWindowMs: i32, batch: i32) -> i32 {
+pub fn pruneInbox(
+    ds: string,
+    retentionMs: i32,
+    redeliveryWindowMs: i32,
+    batch: i32,
+) -> i32 {
     val problem = inboxRetentionProblem(retentionMs, redeliveryWindowMs);
     if (problem != "") @panic(problem);
     val sql = sqlTemplate(ds);
     val cutoff = nowMs() - wide(retentionMs);
-    val rows: Rows = sql.query("SELECT grp, message_id, received_at FROM rakun_inbox", []);
-    val old = rows.toList().filter({ r -> r.long("received_at") <= cutoff }).slice(0, batch);
+    val rows: Rows = sql.query(
+        "SELECT grp, message_id, received_at FROM rakun_inbox",
+        [],
+    );
+    val old = rows
+        .toList()
+        .filter({ r -> r.long("received_at") <= cutoff })
+        .slice(0, batch);
     var n = 0;
-    for (old) { r -> n = n + sql.update("DELETE FROM rakun_inbox WHERE grp = :g AND message_id = :m", [param("g", r.get("grp")), param("m", r.get("message_id"))]); };
+    for (old) { r ->
+        n = n
+            + sql.update(
+                "DELETE FROM rakun_inbox WHERE grp = :g AND message_id = :m",
+                [param("g", r.get("grp")), param("m", r.get("message_id"))],
+            );
+    }
     return n;
 }
 
@@ -213,15 +360,22 @@ pub fn pruneInbox(ds: string, retentionMs: i32, redeliveryWindowMs: i32, batch: 
 // `broker` when the broker offers producer transactions, else `outbox`; the
 // choice is counted (`rakun.tx.path.<name>`) and logged, so an operator can
 // see which guarantee is in force.
-pub fn publishInTransaction(ds: string, brokerTransactions: bool, m: OutboxMessage, brokerSend: fn(topic: string, key: string, payload: string) -> string) -> string {
+pub fn publishInTransaction(
+    ds: string,
+    brokerTransactions: bool,
+    m: OutboxMessage,
+    brokerSend: fn(topic: string, key: string, payload: string) -> string,
+) -> string {
     val path = if (brokerTransactions) "broker" else "outbox";
     val _c = bump("rakun.tx.path." + path);
-    val _l = note("rakun-tx: " + m.topic + " published through the " + path + " path");
+    val _l = note(
+        "rakun-tx: " + m.topic + " published through the " + path + " path",
+    );
     if (brokerTransactions) {
         val err = brokerSend(m.topic, m.key, m.payload);
         if (err != "") @panic(err);
         return path;
-    };
+    }
     val _p = publishAfterCommitOn(ds, m);
     return path;
 }
@@ -229,6 +383,15 @@ pub fn publishInTransaction(ds: string, brokerTransactions: bool, m: OutboxMessa
 // The same call whatever the broker: `rakun.tx.broker-transactions=true`
 // (set by the broker module that offers producer transactions) selects the
 // broker path, anything else the outbox. Application code never changes.
-pub fn publishTransactional(ds: string, m: OutboxMessage, brokerSend: fn(topic: string, key: string, payload: string) -> string) -> string {
-    return publishInTransaction(ds, rkProp("rakun.tx.broker-transactions").trim() == "true", m, brokerSend);
+pub fn publishTransactional(
+    ds: string,
+    m: OutboxMessage,
+    brokerSend: fn(topic: string, key: string, payload: string) -> string,
+) -> string {
+    return publishInTransaction(
+        ds,
+        rkProp("rakun.tx.broker-transactions").trim() == "true",
+        m,
+        brokerSend,
+    );
 }

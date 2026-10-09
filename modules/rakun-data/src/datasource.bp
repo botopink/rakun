@@ -46,7 +46,14 @@ import {isActive} from "rakun";
 // ── the host cells (`src/sidecars/rakun_sql.erl`) ────────────────────────────
 
 #[@External.Erlang("rakun_sql", "start_pool")]
-pub declare fn rkPoolStart(name: string, arm: string, url: string, size: i32, timeoutMs: i32, eager: bool) -> string;
+pub declare fn rkPoolStart(
+    name: string,
+    arm: string,
+    url: string,
+    size: i32,
+    timeoutMs: i32,
+    eager: bool,
+) -> string;
 
 #[@External.Erlang("rakun_sql", "stop_pool")]
 pub declare fn rkPoolStop(name: string) -> i32;
@@ -127,7 +134,14 @@ pub type PooledDataSource(
     mode: string,
 ) implement DataSource {
     pub fn connect(self: Self) -> string {
-        return rkPoolStart(self.name, self.arm, self.url, self.size, self.timeoutMs, self.mode == "eager");
+        return rkPoolStart(
+            self.name,
+            self.arm,
+            self.url,
+            self.size,
+            self.timeoutMs,
+            self.mode == "eager",
+        );
     }
 
     pub fn close(self: Self) -> i32 {
@@ -148,23 +162,50 @@ pub fn defaultDataSourceName() -> string {
 // `""` for a scheme no arm serves.
 pub fn armOf(url: string) -> string {
     val u = url.trim();
-    return if (u.startsWith("ets:")) "ets" else if (u.startsWith("postgresql://") || u.startsWith("postgres://")) "postgresql" else if (u.startsWith("mysql://")) "mysql" else "";
+    return if (u.startsWith("ets:"))
+        "ets"
+    else if (u.startsWith("postgresql://") || u.startsWith("postgres://"))
+        "postgresql"
+    else if (u.startsWith("mysql://"))
+        "mysql"
+    else
+        "";
 }
 
 pub fn driverModule(arm: string) -> string {
-    return if (arm == "postgresql") "epgsql" else if (arm == "mysql") "mysql" else "";
+    return if (arm == "postgresql")
+        "epgsql"
+    else if (arm == "mysql")
+        "mysql"
+    else
+        "";
 }
 
 pub fn driverApplication(arm: string) -> string {
-    return if (arm == "postgresql") "epgsql (https://github.com/epgsql/epgsql)" else if (arm == "mysql") "mysql-otp (https://github.com/mysql-otp/mysql-otp)" else "";
+    return if (arm == "postgresql")
+        "epgsql (https://github.com/epgsql/epgsql)"
+    else if (arm == "mysql")
+        "mysql-otp (https://github.com/mysql-otp/mysql-otp)"
+    else
+        "";
 }
 
 pub fn unknownSchemeProblem(url: string) -> string {
-    return "rakun-data: rakun.datasource.url is '" + url + "', whose scheme no arm serves - accepted: ets:memory, postgresql://..., mysql://...";
+    return "rakun-data: rakun.datasource.url is '"
+        + url
+        + "', whose scheme no arm serves - accepted: ets:memory, postgresql://..., mysql://...";
 }
 
 pub fn driverMissingProblem(url: string, arm: string) -> string {
-    return "rakun-data: rakun.datasource.url is '" + url + "' but the " + arm + " driver module '" + driverModule(arm) + "' is not loadable - put the OTP application " + driverApplication(arm) + " on the code path. rakun-data does not fall back to the ETS store";
+    return "rakun-data: rakun.datasource.url is '"
+        + url
+        + "' but the "
+        + arm
+        + " driver module '"
+        + driverModule(arm)
+        + "' is not loadable - put the OTP application "
+        + driverApplication(arm)
+        + " on the code path. rakun-data does not fall back to the ETS store";
 }
 
 pub fn noUrlProblem() -> string {
@@ -183,45 +224,99 @@ pub fn effectiveUrl(configured: string, testProfile: bool) -> string {
 // is never discovered by the first request.
 pub fn urlProblem(url: string) -> string {
     val arm = armOf(url);
-    return if (url == "") noUrlProblem() else if (arm == "") unknownSchemeProblem(url) else if (arm == "ets") "" else if (rkDriverLoadable(driverModule(arm))) "" else driverMissingProblem(url, arm);
+    return if (url == "")
+        noUrlProblem()
+    else if (arm == "")
+        unknownSchemeProblem(url)
+    else if (arm == "ets")
+        ""
+    else if (rkDriverLoadable(driverModule(arm)))
+        ""
+    else
+        driverMissingProblem(url, arm);
 }
 
 pub fn bootstrapModeProblem(mode: string) -> string {
-    return if (mode == "eager" || mode == "deferred" || mode == "lazy") "" else "rakun-data: rakun.data.repositories.bootstrap-mode is '" + mode + "' - accepted: eager, deferred, lazy";
+    return if (mode == "eager" || mode == "deferred" || mode == "lazy")
+        ""
+    else
+        "rakun-data: rakun.data.repositories.bootstrap-mode is '"
+            + mode
+            + "' - accepted: eager, deferred, lazy";
 }
 
 // `""`, or the warning a deferred pool under a production profile logs.
 pub fn productionWarning(mode: string) -> string {
     val deferredPool = mode == "deferred" || mode == "lazy";
-    val profile = if (isActive("production")) "production" else if (isActive("prod")) "prod" else "";
-    return if (deferredPool && profile != "") "rakun-data: warning - rakun.data.repositories.bootstrap-mode is '" + mode + "' under the active profile '" + profile + "': the boot does not touch the database, so an unreachable one fails the first request instead of the deploy" else "";
+    val profile = if (isActive("production"))
+        "production"
+    else if (isActive("prod"))
+        "prod"
+    else
+        "";
+    return if (deferredPool && profile != "")
+        "rakun-data: warning - rakun.data.repositories.bootstrap-mode is '"
+            + mode
+            + "' under the active profile '"
+            + profile
+            + "': the boot does not touch the database, so an unreachable one fails the first request instead of the deploy"
+    else
+        "";
 }
 
 // ── boot ─────────────────────────────────────────────────────────────────────
 
 // Start a datasource from explicit values. RAISES the refusal: a datasource
 // that cannot start is a boot failure. Answers the started datasource.
-pub fn startDataSource(name: string, url: string, size: i32, timeoutMs: i32, mode: string) -> PooledDataSource {
+pub fn startDataSource(
+    name: string,
+    url: string,
+    size: i32,
+    timeoutMs: i32,
+    mode: string,
+) -> PooledDataSource {
     val problem = urlProblem(url);
     if (problem != "") @panic(problem);
     val modeProblem = bootstrapModeProblem(mode);
     if (modeProblem != "") @panic(modeProblem);
-    if (size < 1) @panic("rakun-data: rakun.datasource.pool.size is " + size.toString() + " - a pool needs at least one connection");
+    if (size < 1)
+        @panic(
+            "rakun-data: rakun.datasource.pool.size is "
+                + size.toString()
+                + " - a pool needs at least one connection",
+        );
     val warning = productionWarning(mode);
-    if (warning != "") {
-        val _w = rkDataWarn(warning);
-    };
-    val ds = PooledDataSource(name: name, url: url.trim(), arm: armOf(url), size: size, timeoutMs: timeoutMs, mode: mode);
+    if (warning != "") val _w = rkDataWarn(warning);
+    val ds = PooledDataSource(
+        name: name,
+        url: url.trim(),
+        arm: armOf(url),
+        size: size,
+        timeoutMs: timeoutMs,
+        mode: mode,
+    );
     val failed = ds.connect();
-    if (failed != "") @panic("rakun-data: the datasource '" + name + "' failed to start - " + failed);
+    if (failed != "")
+        @panic(
+            "rakun-data: the datasource '"
+                + name
+                + "' failed to start - "
+                + failed,
+        );
     return ds;
 }
 
 // The keys this front reads, registered in the core's catalogue so a
 // `rakun config-catalogue` dump lists them.
 pub fn registerDataKeys() -> i32 {
-    val _d = rkRegisterConfigKeys("rakun.datasource", "url:string:|pool.size:i32:10|pool.connection-timeout:Duration:30000");
-    return rkRegisterConfigKeys("rakun.data", "repositories.bootstrap-mode:string:eager");
+    val _d = rkRegisterConfigKeys(
+        "rakun.datasource",
+        "url:string:|pool.size:i32:10|pool.connection-timeout:Duration:30000",
+    );
+    return rkRegisterConfigKeys(
+        "rakun.data",
+        "repositories.bootstrap-mode:string:eager",
+    );
 }
 
 // The default datasource, from configuration: `rakun.datasource.url`,
@@ -234,16 +329,21 @@ pub fn dataSourceBoot() -> PooledDataSource {
     val url = effectiveUrl(rkValue("rakun.datasource.url"), isActive("test"));
     val size = rkPropIntOr("rakun.datasource.pool.size", 10);
     val raw = rkValue("rakun.datasource.pool.connection-timeout");
-    val timeoutMs = if (raw.trim() == "") 30000 else rkPropDuration("rakun.datasource.pool.connection-timeout", "millis").millis;
+    val timeoutMs = if (raw.trim() == "")
+        30000
+    else
+        rkPropDuration(
+            "rakun.datasource.pool.connection-timeout",
+            "millis",
+        ).millis;
     val rawMode = rkValue("rakun.data.repositories.bootstrap-mode").trim();
     val mode = if (rawMode == "") "eager" else rawMode;
     return startDataSource(defaultDataSourceName(), url, size, timeoutMs, mode);
 }
 
 pub fn ensureDataSource(name: string) -> i32 {
-    if (rkPoolStarted(name) == false && name == defaultDataSourceName()) {
+    if (rkPoolStarted(name) == false && name == defaultDataSourceName())
         val _b = dataSourceBoot();
-    };
     return 0;
 }
 

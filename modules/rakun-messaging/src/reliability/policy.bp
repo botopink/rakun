@@ -16,28 +16,58 @@ pub type RetryPolicy(
     maxAttempts: i32,
 )
 
-pub fn retryPolicyProblem(initialMs: i32, multiplierPercent: i32, maxMs: i32, maxAttempts: i32) -> string {
-    if (multiplierPercent <= 0) return "rakun-messaging: a retry policy's multiplierPercent is " + multiplierPercent.toString() + " - it must be at least 1 (100 keeps the delay constant); 0 would retry in a zero-delay hot loop";
-    if (initialMs < 0 || maxMs < 0) return "rakun-messaging: a retry policy's delays must not be negative";
-    if (maxAttempts < 1) return "rakun-messaging: a retry policy's maxAttempts is " + maxAttempts.toString() + " - at least 1 (the first delivery)";
+pub fn retryPolicyProblem(
+    initialMs: i32,
+    multiplierPercent: i32,
+    maxMs: i32,
+    maxAttempts: i32,
+) -> string {
+    if (multiplierPercent <= 0)
+        return "rakun-messaging: a retry policy's multiplierPercent is "
+            + multiplierPercent.toString()
+            + " - it must be at least 1 (100 keeps the delay constant); 0 would retry in a zero-delay hot loop";
+    if (initialMs < 0 || maxMs < 0)
+        return "rakun-messaging: a retry policy's delays must not be negative";
+    if (maxAttempts < 1)
+        return "rakun-messaging: a retry policy's maxAttempts is "
+            + maxAttempts.toString()
+            + " - at least 1 (the first delivery)";
     return "";
 }
 
-pub fn retryPolicy(initialMs: i32, multiplierPercent: i32, maxMs: i32, maxAttempts: i32) -> RetryPolicy {
-    val problem = retryPolicyProblem(initialMs, multiplierPercent, maxMs, maxAttempts);
+pub fn retryPolicy(
+    initialMs: i32,
+    multiplierPercent: i32,
+    maxMs: i32,
+    maxAttempts: i32,
+) -> RetryPolicy {
+    val problem = retryPolicyProblem(
+        initialMs,
+        multiplierPercent,
+        maxMs,
+        maxAttempts,
+    );
     if (problem != "") @panic(problem);
-    return RetryPolicy(initialMs: initialMs, multiplierPercent: multiplierPercent, maxMs: maxMs, maxAttempts: maxAttempts);
+    return RetryPolicy(
+        initialMs: initialMs,
+        multiplierPercent: multiplierPercent,
+        maxMs: maxMs,
+        maxAttempts: maxAttempts,
+    );
 }
 
 // The delay before attempt `attempt + 1`, for a delivery that was attempt
 // `attempt`. Stops multiplying once the ceiling is reached (no overflow).
 pub fn nextDelay(policy: RetryPolicy, attempt: i32) -> i32 {
-    var delay = if (policy.initialMs > policy.maxMs) policy.maxMs else policy.initialMs;
+    var delay = if (policy.initialMs > policy.maxMs)
+        policy.maxMs
+    else
+        policy.initialMs;
     var n = 1;
     while (n < attempt && delay < policy.maxMs) {
         delay = delay * policy.multiplierPercent / 100;
         n = n + 1;
-    };
+    }
     return if (delay > policy.maxMs) policy.maxMs else delay;
 }
 
@@ -51,7 +81,11 @@ fn retryOrDeadLetter(policy: RetryPolicy, attempt: i32) -> string {
     return if (attempt >= policy.maxAttempts) "dead-letter" else "retry";
 }
 
-pub fn nextAction(outcome: Outcome, policy: RetryPolicy, attempt: i32) -> string {
+pub fn nextAction(
+    outcome: Outcome,
+    policy: RetryPolicy,
+    attempt: i32,
+) -> string {
     return case outcome {
         Done -> "ack";
         Reject(reason) -> "dead-letter";
@@ -88,12 +122,29 @@ pub fn deadLetterName(destination: string) -> string {
 }
 
 fn jsonText(s: string) -> string {
-    return "\"" + s.replaceAll("\\", "\\\\").replaceAll("\"", "\\\"").replaceAll("\n", "\\n").replaceAll("\r", "\\r").replaceAll("\t", "\\t") + "\"";
+    return "\""
+        + s
+            .replaceAll("\\", "\\\\")
+            .replaceAll("\"", "\\\"")
+            .replaceAll("\n", "\\n")
+            .replaceAll("\r", "\\r")
+            .replaceAll("\t", "\\t")
+        + "\"";
 }
 
 // The envelope published to the dead-letter destination.
 pub fn deadLetterJson(d: DeadLetter) -> string {
-    return "{\"destination\":" + jsonText(d.destination) + ",\"body\":" + jsonText(d.body) + ",\"reason\":" + jsonText(d.reason) + ",\"attempt\":" + d.attempt.toString() + ",\"firstSeenMs\":" + d.firstSeenMs.toString() + "}";
+    return "{\"destination\":"
+        + jsonText(d.destination)
+        + ",\"body\":"
+        + jsonText(d.body)
+        + ",\"reason\":"
+        + jsonText(d.reason)
+        + ",\"attempt\":"
+        + d.attempt.toString()
+        + ",\"firstSeenMs\":"
+        + d.firstSeenMs.toString()
+        + "}";
 }
 
 // ── the decimal walk ────────────────────────────────────────────────────────
@@ -109,9 +160,7 @@ pub fn parseCount(raw: string, fallback: i32) -> i32 {
     var ok = true;
     for (t.split("")) { c ->
         val d = digits.indexOf(c);
-        if (c != "") {
-            if (d < 0) ok = false else n = n * 10 + d;
-        };
-    };
+        if (c != "") if (d < 0) ok = false else n = n * 10 + d;
+    }
     return if (ok) n else fallback;
 }

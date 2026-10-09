@@ -6,25 +6,7 @@ import {testing.asserts} from "std";
 import {async} from "std";
 import {rkSetProp} from "rakun";
 import {startDataSource, sqlTemplate, Tx, param, Rows};
-import {
-    tx.outbox.OutboxMessage,
-    tx.outbox.OutboxRow,
-    tx.outbox.installOutbox,
-    tx.outbox.publishAfterCommitOn,
-    tx.outbox.outboxRows,
-    tx.outbox.relayTick,
-    tx.outbox.reclaimStale,
-    tx.outbox.pruneSent,
-    tx.outbox.consumeOnce,
-    tx.outbox.inboxRetentionProblem,
-    tx.outbox.publishInTransaction,
-    tx.outbox.publishTransactional,
-    tx.outbox.pruneInbox,
-    tx.outbox.counterOf,
-    tx.outbox.txLog,
-    tx.outbox.bump,
-    tx.outbox.note,
-};
+import {tx.outbox.OutboxMessage, tx.outbox.OutboxRow, tx.outbox.installOutbox, tx.outbox.publishAfterCommitOn, tx.outbox.outboxRows, tx.outbox.relayTick, tx.outbox.reclaimStale, tx.outbox.pruneSent, tx.outbox.consumeOnce, tx.outbox.inboxRetentionProblem, tx.outbox.publishInTransaction, tx.outbox.publishTransactional, tx.outbox.pruneInbox, tx.outbox.counterOf, tx.outbox.txLog, tx.outbox.bump, tx.outbox.note};
 
 fn fresh(name: string) -> string {
     val _s = startDataSource(name, "ets:memory", 2, 5000, "eager");
@@ -44,7 +26,13 @@ fn done() -> i32 {
 }
 
 fn msg(aggregate: string, payload: string) -> OutboxMessage {
-    return OutboxMessage(aggregate: aggregate, topic: "orders", key: aggregate, payload: payload, headers: [#("trace", "t1")]);
+    return OutboxMessage(
+        aggregate: aggregate,
+        topic: "orders",
+        key: aggregate,
+        payload: payload,
+        headers: [#("trace", "t1")],
+    );
 }
 
 fn statuses(ds: string) -> string {
@@ -64,10 +52,13 @@ fn flaky(topic: string, key: string, payload: string) -> string {
 
 test "outbox: a message enrolled in a committed transaction is stored with the business row" {
     val ds = fresh("ob1");
-    val _c = sqlTemplate(ds).update("CREATE TABLE IF NOT EXISTS orders (id integer)", []);
+    val _c = sqlTemplate(ds).update(
+        "CREATE TABLE IF NOT EXISTS orders (id integer)",
+        [],
+    );
     val _t = sqlTemplate(ds).transaction({ t ->
         val _o = t.update("INSERT INTO orders (id) VALUES (1)", []);
-        publishAfterCommitOn(ds, msg("o-1", "created"))
+        publishAfterCommitOn(ds, msg("o-1", "created"));
     });
     val orders = count(ds, "orders");
     assert statuses(ds) == "created=pending" && orders == 1, statuses(ds);
@@ -75,20 +66,28 @@ test "outbox: a message enrolled in a committed transaction is stored with the b
 
 test "outbox: a rolled-back transaction leaves neither the business row nor the message" {
     val ds = fresh("ob2");
-    val _c = sqlTemplate(ds).update("CREATE TABLE IF NOT EXISTS orders (id integer)", []);
-    try asserts.throwsWith({ -> sqlTemplate(ds).transaction({ t ->
-        val _o = t.update("INSERT INTO orders (id) VALUES (1)", []);
-        val _p = publishAfterCommitOn(ds, msg("o-1", "created"));
-        if (true) @panic("business failure");
-        0
-    }) }, "business failure");
+    val _c = sqlTemplate(ds).update(
+        "CREATE TABLE IF NOT EXISTS orders (id integer)",
+        [],
+    );
+    try asserts.throwsWith({ ->
+        sqlTemplate(ds).transaction({ t ->
+            val _o = t.update("INSERT INTO orders (id) VALUES (1)", []);
+            val _p = publishAfterCommitOn(ds, msg("o-1", "created"));
+            if (true) @panic("business failure");
+            0;
+        });
+    }, "business failure");
     val orders = count(ds, "orders");
     assert outboxRows(ds).length == 0 && orders == 0, statuses(ds);
 }
 
 test "outbox: publishAfterCommit outside a transaction refuses" {
     val ds = fresh("ob3");
-    try asserts.throwsWith({ -> publishAfterCommitOn(ds, msg("o-1", "x")) }, "publishAfterCommit was called outside a transaction");
+    try asserts.throwsWith(
+        { -> publishAfterCommitOn(ds, msg("o-1", "x")) },
+        "publishAfterCommit was called outside a transaction",
+    );
     assert outboxRows(ds).length == 0;
 }
 
@@ -97,17 +96,24 @@ test "outbox: the rows of one aggregate carry increasing seq" {
     val _t = sqlTemplate(ds).transaction({ t ->
         val _a = publishAfterCommitOn(ds, msg("o-1", "a"));
         val _b = publishAfterCommitOn(ds, msg("o-2", "b"));
-        publishAfterCommitOn(ds, msg("o-1", "c"))
+        publishAfterCommitOn(ds, msg("o-1", "c"));
     });
-    val seqs = outboxRows(ds).map({ r -> r.aggregate + ":" + r.seq.toString() }).join(",");
+    val seqs = outboxRows(ds)
+        .map({ r -> r.aggregate + ":" + r.seq.toString() })
+        .join(",");
     assert seqs == "o-1:1,o-2:1,o-1:2", seqs;
 }
 
 test "outbox: a payload with a quote, a newline and a four-byte character round-trips" {
     val ds = fresh("ob10");
     val payload = "{\"say\": \"it's\nfine 😀\"}";
-    val _t = sqlTemplate(ds).transaction({ t -> publishAfterCommitOn(ds, msg("o-1", payload)) });
-    val _r = relayTick(ds, { topic, key, p -> if (p == payload) "" else "mangled" });
+    val _t = sqlTemplate(ds).transaction(
+        { t -> publishAfterCommitOn(ds, msg("o-1", payload)) },
+    );
+    val _r = relayTick(
+        ds,
+        { topic, key, p -> if (p == payload) "" else "mangled" },
+    );
     assert statuses(ds) == payload + "=sent", statuses(ds);
 }
 
@@ -117,20 +123,37 @@ test "outbox: the relay publishes pending rows in seq order per aggregate and ma
     val ds = fresh("ob5");
     val _t = sqlTemplate(ds).transaction({ t ->
         val _a = publishAfterCommitOn(ds, msg("o-1", "r5a"));
-        publishAfterCommitOn(ds, msg("o-1", "r5b"))
+        publishAfterCommitOn(ds, msg("o-1", "r5b"));
     });
-    val first = relayTick(ds, { topic, key, payload -> ok(topic, key, payload) });
+    val first = relayTick(
+        ds,
+        { topic, key, payload -> ok(topic, key, payload) },
+    );
     val mid = statuses(ds);
-    val second = relayTick(ds, { topic, key, payload -> ok(topic, key, payload) });
+    val second = relayTick(
+        ds,
+        { topic, key, payload -> ok(topic, key, payload) },
+    );
     assert first == 1 && mid == "r5a=sent,r5b=pending", mid;
-    assert second == 1 && statuses(ds) == "r5a=sent,r5b=sent" && counterOf("sent r5a") == 1 && counterOf("sent r5b") == 1, statuses(ds);
+    assert second == 1
+        && statuses(ds) == "r5a=sent,r5b=sent"
+        && counterOf("sent r5a") == 1
+        && counterOf("sent r5b") == 1, statuses(ds);
 }
 
 test "outbox: a claimed row is published by exactly one relay" {
     val ds = fresh("ob6");
-    val _t = sqlTemplate(ds).transaction({ t -> publishAfterCommitOn(ds, msg("o-1", "r6")) });
-    val _c = sqlTemplate(ds).update("UPDATE rakun_outbox SET status = 'claimed', owner = 'other' WHERE id = 1 AND status = 'pending'", []);
-    val lost = sqlTemplate(ds).update("UPDATE rakun_outbox SET status = 'claimed', owner = 'me' WHERE id = 1 AND status = 'pending'", []);
+    val _t = sqlTemplate(ds).transaction(
+        { t -> publishAfterCommitOn(ds, msg("o-1", "r6")) },
+    );
+    val _c = sqlTemplate(ds).update(
+        "UPDATE rakun_outbox SET status = 'claimed', owner = 'other' WHERE id = 1 AND status = 'pending'",
+        [],
+    );
+    val lost = sqlTemplate(ds).update(
+        "UPDATE rakun_outbox SET status = 'claimed', owner = 'me' WHERE id = 1 AND status = 'pending'",
+        [],
+    );
     val n = relayTick(ds, { topic, key, payload -> ok(topic, key, payload) });
     assert lost == 0 && n == 0 && counterOf("sent r6") == 0, statuses(ds);
 }
@@ -142,30 +165,61 @@ test "outbox: a failed publish backs off, blocks only its aggregate, and fails p
     val _t = sqlTemplate(ds).transaction({ t ->
         val _a = publishAfterCommitOn(ds, msg("bad", "r7a"));
         val _x = publishAfterCommitOn(ds, msg("bad", "r7b"));
-        publishAfterCommitOn(ds, msg("good", "r7c"))
+        publishAfterCommitOn(ds, msg("good", "r7c"));
     });
-    val one = relayTick(ds, { topic, key, payload -> flaky(topic, key, payload) });
-    val afterOne = outboxRows(ds).map({ r -> r.payload + "=" + r.status + "/" + r.attempts.toString() }).join(",");
-    val _two = relayTick(ds, { topic, key, payload -> flaky(topic, key, payload) });
+    val one = relayTick(
+        ds,
+        { topic, key, payload -> flaky(topic, key, payload) },
+    );
+    val afterOne = outboxRows(ds)
+        .map({ r -> r.payload + "=" + r.status + "/" + r.attempts.toString() })
+        .join(",");
+    val _two = relayTick(
+        ds,
+        { topic, key, payload -> flaky(topic, key, payload) },
+    );
     val _z = done();
-    assert one == 1 && afterOne == "r7a=pending/1,r7b=pending/0,r7c=sent/0", afterOne;
+    assert one == 1
+        && afterOne == "r7a=pending/1,r7b=pending/0,r7c=sent/0", afterOne;
     val rows = outboxRows(ds);
-    val a = rows.at(0) ?? OutboxRow(id: 0, aggregate: "", seq: 0, topic: "", key: "", payload: "", status: "", attempts: 0, lastError: "");
-    assert a.status == "failed" && a.attempts == 2 && a.lastError == "broker down", statuses(ds);
+    val a = rows.at(0) ?? OutboxRow(
+        id: 0,
+        aggregate: "",
+        seq: 0,
+        topic: "",
+        key: "",
+        payload: "",
+        status: "",
+        attempts: 0,
+        lastError: "",
+    );
+    assert a.status == "failed"
+        && a.attempts == 2
+        && a.lastError == "broker down", statuses(ds);
 }
 
 test "outbox: a relay killed between publish and mark leaves the row reclaimable - at-least-once" {
     val ds = fresh("ob8");
-    val _t = sqlTemplate(ds).transaction({ t -> publishAfterCommitOn(ds, msg("o-1", "r8")) });
-    try asserts.throwsWith({ -> relayTick(ds, { topic, key, payload ->
-        val _o = ok(topic, key, payload);
-        if (true) @panic("relay killed");
-        ""
-    }) }, "relay killed");
+    val _t = sqlTemplate(ds).transaction(
+        { t -> publishAfterCommitOn(ds, msg("o-1", "r8")) },
+    );
+    try asserts.throwsWith({ ->
+        relayTick(ds, { topic, key, payload ->
+            val _o = ok(topic, key, payload);
+            if (true) @panic("relay killed");
+            "";
+        });
+    }, "relay killed");
     val stuck = statuses(ds);
     val back = reclaimStale(ds);
-    val again = relayTick(ds, { topic, key, payload -> ok(topic, key, payload) });
-    assert stuck == "r8=claimed" && back == 1 && again == 1 && counterOf("sent r8") == 2, stuck;
+    val again = relayTick(
+        ds,
+        { topic, key, payload -> ok(topic, key, payload) },
+    );
+    assert stuck == "r8=claimed"
+        && back == 1
+        && again == 1
+        && counterOf("sent r8") == 2, stuck;
 }
 
 test "outbox: pruning deletes only old sent rows, at most batch per call" {
@@ -173,21 +227,32 @@ test "outbox: pruning deletes only old sent rows, at most batch per call" {
     val _t = sqlTemplate(ds).transaction({ t ->
         val _a = publishAfterCommitOn(ds, msg("a", "r9a"));
         val _b = publishAfterCommitOn(ds, msg("b", "r9b"));
-        publishAfterCommitOn(ds, msg("c", "r9c"))
+        publishAfterCommitOn(ds, msg("c", "r9c"));
     });
-    val _s = sqlTemplate(ds).update("UPDATE rakun_outbox SET status = 'sent', created_at = 0 WHERE status = 'pending'", []);
-    val _p = sqlTemplate(ds).update("UPDATE rakun_outbox SET status = 'pending' WHERE id = 3", []);
+    val _s = sqlTemplate(ds).update(
+        "UPDATE rakun_outbox SET status = 'sent', created_at = 0 WHERE status = 'pending'",
+        [],
+    );
+    val _p = sqlTemplate(ds).update(
+        "UPDATE rakun_outbox SET status = 'pending' WHERE id = 3",
+        [],
+    );
     val first = pruneSent(ds, 1000, 1);
     val second = pruneSent(ds, 1000, 10);
-    assert first == 1 && second == 1 && statuses(ds) == "r9c=pending", statuses(ds);
+    assert first == 1 && second == 1 && statuses(ds) == "r9c=pending", statuses(
+        ds,
+    );
 }
 
 fn relayUntilEmpty(ds: string, tag: string) -> string {
     var rounds = 0;
     while (rounds < 20) {
-        val _r = relayTick(ds, { topic, key, payload -> if (note(tag + " " + payload) == 0) "" else "" });
+        val _r = relayTick(
+            ds,
+            { topic, key, payload -> if (note(tag + " " + payload) == 0) "" else "" },
+        );
         rounds = rounds + 1;
-    };
+    }
     return tag;
 }
 
@@ -198,24 +263,46 @@ test "outbox: two relays running together publish every row once, each aggregate
         val _b = publishAfterCommitOn(ds, msg("y", "y1"));
         val _c = publishAfterCommitOn(ds, msg("x", "x2"));
         val _d = publishAfterCommitOn(ds, msg("y", "y2"));
-        publishAfterCommitOn(ds, msg("x", "x3"))
+        publishAfterCommitOn(ds, msg("x", "x3"));
     });
-    val _r = await async.runAll([
-        { -> async { relayUntilEmpty(ds, "ob11.a") } },
-        { -> async { relayUntilEmpty(ds, "ob11.b") } },
-    ]);
-    val sent = txLog().filter({ l -> l.startsWith("ob11.") }).map({ l -> l.split(" ").at(1) ?? "" });
+    val _r = await async.runAll(
+        [
+            { ->
+                async {
+                    relayUntilEmpty(ds, "ob11.a");
+                };
+            },
+            { ->
+                async {
+                    relayUntilEmpty(ds, "ob11.b");
+                };
+            },
+        ],
+    );
+    val sent = txLog()
+        .filter({ l -> l.startsWith("ob11.") })
+        .map({ l -> l.split(" ").at(1) ?? "" });
     val xs = sent.filter({ p -> p.startsWith("x") }).join(",");
     val ys = sent.filter({ p -> p.startsWith("y") }).join(",");
-    assert sent.length == 5 && xs == "x1,x2,x3" && ys == "y1,y2", sent.join(",");
+    assert sent.length == 5 && xs == "x1,x2,x3" && ys == "y1,y2", sent.join(
+        ",",
+    );
 }
 
 test "outbox: a failed publish waits out its backoff before the next attempt" {
     val ds = fresh("ob12");
     val _b = rkSetProp("rakun.tx.outbox.backoff-ms", "60000");
-    val _t = sqlTemplate(ds).transaction({ t -> publishAfterCommitOn(ds, msg("bad", "r12")) });
-    val _1 = relayTick(ds, { topic, key, payload -> flaky(topic, key, payload) });
-    val _2 = relayTick(ds, { topic, key, payload -> flaky(topic, key, payload) });
+    val _t = sqlTemplate(ds).transaction(
+        { t -> publishAfterCommitOn(ds, msg("bad", "r12")) },
+    );
+    val _1 = relayTick(
+        ds,
+        { topic, key, payload -> flaky(topic, key, payload) },
+    );
+    val _2 = relayTick(
+        ds,
+        { topic, key, payload -> flaky(topic, key, payload) },
+    );
     val attempts = outboxRows(ds).map({ r -> r.attempts.toString() }).join(",");
     val _z = done();
     assert attempts == "1", attempts;
@@ -229,22 +316,33 @@ fn record(t: Tx, v: string) -> i32 {
 
 test "inbox: a redelivered message is acknowledged without running the handler again" {
     val ds = fresh("in1");
-    val _c = sqlTemplate(ds).update("CREATE TABLE IF NOT EXISTS effects (v text)", []);
+    val _c = sqlTemplate(ds).update(
+        "CREATE TABLE IF NOT EXISTS effects (v text)",
+        [],
+    );
     val a = consumeOnce(ds, "billing", "m-1", { t -> record(t, "charged") });
     val b = consumeOnce(ds, "billing", "m-1", { t -> record(t, "charged") });
     val other = consumeOnce(ds, "audit", "m-1", { t -> record(t, "audited") });
     val effects = count(ds, "effects");
-    assert a == "processed" && b == "duplicate" && other == "processed" && effects == 2, a + "/" + b + "/" + other;
+    assert a == "processed"
+        && b == "duplicate"
+        && other == "processed"
+        && effects == 2, a + "/" + b + "/" + other;
 }
 
 test "inbox: a handler that raises rolls back its writes and the inbox row, so the redelivery runs" {
     val ds = fresh("in2");
-    val _c = sqlTemplate(ds).update("CREATE TABLE IF NOT EXISTS effects (v text)", []);
-    try asserts.throwsWith({ -> consumeOnce(ds, "billing", "m-2", { t ->
-        val _r = record(t, "half");
-        if (true) @panic("handler failed");
-        0
-    }).length }, "handler failed");
+    val _c = sqlTemplate(ds).update(
+        "CREATE TABLE IF NOT EXISTS effects (v text)",
+        [],
+    );
+    try asserts.throwsWith({ ->
+        consumeOnce(ds, "billing", "m-2", { t ->
+            val _r = record(t, "half");
+            if (true) @panic("handler failed");
+            0;
+        }).length;
+    }, "handler failed");
     val before = count(ds, "effects");
     val again = consumeOnce(ds, "billing", "m-2", { t -> record(t, "whole") });
     val after = count(ds, "effects");
@@ -254,7 +352,9 @@ test "inbox: a handler that raises rolls back its writes and the inbox row, so t
 test "inbox: a retention shorter than the redelivery window is refused, naming both" {
     assert inboxRetentionProblem(86400000, 3600000) == "";
     val p = inboxRetentionProblem(60000, 3600000);
-    assert p.contains("(60000 ms) must exceed the broker's redelivery window (3600000 ms)"), p;
+    assert p.contains(
+        "(60000 ms) must exceed the broker's redelivery window (3600000 ms)",
+    ), p;
 }
 
 test "inbox: pruning deletes old rows, bounded per call, and refuses a retention inside the redelivery window" {
@@ -262,9 +362,18 @@ test "inbox: pruning deletes old rows, bounded per call, and refuses a retention
     val _a = consumeOnce(ds, "g", "m-1", { t -> 0 });
     val _b = consumeOnce(ds, "g", "m-2", { t -> 0 });
     val _c = consumeOnce(ds, "g", "m-3", { t -> 0 });
-    val _o = sqlTemplate(ds).update("UPDATE rakun_inbox SET received_at = 0 WHERE message_id = 'm-1'", []);
-    val _p = sqlTemplate(ds).update("UPDATE rakun_inbox SET received_at = 0 WHERE message_id = 'm-2'", []);
-    try asserts.throwsWith({ -> pruneInbox(ds, 1000, 5000, 10) }, "must exceed the broker's redelivery window");
+    val _o = sqlTemplate(ds).update(
+        "UPDATE rakun_inbox SET received_at = 0 WHERE message_id = 'm-1'",
+        [],
+    );
+    val _p = sqlTemplate(ds).update(
+        "UPDATE rakun_inbox SET received_at = 0 WHERE message_id = 'm-2'",
+        [],
+    );
+    try asserts.throwsWith(
+        { -> pruneInbox(ds, 1000, 5000, 10) },
+        "must exceed the broker's redelivery window",
+    );
     val first = pruneInbox(ds, 10000, 5000, 1);
     val second = pruneInbox(ds, 10000, 5000, 10);
     assert first == 1 && second == 1 && count(ds, "rakun_inbox") == 1;
@@ -276,18 +385,39 @@ test "path choice: broker transactions skip the outbox, otherwise the outbox is 
     val ds = fresh("pc1");
     val b0 = counterOf("rakun.tx.path.broker");
     val o0 = counterOf("rakun.tx.path.outbox");
-    val viaBroker = publishInTransaction(ds, true, msg("o-1", "p1"), { topic, key, payload -> ok(topic, key, payload) });
-    val viaOutbox = sqlTemplate(ds).transaction({ t -> publishInTransaction(ds, false, msg("o-1", "p2"), { topic, key, payload -> ok(topic, key, payload) }) });
-    val logged = txLog().filter({ l -> l.contains("published through the") }).length;
-    assert viaBroker == "broker" && viaOutbox == "outbox" && statuses(ds) == "p2=pending" && counterOf("sent p1") == 1;
-    assert counterOf("rakun.tx.path.broker") == b0 + 1 && counterOf("rakun.tx.path.outbox") == o0 + 1 && logged >= 2;
+    val viaBroker = publishInTransaction(
+        ds,
+        true,
+        msg("o-1", "p1"),
+        { topic, key, payload -> ok(topic, key, payload) },
+    );
+    val viaOutbox = sqlTemplate(ds).transaction(
+        { t -> publishInTransaction(ds, false, msg("o-1", "p2"), { topic, key, payload -> ok(topic, key, payload) }) },
+    );
+    val logged = txLog().filter(
+        { l -> l.contains("published through the") },
+    ).length;
+    assert viaBroker == "broker"
+        && viaOutbox == "outbox"
+        && statuses(ds) == "p2=pending"
+        && counterOf("sent p1") == 1;
+    assert counterOf("rakun.tx.path.broker") == b0 + 1
+        && counterOf("rakun.tx.path.outbox") == o0 + 1
+        && logged >= 2;
 }
 
 test "path choice: one call site takes the broker or the outbox path by configuration alone" {
     val ds = fresh("pc2");
     val _on = rkSetProp("rakun.tx.broker-transactions", "true");
-    val a = sqlTemplate(ds).transaction({ t -> publishTransactional(ds, msg("o-1", "q1"), { topic, key, payload -> ok(topic, key, payload) }) });
+    val a = sqlTemplate(ds).transaction(
+        { t -> publishTransactional(ds, msg("o-1", "q1"), { topic, key, payload -> ok(topic, key, payload) }) },
+    );
     val _off = rkSetProp("rakun.tx.broker-transactions", "");
-    val b = sqlTemplate(ds).transaction({ t -> publishTransactional(ds, msg("o-1", "q2"), { topic, key, payload -> ok(topic, key, payload) }) });
-    assert a == "broker" && b == "outbox" && statuses(ds) == "q2=pending" && counterOf("sent q1") == 1, statuses(ds);
+    val b = sqlTemplate(ds).transaction(
+        { t -> publishTransactional(ds, msg("o-1", "q2"), { topic, key, payload -> ok(topic, key, payload) }) },
+    );
+    assert a == "broker"
+        && b == "outbox"
+        && statuses(ds) == "q2=pending"
+        && counterOf("sent q1") == 1, statuses(ds);
 }

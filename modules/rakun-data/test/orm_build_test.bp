@@ -3,7 +3,7 @@
 //// refusal (the pattern of `sql_build_test.bp`).
 
 import {testing.asserts} from "std";
-import {io: {fs, process, env}} from "std";
+import {io.fs, io.process, io.env} from "std";
 
 fn fixtureRoot() -> string {
     val tmp = env.read("BOTOPINK_TEST_TMPDIR") ?? "";
@@ -24,16 +24,39 @@ fn buildFixture(name: string, source: string) -> string {
 // which is where a duplicate function definition is refused.
 fn compileFixture(name: string, source: string, command: string) -> string {
     val root = fixtureRoot();
-    return if (root == "") "BOTOPINK_TEST_TMPDIR is not set: run this suite under `botopink test`" else compileFixtureIn(root + "/" + name, name, source, command);
+    return if (root == "")
+        "BOTOPINK_TEST_TMPDIR is not set: run this suite under `botopink test`"
+    else
+        compileFixtureIn(root + "/" + name, name, source, command);
 }
 
-fn compileFixtureIn(dir: string, name: string, source: string, command: string) -> string {
+fn compileFixtureIn(
+    dir: string,
+    name: string,
+    source: string,
+    command: string,
+) -> string {
     val here = process.cwd();
-    val _m = process.runShell("rm -rf '" + dir + "' && mkdir -p '" + dir + "/src'");
-    val manifest = "{\n  \"name\": \"" + name + "\",\n  \"version\": \"0.0.1\",\n  \"src\": \"src/\",\n  \"entry\": \"root.bp\",\n  \"target\": \"erlang\",\n  \"targets\": [\"erlang\"],\n  \"dependencies\": {\n    \"rakun\": { \"path\": \"" + here + "/../rakun\" },\n    \"rakun-data\": { \"path\": \"" + here + "\" }\n  }\n}\n";
+    val _m = process.runShell(
+        "rm -rf '" + dir + "' && mkdir -p '" + dir + "/src'",
+    );
+    val manifest = "{\n  \"name\": \""
+        + name
+        + "\",\n  \"version\": \"0.0.1\",\n  \"src\": \"src/\",\n  \"entry\": \"root.bp\",\n  \"target\": \"erlang\",\n  \"targets\": [\"erlang\"],\n  \"dependencies\": {\n    \"rakun\": { \"path\": \""
+        + here
+        + "/../rakun\" },\n    \"rakun-data\": { \"path\": \""
+        + here
+        + "\" }\n  }\n}\n";
     val _j = fs.writeText(dir + "/botopink.json", manifest);
     val _s = fs.writeText(dir + "/src/root.bp", source);
-    return process.runShell(compilerCommand() + "cd '" + dir + "' && \"$B\" " + command + " 2>&1 < /dev/null; echo \"exit=$?\"");
+    return process.runShell(
+        compilerCommand()
+            + "cd '"
+            + dir
+            + "' && \"$B\" "
+            + command
+            + " 2>&1 < /dev/null; echo \"exit=$?\"",
+    );
 }
 
 fn header() -> string {
@@ -46,58 +69,127 @@ fn city() -> string {
 
 fn refused(name: string, source: string, needle: string) -> string {
     val out = buildFixture(name, header() + source);
-    return if (out.contains(needle) && out.contains("exit=0") == false) "" else out;
+    return if (out.contains(needle) && out.contains("exit=0") == false)
+        ""
+    else
+        out;
 }
 
 test "orm build: a control project with an entity, a repository and the builder builds" {
-    val src = header() + city() + "#[entityRepository(\"City\")]\npub type CityRepo(sql: SqlTemplate) {\n    #[derived]\n    pub fn findByName(self: Self, name: string) -> City[] {\n        return CityRepo.findByNameDerived(self.sql, name);\n    }\n}\n\npub fn q() -> string {\n    return queryOf(City.entityMeta()).where(City.columns().name, Op.Eq, \"x\").toSql();\n}\n";
+    val src = header()
+        + city()
+        + "#[entityRepository(\"City\")]\npub type CityRepo(sql: SqlTemplate) {\n    #[derived]\n    pub fn findByName(self: Self, name: string) -> City[] {\n        return CityRepo.findByNameDerived(self.sql, name);\n    }\n}\n\npub fn q() -> string {\n    return queryOf(City.entityMeta()).where(City.columns().name, Op.Eq, \"x\").toSql();\n}\n";
     val out = buildFixture("orm-ok", src);
     assert out.contains("exit=0"), out;
 }
 
 test "orm build: an entity with no #[id], or two, fails naming it" {
-    assert refused("orm-noid", "#[entity(\"t\")]\npub type NoId(a: i32)\n", "#[entity] NoId has no #[id] field") == "";
-    assert refused("orm-twoid", "#[entity(\"t\")]\npub type TwoIds(\n    #[id]\n    a: i32,\n    #[id]\n    b: i32,\n)\n", "#[entity] TwoIds has 2 #[id] fields (a, b)") == "";
+    assert refused(
+        "orm-noid",
+        "#[entity(\"t\")]\npub type NoId(a: i32)\n",
+        "#[entity] NoId has no #[id] field",
+    )
+        == "";
+    assert refused(
+        "orm-twoid",
+        "#[entity(\"t\")]\npub type TwoIds(\n    #[id]\n    a: i32,\n    #[id]\n    b: i32,\n)\n",
+        "#[entity] TwoIds has 2 #[id] fields (a, b)",
+    )
+        == "";
 }
 
 test "orm build: a non-integer #[version] and an empty table name fail" {
-    assert refused("orm-ver", "#[entity(\"t\")]\npub type V(\n    #[id]\n    a: i32,\n    #[version]\n    v: string,\n)\n", "the #[version] field v is string - a version is an i32") == "";
-    assert refused("orm-table", "#[entity(\"\")]\npub type E(\n    #[id]\n    a: i32,\n)\n", "#[entity] on E names an empty table") == "";
+    assert refused(
+        "orm-ver",
+        "#[entity(\"t\")]\npub type V(\n    #[id]\n    a: i32,\n    #[version]\n    v: string,\n)\n",
+        "the #[version] field v is string - a version is an i32",
+    )
+        == "";
+    assert refused(
+        "orm-table",
+        "#[entity(\"\")]\npub type E(\n    #[id]\n    a: i32,\n)\n",
+        "#[entity] on E names an empty table",
+    )
+        == "";
 }
 
 test "orm build: a predicate consuming a different parameter count fails naming both counts" {
-    val src = city() + "#[entityRepository(\"City\")]\npub type CityRepo(sql: SqlTemplate) {\n    #[derived]\n    pub fn findByPopulationBetween(self: Self, low: i32) -> City[] {\n        return CityRepo.findByPopulationBetweenDerived(self.sql, low);\n    }\n}\n";
-    assert refused("orm-arity", src, "#[derived] CityRepo.findByPopulationBetween: the predicate `PopulationBetween` takes 2 parameter(s) and the method declares 1") == "";
+    val src = city()
+        + "#[entityRepository(\"City\")]\npub type CityRepo(sql: SqlTemplate) {\n    #[derived]\n    pub fn findByPopulationBetween(self: Self, low: i32) -> City[] {\n        return CityRepo.findByPopulationBetweenDerived(self.sql, low);\n    }\n}\n";
+    assert refused(
+        "orm-arity",
+        src,
+        "#[derived] CityRepo.findByPopulationBetween: the predicate `PopulationBetween` takes 2 parameter(s) and the method declares 1",
+    )
+        == "";
 }
 
 test "orm build: a field the entity does not have is a compile error at the emitted column read" {
-    val src = city() + "#[entityRepository(\"City\")]\npub type CityRepo(sql: SqlTemplate) {\n    #[derived]\n    pub fn findByCiudad(self: Self, c: string) -> City[] {\n        return CityRepo.findByCiudadDerived(self.sql, c);\n    }\n}\n";
+    val src = city()
+        + "#[entityRepository(\"City\")]\npub type CityRepo(sql: SqlTemplate) {\n    #[derived]\n    pub fn findByCiudad(self: Self, c: string) -> City[] {\n        return CityRepo.findByCiudadDerived(self.sql, c);\n    }\n}\n";
     val out = buildFixture("orm-field", header() + src);
-    assert out.contains("unknown field 'ciudad'") && out.contains("Columns") && out.contains("exit=0") == false, out;
+    assert out.contains("unknown field 'ciudad'")
+        && out.contains("Columns")
+        && out.contains("exit=0") == false, out;
 }
 
 test "orm build: renaming a field breaks every City.columns() read, and an operator outside Op does not compile" {
-    val renamed = buildFixture("orm-rename", header() + city() + "pub fn q() -> string {\n    return City.columns().state;\n}\n");
-    assert renamed.contains("state") && renamed.contains("exit=0") == false, renamed;
-    val op = buildFixture("orm-op", header() + city() + "pub fn q() -> string {\n    return queryOf(City.entityMeta()).where(City.columns().name, Op.Regexp, \"x\").toSql();\n}\n");
+    val renamed = buildFixture(
+        "orm-rename",
+        header()
+            + city()
+            + "pub fn q() -> string {\n    return City.columns().state;\n}\n",
+    );
+    assert renamed.contains("state")
+        && renamed.contains("exit=0") == false, renamed;
+    val op = buildFixture(
+        "orm-op",
+        header()
+            + city()
+            + "pub fn q() -> string {\n    return queryOf(City.entityMeta()).where(City.columns().name, Op.Regexp, \"x\").toSql();\n}\n",
+    );
     assert op.contains("Regexp") && op.contains("exit=0") == false, op;
 }
 
 test "orm build: belongsTo naming an unknown field or a non-entity fails" {
-    val base = city() + "#[entity(\"orders\")]\npub type Order(\n    #[id]\n    id: i32,\n    cityId: i32,\n)\n\npub type Ghost(id: i32)\n\n";
-    val field = buildFixture("orm-bt-field", header() + base + "#[belongsTo(\"Order\", \"nope\", \"City\", \"id\")]\npub type OC(order: Order, city: City)\n");
+    val base = city()
+        + "#[entity(\"orders\")]\npub type Order(\n    #[id]\n    id: i32,\n    cityId: i32,\n)\n\npub type Ghost(id: i32)\n\n";
+    val field = buildFixture(
+        "orm-bt-field",
+        header()
+            + base
+            + "#[belongsTo(\"Order\", \"nope\", \"City\", \"id\")]\npub type OC(order: Order, city: City)\n",
+    );
     assert field.contains("nope") && field.contains("exit=0") == false, field;
-    val ghost = buildFixture("orm-bt-ghost", header() + base + "#[belongsTo(\"Order\", \"cityId\", \"Ghost\", \"id\")]\npub type OG(order: Order, ghost: Ghost)\n");
+    val ghost = buildFixture(
+        "orm-bt-ghost",
+        header()
+            + base
+            + "#[belongsTo(\"Order\", \"cityId\", \"Ghost\", \"id\")]\npub type OG(order: Order, ghost: Ghost)\n",
+    );
     assert ghost.contains("Ghost") && ghost.contains("exit=0") == false, ghost;
 }
 
 test "orm build: an unaudited entity has no revision reads" {
-    val out = buildFixture("orm-norev", header() + city() + "pub fn r(sql: SqlTemplate) -> i32 {\n    return City.revisionsOf(sql, 1).length;\n}\n");
-    assert out.contains("unknown-associated-fn") && out.contains("revisionsOf") && out.contains("exit=0") == false, out;
+    val out = buildFixture(
+        "orm-norev",
+        header()
+            + city()
+            + "pub fn r(sql: SqlTemplate) -> i32 {\n    return City.revisionsOf(sql, 1).length;\n}\n",
+    );
+    assert out.contains("unknown-associated-fn")
+        && out.contains("revisionsOf")
+        && out.contains("exit=0") == false, out;
 }
 
 test "orm build: the revision surface is exactly three reads and no restore" {
     val src: string = fs.readText("src/orm/entity.bp").unwrapOr("");
-    for (["pub fn revisionsOf(", "pub fn revisionNumbers(", "pub fn revisionAt("]) { r -> assert src.contains(r), r; };
+    for ([
+        "pub fn revisionsOf(",
+        "pub fn revisionNumbers(",
+        "pub fn revisionAt(",
+    ]) { r ->
+        assert src.contains(r), r;
+    }
     assert src.contains("restore") == false && src.contains("_revert") == false;
 }

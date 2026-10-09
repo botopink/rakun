@@ -13,7 +13,10 @@ import {jms.jms.Destination, jms.jms.startJms, jms.jms.stopJms, jms.jms.jmsSend,
 
 fn boot(opts: string[], url: string) -> i32 {
     val port = jmsFixtureStart(opts);
-    val _u = rkSetProp("rakun.jms.url", url.replaceAll("PORT", port.toString()));
+    val _u = rkSetProp(
+        "rakun.jms.url",
+        url.replaceAll("PORT", port.toString()),
+    );
     val _s = startJms();
     return port;
 }
@@ -21,14 +24,16 @@ fn boot(opts: string[], url: string) -> i32 {
 fn done(port: i32) -> i32 {
     val _s = stopJms();
     val _f = jmsFixtureStop(port);
-    for (["url", "user", "password", "client-id", "heart-beat-ms"]) { k -> val _x = rkSetProp("rakun.jms." + k, ""); };
+    for (["url", "user", "password", "client-id", "heart-beat-ms"]) { k ->
+        val _x = rkSetProp("rakun.jms." + k, "");
+    }
     return 0;
 }
 
 fn count(tag: string) -> fn(d: Delivery) -> Outcome {
     return { d ->
         val _b = rkMsgBump(tag + ":" + d.body);
-        Outcome.Done
+        Outcome.Done;
     };
 }
 
@@ -36,14 +41,25 @@ test "jms: the log carries the redacted URL, never the credentials" {
     val port = boot([], "stomp://admin:s3cret@localhost:PORT");
     val lines = jmsLog().join("\n");
     val _d = done(port);
-    assert lines.contains("connected to stomp://***@localhost:") && lines.contains("s3cret") == false, lines;
+    assert lines.contains("connected to stomp://***@localhost:")
+        && lines.contains("s3cret") == false, lines;
 }
 
 test "jms: a dropped connection is re-dialled and its subscriptions re-declared" {
     val port = boot([], "stomp://localhost:PORT");
-    val _l = jmsListen("rc", Destination.Queue(name: "rc"), "auto", "", "", count("rc"));
+    val _l = jmsListen(
+        "rc",
+        Destination.Queue(name: "rc"),
+        "auto",
+        "",
+        "",
+        count("rc"),
+    );
     val _k = jmsFixtureDropAll(port);
-    val back = rkMsgWaitUntil(3000, { -> rkJmsReconnects(jmsConnection()) >= 1 });
+    val back = rkMsgWaitUntil(
+        3000,
+        { -> rkJmsReconnects(jmsConnection()) >= 1 },
+    );
     val _w = rkMsgWaitUntil(300, { -> false });
     val _s = jmsSend(Destination.Queue(name: "rc"), "after");
     val got = rkMsgWaitUntil(3000, { -> rkMsgCount("rc:after") == 1 });
@@ -54,13 +70,44 @@ test "jms: a dropped connection is re-dialled and its subscriptions re-declared"
 
 test "jms: a queue send reaches one of two competing consumers; a topic send reaches both" {
     val port = boot([], "stomp://localhost:PORT");
-    val _a = jmsListen("qa", Destination.Queue(name: "work"), "auto", "", "", count("work-a"));
-    val _b = jmsListen("qb", Destination.Queue(name: "work"), "auto", "", "", count("work-b"));
-    val _c = jmsListen("ta", Destination.Topic(name: "news"), "auto", "", "", count("news-a"));
-    val _e = jmsListen("tb", Destination.Topic(name: "news"), "auto", "", "", count("news-b"));
+    val _a = jmsListen(
+        "qa",
+        Destination.Queue(name: "work"),
+        "auto",
+        "",
+        "",
+        count("work-a"),
+    );
+    val _b = jmsListen(
+        "qb",
+        Destination.Queue(name: "work"),
+        "auto",
+        "",
+        "",
+        count("work-b"),
+    );
+    val _c = jmsListen(
+        "ta",
+        Destination.Topic(name: "news"),
+        "auto",
+        "",
+        "",
+        count("news-a"),
+    );
+    val _e = jmsListen(
+        "tb",
+        Destination.Topic(name: "news"),
+        "auto",
+        "",
+        "",
+        count("news-b"),
+    );
     val _s = jmsSend(Destination.Queue(name: "work"), "job");
     val _t = jmsSend(Destination.Topic(name: "news"), "flash");
-    val _w = rkMsgWaitUntil(2000, { -> rkMsgCount("news-a:flash") == 1 && rkMsgCount("news-b:flash") == 1 });
+    val _w = rkMsgWaitUntil(
+        2000,
+        { -> rkMsgCount("news-a:flash") == 1 && rkMsgCount("news-b:flash") == 1 },
+    );
     val _x = rkMsgWaitUntil(300, { -> false });
     val queue = rkMsgCount("work-a:job") + rkMsgCount("work-b:job");
     val topic = rkMsgCount("news-a:flash") + rkMsgCount("news-b:flash");
@@ -70,27 +117,56 @@ test "jms: a queue send reaches one of two competing consumers; a topic send rea
 }
 
 test "jms: a send to an empty queue name fails before dialling" {
-    try asserts.throwsWith({ -> jmsSend(Destination.Queue(name: ""), "x") }, "rakun jms: a send needs a destination name");
+    try asserts.throwsWith(
+        { -> jmsSend(Destination.Queue(name: ""), "x") },
+        "rakun jms: a send needs a destination name",
+    );
 }
 
 test "jms: the listener is in front 15's registry, under the broker jms" {
     val port = boot([], "stomp://localhost:PORT");
-    val _l = jmsListen("registered", Destination.Queue(name: "reg"), "auto", "", "", count("reg"));
-    val row = rkMsgListeners().filter({ l -> l.startsWith("registered|") }).at(0) ?? "";
+    val _l = jmsListen(
+        "registered",
+        Destination.Queue(name: "reg"),
+        "auto",
+        "",
+        "",
+        count("reg"),
+    );
+    val row = rkMsgListeners()
+        .filter({ l -> l.startsWith("registered|") })
+        .at(0) ?? "";
     val _d = done(port);
     assert row == "registered|jms|/queue/reg||registered", row;
 }
 
 test "jms: Reject dead-letters with the envelope and Retry has the broker redeliver" {
     val port = boot([], "stomp://localhost:PORT");
-    val _g = jmsListen("dl", Destination.Queue(name: "orders"), "client-individual", "", "", { d ->
+    val _g = jmsListen("dl", Destination.Queue(
+        name: "orders",
+    ), "client-individual", "", "", { d ->
         val n = rkMsgBump("dl:" + d.body);
-        if (d.body == "poison") Outcome.Reject(reason: "malformed") else if (n == 1) Outcome.Retry(reason: "busy") else Outcome.Done
+        if (d.body == "poison")
+            Outcome.Reject(reason: "malformed")
+        else if (n == 1)
+            Outcome.Retry(reason: "busy")
+        else
+            Outcome.Done;
     });
-    val _k = jmsListen("dlq", Destination.Queue(name: "orders.dlq"), "auto", "", "", count("dlq"));
+    val _k = jmsListen(
+        "dlq",
+        Destination.Queue(name: "orders.dlq"),
+        "auto",
+        "",
+        "",
+        count("dlq"),
+    );
     val _a = jmsSend(Destination.Queue(name: "orders"), "poison");
     val _b = jmsSend(Destination.Queue(name: "orders"), "flaky");
-    val lettered = rkMsgWaitUntil(3000, { -> rkMsgCount("dlq:{\"destination\":\"/queue/orders\",\"body\":\"poison\",\"reason\":\"malformed\",\"attempt\":1,\"firstSeenMs\":0}") == 1 });
+    val lettered = rkMsgWaitUntil(
+        3000,
+        { -> rkMsgCount("dlq:{\"destination\":\"/queue/orders\",\"body\":\"poison\",\"reason\":\"malformed\",\"attempt\":1,\"firstSeenMs\":0}") == 1 },
+    );
     val redelivered = rkMsgWaitUntil(3000, { -> rkMsgCount("dl:flaky") == 2 });
     val _d = done(port);
     assert lettered && redelivered && rkMsgCount("dl:poison") == 1;
@@ -99,11 +175,25 @@ test "jms: Reject dead-letters with the envelope and Retry has the broker redeli
 test "durable: a durable subscription receives what was published while it was away" {
     val _c = rkSetProp("rakun.jms.client-id", "svc-1");
     val port = boot([], "stomp://localhost:PORT");
-    val _l = jmsListen("dur", Destination.Topic(name: "prices"), "auto", "", "prices-sub", count("dur"));
+    val _l = jmsListen(
+        "dur",
+        Destination.Topic(name: "prices"),
+        "auto",
+        "",
+        "prices-sub",
+        count("dur"),
+    );
     val _s = stopJms();
     val _r = startJms();
     val _p = jmsSend(Destination.Topic(name: "prices"), "while-away");
-    val _l2 = jmsListen("dur", Destination.Topic(name: "prices"), "auto", "", "prices-sub", count("dur"));
+    val _l2 = jmsListen(
+        "dur",
+        Destination.Topic(name: "prices"),
+        "auto",
+        "",
+        "prices-sub",
+        count("dur"),
+    );
     val got = rkMsgWaitUntil(3000, { -> rkMsgCount("dur:while-away") == 1 });
     val _d = done(port);
     assert got;
@@ -111,20 +201,33 @@ test "durable: a durable subscription receives what was published while it was a
 
 test "durable: a durable subscription without a client id refuses, naming the setting" {
     val port = boot([], "stomp://localhost:PORT");
-    try asserts.throwsWith({ -> jmsListen("nodur", Destination.Topic(name: "t"), "auto", "", "sub", count("x")) }, "needs rakun.jms.client-id");
+    try asserts.throwsWith(
+        { -> jmsListen("nodur", Destination.Topic(name: "t"), "auto", "", "sub", count("x")) },
+        "needs rakun.jms.client-id",
+    );
     val _d = done(port);
 }
 
 test "selectors: the broker filters - a non-matching message is never delivered; a rejected selector fails the subscription" {
     val port = boot([], "stomp://localhost:PORT");
-    val _l = jmsListen("sel", Destination.Queue(name: "sel"), "auto", "type = 'order'", "", count("sel"));
+    val _l = jmsListen(
+        "sel",
+        Destination.Queue(name: "sel"),
+        "auto",
+        "type = 'order'",
+        "",
+        count("sel"),
+    );
     val c = jmsConnection();
     val _a = rkJmsSend(c, "/queue/sel", "wanted", [#("type", "order")]);
     val _b = rkJmsSend(c, "/queue/sel", "other", [#("type", "invoice")]);
     val got = rkMsgWaitUntil(2000, { -> rkMsgCount("sel:wanted") == 1 });
     val _w = rkMsgWaitUntil(300, { -> false });
     val other = rkMsgCount("sel:other");
-    try asserts.throwsWith({ -> jmsListen("selbad", Destination.Queue(name: "sel2"), "auto", "price > 10 OR x", "", count("x")) }, "client-side filtering is not a fallback");
+    try asserts.throwsWith(
+        { -> jmsListen("selbad", Destination.Queue(name: "sel2"), "auto", "price > 10 OR x", "", count("x")) },
+        "client-side filtering is not a fallback",
+    );
     val _d = done(port);
     assert got && other == 0;
 }
@@ -134,27 +237,58 @@ declare fn sleepMs(ms: i32) -> i32;
 
 fn pong(d: Delivery) -> Outcome {
     val _p = sleepMs(if (d.body == "slow") 200 else 0);
-    val _s = rkJmsSend(jmsConnection(), d.header("reply-to"), "pong:" + d.body, [#("correlation-id", d.header("correlation-id"))]);
+    val _s = rkJmsSend(
+        jmsConnection(),
+        d.header("reply-to"),
+        "pong:" + d.body,
+        [#("correlation-id", d.header("correlation-id"))],
+    );
     return Outcome.Done;
 }
 
 fn ask(body: string) -> string {
     val r = jmsRequest(Destination.Queue(name: "rr"), body, 3000);
-    return case r { Ok(v) -> v; Error(e) -> "error " + e; };
+    return case r {
+        Ok(v) -> v;
+        Error(e) -> "error " + e;
+    };
 }
 
 test "request/reply: two requests in flight are matched by correlation id; a timeout is an error" {
     val port = boot([], "stomp://localhost:PORT");
-    val _r = jmsListen("replier", Destination.Queue(name: "rr"), "auto", "", "", { d -> pong(d) });
-    val both = await async.runAll([
-        { -> async { ask("slow") } },
-        { -> async { ask("fast") } },
-    ]);
-    val timeout = jmsRequest(Destination.Queue(name: "nobody-answers"), "ping", 200);
+    val _r = jmsListen(
+        "replier",
+        Destination.Queue(name: "rr"),
+        "auto",
+        "",
+        "",
+        { d -> pong(d) },
+    );
+    val both = await async.runAll(
+        [
+            { ->
+                async {
+                    ask("slow");
+                };
+            },
+            { ->
+                async {
+                    ask("fast");
+                };
+            },
+        ],
+    );
+    val timeout = jmsRequest(
+        Destination.Queue(name: "nobody-answers"),
+        "ping",
+        200,
+    );
     val alive = jmsHealth().status;
     val frames = jmsFixtureFrames(port).join(" ");
     val _d = done(port);
-    assert both.join(",") == "pong:slow,pong:fast" && timeout.isError() && alive == "UP", both.join(",") + " " + frames;
+    assert both.join(",") == "pong:slow,pong:fast"
+        && timeout.isError()
+        && alive == "UP", both.join(",") + " " + frames;
 }
 
 test "health: UP with a live connection, DOWN when it is gone, registered with front 11" {
@@ -164,12 +298,18 @@ test "health: UP with a live connection, DOWN when it is gone, registered with f
     val down = jmsHealth();
     val frames = jmsFixtureFrames(port).filter({ f -> f == "SEND" }).length;
     val _d = done(port);
-    assert up.status == "UP" && down.status == "DOWN" && frames == 0 && healthIndicatorIds().indexOf("jms") >= 0;
+    assert up.status == "UP"
+        && down.status == "DOWN"
+        && frames == 0
+        && healthIndicatorIds().indexOf("jms") >= 0;
 }
 
 #[@External.Erlang("""<<255, 254>>""")]
 declare fn notUtf8() -> string;
 
 test "codec: a non-text body is refused naming the byte-type gap" {
-    try asserts.throwsWith({ -> rkJmsEncode("SEND", [], notUtf8()).length() }, "a STOMP body must be text");
+    try asserts.throwsWith(
+        { -> rkJmsEncode("SEND", [], notUtf8()).length() },
+        "a STOMP body must be text",
+    );
 }

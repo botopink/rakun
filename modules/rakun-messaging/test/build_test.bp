@@ -9,14 +9,17 @@
 //// none the cells FAIL saying so.
 
 import {testing.asserts} from "std";
-import {io: {fs, process, env}} from "std";
+import {io.fs, io.process, io.env} from "std";
 
 // This run's own scratch directory, `""` outside `botopink test` (which names
 // it in `BOTOPINK_TEST_TMPDIR`, unique to the run and the target). Never a
 // path under the member: its cells run side by side with it as their cwd.
 fn fixtureRoot() -> string {
     val tmp = env.read("BOTOPINK_TEST_TMPDIR") ?? "";
-    if (tmp == "") @panic("BOTOPINK_TEST_TMPDIR is not set: run this suite under `botopink test`");
+    if (tmp == "")
+        @panic(
+            "BOTOPINK_TEST_TMPDIR is not set: run this suite under `botopink test`",
+        );
     return tmp + "/rakun-messaging-fixtures";
 }
 
@@ -31,12 +34,23 @@ fn dep(name: string, dir: string) -> string {
 fn buildFixture(name: string, source: string) -> string {
     val dir = fixtureRoot() + "/" + name;
     val here = process.cwd();
-    val _m = process.runShell("rm -rf '" + dir + "' && mkdir -p '" + dir + "/src'");
+    val _m = process.runShell(
+        "rm -rf '" + dir + "' && mkdir -p '" + dir + "/src'",
+    );
     val deps = [dep("rakun", here + "/../rakun"), dep("rakun-messaging", here)];
-    val manifest = "{\n  \"name\": \"" + name + "\",\n  \"version\": \"0.0.1\",\n  \"src\": \"src/\",\n  \"entry\": \"root.bp\",\n  \"target\": \"erlang\",\n  \"targets\": [\"erlang\"],\n  \"dependencies\": {\n" + deps.join(",\n") + "\n  }\n}\n";
+    val manifest = "{\n  \"name\": \""
+        + name
+        + "\",\n  \"version\": \"0.0.1\",\n  \"src\": \"src/\",\n  \"entry\": \"root.bp\",\n  \"target\": \"erlang\",\n  \"targets\": [\"erlang\"],\n  \"dependencies\": {\n"
+        + deps.join(",\n")
+        + "\n  }\n}\n";
     val _j = fs.writeText(dir + "/botopink.json", manifest);
     val _s = fs.writeText(dir + "/src/root.bp", source);
-    return process.runShell(compilerCommand() + "cd '" + dir + "' && \"$B\" build --target erlang --out out 2>&1 < /dev/null; echo \"exit=$?\"");
+    return process.runShell(
+        compilerCommand()
+            + "cd '"
+            + dir
+            + "' && \"$B\" build --target erlang --out out 2>&1 < /dev/null; echo \"exit=$?\"",
+    );
 }
 
 fn header() -> string {
@@ -44,59 +58,144 @@ fn header() -> string {
 }
 
 fn handler(marker: string, name: string) -> string {
-    return "    " + marker + "\n    pub fn " + name + "(self: Self, msg: Message) -> i32 {\n        return 0;\n    }\n";
+    return "    "
+        + marker
+        + "\n    pub fn "
+        + name
+        + "(self: Self, msg: Message) -> i32 {\n        return 0;\n    }\n";
 }
 
 fn service(name: string, body: string) -> string {
-    return "#[service]\n#[listener]\npub type " + name + "() {\n" + body + "}\n";
+    return "#[service]\n#[listener]\npub type "
+        + name
+        + "() {\n"
+        + body
+        + "}\n";
 }
 
 test "build: a listener with all four markers builds" {
-    val out = buildFixture("ok", header() + service("AllArms", handler("#[amqpListener(\"q\")]", "a") + handler("#[kafkaListener(\"t\", \"g\")]", "k") + handler("#[redisListener(\"c\")]", "r") + handler("#[streamListener(\"s\", \"42\")]", "s")));
+    val out = buildFixture(
+        "ok",
+        header()
+            + service(
+                "AllArms",
+                handler("#[amqpListener(\"q\")]", "a")
+                    + handler("#[kafkaListener(\"t\", \"g\")]", "k")
+                    + handler("#[redisListener(\"c\")]", "r")
+                    + handler("#[streamListener(\"s\", \"42\")]", "s"),
+            ),
+    );
     try asserts.contains(out, "exit=0");
 }
 
 test "build: #[listener] on a type with no broker marker fails saying so" {
-    val out = buildFixture("no-marker", header() + service("Idle", "    pub fn run(self: Self) -> i32 {\n        return 0;\n    }\n"));
-    try asserts.contains(out, "#[listener] on Idle finds no method carrying #[amqpListener], #[kafkaListener], #[redisListener] or #[streamListener]");
+    val out = buildFixture(
+        "no-marker",
+        header()
+            + service(
+                "Idle",
+                "    pub fn run(self: Self) -> i32 {\n        return 0;\n    }\n",
+            ),
+    );
+    try asserts.contains(
+        out,
+        "#[listener] on Idle finds no method carrying #[amqpListener], #[kafkaListener], #[redisListener] or #[streamListener]",
+    );
     try asserts.notContains(out, "exit=0");
 }
 
 fn misplaced(marker: string, name: string, n: string) -> bool {
-    val out = buildFixture("marker-" + n, header() + marker + "\npub type Wrong(n: i32)\n");
-    return out.contains("#[" + name + "] must annotate a method of a #[listener] type") && out.contains("src/root.bp:") && out.contains("exit=0") == false;
+    val out = buildFixture(
+        "marker-" + n,
+        header() + marker + "\npub type Wrong(n: i32)\n",
+    );
+    return out.contains(
+        "#[" + name + "] must annotate a method of a #[listener] type",
+    )
+        && out.contains("src/root.bp:")
+        && out.contains("exit=0") == false;
 }
 
 test "build: each marker anywhere but on a method fails with a located message" {
     assert misplaced("#[amqpListener(\"q\")]", "amqpListener", "a");
     assert misplaced("#[kafkaListener(\"t\", \"g\")]", "kafkaListener", "k");
     assert misplaced("#[redisListener(\"c\")]", "redisListener", "r");
-    assert misplaced("#[streamListener(\"s\", \"first\")]", "streamListener", "s");
+    assert misplaced(
+        "#[streamListener(\"s\", \"first\")]",
+        "streamListener",
+        "s",
+    );
 }
 
 test "build: #[kafkaListener] with one argument is refused - there is no one-argument form" {
-    val out = buildFixture("kafka-one", header() + service("OneArg", handler("#[kafkaListener(\"t\")]", "k")));
+    val out = buildFixture(
+        "kafka-one",
+        header() + service("OneArg", handler("#[kafkaListener(\"t\")]", "k")),
+    );
     try asserts.notContains(out, "exit=0");
 }
 
 test "build: #[streamListener] refuses an offset that is neither first, last, next nor a decimal" {
-    val bad = buildFixture("stream-bad", header() + service("Replay", handler("#[streamListener(\"s\", \"earliest\")]", "s")));
-    try asserts.contains(bad, "#[streamListener] offset `earliest` is not first, last, next or a decimal number");
+    val bad = buildFixture(
+        "stream-bad",
+        header()
+            + service(
+                "Replay",
+                handler("#[streamListener(\"s\", \"earliest\")]", "s"),
+            ),
+    );
+    try asserts.contains(
+        bad,
+        "#[streamListener] offset `earliest` is not first, last, next or a decimal number",
+    );
     try asserts.notContains(bad, "exit=0");
-    val neg = buildFixture("stream-neg", header() + service("Replay", handler("#[streamListener(\"s\", \"-1\")]", "s")));
+    val neg = buildFixture(
+        "stream-neg",
+        header()
+            + service(
+                "Replay",
+                handler("#[streamListener(\"s\", \"-1\")]", "s"),
+            ),
+    );
     try asserts.contains(neg, "is not first, last, next or a decimal number");
-    val ok = buildFixture("stream-ok", header() + service("Replay", handler("#[streamListener(\"s\", \"last\")]", "s")));
+    val ok = buildFixture(
+        "stream-ok",
+        header()
+            + service(
+                "Replay",
+                handler("#[streamListener(\"s\", \"last\")]", "s"),
+            ),
+    );
     try asserts.contains(ok, "exit=0");
 }
 
 test "build: a handler that does not take one Message is refused" {
-    val out = buildFixture("bad-param", header() + service("Needy", "    #[amqpListener(\"q\")]\n    pub fn on(self: Self, body: string) -> i32 {\n        return 0;\n    }\n"));
-    try asserts.contains(out, "Needy.on must take exactly one parameter of type Message");
+    val out = buildFixture(
+        "bad-param",
+        header()
+            + service(
+                "Needy",
+                "    #[amqpListener(\"q\")]\n    pub fn on(self: Self, body: string) -> i32 {\n        return 0;\n    }\n",
+            ),
+    );
+    try asserts.contains(
+        out,
+        "Needy.on must take exactly one parameter of type Message",
+    );
     try asserts.notContains(out, "exit=0");
 }
 
 test "build: #[listener] without a stereotype fails naming the fix" {
-    val out = buildFixture("no-stereotype", header() + "#[listener]\npub type Bare() {\n" + handler("#[amqpListener(\"q\")]", "a") + "}\n");
-    try asserts.contains(out, "#[listener] needs a stereotype on the same type");
+    val out = buildFixture(
+        "no-stereotype",
+        header()
+            + "#[listener]\npub type Bare() {\n"
+            + handler("#[amqpListener(\"q\")]", "a")
+            + "}\n",
+    );
+    try asserts.contains(
+        out,
+        "#[listener] needs a stereotype on the same type",
+    );
     try asserts.notContains(out, "exit=0");
 }

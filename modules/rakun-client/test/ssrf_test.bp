@@ -26,13 +26,14 @@ declare fn fakeMixedDns(name: string) -> i32;
 declare fn restoreDns() -> i32;
 
 fn stub(method: string, path: string) -> Response {
-    val _l = rkSetProp("test.ssrf.log", rkProp("test.ssrf.log") + method + " " + path + "\n");
+    val _l = rkSetProp(
+        "test.ssrf.log",
+        rkProp("test.ssrf.log") + method + " " + path + "\n",
+    );
     val res = if (path == "/hop") {
         val _h = replyHeader("location", "http://10.0.0.1/secret");
-        Response.withStatus(302, "moved")
-    } else {
-        Response.ok("reached")
-    };
+        Response.withStatus(302, "moved");
+    } else Response.ok("reached");
     return res;
 }
 
@@ -61,8 +62,20 @@ fn policy(allow: Array<string>, deny: Array<string>) -> AddressPolicy {
 
 test "ssrf: loopback, link-local, private and IPv6 loopback are refused with -1 naming the address" {
     val _n = noLists();
-    val cases = ["127.0.0.1", "169.254.169.254", "10.0.0.1", "192.168.1.1", "::1"];
-    val urls = ["http://127.0.0.1/", "http://169.254.169.254/", "http://10.0.0.1/", "http://192.168.1.1/", "http://[::1]/"];
+    val cases = [
+        "127.0.0.1",
+        "169.254.169.254",
+        "10.0.0.1",
+        "192.168.1.1",
+        "::1",
+    ];
+    val urls = [
+        "http://127.0.0.1/",
+        "http://169.254.169.254/",
+        "http://10.0.0.1/",
+        "http://192.168.1.1/",
+        "http://[::1]/",
+    ];
     var i = 0;
     for (urls) { u ->
         val res = probe(u);
@@ -71,7 +84,7 @@ test "ssrf: loopback, link-local, private and IPv6 loopback are refused with -1 
         assert res.body.contains("address " + addr + " of host");
         assert res.body.contains("blocked by the address filter");
         i = i + 1;
-    };
+    }
 }
 
 test "ssrf: a refused loopback request opens no socket" {
@@ -92,7 +105,23 @@ test "ssrf: a refused loopback request opens no socket" {
 test "ssrf: the built-in deny set covers the six families" {
     val none: Array<string> = [];
     val p = policy(none, none);
-    val refused = ["127.0.0.1", "::1", "169.254.169.254", "fe80::1", "10.1.2.3", "172.16.0.1", "172.31.255.255", "192.168.0.1", "fc00::1", "fd12::1", "0.0.0.0", "::", "224.0.0.1", "ff02::1", "255.255.255.255"];
+    val refused = [
+        "127.0.0.1",
+        "::1",
+        "169.254.169.254",
+        "fe80::1",
+        "10.1.2.3",
+        "172.16.0.1",
+        "172.31.255.255",
+        "192.168.0.1",
+        "fc00::1",
+        "fd12::1",
+        "0.0.0.0",
+        "::",
+        "224.0.0.1",
+        "ff02::1",
+        "255.255.255.255",
+    ];
     assert refused.all({ a -> addressAllowed(p, a) == false });
     assert addressAllowed(p, "93.184.216.34");
     assert addressAllowed(p, "172.32.0.1");
@@ -128,7 +157,8 @@ test "ssrf: the configured deny list wins over the allow list" {
     assert addressAllowed(p, "10.1.0.1");
     assert addressAllowed(p, "10.9.0.1") == false;
     val none: Array<string> = [];
-    assert addressAllowed(policy(none, ["93.184.216.0/24"]), "93.184.216.34") == false;
+    assert addressAllowed(policy(none, ["93.184.216.0/24"]), "93.184.216.34")
+        == false;
 }
 
 test "ssrf: a text that is not an address is refused" {
@@ -143,7 +173,10 @@ test "ssrf: a hostname answering one public and one private address is refused" 
     val check = checkHost(policy(none, none), "mixed.rakun.test");
     val res = probe("http://mixed.rakun.test/");
     val _r = restoreDns();
-    try asserts.contains(check.refusal, "address 10.0.0.5 of host mixed.rakun.test");
+    try asserts.contains(
+        check.refusal,
+        "address 10.0.0.5 of host mixed.rakun.test",
+    );
     assert res.status == -1;
     try asserts.contains(res.body, "address 10.0.0.5 of host mixed.rakun.test");
 }
@@ -158,11 +191,18 @@ test "ssrf: a 302 to a private address is refused even from an admitted host" {
     val p = port();
     val _a = rkSetProp("rakun.http.clients.allow", "127.0.0.0/8");
     val _r = rkSetProp("test.ssrf.log", "");
-    val c = RestClient.builder().baseUrl("http://127.0.0.1:" + p.toString()).redirects("follow").build();
+    val c = RestClient
+        .builder()
+        .baseUrl("http://127.0.0.1:" + p.toString())
+        .redirects("follow")
+        .build();
     val res = c.get("/hop").retrieve();
     val _n = noLists();
     assert res.status == -1;
-    try asserts.contains(res.body, "address 10.0.0.1 of host 10.0.0.1 is blocked");
+    try asserts.contains(
+        res.body,
+        "address 10.0.0.1 of host 10.0.0.1 is blocked",
+    );
     assert rkProp("test.ssrf.log") == "GET /hop\n";
 }
 
@@ -177,14 +217,18 @@ test "ssrf: the module holds no switch for the filter" {
         val text = fs.readText(dir + "/" + f).unwrapOr("");
         for (text.split("\n")) { line ->
             val code = line.trim();
-            val mentions = code.toLower().contains("ssrf") || code.contains("filter.enabled") || code.contains("clients.filter");
-            if (mentions && (code.startsWith("//") == false)) offending.push(f + ": " + code);
-        };
-    };
+            val mentions = code.toLower().contains("ssrf")
+                || code.contains("filter.enabled")
+                || code.contains("clients.filter");
+            if (mentions && (code.startsWith("//") == false))
+                offending.push(f + ": " + code);
+        }
+    }
     val erl = fs.readText("src/sidecars/rakun_client.erl").unwrapOr("");
     for (erl.split("\n")) { line ->
         val code = line.trim();
-        if (code.toLower().contains("ssrf") && (code.startsWith("%") == false)) offending.push("rakun_client.erl: " + code);
-    };
+        if (code.toLower().contains("ssrf") && (code.startsWith("%") == false))
+            offending.push("rakun_client.erl: " + code);
+    }
     try asserts.equals(offending.join("\n"), "");
 }

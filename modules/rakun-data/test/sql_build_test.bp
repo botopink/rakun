@@ -13,7 +13,7 @@
 //// none of them the cells FAIL saying so — they never pass vacuously.
 
 import {testing.asserts} from "std";
-import {io: {fs, process, env}} from "std";
+import {io.fs, io.process, io.env} from "std";
 
 // This run's own scratch directory, `""` outside `botopink test`. `botopink
 // test` names it in `BOTOPINK_TEST_TMPDIR` — unique to the run and the target,
@@ -40,16 +40,39 @@ fn buildFixture(name: string, source: string) -> string {
 // which is where a duplicate function definition is refused.
 fn compileFixture(name: string, source: string, command: string) -> string {
     val root = fixtureRoot();
-    return if (root == "") "BOTOPINK_TEST_TMPDIR is not set: run this suite under `botopink test`" else compileFixtureIn(root + "/" + name, name, source, command);
+    return if (root == "")
+        "BOTOPINK_TEST_TMPDIR is not set: run this suite under `botopink test`"
+    else
+        compileFixtureIn(root + "/" + name, name, source, command);
 }
 
-fn compileFixtureIn(dir: string, name: string, source: string, command: string) -> string {
+fn compileFixtureIn(
+    dir: string,
+    name: string,
+    source: string,
+    command: string,
+) -> string {
     val here = process.cwd();
-    val _m = process.runShell("rm -rf '" + dir + "' && mkdir -p '" + dir + "/src'");
-    val manifest = "{\n  \"name\": \"" + name + "\",\n  \"version\": \"0.0.1\",\n  \"src\": \"src/\",\n  \"entry\": \"root.bp\",\n  \"target\": \"erlang\",\n  \"targets\": [\"erlang\"],\n  \"dependencies\": {\n    \"rakun\": { \"path\": \"" + here + "/../rakun\" },\n    \"rakun-data\": { \"path\": \"" + here + "\" }\n  }\n}\n";
+    val _m = process.runShell(
+        "rm -rf '" + dir + "' && mkdir -p '" + dir + "/src'",
+    );
+    val manifest = "{\n  \"name\": \""
+        + name
+        + "\",\n  \"version\": \"0.0.1\",\n  \"src\": \"src/\",\n  \"entry\": \"root.bp\",\n  \"target\": \"erlang\",\n  \"targets\": [\"erlang\"],\n  \"dependencies\": {\n    \"rakun\": { \"path\": \""
+        + here
+        + "/../rakun\" },\n    \"rakun-data\": { \"path\": \""
+        + here
+        + "\" }\n  }\n}\n";
     val _j = fs.writeText(dir + "/botopink.json", manifest);
     val _s = fs.writeText(dir + "/src/root.bp", source);
-    return process.runShell(compilerCommand() + "cd '" + dir + "' && \"$B\" " + command + " 2>&1 < /dev/null; echo \"exit=$?\"");
+    return process.runShell(
+        compilerCommand()
+            + "cd '"
+            + dir
+            + "' && \"$B\" "
+            + command
+            + " 2>&1 < /dev/null; echo \"exit=$?\"",
+    );
 }
 
 fn header() -> string {
@@ -57,13 +80,17 @@ fn header() -> string {
 }
 
 fn repo(annotation: string) -> string {
-    return header() + "#[repository]\npub type FixRepository(sql: SqlTemplate) {\n    " + annotation + "\n    pub fn find(self: Self) -> Rows {\n        return self.sql.query(FixRepository.findSql(), []);\n    }\n}\n";
+    return header()
+        + "#[repository]\npub type FixRepository(sql: SqlTemplate) {\n    "
+        + annotation
+        + "\n    pub fn find(self: Self) -> Rows {\n        return self.sql.query(FixRepository.findSql(), []);\n    }\n}\n";
 }
 
 // ── the control: a well-formed project builds ────────────────────────────────
 
 test "build: a well-formed #[query] repository and #[transactional] service build" {
-    val src = repo("#[query(\"SELECT id FROM users\")]") + "\n#[service]\n#[transactional]\npub type FixService(repo: FixRepository) {\n    pub fn all(self: Self) -> Rows {\n        return self.repo.find();\n    }\n\n    #[noTransaction]\n    pub fn label(self: Self, n: i32) -> string {\n        return \"x\";\n    }\n}\n";
+    val src = repo("#[query(\"SELECT id FROM users\")]")
+        + "\n#[service]\n#[transactional]\npub type FixService(repo: FixRepository) {\n    pub fn all(self: Self) -> Rows {\n        return self.repo.find();\n    }\n\n    #[noTransaction]\n    pub fn label(self: Self, n: i32) -> string {\n        return \"x\";\n    }\n}\n";
     val out = buildFixture("ok", src);
     try asserts.contains(out, "exit=0");
 }
@@ -79,33 +106,53 @@ test "build: an empty #[query] statement fails at the method" {
 
 test "build: an unknown leading keyword fails naming it" {
     val out = buildFixture("keyword", repo("#[query(\"DROP TABLE users\")]"));
-    try asserts.contains(out, "#[query] statement starts with 'DROP', which is not one of SELECT, INSERT, UPDATE, DELETE, WITH, CALL");
+    try asserts.contains(
+        out,
+        "#[query] statement starts with 'DROP', which is not one of SELECT, INSERT, UPDATE, DELETE, WITH, CALL",
+    );
     try asserts.contains(out, "src/root.bp:");
     try asserts.notContains(out, "exit=0");
 }
 
 test "build: a quote next to a placeholder fails as the concatenation smell" {
-    val out = buildFixture("smell", repo("#[query(\"SELECT id FROM users WHERE name = ':name'\")]"));
-    try asserts.contains(out, "#[query] statement has a quote next to a placeholder");
+    val out = buildFixture(
+        "smell",
+        repo("#[query(\"SELECT id FROM users WHERE name = ':name'\")]"),
+    );
+    try asserts.contains(
+        out,
+        "#[query] statement has a quote next to a placeholder",
+    );
     try asserts.contains(out, "src/root.bp:");
     try asserts.notContains(out, "exit=0");
 }
 
 test "build: a cast after a literal is not the smell" {
-    val out = buildFixture("cast", repo("#[query(\"SELECT id FROM users WHERE born = '2020-01-01'::date\")]"));
+    val out = buildFixture(
+        "cast",
+        repo(
+            "#[query(\"SELECT id FROM users WHERE born = '2020-01-01'::date\")]",
+        ),
+    );
     try asserts.contains(out, "exit=0");
 }
 
 test "build: #[query] on a type fails at comptime" {
-    val src = header() + "#[query(\"SELECT 1\")]\npub type FixNotAMethod(n: i32) {\n    pub fn one(self: Self) -> i32 {\n        return 1;\n    }\n}\n";
+    val src = header()
+        + "#[query(\"SELECT 1\")]\npub type FixNotAMethod(n: i32) {\n    pub fn one(self: Self) -> i32 {\n        return 1;\n    }\n}\n";
     val out = buildFixture("placement", src);
     try asserts.contains(out, "#[query] must annotate a method");
     try asserts.notContains(out, "exit=0");
 }
 
 test "build: two #[query] methods of one name on two types of one module are two members and build" {
-    val src = repo("#[query(\"SELECT id FROM users\")]") + "\n#[repository]\npub type FixOtherRepository(sql: SqlTemplate) {\n    #[query(\"SELECT id FROM orders\")]\n    pub fn find(self: Self) -> Rows {\n        return self.sql.query(FixOtherRepository.findSql(), []);\n    }\n}\n";
-    val out = compileFixture("duplicate", src + "\ntest \"fixture\" {\n    assert 1 == 1;\n}\n", "test --target erlang");
+    val src = repo("#[query(\"SELECT id FROM users\")]")
+        + "\n#[repository]\npub type FixOtherRepository(sql: SqlTemplate) {\n    #[query(\"SELECT id FROM orders\")]\n    pub fn find(self: Self) -> Rows {\n        return self.sql.query(FixOtherRepository.findSql(), []);\n    }\n}\n";
+    val out = compileFixture(
+        "duplicate",
+        src + "\ntest \"fixture\" {\n    assert 1 == 1;\n}\n",
+        "test --target erlang",
+    );
     try asserts.contains(out, "ok   fixture");
     try asserts.contains(out, "exit=0");
 }
@@ -113,29 +160,45 @@ test "build: two #[query] methods of one name on two types of one module are two
 // ── #[transactional] ─────────────────────────────────────────────────────────
 
 test "build: #[transactional] on an enum-shaped type fails at comptime" {
-    val src = header() + "#[transactional]\npub type FixColor {\n    Red,\n    Green,\n}\n";
+    val src = header()
+        + "#[transactional]\npub type FixColor {\n    Red,\n    Green,\n}\n";
     val out = buildFixture("enum", src);
-    try asserts.contains(out, "#[transactional] must annotate a type with fields, not an enum");
+    try asserts.contains(
+        out,
+        "#[transactional] must annotate a type with fields, not an enum",
+    );
     try asserts.notContains(out, "exit=0");
 }
 
 test "build: REQUIRES_NEW is refused as not implemented" {
-    val src = header() + "#[service]\n#[transactional]\npub type FixNewService(n: i32) {\n    #[propagation(\"REQUIRES_NEW\")]\n    pub fn one(self: Self) -> i32 {\n        return 1;\n    }\n}\n";
+    val src = header()
+        + "#[service]\n#[transactional]\npub type FixNewService(n: i32) {\n    #[propagation(\"REQUIRES_NEW\")]\n    pub fn one(self: Self) -> i32 {\n        return 1;\n    }\n}\n";
     val out = buildFixture("requiresnew", src);
-    try asserts.contains(out, "FixNewService.one asks for propagation REQUIRES_NEW - only REQUIRED is implemented");
-    try asserts.contains(out, "are not implemented and are refused rather than ignored");
+    try asserts.contains(
+        out,
+        "FixNewService.one asks for propagation REQUIRES_NEW - only REQUIRED is implemented",
+    );
+    try asserts.contains(
+        out,
+        "are not implemented and are refused rather than ignored",
+    );
     try asserts.notContains(out, "exit=0");
 }
 
 test "build: NESTED is refused as not implemented" {
-    val src = header() + "#[service]\n#[transactional]\npub type FixNestedService(n: i32) {\n    #[propagation(\"NESTED\")]\n    pub fn one(self: Self) -> i32 {\n        return 1;\n    }\n}\n";
+    val src = header()
+        + "#[service]\n#[transactional]\npub type FixNestedService(n: i32) {\n    #[propagation(\"NESTED\")]\n    pub fn one(self: Self) -> i32 {\n        return 1;\n    }\n}\n";
     val out = buildFixture("nested", src);
-    try asserts.contains(out, "FixNestedService.one asks for propagation NESTED - only REQUIRED is implemented");
+    try asserts.contains(
+        out,
+        "FixNestedService.one asks for propagation NESTED - only REQUIRED is implemented",
+    );
     try asserts.notContains(out, "exit=0");
 }
 
 test "build: an array parameter and a generic return are forwarded with their spelled types" {
-    val src = header() + "#[service]\n#[transactional]\npub type FixSpelledService() {\n    pub fn many(self: Self, ids: i32[]) -> i32 {\n        return ids.length;\n    }\n    pub fn names(self: Self, xs: Array<string>) -> Array<string> {\n        return xs;\n    }\n}\n";
+    val src = header()
+        + "#[service]\n#[transactional]\npub type FixSpelledService() {\n    pub fn many(self: Self, ids: i32[]) -> i32 {\n        return ids.length;\n    }\n    pub fn names(self: Self, xs: Array<string>) -> Array<string> {\n        return xs;\n    }\n}\n";
     val out = buildFixture("spelled", src);
     try asserts.notContains(out, "cannot forward");
     try asserts.contains(out, "exit=0");

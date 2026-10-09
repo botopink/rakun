@@ -21,10 +21,14 @@ fn bump(key: string) -> i32 {
 fn echo(path: string) -> i32 {
     return rkRegisterWsEndpoint(path, "Echo", { id, principal, path ->
         val _o = bump("ws.opened");
-        WsSession(id: id, principal: principal, path: path).send("hello " + principal);
+        WsSession(id: id, principal: principal, path: path).send(
+            "hello " + principal,
+        );
     }, { id, principal, path, message ->
         if (message == "raise") @panic("handler failed");
-        WsSession(id: id, principal: principal, path: path).send("echo " + message);
+        WsSession(id: id, principal: principal, path: path).send(
+            "echo " + message,
+        );
     }, { id, principal, path, code, reason -> 0 });
 }
 
@@ -60,20 +64,40 @@ test "upgrade: an unregistered path answers 404 and closes" {
 
 test "upgrade: the rakun.v1 subprotocol is accepted and an unknown one is refused at upgrade" {
     val port = boot();
-    assert rkWsClientConnect(port, "/ws/echo", ["Sec-WebSocket-Protocol: rakun.v1"]).startsWith("101|");
-    assert rkWsClientConnect(port, "/ws/echo", ["Sec-WebSocket-Protocol: stomp"]) == "400|";
+    assert rkWsClientConnect(
+        port,
+        "/ws/echo",
+        ["Sec-WebSocket-Protocol: rakun.v1"],
+    ).startsWith("101|");
+    assert rkWsClientConnect(
+        port,
+        "/ws/echo",
+        ["Sec-WebSocket-Protocol: stomp"],
+    )
+        == "400|";
 }
 
 test "upgrade: an upgrade front 10 refuses closes with 1008 and never reaches a handler; an authorized one carries the principal" {
     val port = boot();
-    val _q = rkChainSetRunner({ method, path, headersWire, queryWire, body -> runChain(method, path, headersWire, queryWire, body) });
-    val _j = rkSetProp("rakun.security.jwt.secret", "front-20-test-secret-0123456789abcdef");
-    val _s = installSecurityWith(SecurityPolicy(rules: [], defaultRequirement: "authenticated"));
+    val _q = rkChainSetRunner(
+        { method, path, headersWire, queryWire, body -> runChain(method, path, headersWire, queryWire, body) },
+    );
+    val _j = rkSetProp(
+        "rakun.security.jwt.secret",
+        "front-20-test-secret-0123456789abcdef",
+    );
+    val _s = installSecurityWith(
+        SecurityPolicy(rules: [], defaultRequirement: "authenticated"),
+    );
     val refused = rkWsClientConnect(port, "/ws/echo", []);
     val refusedClient = client(refused);
     val closeFrame = rkWsClientRecv(refusedClient, 2000);
     val openedAfterRefusal = rkPropInt("ws.opened");
-    val ok = rkWsClientConnect(port, "/ws/echo", ["Authorization: Bearer " + testToken("alice", ["ROLE_USER"], 60)]);
+    val ok = rkWsClientConnect(
+        port,
+        "/ws/echo",
+        ["Authorization: Bearer " + testToken("alice", ["ROLE_USER"], 60)],
+    );
     val greeting = rkWsClientRecv(client(ok), 2000);
     val _z = resetChain();
     assert refused.startsWith("101|");
@@ -94,7 +118,8 @@ test "upgrade: one connection is one supervised process, and a raising handler c
     val _r = rkWsClientSend(a, "raise");
     assert rkWsClientRecv(a, 2000) == "close:1011:handler error";
     val _s = rkWsClientSend(b, "still here");
-    assert rkWsClientRecv(b, 2000) == "text:{\"t\":\"\",\"d\":\"echo still here\"}";
+    assert rkWsClientRecv(b, 2000)
+        == "text:{\"t\":\"\",\"d\":\"echo still here\"}";
 }
 
 test "upgrade: max-connections is enforced at upgrade with 503" {

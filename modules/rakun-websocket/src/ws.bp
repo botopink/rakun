@@ -24,16 +24,17 @@ import {json} from "std";
 import {Request, Response, rkRegisterRoute} from "rakun";
 import {Health, healthDown, rkRegisterHealthIndicator} from "rakun";
 import {principal, tryOutsideRequest} from "rakun-security/security";
-import {
-    ws_host.rkWsRegisterEndpoint, ws_host.rkWsEndpoints, ws_host.rkWsDuplicates, ws_host.rkWsReset, ws_host.rkWsInstall, ws_host.rkWsAccepting,
-    ws_host.rkWsNotePrincipal, ws_host.rkWsSend, ws_host.rkWsClose, ws_host.rkWsSubscribe, ws_host.rkWsUnsubscribe, ws_host.rkWsBroadcast,
-    ws_host.rkWsSessionsOn, ws_host.rkWsOpenCount, ws_host.rkWsTopicCount, ws_host.rkWsRefusedCount,
-};
+import {ws_host.rkWsRegisterEndpoint, ws_host.rkWsEndpoints, ws_host.rkWsDuplicates, ws_host.rkWsReset, ws_host.rkWsInstall, ws_host.rkWsAccepting, ws_host.rkWsNotePrincipal, ws_host.rkWsSend, ws_host.rkWsClose, ws_host.rkWsSubscribe, ws_host.rkWsUnsubscribe, ws_host.rkWsBroadcast, ws_host.rkWsSessionsOn, ws_host.rkWsOpenCount, ws_host.rkWsTopicCount, ws_host.rkWsRefusedCount};
 
 pub behavior WsHandler {
     fn onOpen(self: Self, session: WsSession) -> i32;
     fn onMessage(self: Self, session: WsSession, message: string) -> i32;
-    fn onClose(self: Self, session: WsSession, code: i32, reason: string) -> i32;
+    fn onClose(
+        self: Self,
+        session: WsSession,
+        code: i32,
+        reason: string,
+    ) -> i32;
 }
 
 pub fn directFrame(message: string) -> string {
@@ -41,7 +42,11 @@ pub fn directFrame(message: string) -> string {
 }
 
 pub fn topicFrame(topic: string, message: string) -> string {
-    return "{\"t\":" + json.quote(topic) + ",\"d\":" + json.quote(message) + "}";
+    return "{\"t\":"
+        + json.quote(topic)
+        + ",\"d\":"
+        + json.quote(message)
+        + "}";
 }
 
 pub type WsSession(id: string, principal: string, path: string) {
@@ -98,8 +103,14 @@ pub fn websocketConfigProblem() -> string {
     val dups = rkWsDuplicates();
     if (dups.length > 0) {
         val f = (dups[0] ?? "").split("|");
-        return "rakun-websocket: two endpoints serve " + (f[0] ?? "") + ": " + (f[1] ?? "") + " and " + (f[2] ?? "") + " - one path is one endpoint";
-    };
+        return "rakun-websocket: two endpoints serve "
+            + (f[0] ?? "")
+            + ": "
+            + (f[1] ?? "")
+            + " and "
+            + (f[2] ?? "")
+            + " - one path is one endpoint";
+    }
     return "";
 }
 
@@ -116,8 +127,14 @@ pub fn installWebsocket() -> i32 {
     if (problem != "") @panic(problem);
     val _i = rkWsInstall();
     val paths = rkWsEndpoints().map({ e -> e.split("|")[0] ?? "" });
-    for (paths) { p -> val _r = rkRegisterRoute("GET", p, { req -> upgradeRoute(req) }); };
-    val _h = rkRegisterHealthIndicator("websocket", "rakun-websocket", { -> websocketHealth() });
+    for (paths) { p ->
+        val _r = rkRegisterRoute("GET", p, { req -> upgradeRoute(req) });
+    }
+    val _h = rkRegisterHealthIndicator(
+        "websocket",
+        "rakun-websocket",
+        { -> websocketHealth() },
+    );
     return paths.length;
 }
 
@@ -131,11 +148,13 @@ pub fn resetWebsocket() -> i32 {
 // since boot. DOWN while upgrades are not accepted (the hook not installed or
 // front 04's listener not running).
 pub fn websocketHealth() -> Health {
-    val details = json.object([
-        #("connections", rkWsOpenCount().toString()),
-        #("topics", rkWsTopicCount().toString()),
-        #("refusedByCap", rkWsRefusedCount().toString()),
-    ]);
+    val details = json.object(
+        [
+            #("connections", rkWsOpenCount().toString()),
+            #("topics", rkWsTopicCount().toString()),
+            #("refusedByCap", rkWsRefusedCount().toString()),
+        ],
+    );
     if (rkWsAccepting() == false) return healthDown(details);
     return Health(status: "UP", details: details);
 }

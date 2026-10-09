@@ -32,12 +32,33 @@ pub type TopicName(
 
 pub fn parseTopic(name: string) -> TopicName {
     val scheme = name.indexOf("://");
-    if (scheme < 0) return TopicName(persistence: "persistent", tenant: "public", namespace: "default", topic: name);
+    if (scheme < 0)
+        return TopicName(
+            persistence: "persistent",
+            tenant: "public",
+            namespace: "default",
+            topic: name,
+        );
     val persistence = name.slice(0, scheme);
-    if (persistence != "persistent" && persistence != "non-persistent") @panic("rakun pulsar: `" + name + "` - a topic is persistent:// or non-persistent://");
+    if (persistence != "persistent" && persistence != "non-persistent")
+        @panic(
+            "rakun pulsar: `"
+                + name
+                + "` - a topic is persistent:// or non-persistent://",
+        );
     val parts = name.slice(scheme + 3, name.length()).split("/");
-    if (parts.length != 3) @panic("rakun pulsar: `" + name + "` - a full topic name is <persistence>://<tenant>/<namespace>/<topic>");
-    return TopicName(persistence: persistence, tenant: parts.at(0) ?? "", namespace: parts.at(1) ?? "", topic: parts.at(2) ?? "");
+    if (parts.length != 3)
+        @panic(
+            "rakun pulsar: `"
+                + name
+                + "` - a full topic name is <persistence>://<tenant>/<namespace>/<topic>",
+        );
+    return TopicName(
+        persistence: persistence,
+        tenant: parts.at(0) ?? "",
+        namespace: parts.at(1) ?? "",
+        topic: parts.at(2) ?? "",
+    );
 }
 
 pub fn renderTopic(t: TopicName) -> string {
@@ -50,27 +71,50 @@ pub fn subscriptionTypes() -> string[] {
 
 pub fn subscriptionTypeProblem(listener: string, kind: string) -> string {
     if (subscriptionTypes().indexOf(kind) >= 0) return "";
-    return "rakun pulsar: rakun.pulsar.listener." + listener + ".subscription-type is `" + kind + "` - exclusive, shared, failover or key_shared";
+    return "rakun pulsar: rakun.pulsar.listener."
+        + listener
+        + ".subscription-type is `"
+        + kind
+        + "` - exclusive, shared, failover or key_shared";
 }
 
 // `earliest`, `latest`, or `ledger:entry[:partition]`.
 pub fn startPositionProblem(reader: string, position: string) -> string {
     if (position == "earliest" || position == "latest") return "";
     val parts = position.split(":");
-    val numeric = parts.filter({ p -> p != "" && p.split("").filter({ c -> c != "" && "0123456789".contains(c) == false }).length == 0 }).length;
-    if ((parts.length == 2 || parts.length == 3) && numeric == parts.length) return "";
-    return "rakun pulsar: the reader " + reader + " starts at `" + position + "` - earliest, latest or a message id <ledger>:<entry>[:<partition>]";
+    val numeric = parts.filter(
+        { p -> p != "" && p.split("").filter({ c -> c != "" && "0123456789".contains(c) == false }).length == 0 },
+    ).length;
+    if ((parts.length == 2 || parts.length == 3) && numeric == parts.length)
+        return "";
+    return "rakun pulsar: the reader "
+        + reader
+        + " starts at `"
+        + position
+        + "` - earliest, latest or a message id <ledger>:<entry>[:<partition>]";
 }
 
 pub fn authProblem() -> string {
     val kind = rkProp("rakun.pulsar.auth.type").trim();
     if (kind == "" || kind == "none") return "";
-    if (kind == "token") return if (rkProp("rakun.pulsar.auth.token").trim() == "") "rakun pulsar: auth.type=token needs rakun.pulsar.auth.token" else "";
+    if (kind == "token")
+        return if (rkProp("rakun.pulsar.auth.token").trim() == "")
+            "rakun pulsar: auth.type=token needs rakun.pulsar.auth.token"
+        else
+            "";
     if (kind == "oauth2") {
-        val missing = ["issuer-url", "private-key", "audience"].filter({ k -> rkProp("rakun.pulsar.auth." + k).trim() == "" });
-        return if (missing.length == 0) "" else "rakun pulsar: auth.type=oauth2 needs rakun.pulsar.auth." + missing.join(", rakun.pulsar.auth.");
-    };
-    return "rakun pulsar: rakun.pulsar.auth.type is `" + kind + "` - none, token or oauth2";
+        val missing = ["issuer-url", "private-key", "audience"].filter(
+            { k -> rkProp("rakun.pulsar.auth." + k).trim() == "" },
+        );
+        return if (missing.length == 0)
+            ""
+        else
+            "rakun pulsar: auth.type=oauth2 needs rakun.pulsar.auth."
+                + missing.join(", rakun.pulsar.auth.");
+    }
+    return "rakun pulsar: rakun.pulsar.auth.type is `"
+        + kind
+        + "` - none, token or oauth2";
 }
 
 // ── the admin arm ───────────────────────────────────────────────────────────
@@ -86,18 +130,37 @@ declare fn toInt(s: string) -> i32;
 // Front 13's client on `rakun.pulsar.admin-url`, with
 // `rakun.pulsar.admin.connect-timeout` / `.read-timeout` (5000 / 10000 ms).
 fn admin() -> RestClient {
-    return RestClient.builder().baseUrl(rkProp("rakun.pulsar.admin-url").trim()).connectTimeout(msSetting("rakun.pulsar.admin.connect-timeout", 5000)).readTimeout(msSetting("rakun.pulsar.admin.read-timeout", 10000)).build();
+    return RestClient
+        .builder()
+        .baseUrl(rkProp("rakun.pulsar.admin-url").trim())
+        .connectTimeout(msSetting("rakun.pulsar.admin.connect-timeout", 5000))
+        .readTimeout(msSetting("rakun.pulsar.admin.read-timeout", 10000))
+        .build();
 }
 
 fn adminPath(t: TopicName) -> string {
-    return "/admin/v2/" + t.persistence + "/" + t.tenant + "/" + t.namespace + "/" + t.topic;
+    return "/admin/v2/"
+        + t.persistence
+        + "/"
+        + t.tenant
+        + "/"
+        + t.namespace
+        + "/"
+        + t.topic;
 }
 
 pub fn createTopic(name: string) -> @Result<i32, string> {
-    val res: ClientResponse = admin().put(adminPath(parseTopic(name)), "").retrieve();
+    val res: ClientResponse = admin()
+        .put(adminPath(parseTopic(name)), "")
+        .retrieve();
     if (res.status == 204 || res.status == 200) return 1;
     if (res.status == 409) return 0;
-    throw "rakun pulsar: creating " + name + " answered " + res.status.toString() + " " + res.body;
+    throw "rakun pulsar: creating "
+        + name
+        + " answered "
+        + res.status.toString()
+        + " "
+        + res.body;
 }
 
 // The reader of `GET …/subscriptions`: a JSON array of names.
@@ -105,11 +168,24 @@ pub fn readSubscriptions(body: string) -> @Result<string[], string> {
     val d = json.decode(body);
     if (d.isError()) throw "rakun pulsar: the subscriptions answer is not JSON";
     val v: Json = d.unwrapOr(Json.Null);
-    val items: Array<Json> = case v { Arr(items: xs) -> xs; _ -> []; };
-    val isArr = case v { Arr(items: _) -> true; _ -> false; };
-    if (isArr == false) throw "rakun pulsar: the subscriptions answer is not an array";
-    val names = items.map({ x -> case x { Str(value: s) -> s; _ -> ""; } });
-    if (names.filter({ n -> n == "" }).length > 0) throw "rakun pulsar: the subscriptions answer holds a non-string";
+    val items: Array<Json> = case v {
+        Arr(items: xs) -> xs;
+        _ -> [];
+    };
+    val isArr = case v {
+        Arr(items: _) -> true;
+        _ -> false;
+    };
+    if (isArr == false)
+        throw "rakun pulsar: the subscriptions answer is not an array";
+    val names = items.map({ x ->
+        case x {
+            Str(value: s) -> s;
+            _ -> "";
+        }
+    });
+    if (names.filter({ n -> n == "" }).length > 0)
+        throw "rakun pulsar: the subscriptions answer holds a non-string";
     return names;
 }
 
@@ -121,9 +197,18 @@ pub fn readBacklog(body: string, subscription: string) -> @Result<i32, string> {
     val subs = member(v, "subscriptions");
     val sub = member(subs, subscription);
     val backlog = member(sub, "msgBacklog");
-    val isNum = case backlog { Num(value: _) -> true; _ -> false; };
-    if (isNum == false) throw "rakun pulsar: the stats answer has no numeric subscriptions." + subscription + ".msgBacklog";
-    val n: f64 = case backlog { Num(value: x) -> x; _ -> 0.0; };
+    val isNum = case backlog {
+        Num(value: _) -> true;
+        _ -> false;
+    };
+    if (isNum == false)
+        throw "rakun pulsar: the stats answer has no numeric subscriptions."
+            + subscription
+            + ".msgBacklog";
+    val n: f64 = case backlog {
+        Num(value: x) -> x;
+        _ -> 0.0;
+    };
     return toI32(n);
 }
 
@@ -131,18 +216,31 @@ pub fn readBacklog(body: string, subscription: string) -> @Result<i32, string> {
 declare fn toI32(n: f64) -> i32;
 
 fn member(v: Json, key: string) -> Json {
-    val ms: Array<#(string, Json)> = case v { Obj(members: m) -> m; _ -> []; };
-    return ms.filter({ m -> m._0 == key }).map({ m -> m._1 }).at(0) ?? Json.Null;
+    val ms: Array<#(string, Json)> = case v {
+        Obj(members: m) -> m;
+        _ -> [];
+    };
+    return ms
+        .filter({ m -> m._0 == key })
+        .map({ m -> m._1 })
+        .at(0) ?? Json.Null;
 }
 
 pub fn subscriptionsOf(name: string) -> @Result<string[], string> {
-    val res: ClientResponse = admin().get(adminPath(parseTopic(name)) + "/subscriptions").retrieve();
-    if (res.status != 200) throw "rakun pulsar: listing subscriptions answered " + res.status.toString();
+    val res: ClientResponse = admin()
+        .get(adminPath(parseTopic(name)) + "/subscriptions")
+        .retrieve();
+    if (res.status != 200)
+        throw "rakun pulsar: listing subscriptions answered "
+            + res.status.toString();
     return readSubscriptions(res.body);
 }
 
 pub fn backlogOf(name: string, subscription: string) -> @Result<i32, string> {
-    val res: ClientResponse = admin().get(adminPath(parseTopic(name)) + "/stats").retrieve();
-    if (res.status != 200) throw "rakun pulsar: topic stats answered " + res.status.toString();
+    val res: ClientResponse = admin()
+        .get(adminPath(parseTopic(name)) + "/stats")
+        .retrieve();
+    if (res.status != 200)
+        throw "rakun pulsar: topic stats answered " + res.status.toString();
     return readBacklog(res.body, subscription);
 }

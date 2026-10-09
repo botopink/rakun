@@ -14,42 +14,8 @@ import {testing.asserts} from "std";
 import {Response} from "rakun";
 import {rkRegisterRoute, rkRoutePaths} from "rakun";
 import {rkRegisterBean, rkBeanReset, rkHasBean} from "rakun";
-import {
-    filter.Chain,
-    filter.WebRequest,
-    filter.webRequest,
-    filter.runChain,
-    filter.registerFilter,
-    filter.resetChain,
-    filter.orderCors,
-    filter.orderApplication,
-    filter.withHeader,
-    filter.headerValue,
-    filter.headerLines,
-    filter.headerCount,
-    filter.headerNameSet,
-    filter.rkChainSetTerminal,
-};
-import {
-    cors.CorsPolicy,
-    cors.corsPolicy,
-    cors.denyAll,
-    cors.validatePolicy,
-    cors.credentialsWildcardProblem,
-    cors.allowsOrigin,
-    cors.allowsMethod,
-    cors.corsEntry,
-    cors.isPreflight,
-    cors.preflightResponse,
-    cors.globalPolicy,
-    cors.policyFor,
-    cors.registerCorsMapping,
-    cors.corsMappingRows,
-    cors.resetCorsMappings,
-    cors.mappingFor,
-    cors.routeExists,
-    cors.corsEnabled,
-};
+import {filter.Chain, filter.WebRequest, filter.webRequest, filter.runChain, filter.registerFilter, filter.resetChain, filter.orderCors, filter.orderApplication, filter.withHeader, filter.headerValue, filter.headerLines, filter.headerCount, filter.headerNameSet, filter.rkChainSetTerminal};
+import {cors.CorsPolicy, cors.corsPolicy, cors.denyAll, cors.validatePolicy, cors.credentialsWildcardProblem, cors.allowsOrigin, cors.allowsMethod, cors.corsEntry, cors.isPreflight, cors.preflightResponse, cors.globalPolicy, cors.policyFor, cors.registerCorsMapping, cors.corsMappingRows, cors.resetCorsMappings, cors.mappingFor, cors.routeExists, cors.corsEnabled};
 
 // ── fixtures ────────────────────────────────────────────────────────────────
 
@@ -70,7 +36,11 @@ fn withCors(p: CorsPolicy) -> i32 {
     // The entry is registered with the policy CLOSED OVER rather than read from
     // the container, so a cell can vary the policy without rebuilding the bean
     // registry. `globalPolicy()` is asserted separately, from the container.
-    return registerFilter("cors", orderCors(), { req, chain -> corsEntry(req, chain) });
+    return registerFilter(
+        "cors",
+        orderCors(),
+        { req, chain -> corsEntry(req, chain) },
+    );
 }
 
 fn request(method: string, path: string, headersWire: string) -> Response {
@@ -97,7 +67,14 @@ test "rakun-web cors: the default denies every origin" {
 }
 
 test "rakun-web cors: a named origin is allowed and nothing else is" {
-    val p: CorsPolicy = corsPolicy(["https://a.test"], ["GET", "POST"], [], [], false, 0);
+    val p: CorsPolicy = corsPolicy(
+        ["https://a.test"],
+        ["GET", "POST"],
+        [],
+        [],
+        false,
+        0,
+    );
     assert allowsOrigin(p, "https://a.test");
     assert allowsOrigin(p, "https://b.test") == false;
     assert allowsMethod(p, "GET");
@@ -111,20 +88,30 @@ test "rakun-web cors: the wildcard with credentials fails at boot naming the com
         0;
     }, credentialsWildcardProblem());
     try asserts.throwsWith({ ->
-        validatePolicy(CorsPolicy(
-            allowedOrigins: ["*"],
-            allowedMethods: [],
-            allowedHeaders: [],
-            exposedHeaders: [],
-            allowCredentials: true,
-            maxAgeSeconds: 0,
-        ));
+        validatePolicy(
+            CorsPolicy(
+                allowedOrigins: ["*"],
+                allowedMethods: [],
+                allowedHeaders: [],
+                exposedHeaders: [],
+                allowCredentials: true,
+                maxAgeSeconds: 0,
+            ),
+        );
         0;
     }, "Name the origins");
     // The wildcard WITHOUT credentials is legal, and credentials without the
     // wildcard are legal: it is the pair that is refused.
-    assert corsPolicy(["*"], ["GET"], [], [], false, 0).allowedOrigins.length == 1;
-    assert corsPolicy(["https://a.test"], ["GET"], [], [], true, 0).allowCredentials;
+    assert corsPolicy(["*"], ["GET"], [], [], false, 0).allowedOrigins.length
+        == 1;
+    assert corsPolicy(
+        ["https://a.test"],
+        ["GET"],
+        [],
+        [],
+        true,
+        0,
+    ).allowCredentials;
 }
 
 // ── the entry, with no policy ───────────────────────────────────────────────
@@ -162,7 +149,11 @@ test "rakun-web cors: a simple request from an allowed origin echoes that origin
 test "rakun-web cors: a non-allowed origin gets no CORS header and the handler still runs" {
     val _c = withCors(denyAll());
     val _m = registerCorsMapping("/api", "https://a.test", "GET");
-    val res: Response = request("GET", "/api/x", originWire("https://evil.test"));
+    val res: Response = request(
+        "GET",
+        "/api/x",
+        originWire("https://evil.test"),
+    );
     assert res.status == 200;
     assert res.body == "handled GET /api/x";
     assert headerValue("access-control-allow-origin") == "";
@@ -172,9 +163,17 @@ test "rakun-web cors: a non-allowed origin gets no CORS header and the handler s
 test "rakun-web cors: a mapping applies to its controller's paths and to no others" {
     val _c = withCors(denyAll());
     val _m = registerCorsMapping("/api", "https://a.test", "GET");
-    val inside: Response = request("GET", "/api/x", originWire("https://a.test"));
+    val inside: Response = request(
+        "GET",
+        "/api/x",
+        originWire("https://a.test"),
+    );
     assert headerValue("Access-Control-Allow-Origin") == "https://a.test";
-    val outside: Response = request("GET", "/other", originWire("https://a.test"));
+    val outside: Response = request(
+        "GET",
+        "/other",
+        originWire("https://a.test"),
+    );
     assert headerValue("access-control-allow-origin") == "";
 }
 
@@ -186,7 +185,8 @@ test "rakun-web cors: the longest matching prefix wins" {
     assert mappingFor("/api/x").startsWith("/api\t");
     assert mappingFor("/api/admin/x").startsWith("/api/admin\t");
     assert mappingFor("/other") == "";
-    assert policyFor("/api/admin/x").allowedOrigins.join(",") == "https://b.test";
+    assert policyFor("/api/admin/x").allowedOrigins.join(",")
+        == "https://b.test";
     assert policyFor("/api/x").allowedOrigins.join(",") == "https://a.test";
     assert policyFor("/other").allowedOrigins.length == 0;
 }
@@ -196,16 +196,32 @@ test "rakun-web cors: the longest matching prefix wins" {
 test "rakun-web cors: a preflight is recognised by the verb and the request-method header" {
     val plain: WebRequest = webRequest("OPTIONS", "/api/x", "", "", "");
     assert isPreflight(plain) == false;
-    val real: WebRequest = webRequest("OPTIONS", "/api/x", "access-control-request-method\tPOST", "", "");
+    val real: WebRequest = webRequest(
+        "OPTIONS",
+        "/api/x",
+        "access-control-request-method\tPOST",
+        "",
+        "",
+    );
     assert isPreflight(real);
-    val get: WebRequest = webRequest("GET", "/api/x", "access-control-request-method\tPOST", "", "");
+    val get: WebRequest = webRequest(
+        "GET",
+        "/api/x",
+        "access-control-request-method\tPOST",
+        "",
+        "",
+    );
     assert isPreflight(get) == false;
 }
 
 test "rakun-web cors: a preflight for a path with no route answers 404" {
     val _c = withCors(denyAll());
     val _m = registerCorsMapping("/api", "https://a.test", "GET,POST");
-    val res: Response = request("OPTIONS", "/api/nothing", preflightWire("https://a.test", "POST"));
+    val res: Response = request(
+        "OPTIONS",
+        "/api/nothing",
+        preflightWire("https://a.test", "POST"),
+    );
     assert res.status == 404;
 }
 
@@ -213,7 +229,11 @@ test "rakun-web cors: an allowed preflight answers 204 with the three headers an
     val _c = withCors(denyAll());
     val _r = rkRegisterRoute("GET", "/api/x", { req -> Response.ok("never") });
     val _m = registerCorsMapping("/api", "https://a.test", "GET,POST");
-    val res: Response = request("OPTIONS", "/api/x", preflightWire("https://a.test", "POST"));
+    val res: Response = request(
+        "OPTIONS",
+        "/api/x",
+        preflightWire("https://a.test", "POST"),
+    );
     assert res.status == 204;
     assert res.body == "";
     assert headerValue("Access-Control-Allow-Origin") == "https://a.test";
@@ -225,7 +245,11 @@ test "rakun-web cors: a preflight from a non-allowed origin is refused, not answ
     val _c = withCors(denyAll());
     val _r = rkRegisterRoute("GET", "/api/x", { req -> Response.ok("never") });
     val _m = registerCorsMapping("/api", "https://a.test", "GET,POST");
-    val res: Response = request("OPTIONS", "/api/x", preflightWire("https://evil.test", "POST"));
+    val res: Response = request(
+        "OPTIONS",
+        "/api/x",
+        preflightWire("https://evil.test", "POST"),
+    );
     assert res.status == 403;
     assert headerValue("access-control-allow-origin") == "";
     assert headerValue("Vary") == "Origin";
@@ -235,7 +259,11 @@ test "rakun-web cors: a preflight for a method the policy does not allow is refu
     val _c = withCors(denyAll());
     val _r = rkRegisterRoute("GET", "/api/x", { req -> Response.ok("never") });
     val _m = registerCorsMapping("/api", "https://a.test", "GET");
-    val res: Response = request("OPTIONS", "/api/x", preflightWire("https://a.test", "DELETE"));
+    val res: Response = request(
+        "OPTIONS",
+        "/api/x",
+        preflightWire("https://a.test", "DELETE"),
+    );
     assert res.status == 403;
 }
 
@@ -251,7 +279,8 @@ test "rakun-web cors: max-age, allowed headers and exposed headers are set when 
     val _c = freshChain();
     val res: Response = preflightResponse(p, "https://a.test");
     assert res.status == 204;
-    assert headerValue("Access-Control-Allow-Headers") == "Content-Type, Authorization";
+    assert headerValue("Access-Control-Allow-Headers")
+        == "Content-Type, Authorization";
     assert headerValue("Access-Control-Expose-Headers") == "X-Total";
     assert headerValue("Access-Control-Allow-Credentials") == "true";
     assert headerValue("Access-Control-Max-Age") == "600";
@@ -260,7 +289,11 @@ test "rakun-web cors: max-age, allowed headers and exposed headers are set when 
 // ── the route check ─────────────────────────────────────────────────────────
 
 test "rakun-web cors: routeExists reads front 04's route table, bound segments included" {
-    val _r = rkRegisterRoute("GET", "/api/hello/:name", { req -> Response.ok("hi") });
+    val _r = rkRegisterRoute(
+        "GET",
+        "/api/hello/:name",
+        { req -> Response.ok("hi") },
+    );
     assert rkRoutePaths().contains("/api/hello/:name");
     assert routeExists("/api/hello/ana");
     assert routeExists("/api/hello") == false;
@@ -277,7 +310,15 @@ test "rakun-web cors: the global policy is a bean resolved by type name" {
     val _r = rkBeanReset();
     assert rkHasBean("CorsPolicy") == false;
     assert globalPolicy().allowedOrigins.length == 0;
-    val _b = rkRegisterBean("CorsPolicy", "", "singleton", false, false, "providedPolicy", { -> providedPolicy() });
+    val _b = rkRegisterBean(
+        "CorsPolicy",
+        "",
+        "singleton",
+        false,
+        false,
+        "providedPolicy",
+        { -> providedPolicy() },
+    );
     assert rkHasBean("CorsPolicy");
     assert globalPolicy().allowedOrigins.join(",") == "https://bean.test";
     // A per-controller mapping narrows the global one rather than resetting it:

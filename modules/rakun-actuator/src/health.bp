@@ -30,14 +30,7 @@
 
 import {Request, rkProp, rkPropIntOr} from "rakun";
 import {json, json.Json} from "std";
-import {
-    Health,
-    EndpointResponse,
-    healthUp,
-    rkRegisterHealthIndicator,
-    rkRegisterEndpoint,
-    healthIndicatorIds,
-} from "rakun";
+import {Health, EndpointResponse, healthUp, rkRegisterHealthIndicator, rkRegisterEndpoint, healthIndicatorIds} from "rakun";
 import {rkPropDuration, Duration} from "rakun/config";
 
 #[@External.Erlang("rakun_actuator", "run_health")]
@@ -75,13 +68,18 @@ pub fn statusKey(status: string) -> string {
 }
 
 pub fn statusOrder() -> string[] {
-    val raw: string = rkProp("rakun.management.endpoint.health.status.order").trim();
-    val spec: string = if (raw == "") "down, out-of-service, unknown, up" else raw;
+    val raw: string = rkProp(
+        "rakun.management.endpoint.health.status.order",
+    ).trim();
+    val spec: string = if (raw == "")
+        "down, out-of-service, unknown, up"
+    else
+        raw;
     var out: string[] = [];
     for (spec.split(",")) { t ->
         val s = statusToken(t);
         if (s != "") out.push(s);
-    };
+    }
     return out;
 }
 
@@ -97,13 +95,17 @@ pub fn aggregateStatus(statuses: string[]) -> string {
         if (rank < bestRank) {
             bestRank = rank;
             best = s;
-        };
-    };
+        }
+    }
     return if (best == "") "UNKNOWN" else best;
 }
 
 pub fn httpStatusFor(status: string) -> i32 {
-    val mapped: i32 = rkPropIntOr("rakun.management.endpoint.health.status.http-mapping." + statusKey(status), 0);
+    val mapped: i32 = rkPropIntOr(
+        "rakun.management.endpoint.health.status.http-mapping."
+            + statusKey(status),
+        0,
+    );
     if (mapped > 0) return mapped;
     if ((status == "DOWN") || (status == "OUT_OF_SERVICE")) return 503;
     return 200;
@@ -112,7 +114,10 @@ pub fn httpStatusFor(status: string) -> i32 {
 // ── running the indicators ──────────────────────────────────────────────────
 
 pub fn healthTimeoutMillis(id: string) -> i32 {
-    val d: Duration = rkPropDuration("rakun.management.health." + id + ".timeout", "millis");
+    val d: Duration = rkPropDuration(
+        "rakun.management.health." + id + ".timeout",
+        "millis",
+    );
     return if (d.millis > 0) d.millis else 2000;
 }
 
@@ -140,38 +145,69 @@ pub fn componentOf(line: string) -> ComponentHealth {
     val kind: string = f.at(1) ?? "";
     val a: string = f.at(2) ?? "";
     val b: string = f.at(3) ?? "";
-    if (kind == "raised") return ComponentHealth(id: id, status: "DOWN", details: errorDetails(a));
-    if (kind == "timeout") return ComponentHealth(id: id, status: "UNKNOWN", details: errorDetails("timeout after " + a + "ms"));
-    if (kind != "ok") return ComponentHealth(id: id, status: "UNKNOWN", details: errorDetails("indicator missing"));
+    if (kind == "raised")
+        return ComponentHealth(
+            id: id,
+            status: "DOWN",
+            details: errorDetails(a),
+        );
+    if (kind == "timeout")
+        return ComponentHealth(
+            id: id,
+            status: "UNKNOWN",
+            details: errorDetails("timeout after " + a + "ms"),
+        );
+    if (kind != "ok")
+        return ComponentHealth(
+            id: id,
+            status: "UNKNOWN",
+            details: errorDetails("indicator missing"),
+        );
     val status: string = statusToken(a);
-    if (knownStatuses().indexOf(status) < 0) return ComponentHealth(id: id, status: "UNKNOWN", details: errorDetails("unknown status " + a));
+    if (knownStatuses().indexOf(status) < 0)
+        return ComponentHealth(
+            id: id,
+            status: "UNKNOWN",
+            details: errorDetails("unknown status " + a),
+        );
     val details: string = if (b.trim() == "") "{}" else b;
-    if (isJsonObject(details) == false) return ComponentHealth(id: id, status: status, details: errorDetails("details are not a JSON object"));
+    if (isJsonObject(details) == false)
+        return ComponentHealth(
+            id: id,
+            status: status,
+            details: errorDetails("details are not a JSON object"),
+        );
     return ComponentHealth(id: id, status: status, details: details);
 }
 
 // Every registered indicator, concurrently, each under its own timeout.
 pub fn healthReport() -> HealthReport {
     var jobs: string[] = [];
-    for (healthIndicatorIds()) { id -> jobs.push(id + "=" + healthTimeoutMillis(id).toString()) };
+    for (healthIndicatorIds()) { id ->
+        jobs.push(id + "=" + healthTimeoutMillis(id).toString());
+    }
     val wire: string = rkActuatorRunHealth(jobs.join("\n"), "");
     var components: ComponentHealth[] = [];
     var statuses: string[] = [];
-    if (wire != "") {
+    if (wire != "")
         for (wire.split("\n")) { line ->
             val c = componentOf(line);
             components.push(c);
             statuses.push(c.status);
-        };
-    };
-    return HealthReport(status: aggregateStatus(statuses), components: components);
+        }
+    return HealthReport(
+        status: aggregateStatus(statuses),
+        components: components,
+    );
 }
 
 // `status <S>`, then `components:` and `  <id> <status> <details>` per
 // component sorted by id — the rendering the milestone's snapshots pin.
 pub fn renderHealth(r: HealthReport) -> string {
     var out: string[] = ["status " + r.status, "components:"];
-    for (r.components) { c -> out.push("  " + c.id + " " + c.status + " " + c.details) };
+    for (r.components) { c ->
+        out.push("  " + c.id + " " + c.status + " " + c.details);
+    }
     return out.join("\n");
 }
 
@@ -181,7 +217,11 @@ pub fn healthBody(r: HealthReport) -> string {
 
 pub fn healthRead(req: Request) -> EndpointResponse {
     val r: HealthReport = healthReport();
-    return EndpointResponse(status: httpStatusFor(r.status), contentType: "application/json", body: healthBody(r));
+    return EndpointResponse(
+        status: httpStatusFor(r.status),
+        contentType: "application/json",
+        body: healthBody(r),
+    );
 }
 
 // ── the two indicators front 11 ships ───────────────────────────────────────
@@ -193,26 +233,48 @@ pub fn pingHealth() -> Health {
 pub fn diskSpaceHealth() -> Health {
     val raw: string = rkProp("rakun.management.health.diskspace.path").trim();
     val path: string = if (raw == "") "." else raw;
-    val threshold: i32 = rkPropIntOr("rakun.management.health.diskspace.threshold", 10485760);
+    val threshold: i32 = rkPropIntOr(
+        "rakun.management.health.diskspace.threshold",
+        10485760,
+    );
     val facts: string = rkActuatorDiskFacts(path, threshold);
-    if (facts == "") return Health(status: "UNKNOWN", details: errorDetails("disk space unreadable at " + path));
+    if (facts == "")
+        return Health(
+            status: "UNKNOWN",
+            details: errorDetails("disk space unreadable at " + path),
+        );
     val f: string[] = facts.split("\t");
     val free: string = f.at(0) ?? "0";
     val total: string = f.at(1) ?? "0";
     val enough = (f.at(2) ?? "0") == "1";
-    val details = json.object([
-        #("total", total),
-        #("free", free),
-        #("threshold", threshold.toString()),
-        #("path", json.quote(path)),
-    ]);
+    val details = json.object(
+        [
+            #("total", total),
+            #("free", free),
+            #("threshold", threshold.toString()),
+            #("path", json.quote(path)),
+        ],
+    );
     return Health(status: if (enough) "UP" else "DOWN", details: details);
 }
 
 // Registered by `mountActuator` (a library module's top-level `val` does not
 // run at load on the erlang row, so the host registers its own rows at boot).
 pub fn registerHealthBuiltins() -> i32 {
-    val _p = rkRegisterHealthIndicator("ping", "rakun-actuator", { -> pingHealth() });
-    val _d = rkRegisterHealthIndicator("diskSpace", "rakun-actuator", { -> diskSpaceHealth() });
-    return rkRegisterEndpoint("health", "rakun-actuator", "read", { req -> healthRead(req) });
+    val _p = rkRegisterHealthIndicator(
+        "ping",
+        "rakun-actuator",
+        { -> pingHealth() },
+    );
+    val _d = rkRegisterHealthIndicator(
+        "diskSpace",
+        "rakun-actuator",
+        { -> diskSpaceHealth() },
+    );
+    return rkRegisterEndpoint(
+        "health",
+        "rakun-actuator",
+        "read",
+        { req -> healthRead(req) },
+    );
 }

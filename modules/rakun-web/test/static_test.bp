@@ -6,23 +6,10 @@
 //// the root, one pointing out of it and a 200 MB sparse file. Nothing is
 //// checked in: a checked-in symlink escaping its directory is a landmine.
 
-import {io: {fs}} from "std";
+import {io.fs} from "std";
 import {Response, rkSetProp, rkServe, rkDispatchHttp, toI32} from "rakun";
 import {filter.resetChain, filter.runChain, filter.rkChainSetTerminal, filter.rkChainSetRunner, filter.headerValue, filter.orderCompression, filter.orderMetrics};
-import {
-    static.StaticRoot,
-    static.registerStaticRoot,
-    static.resetStaticRoots,
-    static.installStatic,
-    static.contentTypeOf,
-    static.fingerprint,
-    static.fingerprintText,
-    static.cacheHeader,
-    static.rkStaticFsCalls,
-    static.rkStaticHashFile,
-    static.orderStatic,
-    static.defaultStaticRoots,
-};
+import {static.StaticRoot, static.registerStaticRoot, static.resetStaticRoots, static.installStatic, static.contentTypeOf, static.fingerprint, static.fingerprintText, static.cacheHeader, static.rkStaticFsCalls, static.rkStaticHashFile, static.orderStatic, static.defaultStaticRoots};
 
 // ── host helpers ────────────────────────────────────────────────────────────
 
@@ -88,8 +75,22 @@ fn fixtures() -> string {
     return dir;
 }
 
-fn root(site: string, immutable: bool, cacheSeconds: i32, lastModified: bool, precompressed: bool) -> StaticRoot {
-    return StaticRoot(pattern: "/assets/**", directory: site, indexFile: "index.html", cacheSeconds: cacheSeconds, immutable: immutable, useLastModified: lastModified, precompressed: precompressed);
+fn root(
+    site: string,
+    immutable: bool,
+    cacheSeconds: i32,
+    lastModified: bool,
+    precompressed: bool,
+) -> StaticRoot {
+    return StaticRoot(
+        pattern: "/assets/**",
+        directory: site,
+        indexFile: "index.html",
+        cacheSeconds: cacheSeconds,
+        immutable: immutable,
+        useLastModified: lastModified,
+        precompressed: precompressed,
+    );
 }
 
 // The chain with the static entry and a terminal that says it ran.
@@ -99,7 +100,9 @@ fn boot(r: StaticRoot) -> i32 {
     val _p = rkSetProp("rakun.web.resources.cache.period", "");
     val _g = registerStaticRoot(r);
     val _i = installStatic();
-    return rkChainSetTerminal({ method, path, hw, qw, body -> Response.ok("router") });
+    return rkChainSetTerminal(
+        { method, path, hw, qw, body -> Response.ok("router") },
+    );
 }
 
 fn get(path: string, headersWire: string) -> Response {
@@ -121,14 +124,36 @@ test "static: overlapping roots resolve in registration order" {
     val _m = mkdirs(dir + "/other");
     val _w = write(dir + "/other/app.css", "second root");
     val _x = write(dir + "/other/only.css", "only in the second");
-    val _b = boot(StaticRoot(pattern: "/assets/**", directory: dir + "/site", indexFile: "", cacheSeconds: 0, immutable: false, useLastModified: false, precompressed: false));
-    val _g = registerStaticRoot(StaticRoot(pattern: "/assets/**", directory: dir + "/other", indexFile: "", cacheSeconds: 0, immutable: false, useLastModified: false, precompressed: false));
+    val _b = boot(
+        StaticRoot(
+            pattern: "/assets/**",
+            directory: dir + "/site",
+            indexFile: "",
+            cacheSeconds: 0,
+            immutable: false,
+            useLastModified: false,
+            precompressed: false,
+        ),
+    );
+    val _g = registerStaticRoot(
+        StaticRoot(
+            pattern: "/assets/**",
+            directory: dir + "/other",
+            indexFile: "",
+            cacheSeconds: 0,
+            immutable: false,
+            useLastModified: false,
+            precompressed: false,
+        ),
+    );
     val first = get("/assets/app.css", "");
     assert first.status == 200;
-    assert headerValue("ETag") == "\"" + rkStaticHashFile(dir + "/site/app.css") + "\"";
+    assert headerValue("ETag")
+        == "\"" + rkStaticHashFile(dir + "/site/app.css") + "\"";
     val second = get("/assets/only.css", "");
     assert second.status == 200;
-    assert headerValue("ETag") == "\"" + rkStaticHashFile(dir + "/other/only.css") + "\"";
+    assert headerValue("ETag")
+        == "\"" + rkStaticHashFile(dir + "/other/only.css") + "\"";
 }
 
 test "static: contentTypeOf covers the list, charset only on text" {
@@ -202,7 +227,8 @@ test "static: no containment failure answers 403, and missing looks like refused
     assert refused.status == 404 && missing.status == 404;
     assert refused.body == missing.body;
     val src: string = fs.readText("src/static.bp").unwrapOr("");
-    assert src.contains("withStatus(403") == false && src.contains("status: 403") == false;
+    assert src.contains("withStatus(403") == false
+        && src.contains("status: 403") == false;
 }
 
 // ── step 3 ──────────────────────────────────────────────────────────────────
@@ -251,7 +277,11 @@ test "static: when both validators disagree the ETag decides" {
     val _b = boot(root(dir + "/site", false, 0, true, false));
     val _a = get("/assets/app.css", "");
     val lm: string = headerValue("Last-Modified");
-    assert get("/assets/app.css", "if-none-match\t\"stale\"\nif-modified-since\t" + lm).status == 200;
+    assert get(
+        "/assets/app.css",
+        "if-none-match\t\"stale\"\nif-modified-since\t" + lm,
+    ).status
+        == 200;
 }
 
 // ── step 5 ──────────────────────────────────────────────────────────────────
@@ -269,10 +299,13 @@ test "static: immutable roots are public immutable, zero-cache ones no-cache" {
 }
 
 test "static: a fingerprint is stable for identical content and moves with one byte" {
-    assert fingerprintText("body { color: red; }\n") == fingerprintText("body { color: red; }\n");
-    assert fingerprintText("body { color: red; }\n") != fingerprintText("body { color: red; }\r");
+    assert fingerprintText("body { color: red; }\n")
+        == fingerprintText("body { color: red; }\n");
+    assert fingerprintText("body { color: red; }\n")
+        != fingerprintText("body { color: red; }\r");
     val dir = fixtures();
-    assert fingerprint(dir + "/site/app.css") == "app." + fingerprintText("body { color: red; }\n") + ".css";
+    assert fingerprint(dir + "/site/app.css")
+        == "app." + fingerprintText("body { color: red; }\n") + ".css";
 }
 
 test "static: a fingerprinted name whose content moved answers 404, the matching one is immutable" {
@@ -281,7 +314,8 @@ test "static: a fingerprinted name whose content moved answers 404, the matching
     assert get("/assets/lie.abcdef.css", "").status == 404;
     val fp: string = fingerprint(dir + "/site/app.css");
     assert get("/assets/" + fp, "").status == 200;
-    assert headerValue("Cache-Control") == "public, max-age=31536000, immutable";
+    assert headerValue("Cache-Control")
+        == "public, max-age=31536000, immutable";
 }
 
 test "static: the dev cache period sets every root to no-cache" {
@@ -324,7 +358,8 @@ test "static: a variant older than its original is ignored" {
     val _b = boot(root(dir + "/site", false, 0, false, true));
     val _a = get("/assets/old.css", "accept-encoding\tbr");
     assert headerValue("Content-Encoding") == "";
-    assert headerValue("ETag") == "\"" + rkStaticHashFile(dir + "/site/old.css") + "\"";
+    assert headerValue("ETag")
+        == "\"" + rkStaticHashFile(dir + "/site/old.css") + "\"";
 }
 
 test "static: br;q=0 does not select the .br variant" {
@@ -341,7 +376,9 @@ test "static: br;q=0 does not select the .br variant" {
 fn serve(r: StaticRoot) -> i32 {
     val _b = boot(r);
     val _k = rkSetProp("rakun.main.keep-alive", "false");
-    val _r = rkChainSetRunner({ method, path, headersWire, queryWire, body -> runChain(method, path, headersWire, queryWire, body) });
+    val _r = rkChainSetRunner(
+        { method, path, headersWire, queryWire, body -> runChain(method, path, headersWire, queryWire, body) },
+    );
     return rkServe(0, { m, p, h, q, b -> rkDispatchHttp(m, p, h, q, b) });
 }
 
@@ -360,15 +397,24 @@ test "static: the whole file, then the three range forms, over the socket" {
     assert field(whole, 0) == "200";
     assert field(whole, 2) == "300";
     assert field(whole, 8) == "bytes";
-    val head: string = wire(port, request("/assets/hundred.txt", "Range: bytes=0-99\r\n"));
+    val head: string = wire(
+        port,
+        request("/assets/hundred.txt", "Range: bytes=0-99\r\n"),
+    );
     assert field(head, 0) == "206";
     assert field(head, 4) == "bytes 0-99/300";
     assert field(head, 2) == "100";
     assert field(head, 9) == "0123456789".repeat(10);
-    val tail: string = wire(port, request("/assets/hundred.txt", "Range: bytes=100-\r\n"));
+    val tail: string = wire(
+        port,
+        request("/assets/hundred.txt", "Range: bytes=100-\r\n"),
+    );
     assert field(tail, 4) == "bytes 100-299/300";
     assert field(tail, 2) == "200";
-    val last: string = wire(port, request("/assets/hundred.txt", "Range: bytes=-100\r\n"));
+    val last: string = wire(
+        port,
+        request("/assets/hundred.txt", "Range: bytes=-100\r\n"),
+    );
     assert field(last, 4) == "bytes 200-299/300";
     assert field(last, 2) == "100";
 }
@@ -376,13 +422,25 @@ test "static: the whole file, then the three range forms, over the socket" {
 test "static: an unsatisfiable range is 416, a multi-range is the whole file, a stale If-Range is 200" {
     val dir = fixtures();
     val port = serve(root(dir + "/site", false, 0, false, false));
-    val bad: string = wire(port, request("/assets/hundred.txt", "Range: bytes=500-600\r\n"));
+    val bad: string = wire(
+        port,
+        request("/assets/hundred.txt", "Range: bytes=500-600\r\n"),
+    );
     assert field(bad, 0) == "416";
     assert field(bad, 4) == "bytes */300";
-    val multi: string = wire(port, request("/assets/hundred.txt", "Range: bytes=0-9,20-29\r\n"));
+    val multi: string = wire(
+        port,
+        request("/assets/hundred.txt", "Range: bytes=0-9,20-29\r\n"),
+    );
     assert field(multi, 0) == "200";
     assert field(multi, 2) == "300";
-    val stale: string = wire(port, request("/assets/hundred.txt", "Range: bytes=0-9\r\nIf-Range: \"stale\"\r\n"));
+    val stale: string = wire(
+        port,
+        request(
+            "/assets/hundred.txt",
+            "Range: bytes=0-9\r\nIf-Range: \"stale\"\r\n",
+        ),
+    );
     assert field(stale, 0) == "200";
     assert field(stale, 2) == "300";
 }
@@ -402,5 +460,8 @@ test "static: a 200 MB file streams without a proportional allocation" {
 
 test "static: the default roots are /static/** and /public/** with index.html" {
     val roots: StaticRoot[] = defaultStaticRoots("base");
-    assert roots.map({ r -> r.pattern + " " + r.directory + " " + r.indexFile }).join(",") == "/static/** base/static index.html,/public/** base/public index.html";
+    assert roots
+        .map({ r -> r.pattern + " " + r.directory + " " + r.indexFile })
+        .join(",")
+        == "/static/** base/static index.html,/public/** base/public index.html";
 }

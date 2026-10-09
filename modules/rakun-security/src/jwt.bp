@@ -66,7 +66,9 @@ fn propOr(key: string, fallback: string) -> string {
 fn digitsOnly(s: string) -> bool {
     if (s == "") return false;
     var ok = true;
-    for (s.split("")) { c -> if ("0123456789".indexOf(c) < 0) ok = false; };
+    for (s.split("")) { c ->
+        if ("0123456789".indexOf(c) < 0) ok = false;
+    }
     return ok;
 }
 
@@ -78,7 +80,9 @@ pub fn skewOf(raw: string) -> i32 {
     val bare: string = if (t.endsWith("s")) t.slice(0, t.length() - 1) else t;
     if (digitsOnly(bare) == false) return -1;
     var n = 0;
-    for (bare.split("")) { c -> n = n * 10 + "0123456789".indexOf(c); };
+    for (bare.split("")) { c ->
+        n = n * 10 + "0123456789".indexOf(c);
+    }
     return n;
 }
 
@@ -89,26 +93,27 @@ pub fn jwtConfig() -> JwtConfig {
         skewSeconds: skewOf(rkProp("rakun.security.jwt.clock-skew")),
         issuer: rkProp("rakun.security.jwt.issuer"),
         audience: rkProp("rakun.security.jwt.audience"),
-        authoritiesClaim: propOr("rakun.security.jwt.authorities-claim", "roles"),
+        authoritiesClaim: propOr(
+            "rakun.security.jwt.authorities-claim",
+            "roles",
+        ),
         authorityPrefix: rkProp("rakun.security.jwt.authority-prefix"),
     );
 }
 
 // The boot check. `""` when the configuration is usable.
 pub fn jwtConfigProblem(c: JwtConfig) -> string {
-    if (c.algorithm != "HS256") {
-        return "rakun-security: rakun.security.jwt.algorithm is `" + c.algorithm
+    if (c.algorithm != "HS256")
+        return "rakun-security: rakun.security.jwt.algorithm is `"
+            + c.algorithm
             + "` - this front verifies HS256 only; RS256, JWKS and key rotation "
             + "need a public-key bundle and belong to front 79";
-    };
-    if (c.skewSeconds < 0) {
+    if (c.skewSeconds < 0)
         return "rakun-security: rakun.security.jwt.clock-skew is not a duration "
             + "in seconds (30 or 30s)";
-    };
-    if ((c.secret != "") && (c.secret.length() < 32)) {
+    if ((c.secret != "") && (c.secret.length() < 32))
         return "rakun-security: rakun.security.jwt.secret is shorter than 32 "
             + "characters - an HS256 key must be at least 256 bits (RFC 7518 3.2)";
-    };
     return "";
 }
 
@@ -130,7 +135,10 @@ fn isObject(v: Json) -> bool {
 
 fn fieldOf(ms: Array<#(string, Json)>, key: string) -> ?Json {
     val hit = ms.filter({ m -> m._0 == key });
-    if (hit.length == 0) return null else return (hit.at(0) ?? #("", Json.Null))._1;
+    if (hit.length == 0)
+        return null
+    else
+        return (hit.at(0) ?? #("", Json.Null))._1;
 }
 
 fn hasField(ms: Array<#(string, Json)>, key: string) -> bool {
@@ -173,7 +181,10 @@ fn isArray(v: Json) -> bool {
 }
 
 // A segment's JSON object: base64url, then UTF-8, then JSON, then an object.
-fn segmentObject(segment: string, what: string) -> @Result<Array<#(string, Json)>, string> {
+fn segmentObject(
+    segment: string,
+    what: string,
+) -> @Result<Array<#(string, Json)>, string> {
     val raw = encoding.base64UrlDecode(segment);
     if (raw.isError()) throw "the " + what + " is not base64url";
     val text: string = raw.unwrapOr("");
@@ -193,27 +204,34 @@ pub fn signatureOf(secret: string, signingInput: string) -> string {
 }
 
 // THE compare. Step 3's acceptance reads this call.
-pub fn signatureMatches(secret: string, signingInput: string, presented: string) -> bool {
-    return hash.equalsConstantTime(signatureOf(secret, signingInput), presented);
+pub fn signatureMatches(
+    secret: string,
+    signingInput: string,
+    presented: string,
+) -> bool {
+    return hash.equalsConstantTime(
+        signatureOf(secret, signingInput),
+        presented,
+    );
 }
 
 fn audienceMatches(claim: Json, wanted: string) -> bool {
-    if (isArray(claim)) {
+    if (isArray(claim))
         return itemsOf(claim).filter({ a -> strOf(a) == wanted }).length > 0;
-    };
     return strOf(claim) == wanted;
 }
 
 fn authoritiesOf(claim: Json, prefix: string) -> string[] {
     var out: string[] = [];
-    if (isArray(claim)) {
+    if (isArray(claim))
         for (itemsOf(claim)) { a ->
             val s: string = strOf(a);
             if (s != "") out.push(prefix + s);
-        };
-    } else {
-        for (strOf(claim).split(" ")) { s -> if (s != "") out.push(prefix + s); };
-    };
+        }
+    else
+        for (strOf(claim).split(" ")) { s ->
+            if (s != "") out.push(prefix + s);
+        }
     return out;
 }
 
@@ -223,7 +241,11 @@ fn allWireSafe(xs: string[]) -> bool {
 
 // `nowSeconds` is a parameter so a cell can place "now" anywhere; the entry
 // passes `clock.nowMillis()`.
-pub fn verifyJwtAt(token: string, c: JwtConfig, nowSeconds: f64) -> @Result<Authentication, string> {
+pub fn verifyJwtAt(
+    token: string,
+    c: JwtConfig,
+    nowSeconds: f64,
+) -> @Result<Authentication, string> {
     val parts: string[] = token.split(".");
     if (parts.length != 3) throw "a JWS compact token has exactly three parts";
     val headerPart: string = parts.at(0) ?? "";
@@ -232,12 +254,17 @@ pub fn verifyJwtAt(token: string, c: JwtConfig, nowSeconds: f64) -> @Result<Auth
     // Step 2 — the algorithm, before the signature is considered.
     val header = try segmentObject(headerPart, "header");
     val alg: string = strOf(fieldOf(header, "alg") ?? Json.Null);
-    if (alg != c.algorithm) throw "the token's alg is not the configured algorithm";
+    if (alg != c.algorithm)
+        throw "the token's alg is not the configured algorithm";
     // Step 3 — the signature, in constant time.
     if (c.secret == "") throw "no rakun.security.jwt.secret is configured";
-    if (signatureMatches(c.secret, headerPart + "." + payloadPart, signaturePart) == false) {
+    if (signatureMatches(
+        c.secret,
+        headerPart + "." + payloadPart,
+        signaturePart,
+    )
+        == false)
         throw "the signature does not verify";
-    };
     // Step 4 — the claims.
     val claims = try segmentObject(payloadPart, "payload");
     val skew: f64 = toF64(c.skewSeconds);
@@ -249,15 +276,22 @@ pub fn verifyJwtAt(token: string, c: JwtConfig, nowSeconds: f64) -> @Result<Auth
     if (numOf(nbf) - skew > nowSeconds) throw "the token is not valid yet";
     val iat: Json = fieldOf(claims, "iat") ?? Json.Num(value: 0.0);
     if (isNum(iat) == false) throw "the token's iat is not numeric";
-    if (numOf(iat) - skew > nowSeconds) throw "the token was issued in the future";
-    val issOk: bool = (c.issuer == "") || (strOf(fieldOf(claims, "iss") ?? Json.Null) == c.issuer);
+    if (numOf(iat) - skew > nowSeconds)
+        throw "the token was issued in the future";
+    val issOk: bool = (c.issuer == "")
+        || (strOf(fieldOf(claims, "iss") ?? Json.Null) == c.issuer);
     if (issOk == false) throw "the token's iss is not the configured issuer";
-    val audOk: bool = (c.audience == "") || audienceMatches(fieldOf(claims, "aud") ?? Json.Null, c.audience);
-    if (audOk == false) throw "the token's aud does not name the configured audience";
+    val audOk: bool = (c.audience == "")
+        || audienceMatches(fieldOf(claims, "aud") ?? Json.Null, c.audience);
+    if (audOk == false)
+        throw "the token's aud does not name the configured audience";
     // Step 5 — the principal and its authorities.
     val sub: string = strOf(fieldOf(claims, "sub") ?? Json.Null);
     if (sub == "") throw "the token carries no sub";
-    val authorities: string[] = authoritiesOf(fieldOf(claims, c.authoritiesClaim) ?? Json.Null, c.authorityPrefix);
+    val authorities: string[] = authoritiesOf(
+        fieldOf(claims, c.authoritiesClaim) ?? Json.Null,
+        c.authorityPrefix,
+    );
     val safe: bool = isWireSafe(sub) && allWireSafe(authorities);
     if (safe == false) throw "the token's sub or authorities carry a separator";
     return authenticatedAs(sub, authorities, "jwt");
@@ -273,8 +307,14 @@ pub fn verifyJwt(token: string) -> @Result<Authentication, string> {
 
 // ── minting (tests, fixtures, a service that issues its own tokens) ─────────
 
-pub fn signJwt(secret: string, headerJson: string, claimsJson: string) -> string {
-    val input: string = encoding.base64UrlEncode(headerJson) + "." + encoding.base64UrlEncode(claimsJson);
+pub fn signJwt(
+    secret: string,
+    headerJson: string,
+    claimsJson: string,
+) -> string {
+    val input: string = encoding.base64UrlEncode(headerJson)
+        + "."
+        + encoding.base64UrlEncode(claimsJson);
     return input + "." + signatureOf(secret, input);
 }
 
@@ -283,12 +323,14 @@ pub fn hs256Header() -> string {
 }
 
 pub fn claimsFor(sub: string, roles: string[], expSeconds: i32) -> string {
-    return object([
-        #("sub", quote(sub)),
-        #("roles", array(roles.map({ r -> quote(r) }))),
-        #("iat", rkSecNowSeconds().toString()),
-        #("exp", expSeconds.toString()),
-    ]);
+    return object(
+        [
+            #("sub", quote(sub)),
+            #("roles", array(roles.map({ r -> quote(r) }))),
+            #("iat", rkSecNowSeconds().toString()),
+            #("exp", expSeconds.toString()),
+        ],
+    );
 }
 
 // A token for `sub` with `roles`, signed with the configured secret, expiring
@@ -304,13 +346,24 @@ pub fn testToken(sub: string, roles: string[], ttlSeconds: i32) -> string {
 pub fn testTokenTampered(sub: string) -> string {
     val genuine: string = testToken(sub, ["ROLE_USER"], 3600);
     val parts: string[] = genuine.split(".");
-    val forged: string = encoding.base64UrlEncode(claimsFor(sub, ["ROLE_ADMIN"], rkSecNowSeconds() + 3600));
+    val forged: string = encoding.base64UrlEncode(
+        claimsFor(sub, ["ROLE_ADMIN"], rkSecNowSeconds() + 3600),
+    );
     return parts.at(0) ?? "" + "." + forged + "." + parts.at(2) ?? "";
 }
 
 // `alg: none` with an empty signature.
 pub fn testTokenAlgNone(sub: string) -> string {
-    val header: string = object([#("alg", quote("none")), #("typ", quote("JWT"))]);
-    val claims: string = claimsFor(sub, ["ROLE_ADMIN"], rkSecNowSeconds() + 3600);
-    return encoding.base64UrlEncode(header) + "." + encoding.base64UrlEncode(claims) + ".";
+    val header: string = object(
+        [#("alg", quote("none")), #("typ", quote("JWT"))],
+    );
+    val claims: string = claimsFor(
+        sub,
+        ["ROLE_ADMIN"],
+        rkSecNowSeconds() + 3600,
+    );
+    return encoding.base64UrlEncode(header)
+        + "."
+        + encoding.base64UrlEncode(claims)
+        + ".";
 }

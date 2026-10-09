@@ -11,17 +11,24 @@ import {messaging_host.rkMsgBump, messaging_host.rkMsgCount, messaging_host.rkMs
 
 fn clean() -> i32 {
     val _s = stopMessaging();
-    for (["amqp", "kafka", "redis", "stream"]) { a -> val _t = rkSetProp("rakun.messaging." + a + ".transport", "memory"); };
+    for (["amqp", "kafka", "redis", "stream"]) { a ->
+        val _t = rkSetProp("rakun.messaging." + a + ".transport", "memory");
+    }
     return resetMessaging();
 }
 
 fn set(container: string, key: string, value: string) -> i32 {
-    return rkSetProp("rakun.messaging.listener." + container + "." + key, value);
+    return rkSetProp(
+        "rakun.messaging.listener." + container + "." + key,
+        value,
+    );
 }
 
 fn publish(arm: string, dest: string, payloads: Array<string>) -> i32 {
     val b = InProcessBroker(arm: arm);
-    for (payloads) { p -> val _x = b.publish(dest, "", p); };
+    for (payloads) { p ->
+        val _x = b.publish(dest, "", p);
+    }
     return payloads.length;
 }
 
@@ -39,11 +46,20 @@ test "container: concurrency 4 starts four workers in the supervision tree" {
 test "container: a killed worker is restarted and the other three keep consuming" {
     val _c = clean();
     val _s = set("ck", "concurrency", "4");
-    val _l = rkRegisterListener("amqp", "ck", "", "ck", { msg -> rkMsgBump("ck:" + msg.payload) });
+    val _l = rkRegisterListener(
+        "amqp",
+        "ck",
+        "",
+        "ck",
+        { msg -> rkMsgBump("ck:" + msg.payload) },
+    );
     val _b = startMessaging();
     val killed = rkMsgKillWorker("ck", 1);
     val _p = publish("amqp", "ck", ["a", "b", "c", "d", "e", "f", "g", "h"]);
-    val consumed = rkMsgWaitUntil(3000, { -> rkMsgCount("ck:a") == 1 && rkMsgCount("ck:h") == 1 });
+    val consumed = rkMsgWaitUntil(
+        3000,
+        { -> rkMsgCount("ck:a") == 1 && rkMsgCount("ck:h") == 1 },
+    );
     val back = rkMsgWaitUntil(3000, { -> containerWorkers("ck") == 4 });
     val _z = set("ck", "concurrency", "");
     val _y = clean();
@@ -61,7 +77,11 @@ test "container: a worker holds no more than prefetch unsettled messages" {
         rkMsgBump("pf:done");
     });
     val _b = startMessaging();
-    val _p = publish("amqp", "pf", ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]);
+    val _p = publish(
+        "amqp",
+        "pf",
+        ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"],
+    );
     val held = rkMsgWaitUntil(2000, { -> rkMsgInflight("pf") == 3 });
     val atMost = rkMsgInflight("pf");
     val _go = rkSetProp("test.release", "1");
@@ -76,12 +96,16 @@ test "container: a worker holds no more than prefetch unsettled messages" {
 test "container: under auto a non-raising return is acked once, a raising one is redelivered" {
     val _c = clean();
     val _l = rkRegisterListener("amqp", "au", "", "au", { msg ->
-        if (msg.payload == "fail-once" && msg.headersJson == "{}") @panic("first delivery fails");
+        if (msg.payload == "fail-once" && msg.headersJson == "{}")
+            @panic("first delivery fails");
         rkMsgBump("au:" + msg.payload + ":" + msg.headersJson);
     });
     val _b = startMessaging();
     val _p = publish("amqp", "au", ["ok", "fail-once"]);
-    val done = rkMsgWaitUntil(3000, { -> rkMsgCount("au:ok:{}") == 1 && rkMsgCount("au:fail-once:{\"redelivered\":true}") == 1 });
+    val done = rkMsgWaitUntil(
+        3000,
+        { -> rkMsgCount("au:ok:{}") == 1 && rkMsgCount("au:fail-once:{\"redelivered\":true}") == 1 },
+    );
     val okDeliveries = rkMsgDeliveries("amqp|au|0");
     val failDeliveries = rkMsgDeliveries("amqp|au|1");
     val inflight = rkMsgInflight("au");
@@ -101,7 +125,10 @@ test "container: under manual a handler that returns without acking is redeliver
     });
     val _b = startMessaging();
     val _p = publish("amqp", "man", ["m"]);
-    val done = rkMsgWaitUntil(3000, { -> rkMsgDeliveries("amqp|man|0") == 2 && rkMsgInflight("man") == 0 });
+    val done = rkMsgWaitUntil(
+        3000,
+        { -> rkMsgDeliveries("amqp|man|0") == 2 && rkMsgInflight("man") == 0 },
+    );
     val _w = rkMsgWaitUntil(100, { -> false });
     val deliveries = rkMsgDeliveries("amqp|man|0");
     val _z = set("man", "ack-mode", "");
@@ -114,11 +141,17 @@ test "container: under manual nackMessage redelivers and ackMessage settles" {
     val _c = clean();
     val _s = set("nk", "ack-mode", "manual");
     val _l = rkRegisterListener("amqp", "nk", "", "nk", { msg ->
-        if (msg.headersJson.contains("redelivered")) ackMessage(msg) else nackMessage(msg);
+        if (msg.headersJson.contains("redelivered"))
+            ackMessage(msg)
+        else
+            nackMessage(msg);
     });
     val _b = startMessaging();
     val _p = publish("amqp", "nk", ["n"]);
-    val done = rkMsgWaitUntil(3000, { -> rkMsgDeliveries("amqp|nk|0") == 2 && rkMsgInflight("nk") == 0 });
+    val done = rkMsgWaitUntil(
+        3000,
+        { -> rkMsgDeliveries("amqp|nk|0") == 2 && rkMsgInflight("nk") == 0 },
+    );
     val _z = set("nk", "ack-mode", "");
     val _y = clean();
     assert done;
@@ -128,12 +161,19 @@ test "container: ack-mode none is refused for amqp and kafka at boot" {
     val _c = clean();
     val _s = set("na", "ack-mode", "none");
     val _l = rkRegisterListener("amqp", "na", "", "na", { msg -> 0 });
-    assert messagingConfigProblem().contains("rakun.messaging.listener.na.ack-mode none is refused for amqp");
-    try asserts.throwsWith({ -> startMessaging() }, "ack-mode none is refused for amqp");
+    assert messagingConfigProblem().contains(
+        "rakun.messaging.listener.na.ack-mode none is refused for amqp",
+    );
+    try asserts.throwsWith(
+        { -> startMessaging() },
+        "ack-mode none is refused for amqp",
+    );
     val _r = resetMessaging();
     val _t = set("nka", "ack-mode", "none");
     val _k = rkRegisterListener("kafka", "nka", "g", "nka", { msg -> 0 });
-    assert messagingConfigProblem().contains("ack-mode none is refused for kafka");
+    assert messagingConfigProblem().contains(
+        "ack-mode none is refused for kafka",
+    );
     val _z = set("na", "ack-mode", "");
     val _x = set("nka", "ack-mode", "");
     val _y = clean();
@@ -144,7 +184,9 @@ test "container: redis accepts ack-mode none only, and defaults to it" {
     val _l = rkRegisterListener("redis", "rd", "", "rd", { msg -> 0 });
     assert messagingConfigProblem() == "";
     val _s = set("rd", "ack-mode", "auto");
-    assert messagingConfigProblem().contains("rakun.messaging.listener.rd.ack-mode is `auto` - Redis pub/sub has no acknowledgement");
+    assert messagingConfigProblem().contains(
+        "rakun.messaging.listener.rd.ack-mode is `auto` - Redis pub/sub has no acknowledgement",
+    );
     val _m = set("rd", "ack-mode", "manual");
     assert messagingConfigProblem().contains("`manual` - Redis pub/sub");
     val _z = set("rd", "ack-mode", "");
@@ -165,7 +207,8 @@ test "container: a redis handler that raises is neither nacked nor redelivered, 
     val crashed = rkMsgWaitUntil(3000, { -> rkMsgCount("inv:boom") == 1 });
     val _r = rkMsgWaitUntil(3000, { -> containerWorkers("inv") == 1 });
     val _q = publish("redis", "inv", ["after"]);
-    val done = crashed && rkMsgWaitUntil(3000, { -> rkMsgCount("inv:after") == 1 });
+    val done = crashed
+        && rkMsgWaitUntil(3000, { -> rkMsgCount("inv:after") == 1 });
     val _w = rkMsgWaitUntil(200, { -> false });
     val boom = rkMsgCount("inv:boom");
     val early = rkMsgCount("inv:before-subscribe");
@@ -178,7 +221,13 @@ test "container: a redis handler that raises is neither nacked nor redelivered, 
 test "container: enabled false starts no container and the listener stays registered" {
     val _c = clean();
     val _s = set("off", "enabled", "false");
-    val _l = rkRegisterListener("amqp", "off", "", "off", { msg -> rkMsgBump("off:hit") });
+    val _l = rkRegisterListener(
+        "amqp",
+        "off",
+        "",
+        "off",
+        { msg -> rkMsgBump("off:hit") },
+    );
     val started = startMessaging();
     val running = rkMsgContainers();
     val _p = publish("amqp", "off", ["x"]);
@@ -189,7 +238,10 @@ test "container: enabled false starts no container and the listener stays regist
     assert started == 0;
     assert running.length == 0;
     assert rkMsgCount("off:hit") == 0;
-    assert log.filter({ l -> l == "container off is disabled - amqp:off stays registered and idle" }).length == 1;
+    assert log.filter(
+        { l -> l == "container off is disabled - amqp:off stays registered and idle" },
+    ).length
+        == 1;
 }
 
 test "container: concurrency above one logs that ordering is not preserved" {
@@ -201,7 +253,10 @@ test "container: concurrency above one logs that ordering is not preserved" {
     val log = messagingStartupLog();
     val _z = set("ord", "concurrency", "");
     val _y = clean();
-    assert log.filter({ l -> l == "container ord runs 2 workers - per-destination ordering is NOT preserved" }).length == 1;
+    assert log.filter(
+        { l -> l == "container ord runs 2 workers - per-destination ordering is NOT preserved" },
+    ).length
+        == 1;
     assert log.filter({ l -> l.startsWith("container one") }).length == 0;
 }
 
@@ -209,12 +264,27 @@ test "container: a stream is re-read from its offset and carries the offsets" {
     val _c = clean();
     val _up = startBroker("stream");
     val _p = publish("stream", "audit", ["r0", "r1", "r2"]);
-    val _l = rkRegisterListener("stream", "audit", "@first", "audit", { msg -> rkMsgBump("audit:" + msg.payload + "@" + msg.offset.toString()) });
-    val _n = rkRegisterListener("stream", "audit-next", "@next", "audit-next", { msg -> rkMsgBump("next:" + msg.payload) });
+    val _l = rkRegisterListener(
+        "stream",
+        "audit",
+        "@first",
+        "audit",
+        { msg -> rkMsgBump("audit:" + msg.payload + "@" + msg.offset.toString()) },
+    );
+    val _n = rkRegisterListener(
+        "stream",
+        "audit-next",
+        "@next",
+        "audit-next",
+        { msg -> rkMsgBump("next:" + msg.payload) },
+    );
     val _q = publish("stream", "audit-next", ["old"]);
     val _b = startMessaging();
     val _r = publish("stream", "audit-next", ["new"]);
-    val done = rkMsgWaitUntil(3000, { -> rkMsgCount("audit:r2@2") == 1 && rkMsgCount("next:new") == 1 });
+    val done = rkMsgWaitUntil(
+        3000,
+        { -> rkMsgCount("audit:r2@2") == 1 && rkMsgCount("next:new") == 1 },
+    );
     val first = rkMsgCount("audit:r0@0");
     val old = rkMsgCount("next:old");
     val _y = clean();
@@ -225,12 +295,21 @@ test "container: a stream is re-read from its offset and carries the offsets" {
 
 test "container: two kafka groups each read every record, with key and offset" {
     val _c = clean();
-    val _a = rkRegisterListener("kafka", "events", "billing", "events", { msg -> rkMsgBump("billing:" + msg.key + "@" + msg.offset.toString()) });
+    val _a = rkRegisterListener(
+        "kafka",
+        "events",
+        "billing",
+        "events",
+        { msg -> rkMsgBump("billing:" + msg.key + "@" + msg.offset.toString()) },
+    );
     val _b = startMessaging();
     val k = InProcessBroker(arm: "kafka");
     val _p = k.publish("events", "placed", "{}");
     val _q = k.publish("events", "shipped", "{}");
-    val done = rkMsgWaitUntil(3000, { -> rkMsgCount("billing:placed@0") == 1 && rkMsgCount("billing:shipped@1") == 1 });
+    val done = rkMsgWaitUntil(
+        3000,
+        { -> rkMsgCount("billing:placed@0") == 1 && rkMsgCount("billing:shipped@1") == 1 },
+    );
     val _y = clean();
     assert done;
 }

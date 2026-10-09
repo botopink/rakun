@@ -9,12 +9,19 @@ import {tx.outbox.bump, tx.outbox.counterOf, tx.outbox.note, tx.outbox.txLog};
 
 #[@External.Erlang("""(fun(__Ms) -> timer:sleep(__Ms), 0 end)($0)""")]
 declare fn pause(ms: i32) -> i32;
+
 #[@External.Erlang("""(fun(__F, __Ms) -> __P = spawn(fun() -> __F() end), timer:sleep(__Ms), exit(__P, kill), 0 end)($0, $1)""")]
 declare fn killAfter(work: fn() -> string, ms: i32) -> i32;
 
 fn sagaRows(ds: string) -> string {
-    val rows: Rows = sqlTemplate(ds).query("SELECT status, step FROM rakun_saga", []);
-    return rows.toList().map({ r -> r.get("status") + "@" + r.get("step") }).join(",");
+    val rows: Rows = sqlTemplate(ds).query(
+        "SELECT status, step FROM rakun_saga",
+        [],
+    );
+    return rows
+        .toList()
+        .map({ r -> r.get("status") + "@" + r.get("step") })
+        .join(",");
 }
 
 fn fresh(name: string) -> string {
@@ -45,38 +52,87 @@ fn logOf(prefix: string) -> string {
     return txLog().filter({ l -> l.startsWith(prefix) }).join(",");
 }
 
-fn order(prefix: string, failAt: string, compensation: fn(ctx: string) -> string) -> Saga {
-    return Saga(name: prefix, retries: 2, backoffMs: 1, steps: [
-        SagaStep(name: "reserve", run: { c -> if (failAt == "reserve") fail(prefix + ".reserve") else track(prefix + ".reserve", c) }, compensate: { c -> track(prefix + ".release", c) }),
-        SagaStep(name: "charge", run: { c -> if (failAt == "charge") fail(prefix + ".charge") else track(prefix + ".charge", c) }, compensate: compensation),
-        SagaStep(name: "ship", run: { c -> if (failAt == "ship") fail(prefix + ".ship") else track(prefix + ".ship", c) }, compensate: { c -> track(prefix + ".unship", c) }),
-    ]);
+fn order(
+    prefix: string,
+    failAt: string,
+    compensation: fn(ctx: string) -> string,
+) -> Saga {
+    return Saga(
+        name: prefix,
+        retries: 2,
+        backoffMs: 1,
+        steps: [
+            SagaStep(
+                name: "reserve",
+                run: { c -> if (failAt == "reserve") fail(prefix + ".reserve") else track(prefix + ".reserve", c) },
+                compensate: { c -> track(prefix + ".release", c) },
+            ),
+            SagaStep(
+                name: "charge",
+                run: { c -> if (failAt == "charge") fail(prefix + ".charge") else track(prefix + ".charge", c) },
+                compensate: compensation,
+            ),
+            SagaStep(
+                name: "ship",
+                run: { c -> if (failAt == "ship") fail(prefix + ".ship") else track(prefix + ".ship", c) },
+                compensate: { c -> track(prefix + ".unship", c) },
+            ),
+        ],
+    );
 }
 
 // ── step 4 ──────────────────────────────────────────────────────────────────
 
 test "saga: every step runs in order and the saga completes with its history" {
     val ds = fresh("sg1");
-    val id = startSagaOn(ds, order("sg1", "", { c -> track("sg1.refund", c) }), "ctx");
+    val id = startSagaOn(
+        ds,
+        order("sg1", "", { c -> track("sg1.refund", c) }),
+        "ctx",
+    );
     val st = sagaStateOn(ds, id);
-    assert st.status == "completed" && st.step == 3 && st.context == "ctx>sg1.reserve>sg1.charge>sg1.ship", st.context;
-    assert st.history.join(",") == "forward:reserve:ok,forward:charge:ok,forward:ship:ok", st.history.join(",");
+    assert st.status == "completed"
+        && st.step == 3
+        && st.context == "ctx>sg1.reserve>sg1.charge>sg1.ship", st.context;
+    assert st.history.join(",")
+        == "forward:reserve:ok,forward:charge:ok,forward:ship:ok", st.history.join(
+        ",",
+    );
 }
 
 test "saga: a failed step compensates the completed ones in reverse and runs no later step" {
     val ds = fresh("sg2");
-    val id = startSagaOn(ds, order("sg2", "ship", { c -> track("sg2.refund", c) }), "");
+    val id = startSagaOn(
+        ds,
+        order("sg2", "ship", { c -> track("sg2.refund", c) }),
+        "",
+    );
     val st = sagaStateOn(ds, id);
     assert st.status == "compensated", st.status;
-    assert logOf("sg2.") == "sg2.reserve,sg2.charge,sg2.ship,sg2.refund,sg2.release", logOf("sg2.");
-    assert st.history.join(",") == "forward:reserve:ok,forward:charge:ok,forward:ship:failed:sg2.ship refused,compensate:charge:ok,compensate:reserve:ok", st.history.join(",");
+    assert logOf("sg2.")
+        == "sg2.reserve,sg2.charge,sg2.ship,sg2.refund,sg2.release", logOf(
+        "sg2.",
+    );
+    assert st.history.join(",")
+        == "forward:reserve:ok,forward:charge:ok,forward:ship:failed:sg2.ship refused,compensate:charge:ok,compensate:reserve:ok", st.history.join(
+        ",",
+    );
 }
 
 test "saga: a failure at step 1 compensates nothing and ends compensated" {
     val ds = fresh("sg7");
-    val id = startSagaOn(ds, order("sg7", "reserve", { c -> track("sg7.refund", c) }), "");
+    val id = startSagaOn(
+        ds,
+        order("sg7", "reserve", { c -> track("sg7.refund", c) }),
+        "",
+    );
     val st = sagaStateOn(ds, id);
-    assert st.status == "compensated" && logOf("sg7.") == "sg7.reserve" && st.history.join(",") == "forward:reserve:failed:sg7.reserve refused", st.history.join(",");
+    assert st.status == "compensated"
+        && logOf("sg7.") == "sg7.reserve"
+        && st.history.join(",")
+            == "forward:reserve:failed:sg7.reserve refused", st.history.join(
+        ",",
+    );
 }
 
 test "saga: startSaga and sagaState use rakun.tx.datasource" {
@@ -85,56 +141,103 @@ test "saga: startSaga and sagaState use rakun.tx.datasource" {
     val id = startSaga(order("sg8", "", { c -> c }), "");
     val st = sagaState(id);
     val _r = rkSetProp("rakun.tx.datasource", "");
-    assert st.status == "completed" && sagaStateOn("sg8", id).status == "completed";
+    assert st.status == "completed"
+        && sagaStateOn("sg8", id).status == "completed";
 }
 
 test "saga: a compensation that keeps failing is retried then parks in needs_attention with its history" {
     val ds = fresh("sg3");
-    val id = startSagaOn(ds, order("sg3", "ship", { c -> fail("sg3.refund") }), "");
+    val id = startSagaOn(
+        ds,
+        order("sg3", "ship", { c -> fail("sg3.refund") }),
+        "",
+    );
     val st = sagaStateOn(ds, id);
     val tries = txLog().filter({ l -> l == "sg3.refund" }).length;
-    assert st.status == "needs_attention" && tries == 3, st.status + " " + tries.toString();
-    assert st.history.filter({ h -> h.startsWith("compensate:charge:failed") }).length == 3 && logOf("sg3.release") == "", st.history.join(",");
+    assert st.status == "needs_attention" && tries == 3, st.status
+        + " "
+        + tries.toString();
+    assert st.history.filter(
+        { h -> h.startsWith("compensate:charge:failed") },
+    ).length
+        == 3
+        && logOf("sg3.release") == "", st.history.join(",");
 }
 
 test "saga: a compensation that fails once then succeeds completes the rollback" {
     val ds = fresh("sg4");
-    val id = startSagaOn(ds, order("sg4", "ship", { c -> failFirst("sg4.refund", 1, c) }), "");
+    val id = startSagaOn(
+        ds,
+        order("sg4", "ship", { c -> failFirst("sg4.refund", 1, c) }),
+        "",
+    );
     val st = sagaStateOn(ds, id);
-    assert st.status == "compensated" && logOf("sg4.release") == "sg4.release", st.history.join(",");
+    assert st.status == "compensated"
+        && logOf("sg4.release") == "sg4.release", st.history.join(",");
 }
 
 fn slowOnce(tag: string, ctx: string) -> string {
     val n = bump(tag);
     val _l = note(tag);
-    if (n == 1) {
-        val _p = pause(2000);
-    };
+    if (n == 1) val _p = pause(2000);
     return ctx + ">" + tag;
 }
 
 test "saga: a coordinator killed between steps 2 and 3 resumes at step 3, the step it had not finished" {
     val ds = fresh("sg5");
-    val def = Saga(name: "sg5", retries: 0, backoffMs: 0, steps: [
-        SagaStep(name: "reserve", run: { c -> track("sg5.reserve", c) }, compensate: { c -> c }),
-        SagaStep(name: "charge", run: { c -> track("sg5.charge", c) }, compensate: { c -> c }),
-        SagaStep(name: "ship", run: { c -> slowOnce("sg5.ship", c) }, compensate: { c -> c }),
-    ]);
+    val def = Saga(
+        name: "sg5",
+        retries: 0,
+        backoffMs: 0,
+        steps: [
+            SagaStep(
+                name: "reserve",
+                run: { c -> track("sg5.reserve", c) },
+                compensate: { c -> c },
+            ),
+            SagaStep(
+                name: "charge",
+                run: { c -> track("sg5.charge", c) },
+                compensate: { c -> c },
+            ),
+            SagaStep(
+                name: "ship",
+                run: { c -> slowOnce("sg5.ship", c) },
+                compensate: { c -> c },
+            ),
+        ],
+    );
     val _k = killAfter({ -> startSagaOn(ds, def, "c") }, 300);
     val open = sagaRows(ds);
     val n = resumeSagas(ds, [def]);
     val again = resumeSagas(ds, [def]);
     val done = sagaRows(ds);
-    assert open == "running@2" && n == 1 && again == 0 && done == "completed@3", open + " " + done;
-    assert logOf("sg5.") == "sg5.reserve,sg5.charge,sg5.ship,sg5.ship", logOf("sg5.");
+    assert open == "running@2"
+        && n == 1
+        && again == 0
+        && done == "completed@3", open + " " + done;
+    assert logOf("sg5.") == "sg5.reserve,sg5.charge,sg5.ship,sg5.ship", logOf(
+        "sg5.",
+    );
 }
 
 test "saga: two runs of one definition keep separate state" {
     val ds = fresh("sg6");
-    val a = startSagaOn(ds, order("sg6", "", { c -> track("sg6.refund", c) }), "a");
-    val b = startSagaOn(ds, order("sg6", "charge", { c -> track("sg6.refund", c) }), "b");
-    assert a != b && sagaStateOn(ds, a).status == "completed" && sagaStateOn(ds, b).status == "compensated";
-    assert sagaStateOn(ds, a).context.startsWith("a>") && sagaStateOn(ds, b).context == "b>sg6.reserve";
+    val a = startSagaOn(
+        ds,
+        order("sg6", "", { c -> track("sg6.refund", c) }),
+        "a",
+    );
+    val b = startSagaOn(
+        ds,
+        order("sg6", "charge", { c -> track("sg6.refund", c) }),
+        "b",
+    );
+    assert a != b
+        && sagaStateOn(ds, a).status == "completed"
+        && sagaStateOn(ds, b).status == "compensated";
+    assert sagaStateOn(ds, a).context.startsWith("a>")
+        && sagaStateOn(ds, b).context == "b>sg6.reserve";
 }
 
 // ── step 5 ──────────────────────────────────────────────────────────────────
@@ -152,55 +255,88 @@ test "2pc: every participant prepares, the decision is logged, and all commit" {
     val ds = fresh("tp1");
     val d = commitAll(ds, "tx-1", [part("tp1a", true), part("tp1b", true)]);
     assert d == "commit" && decisionOf(ds, "tx-1") == "commit/yes";
-    assert logOf("tp1") == "tp1a.prepare tx-1,tp1b.prepare tx-1,tp1a.commit tx-1,tp1b.commit tx-1", logOf("tp1");
+    assert logOf("tp1")
+        == "tp1a.prepare tx-1,tp1b.prepare tx-1,tp1a.commit tx-1,tp1b.commit tx-1", logOf(
+        "tp1",
+    );
 }
 
 test "2pc: one participant voting no aborts every participant" {
     val ds = fresh("tp2");
     val d = commitAll(ds, "tx-2", [part("tp2a", true), part("tp2b", false)]);
-    assert d == "abort" && decisionOf(ds, "tx-2") == "abort/yes" && logOf("tp2a.commit") == "" && logOf("tp2a.abort") == "tp2a.abort tx-2", logOf("tp2");
+    assert d == "abort"
+        && decisionOf(ds, "tx-2") == "abort/yes"
+        && logOf("tp2a.commit") == ""
+        && logOf("tp2a.abort") == "tp2a.abort tx-2", logOf("tp2");
 }
 
 test "2pc: a participant that does not acknowledge is retried until it does" {
     val ds = fresh("tp3");
-    val flaky = Participant(name: "tp3", prepare: { t -> true }, commit: { t -> bump("tp3.commit") > 2 }, abort: { t -> true });
+    val flaky = Participant(
+        name: "tp3",
+        prepare: { t -> true },
+        commit: { t -> bump("tp3.commit") > 2 },
+        abort: { t -> true },
+    );
     val d = commitAll(ds, "tx-3", [flaky]);
-    assert d == "commit" && counterOf("tp3.commit") == 3 && decisionOf(ds, "tx-3") == "commit/yes";
+    assert d == "commit"
+        && counterOf("tp3.commit") == 3
+        && decisionOf(ds, "tx-3") == "commit/yes";
 }
 
 fn slowAck(tag: string, t: string, phase: string) -> bool {
     val n = bump(tag + "." + phase);
     val _l = note(tag + "." + phase + " " + t);
-    if (n == 1) {
-        val _p = pause(2000);
-    };
+    if (n == 1) val _p = pause(2000);
     return true;
 }
 
 test "2pc: a coordinator killed after logging commit and before the first commit message commits on recovery" {
     val ds = fresh("tp4");
-    val slow = Participant(name: "tp4", prepare: { t -> true }, commit: { t -> slowAck("tp4", t, "commit") }, abort: { t -> true });
+    val slow = Participant(
+        name: "tp4",
+        prepare: { t -> true },
+        commit: { t -> slowAck("tp4", t, "commit") },
+        abort: { t -> true },
+    );
     val _k = killAfter({ -> commitAll(ds, "tx-4", [slow]) }, 300);
     val logged = decisionOf(ds, "tx-4");
     val n = recover2pc(ds, [slow]);
-    assert logged == "commit/no" && n == 1 && decisionOf(ds, "tx-4") == "commit/yes", logged;
+    assert logged == "commit/no"
+        && n == 1
+        && decisionOf(ds, "tx-4") == "commit/yes", logged;
     assert counterOf("tp4.commit") == 2 && recover2pc(ds, [slow]) == 0;
 }
 
 test "2pc: a coordinator killed before logging a decision aborts on recovery" {
     val ds = fresh("tp5");
-    val slow = Participant(name: "tp5", prepare: { t -> slowAck("tp5", t, "prepare") }, commit: { t -> note("tp5.commit " + t) == 0 }, abort: { t -> note("tp5.abort " + t) == 0 });
+    val slow = Participant(
+        name: "tp5",
+        prepare: { t -> slowAck("tp5", t, "prepare") },
+        commit: { t -> note("tp5.commit " + t) == 0 },
+        abort: { t -> note("tp5.abort " + t) == 0 },
+    );
     val _k = killAfter({ -> commitAll(ds, "tx-5", [slow]) }, 300);
     val logged = decisionOf(ds, "tx-5");
     val n = recover2pc(ds, [slow]);
-    assert logged == "/no" && n == 1 && decisionOf(ds, "tx-5") == "abort/yes" && logOf("tp5.") == "tp5.prepare tx-5,tp5.abort tx-5", logOf("tp5.");
+    assert logged == "/no"
+        && n == 1
+        && decisionOf(ds, "tx-5") == "abort/yes"
+        && logOf("tp5.") == "tp5.prepare tx-5,tp5.abort tx-5", logOf("tp5.");
 }
 
 test "2pc: a transaction whose participant never acknowledges stays open for recovery" {
     val ds = fresh("tp6");
     val _m = rkSetProp("rakun.tx.2pc.max-retries", "2");
-    val down = Participant(name: "tp6", prepare: { t -> true }, commit: { t -> bump("tp6.commit") < 0 }, abort: { t -> true });
+    val down = Participant(
+        name: "tp6",
+        prepare: { t -> true },
+        commit: { t -> bump("tp6.commit") < 0 },
+        abort: { t -> true },
+    );
     val d = commitAll(ds, "tx-6", [down]);
     val _r = rkSetProp("rakun.tx.2pc.max-retries", "");
-    assert d == "commit" && decisionOf(ds, "tx-6") == "commit/no" && counterOf("tp6.commit") == 2;
+    assert d == "commit"
+        && decisionOf(ds, "tx-6") == "commit/no"
+        && counterOf("tp6.commit") == 2;
 }

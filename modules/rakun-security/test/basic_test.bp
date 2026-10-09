@@ -17,7 +17,13 @@ import {users_sql.SqlUserDetailsService, users_sql.sqlUserStore, users_sql.userS
 import {basic.BasicCredentials, basic.parseBasic, basic.verifyBasic, basic.verifyUser, basic.basicHeader};
 import {security_filter.installSecurityWith, security_filter.challengeHeader, security_filter.unauthorizedDetail};
 
-fn setUser(i: i32, name: string, password: string, authorities: string, enabled: string) -> i32 {
+fn setUser(
+    i: i32,
+    name: string,
+    password: string,
+    authorities: string,
+    enabled: string,
+) -> i32 {
     val base: string = "rakun.security.users[" + i.toString() + "].";
     val _u = rkSetProp(base + "username", name);
     val _p = rkSetProp(base + "password", encodePassword(password));
@@ -39,10 +45,18 @@ fn users() -> i32 {
 
 fn chain() -> i32 {
     val _r = resetChain();
-    val _p = installSecurityWith(SecurityPolicy(rules: [], defaultRequirement: "authenticated"));
+    val _p = installSecurityWith(
+        SecurityPolicy(rules: [], defaultRequirement: "authenticated"),
+    );
     return rkChainSetTerminal({ method, path, headersWire, queryWire, body ->
         val a: Authentication = currentAuthentication();
-        Response.ok(a.principal.name + " " + a.method + " " + a.principal.authorities.join(","));
+        Response.ok(
+            a.principal.name
+                + " "
+                + a.method
+                + " "
+                + a.principal.authorities.join(","),
+        );
     });
 }
 
@@ -62,7 +76,13 @@ fn whyOf(r: @Result<Authentication, string>) -> string {
 test "basic: a known user with the right password authenticates" {
     val _u = users();
     val _c = chain();
-    val res: Response = runChain("GET", "/orders", basicWire("ana", "pa:ss:word"), "", "");
+    val res: Response = runChain(
+        "GET",
+        "/orders",
+        basicWire("ana", "pa:ss:word"),
+        "",
+        "",
+    );
     val _x = clearUsers();
     assert res.status == 200, res.body;
     assert res.body == "ana basic ROLE_USER,ROLE_AUDIT", res.body;
@@ -70,7 +90,9 @@ test "basic: a known user with the right password authenticates" {
 
 test "basic: a password containing a colon round-trips - the split takes the first colon only" {
     val c = parseBasic(basicHeader("ana", "pa:ss:word"));
-    val creds: BasicCredentials = c.unwrapOr(BasicCredentials(username: "", password: ""));
+    val creds: BasicCredentials = c.unwrapOr(
+        BasicCredentials(username: "", password: ""),
+    );
     assert creds.username == "ana";
     assert creds.password == "pa:ss:word";
     assert parseBasic("Basic bm9jb2xvbg==").isError();
@@ -82,10 +104,22 @@ test "basic: a wrong password and an unknown user produce the identical response
     val _u = users();
     val _c = chain();
     val _r = rkSecEncodeReset();
-    val wrong: Response = runChain("GET", "/orders", basicWire("ana", "nope"), "", "");
+    val wrong: Response = runChain(
+        "GET",
+        "/orders",
+        basicWire("ana", "nope"),
+        "",
+        "",
+    );
     val wrongHeader: string = headerValue("WWW-Authenticate");
     val afterWrong: i32 = rkSecEncodeCount();
-    val stranger: Response = runChain("GET", "/orders", basicWire("nobody", "nope"), "", "");
+    val stranger: Response = runChain(
+        "GET",
+        "/orders",
+        basicWire("nobody", "nope"),
+        "",
+        "",
+    );
     val strangerHeader: string = headerValue("WWW-Authenticate");
     val afterStranger: i32 = rkSecEncodeCount();
     val _x = clearUsers();
@@ -94,19 +128,27 @@ test "basic: a wrong password and an unknown user produce the identical response
     assert wrong.body == stranger.body;
     assert wrongHeader == strangerHeader;
     assert afterWrong == 1, afterWrong.toString();
-    assert afterStranger - afterWrong == 1, (afterStranger - afterWrong).toString();
+    assert afterStranger - afterWrong == 1, (afterStranger
+        - afterWrong).toString();
 }
 
 test "basic: the 401 carries WWW-Authenticate and a problem detail, never the credentials" {
     val _u = users();
     val _c = chain();
-    val res: Response = runChain("GET", "/orders", basicWire("ana", "pa:ss:wrong"), "", "");
+    val res: Response = runChain(
+        "GET",
+        "/orders",
+        basicWire("ana", "pa:ss:wrong"),
+        "",
+        "",
+    );
     val challenge: string = headerValue("WWW-Authenticate");
     val contentType: string = headerValue("Content-Type");
     val _x = clearUsers();
     assert res.status == 401;
     assert challenge == challengeHeader();
-    assert challenge == "Bearer realm=\"rakun\", Basic realm=\"rakun\"", challenge;
+    assert challenge
+        == "Bearer realm=\"rakun\", Basic realm=\"rakun\"", challenge;
     assert contentType == "application/problem+json";
     try asserts.contains(res.body, "\"status\":401");
     try asserts.contains(res.body, unauthorizedDetail());
@@ -119,8 +161,20 @@ test "basic: a request with no credentials gets the same 401 as bad ones" {
     val _u = users();
     val _c = chain();
     val none: Response = runChain("GET", "/orders", "", "", "");
-    val bad: Response = runChain("GET", "/orders", basicWire("ana", "x"), "", "");
-    val other: Response = runChain("GET", "/orders", "authorization\tDigest abc", "", "");
+    val bad: Response = runChain(
+        "GET",
+        "/orders",
+        basicWire("ana", "x"),
+        "",
+        "",
+    );
+    val other: Response = runChain(
+        "GET",
+        "/orders",
+        "authorization\tDigest abc",
+        "",
+        "",
+    );
     val _x = clearUsers();
     assert none.status == 401;
     assert none.body == bad.body;
@@ -134,7 +188,12 @@ test "users: the in-memory arm parses the configured user list" {
     val _u = users();
     val list: UserDetails[] = configuredUsers();
     val store: UserStore = inMemoryStore();
-    val ana: UserDetails = loadUser(store, "ana") ?? UserDetails(username: "", passwordHash: "", authorities: [], enabled: false);
+    val ana: UserDetails = loadUser(store, "ana") ?? UserDetails(
+        username: "",
+        passwordHash: "",
+        authorities: [],
+        enabled: false,
+    );
     val missing: ?UserDetails = loadUser(store, "carol");
     val _x = clearUsers();
     assert list.length == 2;
@@ -144,7 +203,10 @@ test "users: the in-memory arm parses the configured user list" {
     assert ana.passwordHash.startsWith("{pbkdf2}310000$");
     assert (list.at(1) ?? ana).enabled == false;
     var found = false;
-    if (missing) { _ -> found = true; };
+    if (missing) {
+        _ ->
+        found = true;
+    }
     assert found == false;
 }
 
@@ -152,9 +214,21 @@ test "users: a disabled user is rejected with the same 401 as a wrong password" 
     val _u = users();
     val _c = chain();
     val _r = rkSecEncodeReset();
-    val disabled: Response = runChain("GET", "/orders", basicWire("bob", "hunter2"), "", "");
+    val disabled: Response = runChain(
+        "GET",
+        "/orders",
+        basicWire("bob", "hunter2"),
+        "",
+        "",
+    );
     val afterDisabled: i32 = rkSecEncodeCount();
-    val wrong: Response = runChain("GET", "/orders", basicWire("ana", "hunter2"), "", "");
+    val wrong: Response = runChain(
+        "GET",
+        "/orders",
+        basicWire("ana", "hunter2"),
+        "",
+        "",
+    );
     val _x = clearUsers();
     assert disabled.status == 401;
     assert disabled.body == wrong.body;
@@ -165,17 +239,46 @@ test "users: the SQL arm loads a user through a front 08 #[query] statement" {
     val _url = rkSetProp("rakun.datasource.url", "ets:memory");
     val _b = dataSourceBoot();
     val sql: SqlTemplate = sqlTemplate(defaultDataSourceName());
-    for (userSchema()) { ddl -> val _d = sql.update(ddl, []); };
-    val _i = sql.update("INSERT INTO users (username, password, enabled) VALUES (:u, :p, :e)", [param("u", "dora"), param("p", encodePassword("s3cret")), param("e", "true")]);
-    val _j = sql.update("INSERT INTO users (username, password, enabled) VALUES (:u, :p, :e)", [param("u", "eve"), param("p", encodePassword("s3cret")), param("e", "false")]);
-    val _k = sql.update("INSERT INTO authorities (username, authority) VALUES (:u, :a)", [param("u", "dora"), param("a", "ROLE_USER")]);
-    val _l = sql.update("INSERT INTO authorities (username, authority) VALUES (:u, :a)", [param("u", "dora"), param("a", "ROLE_ADMIN")]);
+    for (userSchema()) { ddl ->
+        val _d = sql.update(ddl, []);
+    }
+    val _i = sql.update(
+        "INSERT INTO users (username, password, enabled) VALUES (:u, :p, :e)",
+        [
+            param("u", "dora"),
+            param("p", encodePassword("s3cret")),
+            param("e", "true"),
+        ],
+    );
+    val _j = sql.update(
+        "INSERT INTO users (username, password, enabled) VALUES (:u, :p, :e)",
+        [
+            param("u", "eve"),
+            param("p", encodePassword("s3cret")),
+            param("e", "false"),
+        ],
+    );
+    val _k = sql.update(
+        "INSERT INTO authorities (username, authority) VALUES (:u, :a)",
+        [param("u", "dora"), param("a", "ROLE_USER")],
+    );
+    val _l = sql.update(
+        "INSERT INTO authorities (username, authority) VALUES (:u, :a)",
+        [param("u", "dora"), param("a", "ROLE_ADMIN")],
+    );
     val arm = SqlUserDetailsService(sql: sqlTemplate(defaultDataSourceName()));
-    val dora: UserDetails = arm.loadByUsername("dora") ?? UserDetails(username: "", passwordHash: "", authorities: [], enabled: false);
+    val dora: UserDetails = arm.loadByUsername("dora") ?? UserDetails(
+        username: "",
+        passwordHash: "",
+        authorities: [],
+        enabled: false,
+    );
     assert dora.username == "dora";
     assert dora.enabled;
-    assert dora.authorities.join(",") == "ROLE_USER,ROLE_ADMIN", dora.authorities.join(",");
-    assert SqlUserDetailsService.loadByUsernameSql() == "SELECT username, password, enabled FROM users WHERE username = :username";
+    assert dora.authorities.join(",")
+        == "ROLE_USER,ROLE_ADMIN", dora.authorities.join(",");
+    assert SqlUserDetailsService.loadByUsernameSql()
+        == "SELECT username, password, enabled FROM users WHERE username = :username";
     val store: UserStore = sqlUserStore(sqlTemplate(defaultDataSourceName()));
     assert whyOf(verifyUser(store, "dora", "s3cret")) == "ok dora";
     assert whyOf(verifyUser(store, "dora", "wrong")) == "bad credentials";

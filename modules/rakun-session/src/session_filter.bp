@@ -23,7 +23,7 @@
 //// principal (the session-fixation defence: call it on every login and every
 //// privilege change), `invalidateSession()` ends it.
 
-import {io: {clock}} from "std";
+import {io.clock} from "std";
 import {Response} from "rakun";
 import {rkScheduleFixedDelay} from "rakun-scheduling";
 import {WebRequest, Chain, registerFilter, rkCookieAdd} from "rakun-web";
@@ -65,11 +65,18 @@ pub fn installSession(repo: SessionRepository) -> i32 {
     return installSessionWith(repo, sessionSettings());
 }
 
-pub fn installSessionWith(repo: SessionRepository, settings: SessionSettings) -> i32 {
+pub fn installSessionWith(
+    repo: SessionRepository,
+    settings: SessionSettings,
+) -> i32 {
     val problem: string = sessionConfigProblem(settings);
     if (problem != "") @panic(problem);
     val _r = rkSessInstallRepo(repo);
-    return registerFilter("session", orderSession(), { req, chain -> sessionEntry(settings, req, chain) });
+    return registerFilter(
+        "session",
+        orderSession(),
+        { req, chain -> sessionEntry(settings, req, chain) },
+    );
 }
 
 // What the entry concluded about the presented cookie: `none` (no cookie),
@@ -78,31 +85,49 @@ pub fn sessionOutcome() -> string {
     return rkSessSlot("outcome");
 }
 
-pub fn sessionEntry(settings: SessionSettings, req: WebRequest, chain: Chain) -> Response {
+pub fn sessionEntry(
+    settings: SessionSettings,
+    req: WebRequest,
+    chain: Chain,
+) -> Response {
     val _c = rkSessSlotsClear();
-    val presented: string = cookieFromHeader(req.header("cookie"), settings.cookieName);
+    val presented: string = cookieFromHeader(
+        req.header("cookie"),
+        settings.cookieName,
+    );
     val _o = rkSessSlotPut("outcome", "none");
     if (presented != "") {
         val repo: SessionRepository = installedRepository();
         val now: i64 = clock.nowMillis();
-        val r: Resolution = resolveCookie(repo, settings.secret, presented, now);
+        val r: Resolution = resolveCookie(
+            repo,
+            settings.secret,
+            presented,
+            now,
+        );
         val _p = rkSessSlotPut("outcome", r.outcome);
         if (r.outcome == "ok") {
             val touched: Session = touchedAt(r.session, now);
             val _s = repo.save(touched);
             val _t = rkSessSlotPut("touches", "1");
             val _k = rkSessPutCurrent(touched);
-        };
-    };
+        }
+    }
     val res: Response = chain.next(req);
     val cookie: string = rkSessSlot("cookie");
     if (cookie == "issue") {
         val current: ?Session = rkSessCurrent();
-        if (current) { s -> val _a = rkCookieAdd(sessionCookieHeader(settings, cookieValueFor(settings.secret, s.id))); };
-    };
-    if (cookie == "end") {
-        val _e = rkCookieAdd(expiredCookieHeader(settings));
-    };
+        if (current) {
+            s ->
+            val _a = rkCookieAdd(
+                sessionCookieHeader(
+                    settings,
+                    cookieValueFor(settings.secret, s.id),
+                ),
+            );
+        }
+    }
+    if (cookie == "end") val _e = rkCookieAdd(expiredCookieHeader(settings));
     return res;
 }
 
@@ -152,7 +177,10 @@ pub fn rotateSession() -> Session {
 // session id planted before login is worth nothing after it.
 pub fn authenticateSession(principal: string) -> Session {
     val repo: SessionRepository = installedRepository();
-    val next: Session = rotate(repo, withPrincipal(currentSession(), principal));
+    val next: Session = rotate(
+        repo,
+        withPrincipal(currentSession(), principal),
+    );
     val _s = repo.save(next);
     val _k = rkSessPutCurrent(next);
     val _i = rkSessSlotPut("cookie", "issue");
@@ -161,7 +189,10 @@ pub fn authenticateSession(principal: string) -> Session {
 
 pub fn invalidateSession() -> i32 {
     val current: ?Session = rkSessCurrent();
-    if (current) { s -> val _d = installedRepository().deleteById(s.id); };
+    if (current) {
+        s ->
+        val _d = installedRepository().deleteById(s.id);
+    }
     val _c = rkSessClearCurrent();
     return rkSessSlotPut("cookie", "end");
 }
@@ -179,5 +210,10 @@ pub fn sweepExpiredSessions() -> i32 {
 }
 
 pub fn installSessionSweeper(millis: i32) -> i32 {
-    return rkScheduleFixedDelay("session-sweeper", "rakun-session", millis, { -> sweepExpiredSessions() });
+    return rkScheduleFixedDelay(
+        "session-sweeper",
+        "rakun-session",
+        millis,
+        { -> sweepExpiredSessions() },
+    );
 }

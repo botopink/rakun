@@ -33,30 +33,53 @@ fn port() -> i32 {
 }
 
 fn client() -> RestClient {
-    return RestClient.builder().baseUrl("http://127.0.0.1:" + port().toString()).build();
+    return RestClient
+        .builder()
+        .baseUrl("http://127.0.0.1:" + port().toString())
+        .build();
 }
 
 // The stand-in store: a hit answers the row, a miss runs `load` and keeps it.
-fn standIn(name: string, parts: Array<string>, life: CacheLife, tags: Array<string>, load: fn() -> string) -> string {
+fn standIn(
+    name: string,
+    parts: Array<string>,
+    life: CacheLife,
+    tags: Array<string>,
+    load: fn() -> string,
+) -> string {
     val key = "test.cache.row." + name + "|" + parts.join("|");
-    val _l = rkSetProp("test.cache.store", rkProp("test.cache.store") + name + " " + life.expire.toString() + " [" + tags.join(",") + "]\n");
+    val _l = rkSetProp(
+        "test.cache.store",
+        rkProp("test.cache.store")
+            + name
+            + " "
+            + life.expire.toString()
+            + " ["
+            + tags.join(",")
+            + "]\n",
+    );
     val row = rkProp(key);
     if (row != "") return row;
     val fresh = load();
     val _w = rkSetProp(key, fresh);
-    val _k = rkSetProp("test.cache.keys", rkProp("test.cache.keys") + key + "\n");
+    val _k = rkSetProp(
+        "test.cache.keys",
+        rkProp("test.cache.keys") + key + "\n",
+    );
     return fresh;
 }
 
 fn install() -> i32 {
     val _r = reset();
-    return installResponseCache({ name, parts, life, tags, load -> standIn(name, parts, life, tags, load) });
+    return installResponseCache(
+        { name, parts, life, tags, load -> standIn(name, parts, life, tags, load) },
+    );
 }
 
 fn reset() -> i32 {
     for (rkProp("test.cache.keys").split("\n")) { k ->
         if (k != "") rkSetProp(k, "");
-    };
+    }
     val _k = rkSetProp("test.cache.keys", "");
     val _s = rkSetProp("test.cache.store", "");
     val _h = rkSetProp("test.cache.hits", "0");
@@ -80,8 +103,14 @@ fn life() -> CacheLife {
 test "cache: a second retrieve of a cached GET inside the window does not reach the transport" {
     val _i = install();
     val c = client();
-    val first = c.get("/products").cached("upstream-products", life(), ["products"]).retrieve();
-    val second = c.get("/products").cached("upstream-products", life(), ["products"]).retrieve();
+    val first = c
+        .get("/products")
+        .cached("upstream-products", life(), ["products"])
+        .retrieve();
+    val second = c
+        .get("/products")
+        .cached("upstream-products", life(), ["products"])
+        .retrieve();
     val reached = hits();
     val _d = done();
     assert first.status == 200;
@@ -93,7 +122,10 @@ test "cache: a second retrieve of a cached GET inside the window does not reach 
 
 test "cache: the store receives the name, the lifetime and the tags" {
     val _i = install();
-    val _r = client().get("/tags").cached("upstream", cacheLifeOf(30, 60, 90), ["a", "b"]).retrieve();
+    val _r = client()
+        .get("/tags")
+        .cached("upstream", cacheLifeOf(30, 60, 90), ["a", "b"])
+        .retrieve();
     val store = rkProp("test.cache.store");
     val _d = done();
     assert store == "upstream 90 [a,b]\n";
@@ -117,7 +149,11 @@ test "cache: revalidate(n) caches under the derived name with a lifetime of (0, 
     val store = rkProp("test.cache.store");
     val reached = hits();
     val _d = done();
-    assert store == derivedCacheName() + " 3600 []\n" + derivedCacheName() + " 3600 []\n";
+    assert store
+        == derivedCacheName()
+            + " 3600 []\n"
+            + derivedCacheName()
+            + " 3600 []\n";
     assert reached == 1;
 }
 
@@ -173,11 +209,37 @@ test "cache: with no store installed a cached request is a direct transport call
 test "cache: requests differing only in a header share a row, differing in body do not" {
     val _i = install();
     val c = client();
-    val _a = c.get("/k").header("x-a", "1").cached("keyed", life(), []).retrieve();
-    val _b = c.get("/k").header("x-a", "2").cached("keyed", life(), []).retrieve();
+    val _a = c
+        .get("/k")
+        .header("x-a", "1")
+        .cached("keyed", life(), [])
+        .retrieve();
+    val _b = c
+        .get("/k")
+        .header("x-a", "2")
+        .cached("keyed", life(), [])
+        .retrieve();
     val afterHeaders = hits();
-    val one = RequestSpec(client: c, method: "GET", path: "/k", body: "one", headers: [], cacheName: "keyed", cacheLife: life(), cacheTags: []);
-    val two = RequestSpec(client: c, method: "GET", path: "/k", body: "two", headers: [], cacheName: "keyed", cacheLife: life(), cacheTags: []);
+    val one = RequestSpec(
+        client: c,
+        method: "GET",
+        path: "/k",
+        body: "one",
+        headers: [],
+        cacheName: "keyed",
+        cacheLife: life(),
+        cacheTags: [],
+    );
+    val two = RequestSpec(
+        client: c,
+        method: "GET",
+        path: "/k",
+        body: "two",
+        headers: [],
+        cacheName: "keyed",
+        cacheLife: life(),
+        cacheTags: [],
+    );
     val _c = one.retrieve();
     val _e = two.retrieve();
     val afterBodies = hits();
@@ -185,5 +247,6 @@ test "cache: requests differing only in a header share a row, differing in body 
     assert afterHeaders == 1;
     assert afterBodies == 3;
     assert cacheKeyParts(one) != cacheKeyParts(two);
-    assert (cacheKeyParts(one).at(1) ?? "") == "http://127.0.0.1:" + port().toString() + "/k";
+    assert (cacheKeyParts(one).at(1) ?? "")
+        == "http://127.0.0.1:" + port().toString() + "/k";
 }

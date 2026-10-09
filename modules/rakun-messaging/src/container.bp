@@ -29,11 +29,7 @@
 
 import {rkProp, toI32} from "rakun";
 import {rkRegisterHealthIndicator} from "rakun";
-import {
-    messaging_host.rkMsgListeners, messaging_host.rkMsgDuplicates, messaging_host.rkMsgReset, messaging_host.rkMsgArmConnect, messaging_host.rkMsgArmDisconnect, messaging_host.rkMsgArmConnected,
-    messaging_host.rkMsgArmProperties, messaging_host.rkMsgPropsUnder, messaging_host.rkMsgPublished, messaging_host.rkMsgPublishedClear, messaging_host.rkMsgStartContainer,
-    messaging_host.rkMsgStopContainers, messaging_host.rkMsgContainerWorkers, messaging_host.rkMsgLogLine, messaging_host.rkMsgLogLines, messaging_host.rkMsgLogClear,
-};
+import {messaging_host.rkMsgListeners, messaging_host.rkMsgDuplicates, messaging_host.rkMsgReset, messaging_host.rkMsgArmConnect, messaging_host.rkMsgArmDisconnect, messaging_host.rkMsgArmConnected, messaging_host.rkMsgArmProperties, messaging_host.rkMsgPropsUnder, messaging_host.rkMsgPublished, messaging_host.rkMsgPublishedClear, messaging_host.rkMsgStartContainer, messaging_host.rkMsgStopContainers, messaging_host.rkMsgContainerWorkers, messaging_host.rkMsgLogLine, messaging_host.rkMsgLogLines, messaging_host.rkMsgLogClear};
 import {messaging_health.armHealth};
 
 pub fn arms() -> Array<string> {
@@ -60,7 +56,13 @@ pub type Listener(
 pub fn registeredListeners() -> Array<Listener> {
     return rkMsgListeners().map({ line ->
         val f = line.split("|");
-        Listener(name: (f[0] ?? ""), broker: (f[1] ?? ""), destination: (f[2] ?? ""), group: (f[3] ?? ""), container: (f[4] ?? ""))
+        Listener(
+            name: (f[0] ?? ""),
+            broker: (f[1] ?? ""),
+            destination: (f[2] ?? ""),
+            group: (f[3] ?? ""),
+            container: (f[4] ?? ""),
+        );
     });
 }
 
@@ -71,14 +73,20 @@ fn listenerKey(container: string, key: string) -> string {
 fn intOr(key: string, fallback: i32) -> i32 {
     val v = rkProp(key).trim();
     if (v == "") return fallback;
-    val digits = v.split("").filter({ c -> "0123456789".contains(c) == false }).length == 0;
+    val digits = v
+        .split("")
+        .filter({ c -> "0123456789".contains(c) == false }).length
+        == 0;
     return if (digits) toI32(v) else -1;
 }
 
-pub fn containerSettings(container: string, broker: string) -> ContainerSettings {
+pub fn containerSettings(
+    container: string,
+    broker: string,
+) -> ContainerSettings {
     val ack = rkProp(listenerKey(container, "ack-mode")).trim();
     val enabled = rkProp(listenerKey(container, "enabled")).trim();
-    val defaultAck = if (broker == "redis") { "none" } else { "auto" };
+    val defaultAck = if (broker == "redis") "none" else "auto";
     return ContainerSettings(
         name: container,
         broker: broker,
@@ -99,7 +107,10 @@ pub fn armConfigured(arm: string) -> bool {
 
 fn addressKeys(arm: string) -> Array<string> {
     val keys = case arm {
-        "amqp" -> ["rakun.messaging.amqp.host", "rakun.messaging.amqp.addresses"];
+        "amqp" -> [
+            "rakun.messaging.amqp.host",
+            "rakun.messaging.amqp.addresses",
+        ];
         "kafka" -> ["rakun.messaging.kafka.bootstrap-servers"];
         "redis" -> ["rakun.messaging.redis.url"];
         _ -> [];
@@ -119,11 +130,32 @@ fn driverOf(arm: string) -> string {
 
 fn settingsProblem(s: ContainerSettings) -> string {
     val c = "rakun.messaging.listener." + s.name;
-    if (s.concurrency < 1) return "rakun-messaging: " + c + ".concurrency must be a whole number of at least 1";
-    if (s.prefetch < 1) return "rakun-messaging: " + c + ".prefetch must be a whole number of at least 1";
-    if (s.ackMode != "auto" && s.ackMode != "manual" && s.ackMode != "none") return "rakun-messaging: " + c + ".ack-mode is `" + s.ackMode + "` - it must be auto, manual or none";
-    if (s.broker == "redis" && s.ackMode != "none") return "rakun-messaging: " + c + ".ack-mode is `" + s.ackMode + "` - Redis pub/sub has no acknowledgement and no redelivery, so a redis container runs with ack-mode none only";
-    if ((s.broker == "amqp" || s.broker == "kafka") && s.ackMode == "none") return "rakun-messaging: " + c + ".ack-mode none is refused for " + s.broker + " - a message would be settled before its handler ran; use auto or manual";
+    if (s.concurrency < 1)
+        return "rakun-messaging: "
+            + c
+            + ".concurrency must be a whole number of at least 1";
+    if (s.prefetch < 1)
+        return "rakun-messaging: "
+            + c
+            + ".prefetch must be a whole number of at least 1";
+    if (s.ackMode != "auto" && s.ackMode != "manual" && s.ackMode != "none")
+        return "rakun-messaging: "
+            + c
+            + ".ack-mode is `"
+            + s.ackMode
+            + "` - it must be auto, manual or none";
+    if (s.broker == "redis" && s.ackMode != "none")
+        return "rakun-messaging: "
+            + c
+            + ".ack-mode is `"
+            + s.ackMode
+            + "` - Redis pub/sub has no acknowledgement and no redelivery, so a redis container runs with ack-mode none only";
+    if ((s.broker == "amqp" || s.broker == "kafka") && s.ackMode == "none")
+        return "rakun-messaging: "
+            + c
+            + ".ack-mode none is refused for "
+            + s.broker
+            + " - a message would be settled before its handler ran; use auto or manual";
     return "";
 }
 
@@ -132,26 +164,62 @@ pub fn messagingConfigProblem() -> string {
     var problem = "";
     for (arms()) { arm ->
         val t = transportOf(arm);
-        if (problem == "" && t != "" && t != "memory") problem = "rakun-messaging: rakun.messaging." + arm + ".transport is `" + t + "` - the only transport this milestone is memory (the in-process broker)";
+        if (problem == "" && t != "" && t != "memory")
+            problem = "rakun-messaging: rakun.messaging."
+                + arm
+                + ".transport is `"
+                + t
+                + "` - the only transport this milestone is memory (the in-process broker)";
         for (addressKeys(arm)) { k ->
-            if (problem == "" && rkProp(k) != "" && t != "memory") problem = "rakun-messaging: " + k + " is set, but the " + arm + " wire is not implemented - it needs " + driverOf(arm) + ", an OTP application a sidecar cannot load; set rakun.messaging." + arm + ".transport=memory for the in-process broker";
-        };
-    };
+            if (problem == "" && rkProp(k) != "" && t != "memory")
+                problem = "rakun-messaging: "
+                    + k
+                    + " is set, but the "
+                    + arm
+                    + " wire is not implemented - it needs "
+                    + driverOf(arm)
+                    + ", an OTP application a sidecar cannot load; set rakun.messaging."
+                    + arm
+                    + ".transport=memory for the in-process broker";
+        }
+    }
     for (rkMsgDuplicates()) { d ->
         val f = d.split("|");
-        if (problem == "") problem = "rakun-messaging: two listeners consume " + (f[0] ?? "") + " " + (f[1] ?? "") + ": " + (f[2] ?? "") + " and " + (f[3] ?? "") + " - one of them would never receive a message";
-    };
+        if (problem == "")
+            problem = "rakun-messaging: two listeners consume "
+                + (f[0] ?? "")
+                + " "
+                + (f[1] ?? "")
+                + ": "
+                + (f[2] ?? "")
+                + " and "
+                + (f[3] ?? "")
+                + " - one of them would never receive a message";
+    }
     for (registeredListeners()) { l ->
-        if (problem == "" && armConfigured(l.broker) == false) problem = "rakun-messaging: " + l.name + " consumes " + l.broker + " " + l.destination + ", and no " + l.broker + " transport is configured (rakun.messaging." + l.broker + ".transport)";
+        if (problem == "" && armConfigured(l.broker) == false)
+            problem = "rakun-messaging: "
+                + l.name
+                + " consumes "
+                + l.broker
+                + " "
+                + l.destination
+                + ", and no "
+                + l.broker
+                + " transport is configured (rakun.messaging."
+                + l.broker
+                + ".transport)";
         val p = settingsProblem(containerSettings(l.container, l.broker));
         if (problem == "" && p != "") problem = p;
-    };
+    }
     return problem;
 }
 
 fn passthrough(arm: string) -> Array<string> {
     val prefix = "rakun.messaging." + arm + ".properties.";
-    return rkMsgPropsUnder(prefix).map({ kv -> kv.slice(prefix.length(), kv.length()) });
+    return rkMsgPropsUnder(prefix).map(
+        { kv -> kv.slice(prefix.length(), kv.length()) },
+    );
 }
 
 // The boot: refuse a bad configuration, connect every configured arm with its
@@ -165,31 +233,54 @@ pub fn startMessaging() -> i32 {
             val props = passthrough(arm);
             val _c = rkMsgArmConnect(arm, props);
             val names = props.map({ kv -> (kv.split("=")[0] ?? "") });
-            val shown = if (names.length == 0) { "(none)" } else { names.join(", ") };
+            val shown = if (names.length == 0) "(none)" else names.join(", ");
             val _l = rkMsgLogLine("passthrough " + arm + ": " + shown);
-            val _h = rkRegisterHealthIndicator("messaging." + arm, "rakun-messaging", { -> armHealth(arm) });
-        };
-    };
+            val _h = rkRegisterHealthIndicator(
+                "messaging." + arm,
+                "rakun-messaging",
+                { -> armHealth(arm) },
+            );
+        }
+    }
     var started = 0;
     for (registeredListeners()) { l ->
         val s = containerSettings(l.container, l.broker);
         if (s.enabled) {
-            val _s = rkMsgStartContainer(l.container, l.broker, l.destination, l.group, s.concurrency, s.prefetch, s.ackMode);
+            val _s = rkMsgStartContainer(
+                l.container,
+                l.broker,
+                l.destination,
+                l.group,
+                s.concurrency,
+                s.prefetch,
+                s.ackMode,
+            );
             started = started + 1;
-            if (s.concurrency > 1) {
-                val _o = rkMsgLogLine("container " + l.container + " runs " + s.concurrency.toString() + " workers - per-destination ordering is NOT preserved");
-            };
-        } else {
-            val _d = rkMsgLogLine("container " + l.container + " is disabled - " + l.name + " stays registered and idle");
-        };
-    };
+            if (s.concurrency > 1)
+                val _o = rkMsgLogLine(
+                    "container "
+                        + l.container
+                        + " runs "
+                        + s.concurrency.toString()
+                        + " workers - per-destination ordering is NOT preserved",
+                );
+        } else val _d = rkMsgLogLine(
+            "container "
+                + l.container
+                + " is disabled - "
+                + l.name
+                + " stays registered and idle",
+        );
+    }
     return started;
 }
 
 // Stops every container and disconnects every arm; listeners stay registered.
 pub fn stopMessaging() -> i32 {
     val _s = rkMsgStopContainers();
-    for (arms()) { arm -> val _d = rkMsgArmDisconnect(arm); };
+    for (arms()) { arm ->
+        val _d = rkMsgArmDisconnect(arm);
+    }
     val _p = rkMsgPublishedClear();
     return rkMsgLogClear();
 }

@@ -18,24 +18,7 @@
 
 import {Response, rkProp} from "rakun";
 import {WebRequest, Chain, registerFilter, orderMetrics, chainNames} from "rakun-web";
-import {
-    Span,
-    rkSpanCurrent,
-    rkSpanFreshTraceId,
-    rkSpanFreshSpanId,
-    rkSpanNowMicros,
-    rkSpanPush,
-    rkSpanPop,
-    rkSpanEmitStart,
-    rkSpanEmitStop,
-    rkSpanFlags,
-    rkSpanSetFlags,
-    rkSpanParent,
-    currentTraceparent,
-    continueTrace,
-    validTraceparent,
-    subscribeSpans,
-} from "rakun";
+import {Span, rkSpanCurrent, rkSpanFreshTraceId, rkSpanFreshSpanId, rkSpanNowMicros, rkSpanPush, rkSpanPop, rkSpanEmitStart, rkSpanEmitStop, rkSpanFlags, rkSpanSetFlags, rkSpanParent, currentTraceparent, continueTrace, validTraceparent, subscribeSpans} from "rakun";
 
 #[@External.Erlang("rakun_metrics", "span_count")]
 pub declare fn rkMetricsSpanCount() -> i32;
@@ -50,7 +33,11 @@ pub declare fn rkMetricsSpanBuffered() -> i32;
 pub declare fn rkMetricsSpanCap() -> i32;
 
 #[@External.Erlang("rakun_metrics", "span_from_event")]
-declare fn rkMetricsSpanFromEvent(event: string, measurementsJson: string, metadataJson: string) -> i32;
+declare fn rkMetricsSpanFromEvent(
+    event: string,
+    measurementsJson: string,
+    metadataJson: string,
+) -> i32;
 
 #[@External.Erlang("rakun_metrics", "span_subscribe_once")]
 declare fn rkMetricsSpanSubscribeOnce() -> bool;
@@ -112,7 +99,14 @@ pub fn openSpan(name: string) -> string {
     val parent = if (inTrace) spanId() else "";
     val id: string = rkSpanFreshSpanId();
     val _p = rkSpanPush(trace, id);
-    val span = Span(name: name, traceId: trace, spanId: id, parentId: parent, startedAt: rkSpanNowMicros(), attributes: "{}");
+    val span = Span(
+        name: name,
+        traceId: trace,
+        spanId: id,
+        parentId: parent,
+        startedAt: rkSpanNowMicros(),
+        attributes: "{}",
+    );
     val _s = rkMetricsOpenSpanPut(id, span);
     val _e = rkSpanEmitStart(name, trace, id, parent, "{}");
     return id;
@@ -126,7 +120,15 @@ pub fn closeSpan(span: string) -> i32 {
     val zero: i64 = 0;
     val s = open;
     val _p = rkSpanPop(s.spanId);
-    val _e = rkSpanEmitStop(s.name, s.traceId, s.spanId, s.parentId, s.attributes, rkSpanNowMicros() - s.startedAt, "ok");
+    val _e = rkSpanEmitStop(
+        s.name,
+        s.traceId,
+        s.spanId,
+        s.parentId,
+        s.attributes,
+        rkSpanNowMicros() - s.startedAt,
+        "ok",
+    );
     return 0;
 }
 
@@ -141,9 +143,10 @@ pub fn probability() -> string {
 
 // The edge decision for a trace this request minted.
 pub fn samplingEntry(req: WebRequest, chain: Chain) -> Response {
-    if (validTraceparent(req.header("traceparent")) == false) {
-        val _f = rkSpanSetFlags(if (rkMetricsSample(probability())) "01" else "00");
-    };
+    if (validTraceparent(req.header("traceparent")) == false)
+        val _f = rkSpanSetFlags(
+            if (rkMetricsSample(probability())) "01" else "00",
+        );
     return chain.next(req);
 }
 
@@ -152,7 +155,14 @@ pub fn samplingEntryName() -> string {
 }
 
 pub fn installTracing() -> i32 {
-    val _s = if (rkMetricsSpanSubscribeOnce()) subscribeSpans({ e, m, d -> rkMetricsSpanFromEvent(e, m, d) }) else 0;
+    val _s = if (rkMetricsSpanSubscribeOnce())
+        subscribeSpans({ e, m, d -> rkMetricsSpanFromEvent(e, m, d) })
+    else
+        0;
     if (chainNames().indexOf(samplingEntryName()) >= 0) return 0;
-    return registerFilter(samplingEntryName(), orderMetrics() + 1, { req, chain -> samplingEntry(req, chain) });
+    return registerFilter(
+        samplingEntryName(),
+        orderMetrics() + 1,
+        { req, chain -> samplingEntry(req, chain) },
+    );
 }

@@ -9,7 +9,7 @@
 
 import {session.Session, session.SessionRepository, session.newSession, session.encodeSession, session.decodeSession};
 import {signing.newSessionId};
-import {io: {clock}} from "std";
+import {io.clock} from "std";
 import {host.rkSessRedis};
 
 pub fn sessionKey(id: string) -> string {
@@ -23,7 +23,13 @@ pub fn principalKey(principal: string) -> string {
 // The command that stores a session: the value and a server-side TTL equal to
 // the session's own inactivity budget.
 pub fn saveCommand(s: Session) -> string[] {
-    return ["SET", sessionKey(s.id), encodeSession(s), "EX", s.maxInactiveSeconds.toString()];
+    return [
+        "SET",
+        sessionKey(s.id),
+        encodeSession(s),
+        "EX",
+        s.maxInactiveSeconds.toString(),
+    ];
 }
 
 fn redisTimeout() -> i32 {
@@ -32,13 +38,22 @@ fn redisTimeout() -> i32 {
 
 fn call(url: string, args: string[]) -> string {
     val out: string = rkSessRedis(url, args, redisTimeout());
-    if (out.startsWith("err ")) @panic("rakun-session: redis " + args.at(0) ?? "" + " failed: " + out.slice(4, out.length()));
+    if (out.startsWith("err "))
+        @panic(
+            "rakun-session: redis "
+                + args.at(0) ?? ""
+                + " failed: "
+                + out.slice(4, out.length()),
+        );
     return out;
 }
 
 fn redisSave(url: string, s: Session) -> i32 {
     val _s = call(url, saveCommand(s));
-    val _p = if (s.principal != "") call(url, ["SADD", principalKey(s.principal), s.id]) else "";
+    val _p = if (s.principal != "")
+        call(url, ["SADD", principalKey(s.principal), s.id])
+    else
+        "";
     return 1;
 }
 
@@ -51,20 +66,32 @@ fn redisFind(url: string, id: string) -> ?Session {
 
 fn redisDelete(url: string, id: string) -> i32 {
     val found: ?Session = redisFind(url, id);
-    if (found) { s -> val _r = if (s.principal != "") call(url, ["SREM", principalKey(s.principal), id]) else ""; };
+    if (found) {
+        s ->
+        val _r = if (s.principal != "")
+            call(url, ["SREM", principalKey(s.principal), id])
+        else
+            "";
+    }
     val out: string = call(url, ["DEL", sessionKey(id)]);
     return if (out == "ok 1") 1 else 0;
 }
 
-fn redisByPrincipal(url: string, principal: string, now: i64) -> Array<Session> {
+fn redisByPrincipal(
+    url: string,
+    principal: string,
+    now: i64,
+) -> Array<Session> {
     val out: string = call(url, ["SMEMBERS", principalKey(principal)]);
     var sessions: Array<Session> = [];
-    if (out.startsWith("ok ")) {
+    if (out.startsWith("ok "))
         for (out.slice(3, out.length()).split("\n")) { id ->
             val found: ?Session = if (id == "") null else redisFind(url, id);
-            if (found) { s -> if (s.isExpired(now) == false) sessions.push(s); };
-        };
-    };
+            if (found) {
+                s ->
+                if (s.isExpired(now) == false) sessions.push(s);
+            }
+        }
     return sessions;
 }
 
@@ -72,7 +99,12 @@ pub fn redisRepository(url: string, timeoutSeconds: i32) -> SessionRepository {
     return SessionRepository(
         arm: "redis",
         createFn: { principal ->
-            val s: Session = newSession(newSessionId(), principal, clock.nowMillis(), timeoutSeconds);
+            val s: Session = newSession(
+                newSessionId(),
+                principal,
+                clock.nowMillis(),
+                timeoutSeconds,
+            );
             val _p = redisSave(url, s);
             s;
         },

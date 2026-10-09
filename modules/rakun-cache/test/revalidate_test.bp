@@ -18,11 +18,26 @@ fn load() -> string {
 }
 
 fn open(phase: RequestPhase) -> i64 {
-    return beginRequest(RequestScope(id: "rv", phase: phase, method: "POST", path: "/x", query: "", headersWire: "", strict: false));
+    return beginRequest(
+        RequestScope(
+            id: "rv",
+            phase: phase,
+            method: "POST",
+            path: "/x",
+            query: "",
+            headersWire: "",
+            strict: false,
+        ),
+    );
 }
 
 fn products() -> string {
-    val policy = cachePolicy(CacheScope.Shared, "rv-products", cacheLife("hours"), ["products", "catalog"]);
+    val policy = cachePolicy(
+        CacheScope.Shared,
+        "rv-products",
+        cacheLife("hours"),
+        ["products", "catalog"],
+    );
     return cacheThrough(policy, ["productsJson", "1"], { -> load() });
 }
 
@@ -44,7 +59,10 @@ test "revalidate: in a route handler revalidateTag and revalidatePath are legal 
     val _o = open(RequestPhase.Handler);
     val t = revalidateTag("t");
     val p = revalidatePath("/p");
-    val r = asserts.throwsWith({ -> updateTag("t") }, "updateTag is legal only inside a server action (the phase is handler)");
+    val r = asserts.throwsWith(
+        { -> updateTag("t") },
+        "updateTag is legal only inside a server action (the phase is handler)",
+    );
     val _e = endRequest();
     assert t == 0 && p == 0;
     assert r.isOk();
@@ -53,9 +71,18 @@ test "revalidate: in a route handler revalidateTag and revalidatePath are legal 
 test "revalidate: during render all three verbs raise" {
     val _b = boot();
     val _o = open(RequestPhase.Render);
-    val t = asserts.throwsWith({ -> revalidateTag("t") }, "revalidateTag is not legal during render");
-    val p = asserts.throwsWith({ -> revalidatePath("/p") }, "revalidatePath is not legal during render");
-    val u = asserts.throwsWith({ -> updateTag("t") }, "updateTag is legal only inside a server action (the phase is render)");
+    val t = asserts.throwsWith(
+        { -> revalidateTag("t") },
+        "revalidateTag is not legal during render",
+    );
+    val p = asserts.throwsWith(
+        { -> revalidatePath("/p") },
+        "revalidatePath is not legal during render",
+    );
+    val u = asserts.throwsWith(
+        { -> updateTag("t") },
+        "updateTag is legal only inside a server action (the phase is render)",
+    );
     val _e = endRequest();
     assert t.isOk() && p.isOk() && u.isOk();
     assert revalidatedTags().length == 0 && revalidatedPaths().length == 0;
@@ -92,7 +119,8 @@ test "revalidate: revalidateTag serves the stale value once, refreshes, and the 
     val _d = drainRefreshes();
     assert products() == "v2";
     assert rkPropInt("rv.loads") == 2;
-    assert cacheTrace().join("\n") == "miss key=rv-products:productsJson,1 [products,catalog]\nrevalidate key=* [products]\nrevalidate key=rv-products:productsJson,1 [products,catalog]\nhit key=rv-products:productsJson,1 [products,catalog]";
+    assert cacheTrace().join("\n")
+        == "miss key=rv-products:productsJson,1 [products,catalog]\nrevalidate key=* [products]\nrevalidate key=rv-products:productsJson,1 [products,catalog]\nhit key=rv-products:productsJson,1 [products,catalog]";
 }
 
 test "revalidate: an entry carrying two tags is invalidated by either" {
@@ -110,7 +138,12 @@ test "revalidate: an entry carrying two tags is invalidated by either" {
 
 test "revalidate: revalidatePath marks the rows tagged with that path" {
     val _b = boot();
-    val page = cachePolicy(CacheScope.Shared, "rv-pages", cacheLifeOf(0, 600, 600), ["path:/products/42"]);
+    val page = cachePolicy(
+        CacheScope.Shared,
+        "rv-pages",
+        cacheLifeOf(0, 600, 600),
+        ["path:/products/42"],
+    );
     assert cacheThrough(page, ["page"], { -> load() }) == "v1";
     assert revalidatePath("/products/42") == 1;
     assert revalidatePath("/products/43") == 0;
@@ -146,7 +179,12 @@ test "revalidate: inside a request every invalidation is also noted on the frame
 test "revalidate: inside a server action revalidateTag and revalidatePath expire, so the next read is fresh" {
     val _b = boot();
     assert products() == "v1";
-    val page = cachePolicy(CacheScope.Shared, "rv-action-page", cacheLifeOf(0, 600, 600), ["path:/blog"]);
+    val page = cachePolicy(
+        CacheScope.Shared,
+        "rv-action-page",
+        cacheLifeOf(0, 600, 600),
+        ["path:/blog"],
+    );
     assert cacheThrough(page, ["doc"], { -> "doc-" + load() }) == "doc-v2";
     val _o = open(RequestPhase.Action);
     val t = revalidateTag("products");

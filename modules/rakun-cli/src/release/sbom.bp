@@ -38,32 +38,103 @@ pub fn components(manifest: string) -> Component[] {
                 val src = dependencySource(text, d);
                 val target = dependencyManifest(file, text, d);
                 val depText = if (target == "") "" else rkRelRead(target);
-                val kind = if (src.startsWith("path:")) "path" else if (src == "workspace") "workspace" else if (text.contains("\"git\"")) "git" else "registry";
-                val hash = if (kind == "path" && target != "") rkRelTreeHash(dirOf(target)) else "";
-                out.push(Component(name: d, version: versionOf(depText), source: kind, hash: hash));
+                val kind = if (src.startsWith("path:"))
+                    "path"
+                else if (src == "workspace")
+                    "workspace"
+                else if (text.contains("\"git\""))
+                    "git"
+                else
+                    "registry";
+                val hash = if (kind == "path" && target != "")
+                    rkRelTreeHash(dirOf(target))
+                else
+                    "";
+                out.push(
+                    Component(
+                        name: d,
+                        version: versionOf(depText),
+                        source: kind,
+                        hash: hash,
+                    ),
+                );
                 if (target != "") queue.push(target);
-            };
-        };
+            }
+        }
         i = i + 1;
-    };
+    }
     return out;
 }
 
 fn componentJson(c: Component) -> string {
-    var fields: Array<#(string, string)> = [#("type", json.quote("library")), #("name", json.quote(c.name)), #("version", json.quote(c.version)), #("properties", json.array([json.object([#("name", json.quote("rakun:source")), #("value", json.quote(c.source))])]))];
-    if (c.hash != "") fields.push(#("hashes", json.array([json.object([#("alg", json.quote("SHA-256")), #("content", json.quote(c.hash))])])));
+    var fields: Array<#(string, string)> = [
+        #("type", json.quote("library")),
+        #("name", json.quote(c.name)),
+        #("version", json.quote(c.version)),
+        #(
+            "properties",
+            json.array(
+                [
+                    json.object(
+                        [
+                            #("name", json.quote("rakun:source")),
+                            #("value", json.quote(c.source)),
+                        ],
+                    ),
+                ],
+            ),
+        ),
+    ];
+    if (c.hash != "")
+        fields.push(
+            #(
+                "hashes",
+                json.array(
+                    [
+                        json.object(
+                            [
+                                #("alg", json.quote("SHA-256")),
+                                #("content", json.quote(c.hash)),
+                            ],
+                        ),
+                    ],
+                ),
+            ),
+        );
     return json.object(fields);
 }
 
-pub fn sbomDocument(appName: string, appVersion: string, manifest: string) -> string {
+pub fn sbomDocument(
+    appName: string,
+    appVersion: string,
+    manifest: string,
+) -> string {
     val comps = components(manifest).map({ c -> componentJson(c) });
-    return json.object([
-        #("bomFormat", json.quote("CycloneDX")),
-        #("specVersion", json.quote("1.5")),
-        #("version", "1"),
-        #("metadata", json.object([#("component", json.object([#("type", json.quote("application")), #("name", json.quote(appName)), #("version", json.quote(appVersion))]))])),
-        #("components", json.array(comps)),
-    ]);
+    return json.object(
+        [
+            #("bomFormat", json.quote("CycloneDX")),
+            #("specVersion", json.quote("1.5")),
+            #("version", "1"),
+            #(
+                "metadata",
+                json.object(
+                    [
+                        #(
+                            "component",
+                            json.object(
+                                [
+                                    #("type", json.quote("application")),
+                                    #("name", json.quote(appName)),
+                                    #("version", json.quote(appVersion)),
+                                ],
+                            ),
+                        ),
+                    ],
+                ),
+            ),
+            #("components", json.array(comps)),
+        ],
+    );
 }
 
 pub fn sbomMediaType() -> string {
@@ -71,5 +142,10 @@ pub fn sbomMediaType() -> string {
 }
 
 pub fn registerSbomEndpoint(file: string) -> i32 {
-    return rkRegisterEndpoint("sbom", "rakun-release", "read", { req -> EndpointResponse(status: 200, contentType: sbomMediaType(), body: rkRelRead(file)) });
+    return rkRegisterEndpoint(
+        "sbom",
+        "rakun-release",
+        "read",
+        { req -> EndpointResponse(status: 200, contentType: sbomMediaType(), body: rkRelRead(file)) },
+    );
 }

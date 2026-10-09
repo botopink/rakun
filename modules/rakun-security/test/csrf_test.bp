@@ -20,11 +20,15 @@ fn secret() -> string {
 fn chain() -> i32 {
     val _r = resetChain();
     val _s = rkSetProp("rakun.security.jwt.secret", secret());
-    val _p = installSecurityWith(SecurityPolicy(
-        rules: [PathRule(pattern: "/:rest*", requirement: "permitAll")],
-        defaultRequirement: "authenticated",
-    ));
-    return rkChainSetTerminal({ method, path, headersWire, queryWire, body -> Response.ok("pong") });
+    val _p = installSecurityWith(
+        SecurityPolicy(
+            rules: [PathRule(pattern: "/:rest*", requirement: "permitAll")],
+            defaultRequirement: "authenticated",
+        ),
+    );
+    return rkChainSetTerminal(
+        { method, path, headersWire, queryWire, body -> Response.ok("pong") },
+    );
 }
 
 fn post(headersWire: string) -> Response {
@@ -39,15 +43,21 @@ test "csrf: a POST with a session cookie and no X-CSRF-Token answers 403" {
     try asserts.contains(res.body, csrfDetail());
     assert headerValue("Content-Type") == "application/problem+json";
     // A header without the cookie it must match is the same refusal.
-    assert post("cookie\tSESSION=sess-0001\nx-csrf-token\tcsrf-0001").status == 403;
+    assert post("cookie\tSESSION=sess-0001\nx-csrf-token\tcsrf-0001").status
+        == 403;
 }
 
 test "csrf: a POST with a matching token succeeds" {
     val _c = chain();
-    val res: Response = post("cookie\tSESSION=sess-0001; XSRF-TOKEN=csrf-0001\nx-csrf-token\tcsrf-0001");
+    val res: Response = post(
+        "cookie\tSESSION=sess-0001; XSRF-TOKEN=csrf-0001\nx-csrf-token\tcsrf-0001",
+    );
     assert res.status == 200;
     assert res.body == "pong";
-    assert post("cookie\tSESSION=sess-0001; XSRF-TOKEN=csrf-0001\nx-csrf-token\tcsrf-0002").status == 403;
+    assert post(
+        "cookie\tSESSION=sess-0001; XSRF-TOKEN=csrf-0001\nx-csrf-token\tcsrf-0002",
+    ).status
+        == 403;
 }
 
 test "csrf: PUT, PATCH and DELETE are challenged like POST" {
@@ -63,12 +73,18 @@ test "csrf: a POST authenticated by a bearer token and no cookie is exempt" {
     val res: Response = post("authorization\tBearer " + t);
     assert res.status == 200;
     // The session cookie is ambient whatever else is present.
-    assert post("authorization\tBearer " + t + "\ncookie\tSESSION=sess-0001").status == 403;
+    assert post(
+        "authorization\tBearer " + t + "\ncookie\tSESSION=sess-0001",
+    ).status
+        == 403;
 }
 
 test "csrf: Basic credentials are ambient and are challenged" {
     val _u = rkSetProp("rakun.security.users[0].username", "ana");
-    val _p = rkSetProp("rakun.security.users[0].password", encodePassword("pw"));
+    val _p = rkSetProp(
+        "rakun.security.users[0].password",
+        encodePassword("pw"),
+    );
     val _c = chain();
     val res: Response = post("authorization\t" + basicHeader("ana", "pw"));
     val _x = rkSetProp("rakun.security.users[0].username", "");
@@ -87,8 +103,10 @@ test "csrf: the token is compared in constant time" {
 
 test "csrf: GET and HEAD are never challenged" {
     val _c = chain();
-    assert runChain("GET", "/x", "cookie\tSESSION=sess-0001", "", "").status == 200;
-    assert runChain("HEAD", "/x", "cookie\tSESSION=sess-0001", "", "").status == 200;
+    assert runChain("GET", "/x", "cookie\tSESSION=sess-0001", "", "").status
+        == 200;
+    assert runChain("HEAD", "/x", "cookie\tSESSION=sess-0001", "", "").status
+        == 200;
     assert isSafeMethod("get");
     assert isSafeMethod("POST") == false;
     val get = webRequest("GET", "/x", "cookie\tSESSION=s", "", "");
@@ -104,8 +122,15 @@ test "csrf: a request with the session cookie and no token cookie is issued one"
     assert line.startsWith("XSRF-TOKEN=");
     try asserts.contains(line, "SameSite=Strict");
     // 32 random bytes, base64url.
-    assert cookieValue(line.split(";").at(0) ?? "", "XSRF-TOKEN").length() == 43;
-    val _h = runChain("GET", "/x", "cookie\tSESSION=sess-0001; XSRF-TOKEN=abc", "", "");
+    assert cookieValue(line.split(";").at(0) ?? "", "XSRF-TOKEN").length()
+        == 43;
+    val _h = runChain(
+        "GET",
+        "/x",
+        "cookie\tSESSION=sess-0001; XSRF-TOKEN=abc",
+        "",
+        "",
+    );
     assert cookieLines().length == 0;
     assert sessionCookieName() == "SESSION";
     val _r = resetChain();

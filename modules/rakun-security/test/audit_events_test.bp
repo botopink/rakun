@@ -13,21 +13,42 @@ import {basic.basicHeader};
 import {security_filter.installSecurityWith};
 
 #[@External.Erlang("""(fun(__K, __P, __D) -> persistent_term:put(rakun_test_audit, persistent_term:get(rakun_test_audit, []) ++ [iolist_to_binary([__K, " ", __P, " ", lists:join(",", [[__A, "=", __B] || {__A, __B} <- __D])])]), 1 end)($0, $1, $2)""")]
-declare fn capture(kind: string, principal: string, data: Array<#(string, string)>) -> i32;
+declare fn capture(
+    kind: string,
+    principal: string,
+    data: Array<#(string, string)>,
+) -> i32;
+
 #[@External.Erlang("""persistent_term:get(rakun_test_audit, [])""")]
 declare fn captured() -> string[];
+
 #[@External.Erlang("""(fun() -> persistent_term:erase(rakun_test_audit), 0 end)()""")]
 declare fn resetCaptured() -> i32;
 
 fn setUp() -> i32 {
     val _u = rkSetProp("rakun.security.users[0].username", "ana");
-    val _p = rkSetProp("rakun.security.users[0].password", encodePassword("s3cret-pw"));
+    val _p = rkSetProp(
+        "rakun.security.users[0].password",
+        encodePassword("s3cret-pw"),
+    );
     val _a = rkSetProp("rakun.security.users[0].authorities", "ROLE_USER");
     val _r = resetChain();
     val _c = resetCaptured();
     val _s = rkAuditInstallSink({ k, p, d -> capture(k, p, d) });
-    val _i = installSecurityWith(SecurityPolicy(rules: [PathRule(pattern: "/admin/:path*", requirement: "hasRole:ADMIN")], defaultRequirement: "authenticated"));
-    return rkChainSetTerminal({ method, path, headersWire, queryWire, body -> Response.ok("ok") });
+    val _i = installSecurityWith(
+        SecurityPolicy(
+            rules: [
+                PathRule(
+                    pattern: "/admin/:path*",
+                    requirement: "hasRole:ADMIN",
+                ),
+            ],
+            defaultRequirement: "authenticated",
+        ),
+    );
+    return rkChainSetTerminal(
+        { method, path, headersWire, queryWire, body -> Response.ok("ok") },
+    );
 }
 
 fn tearDown() -> i32 {
@@ -38,34 +59,70 @@ fn tearDown() -> i32 {
 
 test "audit events: a successful authentication is one AUTHENTICATION_SUCCESS with the principal and the remote address" {
     val _s = setUp();
-    val res = runChain("GET", "/orders", "authorization\t" + basicHeader("ana", "s3cret-pw"), "", "");
+    val res = runChain(
+        "GET",
+        "/orders",
+        "authorization\t" + basicHeader("ana", "s3cret-pw"),
+        "",
+        "",
+    );
     val events = captured();
     val _t = tearDown();
-    assert res.status == 200 && events.length == 1 && (events.at(0) ?? "").startsWith("AUTHENTICATION_SUCCESS ana remoteAddress="), events.join(" | ");
+    assert res.status == 200
+        && events.length == 1
+        && (events.at(0) ?? "").startsWith(
+            "AUTHENTICATION_SUCCESS ana remoteAddress=",
+        ), events.join(" | ");
 }
 
 test "audit events: a failure is one AUTHENTICATION_FAILURE naming the attempted principal and carrying no password" {
     val _s = setUp();
-    val res = runChain("GET", "/orders", "authorization\t" + basicHeader("ana", "wrong-guess"), "", "");
+    val res = runChain(
+        "GET",
+        "/orders",
+        "authorization\t" + basicHeader("ana", "wrong-guess"),
+        "",
+        "",
+    );
     val events = captured();
     val _t = tearDown();
     val all = events.join(" | ");
-    assert res.status == 401 && events.length == 1 && all.startsWith("AUTHENTICATION_FAILURE ana ") && all.contains("wrong-guess") == false && all.toLower().contains("password") == false, all;
+    assert res.status == 401
+        && events.length == 1
+        && all.startsWith("AUTHENTICATION_FAILURE ana ")
+        && all.contains("wrong-guess") == false
+        && all.toLower().contains("password") == false, all;
 }
 
 test "audit events: a denied request is one AUTHORIZATION_FAILURE with the path and the required role" {
     val _s = setUp();
-    val res = runChain("GET", "/admin/users", "authorization\t" + basicHeader("ana", "s3cret-pw"), "", "");
+    val res = runChain(
+        "GET",
+        "/admin/users",
+        "authorization\t" + basicHeader("ana", "s3cret-pw"),
+        "",
+        "",
+    );
     val events = captured();
     val _t = tearDown();
     val denied = events.filter({ e -> e.startsWith("AUTHORIZATION_FAILURE") });
-    assert res.status == 403 && denied.length == 1 && (denied.at(0) ?? "").contains("ana path=/admin/users,requiredAuthority=ROLE_ADMIN"), res.status.toString() + " " + events.join(" | ");
+    assert res.status == 403
+        && denied.length == 1
+        && (denied.at(0) ?? "").contains(
+            "ana path=/admin/users,requiredAuthority=ROLE_ADMIN",
+        ), res.status.toString() + " " + events.join(" | ");
 }
 
 test "audit events: with no sink installed the filter runs unchanged" {
     val _s = setUp();
     val _c = rkAuditClearSink();
-    val res = runChain("GET", "/orders", "authorization\t" + basicHeader("ana", "s3cret-pw"), "", "");
+    val res = runChain(
+        "GET",
+        "/orders",
+        "authorization\t" + basicHeader("ana", "s3cret-pw"),
+        "",
+        "",
+    );
     val _t = tearDown();
     assert res.status == 200 && captured().length == 0;
 }

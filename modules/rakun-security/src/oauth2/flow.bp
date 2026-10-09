@@ -23,10 +23,7 @@ import {withHeader, problemFor, problemResponse} from "rakun-web";
 import {RestClient, ClientResponse} from "rakun-client";
 import {Session, currentSession, optionalSession, authenticateSession, invalidateSession} from "rakun-session";
 import {oauth2.provider.OAuth2Provider, oauth2.provider.ProviderEndpoints, oauth2.provider.provider, oauth2.provider.discover};
-import {
-    oauth2_host.oauthRandom, oauth2_host.oauthS256, oauth2_host.oauthStatePut, oauth2_host.oauthStateTake, oauth2_host.oauthJwksPut, oauth2_host.oauthJwksHas, oauth2_host.oauthJwksNoteFetch,
-    oauth2_host.oauthJwksMayRefetch, oauth2_host.oauthVerify, oauth2_host.oauthCheckClaims, oauth2_host.oauthClaim, oauth2_host.oauthTokenPut, oauth2_host.oauthTokenGet, oauth2_host.oauthTokenDrop, oauth2_host.oauthNow,
-};
+import {oauth2_host.oauthRandom, oauth2_host.oauthS256, oauth2_host.oauthStatePut, oauth2_host.oauthStateTake, oauth2_host.oauthJwksPut, oauth2_host.oauthJwksHas, oauth2_host.oauthJwksNoteFetch, oauth2_host.oauthJwksMayRefetch, oauth2_host.oauthVerify, oauth2_host.oauthCheckClaims, oauth2_host.oauthClaim, oauth2_host.oauthTokenPut, oauth2_host.oauthTokenGet, oauth2_host.oauthTokenDrop, oauth2_host.oauthNow};
 
 pub type AuthorizationRequest(
     url: string,
@@ -57,7 +54,11 @@ fn refetchWindowMs() -> i32 {
 // protocol-relative `//host` or anything not starting with `/` is replaced.
 pub fn safeReturnTo(returnTo: string) -> string {
     val t = returnTo.trim();
-    if (t.startsWith("/") == false || t.startsWith("//") || t.startsWith("/\\") || t.contains("://")) return "/";
+    if (t.startsWith("/") == false
+        || t.startsWith("//")
+        || t.startsWith("/\\")
+        || t.contains("://"))
+        return "/";
     return t;
 }
 
@@ -70,16 +71,26 @@ pub fn redirectUri(p: OAuth2Provider) -> string {
     return baseUrl() + p.redirectPath;
 }
 
-pub fn authorizationRequest(p: OAuth2Provider, returnTo: string) -> AuthorizationRequest {
+pub fn authorizationRequest(
+    p: OAuth2Provider,
+    returnTo: string,
+) -> AuthorizationRequest {
     return authorizationRequestFor(p, returnTo, "");
 }
 
-pub fn authorizationRequestFor(p: OAuth2Provider, returnTo: string, sessionId: string) -> AuthorizationRequest {
+pub fn authorizationRequestFor(
+    p: OAuth2Provider,
+    returnTo: string,
+    sessionId: string,
+) -> AuthorizationRequest {
     val e: ProviderEndpoints = discover(p);
     val state = oauthRandom(32);
     val nonce = oauthRandom(32);
     val verifier = oauthRandom(32);
-    val _s = oauthStatePut(state, [p.id, nonce, verifier, safeReturnTo(returnTo), sessionId].join("\t"));
+    val _s = oauthStatePut(
+        state,
+        [p.id, nonce, verifier, safeReturnTo(returnTo), sessionId].join("\t"),
+    );
     val pairs: Array<#(string, string)> = [
         #("response_type", "code"),
         #("client_id", p.clientId),
@@ -90,7 +101,12 @@ pub fn authorizationRequestFor(p: OAuth2Provider, returnTo: string, sessionId: s
         #("code_challenge", oauthS256(verifier)),
         #("code_challenge_method", "S256"),
     ];
-    return AuthorizationRequest(url: e.authorization + "?" + encoding.formStringify(pairs), state: state, nonce: nonce, verifier: verifier);
+    return AuthorizationRequest(
+        url: e.authorization + "?" + encoding.formStringify(pairs),
+        state: state,
+        nonce: nonce,
+        verifier: verifier,
+    );
 }
 
 fn redirect(location: string) -> Response {
@@ -104,7 +120,12 @@ fn problem(status: i32, detail: string, path: string) -> Response {
 pub fn authorize(req: Request) -> Response {
     val id = req.param("id");
     val p: ?OAuth2Provider = provider(id);
-    if (p == null) return problem(404, "no OAuth2 provider is registered as " + id, req.path);
+    if (p == null)
+        return problem(
+            404,
+            "no OAuth2 provider is registered as " + id,
+            req.path,
+        );
     val session: Session = currentSession();
     val a = authorizationRequestFor(p, req.query("returnTo"), session.id);
     return redirect(a.url);
@@ -112,17 +133,33 @@ pub fn authorize(req: Request) -> Response {
 
 // ── the token exchange and the ID token ─────────────────────────────────────
 
-fn tokenCall(e: ProviderEndpoints, p: OAuth2Provider, pairs: Array<#(string, string)>) -> ClientResponse {
+fn tokenCall(
+    e: ProviderEndpoints,
+    p: OAuth2Provider,
+    pairs: Array<#(string, string)>,
+) -> ClientResponse {
     var all: Array<#(string, string)> = [];
-    for (pairs) { x -> all.push(x); };
+    for (pairs) { x ->
+        all.push(x);
+    }
     all.push(#("client_id", p.clientId));
     if (p.clientSecret != "") all.push(#("client_secret", p.clientSecret));
-    return RestClient.builder().defaultHeader("content-type", "application/x-www-form-urlencoded").defaultHeader("accept", "application/json").build().post(e.token, encoding.formStringify(all)).retrieve();
+    return RestClient
+        .builder()
+        .defaultHeader("content-type", "application/x-www-form-urlencoded")
+        .defaultHeader("accept", "application/json")
+        .build()
+        .post(e.token, encoding.formStringify(all))
+        .retrieve();
 }
 
 fn fetchJwks(e: ProviderEndpoints) -> i32 {
     val _n = oauthJwksNoteFetch(e.issuer);
-    val res: ClientResponse = RestClient.builder().build().get(e.jwks).retrieve();
+    val res: ClientResponse = RestClient
+        .builder()
+        .build()
+        .get(e.jwks)
+        .retrieve();
     return if (res.isOk()) oauthJwksPut(e.issuer, res.body) else 0;
 }
 
@@ -136,34 +173,67 @@ fn kidOf(token: string) -> string {
 // JWKS, fetched on first use, re-fetched once per window for an unknown kid.
 pub fn verifySigned(e: ProviderEndpoints, token: string) -> string {
     val kid = kidOf(token);
-    if (oauthJwksHas(e.issuer, kid) == false && oauthJwksMayRefetch(e.issuer, refetchWindowMs())) {
+    if (oauthJwksHas(e.issuer, kid) == false
+        && oauthJwksMayRefetch(e.issuer, refetchWindowMs()))
         val _f = fetchJwks(e);
-    };
     return oauthVerify(e.issuer, token);
 }
 
 // `""` or the reason an ID token is refused, naming the check.
-pub fn idTokenProblem(p: OAuth2Provider, e: ProviderEndpoints, idToken: string, nonce: string) -> string {
+pub fn idTokenProblem(
+    p: OAuth2Provider,
+    e: ProviderEndpoints,
+    idToken: string,
+    nonce: string,
+) -> string {
     val v = verifySigned(e, idToken);
-    if (v.startsWith("error\t")) return "rakun oauth2: the ID token fails its " + v.slice(6, v.length()) + " check";
+    if (v.startsWith("error\t"))
+        return "rakun oauth2: the ID token fails its "
+            + v.slice(6, v.length())
+            + " check";
     val claims = v.slice(3, v.length());
-    val bad = oauthCheckClaims(claims, e.issuer, p.clientId, nonce, oauthNow(), skew());
-    if (bad != "") return "rakun oauth2: the ID token's " + bad + " claim does not hold";
+    val bad = oauthCheckClaims(
+        claims,
+        e.issuer,
+        p.clientId,
+        nonce,
+        oauthNow(),
+        skew(),
+    );
+    if (bad != "")
+        return "rakun oauth2: the ID token's " + bad + " claim does not hold";
     return "";
 }
 
 fn encodeTokens(t: TokenSet) -> string {
-    return [t.accessToken, t.refreshToken, t.idToken, t.expiresAt.toString(), t.scopes.join(" ")].join("\t");
+    return [
+        t.accessToken,
+        t.refreshToken,
+        t.idToken,
+        t.expiresAt.toString(),
+        t.scopes.join(" "),
+    ].join("\t");
 }
 
 fn decodeTokens(text: string) -> ?TokenSet {
     if (text == "") return null;
     val f = text.split("\t");
-    return TokenSet(accessToken: f.at(0) ?? "", refreshToken: f.at(1) ?? "", idToken: f.at(2) ?? "", expiresAt: toI32(f.at(3) ?? "0"), scopes: (f.at(4) ?? "").split(" ").filter({ s -> s != "" }));
+    return TokenSet(
+        accessToken: f.at(0) ?? "",
+        refreshToken: f.at(1) ?? "",
+        idToken: f.at(2) ?? "",
+        expiresAt: toI32(f.at(3) ?? "0"),
+        scopes: (f.at(4) ?? "").split(" ").filter({ s -> s != "" }),
+    );
 }
 
 fn tokensOf(body: string, fallbackRefresh: string) -> TokenSet {
-    val expiresIn = toI32(if (oauthClaim(body, "expires_in") == "") "0" else oauthClaim(body, "expires_in"));
+    val expiresIn = toI32(
+        if (oauthClaim(body, "expires_in") == "")
+            "0"
+        else
+            oauthClaim(body, "expires_in"),
+    );
     val refresh = oauthClaim(body, "refresh_token");
     return TokenSet(
         accessToken: oauthClaim(body, "access_token"),
@@ -179,23 +249,62 @@ pub fn callback(req: Request) -> Response {
     val err = req.query("error");
     val state = req.query("state");
     val flow = if (state == "") "" else oauthStateTake(state);
-    if (err != "") return problem(403, "the provider refused the login: " + req.query("error_description"), req.path);
-    if (flow == "") return problem(400, "the login callback carries no known state", req.path);
+    if (err != "")
+        return problem(
+            403,
+            "the provider refused the login: " + req.query("error_description"),
+            req.path,
+        );
+    if (flow == "")
+        return problem(
+            400,
+            "the login callback carries no known state",
+            req.path,
+        );
     val f = flow.split("\t");
     val p: ?OAuth2Provider = provider(id);
-    if (p == null || (f.at(0) ?? "") != id) return problem(400, "the login callback carries no known state", req.path);
+    if (p == null || (f.at(0) ?? "") != id)
+        return problem(
+            400,
+            "the login callback carries no known state",
+            req.path,
+        );
     val prov = p;
     val e = discover(prov);
-    val res = tokenCall(e, prov, [#("grant_type", "authorization_code"), #("code", req.query("code")), #("redirect_uri", redirectUri(prov)), #("code_verifier", f.at(2) ?? "")]);
-    if (res.isOk() == false) return problem(401, "the token exchange failed with status " + res.status.toString(), req.path);
+    val res = tokenCall(
+        e,
+        prov,
+        [
+            #("grant_type", "authorization_code"),
+            #("code", req.query("code")),
+            #("redirect_uri", redirectUri(prov)),
+            #("code_verifier", f.at(2) ?? ""),
+        ],
+    );
+    if (res.isOk() == false)
+        return problem(
+            401,
+            "the token exchange failed with status " + res.status.toString(),
+            req.path,
+        );
     val tokens = tokensOf(res.body, "");
     val openid = prov.scopes.indexOf("openid") >= 0;
-    if (openid && tokens.idToken == "") return problem(401, "the token response carries no ID token for an openid login", req.path);
-    val refused = if (openid) idTokenProblem(prov, e, tokens.idToken, f.at(1) ?? "") else "";
+    if (openid && tokens.idToken == "")
+        return problem(
+            401,
+            "the token response carries no ID token for an openid login",
+            req.path,
+        );
+    val refused = if (openid)
+        idTokenProblem(prov, e, tokens.idToken, f.at(1) ?? "")
+    else
+        "";
     if (refused != "") return problem(401, refused, req.path);
     val v = if (openid) verifySigned(e, tokens.idToken) else "ok\t{}";
     val subject = oauthClaim(v.slice(3, v.length()), "sub");
-    val s: Session = authenticateSession(if (subject == "") prov.id + "-user" else subject);
+    val s: Session = authenticateSession(
+        if (subject == "") prov.id + "-user" else subject,
+    );
     val _t = oauthTokenPut("session:" + prov.id, s.id, encodeTokens(tokens));
     return redirect(f.at(3) ?? "/");
 }
@@ -222,14 +331,36 @@ pub fn accessToken(providerId: string) -> string {
     val cur = t;
     if (cur.expiresAt - oauthNow() > marginSeconds()) return cur.accessToken;
     val p: ?OAuth2Provider = provider(providerId);
-    val prov = p ?? OAuth2Provider(id: "", clientId: "", clientSecret: "", issuerUri: "", scopes: [], pkce: true, redirectPath: "", authorizationUri: "", tokenUri: "", userinfoUri: "", jwksUri: "");
-    val res = tokenCall(discover(prov), prov, [#("grant_type", "refresh_token"), #("refresh_token", cur.refreshToken)]);
+    val prov = p ?? OAuth2Provider(
+        id: "",
+        clientId: "",
+        clientSecret: "",
+        issuerUri: "",
+        scopes: [],
+        pkce: true,
+        redirectPath: "",
+        authorizationUri: "",
+        tokenUri: "",
+        userinfoUri: "",
+        jwksUri: "",
+    );
+    val res = tokenCall(
+        discover(prov),
+        prov,
+        [
+            #("grant_type", "refresh_token"),
+            #("refresh_token", cur.refreshToken),
+        ],
+    );
     val sid = (optionalSession() ?? currentSession()).id;
     if (res.isOk() == false) {
         val _d = oauthTokenDrop("session:" + providerId, sid);
-        val _i = if (oauthClaim(res.body, "error") == "invalid_grant") invalidateSession() else 0;
+        val _i = if (oauthClaim(res.body, "error") == "invalid_grant")
+            invalidateSession()
+        else
+            0;
         return "";
-    };
+    }
     val next = tokensOf(res.body, cur.refreshToken);
     val _p = oauthTokenPut("session:" + providerId, sid, encodeTokens(next));
     return next.accessToken;
@@ -241,6 +372,14 @@ declare fn firstInstall() -> bool;
 
 pub fn installOAuth2Login() -> i32 {
     if (firstInstall() == false) return 0;
-    val _a = rkRegisterRoute("GET", "/oauth2/authorization/:id", { req -> authorize(req) });
-    return rkRegisterRoute("GET", "/login/oauth2/code/:id", { req -> callback(req) });
+    val _a = rkRegisterRoute(
+        "GET",
+        "/oauth2/authorization/:id",
+        { req -> authorize(req) },
+    );
+    return rkRegisterRoute(
+        "GET",
+        "/login/oauth2/code/:id",
+        { req -> callback(req) },
+    );
 }

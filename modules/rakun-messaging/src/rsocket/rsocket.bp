@@ -36,11 +36,18 @@ import {reliability.policy.DeadLetter, reliability.policy.deadLetterJson};
 import {rsocket.rsocket_host.rsServe, rsocket.rsocket_host.rsStop, rsocket.rsocket_host.rsConnect, rsocket.rsocket_host.rsClose, rsocket.rsocket_host.rsRequestResponse, rsocket.rsocket_host.rsFireAndForget, rsocket.rsocket_host.rsRequestStream, rsocket.rsocket_host.rsRequestN, rsocket.rsocket_host.rsNext, rsocket.rsocket_host.rsCancel};
 
 #[@External.Erlang("""(fun(__R, __K, __F) -> __L = persistent_term:get(rakun_rsocket_routes, []), case lists:keyfind(__R, 1, __L) of {__R, _, _} -> 0; false -> persistent_term:put(rakun_rsocket_routes, __L ++ [{__R, __K, __F}]), 1 end end)($0, $1, $2)""")]
-declare fn storeRoute(route: string, kind: string, handler: fn(data: string) -> string) -> i32;
+declare fn storeRoute(
+    route: string,
+    kind: string,
+    handler: fn(data: string) -> string,
+) -> i32;
+
 #[@External.Erlang("""persistent_term:get(rakun_rsocket_routes, [])""")]
 declare fn routes() -> Array<#(string, string, fn(data: string) -> string)>;
+
 #[@External.Erlang("""(fun() -> persistent_term:erase(rakun_rsocket_routes), 0 end)()""")]
 pub declare fn clearRoutes() -> i32;
+
 #[@External.Erlang("""(fun(__S) -> try binary_to_integer(__S) catch _:_ -> 0 end end)($0)""")]
 declare fn toInt(s: string) -> i32;
 
@@ -52,22 +59,68 @@ fn wireKind(kind: string) -> string {
     return if (kind == "request-response") "rr" else kind;
 }
 
-pub fn rsocketRoute(route: string, kind: string, handler: fn(data: string) -> string) -> i32 {
-    if (routeKinds().indexOf(kind) < 0) @panic("rakun rsocket: route " + route + " has the kind `" + kind + "` - fnf, request-response or stream");
-    if (storeRoute(route, wireKind(kind), handler) == 0) @panic("rakun rsocket: the route " + route + " is declared twice - one handler per route");
-    val _t = if (rkProp("rakun.messaging.rsocket.transport").trim() == "") rkSetProp("rakun.messaging.rsocket.transport", "memory") else 0;
-    val _e = rkSetProp("rakun.messaging.listener.rsocket-" + route + ".enabled", "false");
-    return rkRegisterListenerAs("rsocket:" + route, "rsocket", route, kind, "rsocket-" + route, { msg -> 0 });
+pub fn rsocketRoute(
+    route: string,
+    kind: string,
+    handler: fn(data: string) -> string,
+) -> i32 {
+    if (routeKinds().indexOf(kind) < 0)
+        @panic(
+            "rakun rsocket: route "
+                + route
+                + " has the kind `"
+                + kind
+                + "` - fnf, request-response or stream",
+        );
+    if (storeRoute(route, wireKind(kind), handler) == 0)
+        @panic(
+            "rakun rsocket: the route "
+                + route
+                + " is declared twice - one handler per route",
+        );
+    val _t = if (rkProp("rakun.messaging.rsocket.transport").trim() == "")
+        rkSetProp("rakun.messaging.rsocket.transport", "memory")
+    else
+        0;
+    val _e = rkSetProp(
+        "rakun.messaging.listener.rsocket-" + route + ".enabled",
+        "false",
+    );
+    return rkRegisterListenerAs(
+        "rsocket:" + route,
+        "rsocket",
+        route,
+        kind,
+        "rsocket-" + route,
+        { msg -> 0 },
+    );
 }
 
 fn deadLetter(route: string, data: string, reason: string) -> i32 {
-    return rkMsgPublish("amqp", route + ".dlq", "", deadLetterJson(DeadLetter(destination: route, body: data, reason: reason, attempt: 1, firstSeenMs: rkMsgWide(0))));
+    return rkMsgPublish(
+        "amqp",
+        route + ".dlq",
+        "",
+        deadLetterJson(
+            DeadLetter(
+                destination: route,
+                body: data,
+                reason: reason,
+                attempt: 1,
+                firstSeenMs: rkMsgWide(0),
+            ),
+        ),
+    );
 }
 
 pub fn rsocketConfigProblem() -> string {
     val transport = rkProp("rakun.rsocket.server.transport").trim();
-    if (transport == "websocket") return "rakun rsocket: rakun.rsocket.server.transport=websocket needs front 20's mount at the mapping path, which is not wired - use tcp";
-    if (transport != "" && transport != "tcp") return "rakun rsocket: rakun.rsocket.server.transport is `" + transport + "` - tcp or websocket";
+    if (transport == "websocket")
+        return "rakun rsocket: rakun.rsocket.server.transport=websocket needs front 20's mount at the mapping path, which is not wired - use tcp";
+    if (transport != "" && transport != "tcp")
+        return "rakun rsocket: rakun.rsocket.server.transport is `"
+            + transport
+            + "` - tcp or websocket";
     return "";
 }
 
@@ -77,7 +130,13 @@ pub fn startRSocketServer() -> i32 {
     if (problem != "") @panic(problem);
     val raw = rkProp("rakun.rsocket.server.port").trim();
     if (raw == "") return 0;
-    return rsServe(toInt(raw), routes(), { route, data, reason -> deadLetter(route, data, reason) }, 0, toInt(rkProp("rakun.rsocket.server.lease").trim()));
+    return rsServe(
+        toInt(raw),
+        routes(),
+        { route, data, reason -> deadLetter(route, data, reason) },
+        0,
+        toInt(rkProp("rakun.rsocket.server.lease").trim()),
+    );
 }
 
 pub fn stopRSocketServer(port: i32) -> i32 {
@@ -87,16 +146,33 @@ pub fn stopRSocketServer(port: i32) -> i32 {
 // ── the requester ───────────────────────────────────────────────────────────
 
 pub type Requester(conn: string)
+
 pub type StreamHandle(conn: string, id: i32)
 
 pub fn rsocketRequester(url: string) -> Requester {
-    if (url.startsWith("tcp://") == false) @panic("rakun rsocket: `" + url + "` - the requester speaks tcp://host:port (ws:// and wss:// wait on front 20's transport)");
+    if (url.startsWith("tcp://") == false)
+        @panic(
+            "rakun rsocket: `"
+                + url
+                + "` - the requester speaks tcp://host:port (ws:// and wss:// wait on front 20's transport)",
+        );
     val hp = url.slice(6, url.length());
     val colon = hp.indexOf(":");
     val interval = toInt(rkProp("rakun.rsocket.client.keepalive-ms").trim());
     val lifetime = toInt(rkProp("rakun.rsocket.client.max-lifetime-ms").trim());
-    val c = rsConnect(hp.slice(0, colon), toInt(hp.slice(colon + 1, hp.length())), if (interval == 0) 20000 else interval, if (lifetime == 0) 90000 else lifetime);
-    if (c.startsWith("error:")) @panic("rakun rsocket: cannot connect to " + url + " - " + c.slice(6, c.length()));
+    val c = rsConnect(
+        hp.slice(0, colon),
+        toInt(hp.slice(colon + 1, hp.length())),
+        if (interval == 0) 20000 else interval,
+        if (lifetime == 0) 90000 else lifetime,
+    );
+    if (c.startsWith("error:"))
+        @panic(
+            "rakun rsocket: cannot connect to "
+                + url
+                + " - "
+                + c.slice(6, c.length()),
+        );
     return Requester(conn: c);
 }
 
@@ -104,17 +180,28 @@ pub fn closeRequester(r: Requester) -> i32 {
     return rsClose(r.conn);
 }
 
-pub fn requestResponse(r: Requester, route: string, data: string) -> @Task<string> {
+pub fn requestResponse(
+    r: Requester,
+    route: string,
+    data: string,
+) -> @Task<string> {
     val out = rsRequestResponse(r.conn, route, data, 5000);
     if (out.isError()) {
-        val reason = case out { Ok(v) -> ""; Error(e) -> e; };
+        val reason = case out {
+            Ok(v) -> "";
+            Error(e) -> e;
+        };
         @panic("rakun rsocket: " + route + " - " + reason);
-    };
+    }
     return out.unwrapOr("");
 }
 
 // The outcome without raising: "" or the failure.
-pub fn tryRequestResponse(r: Requester, route: string, data: string) -> @Result<string, string> {
+pub fn tryRequestResponse(
+    r: Requester,
+    route: string,
+    data: string,
+) -> @Result<string, string> {
     return rsRequestResponse(r.conn, route, data, 5000);
 }
 
@@ -122,8 +209,16 @@ pub fn fireAndForget(r: Requester, route: string, data: string) -> string {
     return rsFireAndForget(r.conn, route, data);
 }
 
-pub fn requestStream(r: Requester, route: string, data: string, initial: i32) -> StreamHandle {
-    return StreamHandle(conn: r.conn, id: rsRequestStream(r.conn, route, data, initial));
+pub fn requestStream(
+    r: Requester,
+    route: string,
+    data: string,
+    initial: i32,
+) -> StreamHandle {
+    return StreamHandle(
+        conn: r.conn,
+        id: rsRequestStream(r.conn, route, data, initial),
+    );
 }
 
 pub fn request(h: StreamHandle, n: i32) -> i32 {

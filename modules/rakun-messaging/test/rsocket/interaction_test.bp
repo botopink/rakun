@@ -11,6 +11,7 @@ import {rsocket.rsocket.rsocketRoute, rsocket.rsocket.clearRoutes, rsocket.rsock
 
 #[@External.Erlang("""(fun(__Ms) -> timer:sleep(__Ms), 0 end)($0)""")]
 declare fn pause(ms: i32) -> i32;
+
 #[@External.Erlang("""erlang:monotonic_time(millisecond)""")]
 declare fn nowMs() -> i32;
 // A raw exchange: SETUP (with RESUME when `resume`), then an optional
@@ -23,16 +24,16 @@ fn setUp() -> i32 {
     val _a = rsocketRoute("echo", "request-response", { d -> "re:" + d });
     val _b = rsocketRoute("slow", "request-response", { d ->
         val _p = pause(if (d == "first") 300 else 0);
-        d
+        d;
     });
     val _e = rsocketRoute("boom", "request-response", { d ->
         if (true) @panic("handler failed");
-        d
+        d;
     });
     val _s = rsocketRoute("count", "stream", { d -> "1\n2\n3" });
     val _f = rsocketRoute("audit", "fnf", { d ->
         if (d == "poison") @panic("unreadable");
-        ""
+        "";
     });
     val _p = rkSetProp("rakun.rsocket.server.port", "0");
     return startRSocketServer();
@@ -62,7 +63,16 @@ test "request/response: one PAYLOAD resolves the requester's task; an error fram
     val _c = closeRequester(r);
     val _x = stopRSocketServer(port);
     assert a == "re:hi" && again == "re:still here";
-    assert (case bad { Ok(v) -> ""; Error(e) -> e; }) == "handler failed" && (case missing { Ok(v) -> ""; Error(e) -> e; }) == "no handler for route nowhere";
+    assert (case bad {
+        Ok(v) -> "";
+        Error(e) -> e;
+    })
+        == "handler failed"
+        && (case missing {
+            Ok(v) -> "";
+            Error(e) -> e;
+        })
+            == "no handler for route nowhere";
 }
 
 test "request/stream: no more than the credit; the rest after request(1); CANCEL stops it" {
@@ -82,7 +92,11 @@ test "request/stream: no more than the credit; the rest after request(1); CANCEL
     val after = next(h2, 300);
     val _c = closeRequester(r);
     val _x = stopRSocketServer(port);
-    assert one == "item:1" && two == "item:2" && held == "timeout" && three == "item:3" && end == "done", one + two + held + three + end;
+    assert one == "item:1"
+        && two == "item:2"
+        && held == "timeout"
+        && three == "item:3"
+        && end == "done", one + two + held + three + end;
     assert first == "item:1" && after == "timeout";
 }
 
@@ -94,7 +108,10 @@ test "fire-and-forget: nothing comes back, it returns at once, and a Reject reac
     val ok = fireAndForget(r, "audit", "fine");
     val bad = fireAndForget(r, "audit", "poison");
     val took = nowMs() - start;
-    val lettered = rkMsgWaitUntil(2000, { -> published("amqp").filter({ l -> l.startsWith("audit.dlq|") && l.contains("\"reason\":\"unreadable\"") }).length == 1 });
+    val lettered = rkMsgWaitUntil(
+        2000,
+        { -> published("amqp").filter({ l -> l.startsWith("audit.dlq|") && l.contains("\"reason\":\"unreadable\"") }).length == 1 },
+    );
     val _c = closeRequester(r);
     val _x = stopRSocketServer(port);
     assert ok == "" && bad == "" && took < 200 && lettered, took.toString();
@@ -112,7 +129,12 @@ test "lease: a request past the responder's budget is rejected locally, writing 
     val after = rsWritten(r.conn);
     val _c = closeRequester(r);
     val _x = stopRSocketServer(port);
-    assert first.isOk() && (case second { Ok(v) -> ""; Error(e) -> e; }).contains("rejected locally") && after == before, before.toString() + "/" + after.toString();
+    assert first.isOk()
+        && (case second {
+            Ok(v) -> "";
+            Error(e) -> e;
+        }).contains("rejected locally")
+        && after == before, before.toString() + "/" + after.toString();
 }
 
 test "keep-alive: silence past the negotiated lifetime closes the connection and its streams" {
@@ -146,10 +168,20 @@ fn askSlow(r: Requester, d: string) -> @Task<string> {
 test "requester: concurrent calls as thunks gather in request order whatever the completion order" {
     val port = setUp();
     val r = rsocketRequester(url(port));
-    val results = await async.runAll([
-        { -> async { askSlow(r, "first") } },
-        { -> async { askSlow(r, "second") } },
-    ]);
+    val results = await async.runAll(
+        [
+            { ->
+                async {
+                    askSlow(r, "first");
+                };
+            },
+            { ->
+                async {
+                    askSlow(r, "second");
+                };
+            },
+        ],
+    );
     val _c = closeRequester(r);
     val _x = stopRSocketServer(port);
     assert results.join(",") == "first,second", results.join(",");
@@ -159,13 +191,19 @@ test "routing: each route is a row in front 15's registry under the broker rsock
     val _p = setUp();
     val rows = rkMsgListeners().filter({ l -> l.startsWith("rsocket:echo|") });
     val _x = stopRSocketServer(_p);
-    assert (rows.at(0) ?? "") == "rsocket:echo|rsocket|echo|request-response|rsocket-echo", rows.join(";");
+    assert (rows.at(0) ?? "")
+        == "rsocket:echo|rsocket|echo|request-response|rsocket-echo", rows.join(
+        ";",
+    );
 }
 
 test "routing: a route declared twice is refused naming it" {
     val _c = clearRoutes();
     val _a = rsocketRoute("dup", "fnf", { d -> "" });
-    try asserts.throwsWith({ -> rsocketRoute("dup", "fnf", { d -> "" }) }, "the route dup is declared twice");
+    try asserts.throwsWith(
+        { -> rsocketRoute("dup", "fnf", { d -> "" }) },
+        "the route dup is declared twice",
+    );
 }
 
 test "setup: RESUME is answered with a rejection naming resumption, and a request without routing metadata with an ERROR naming the route" {
@@ -173,5 +211,10 @@ test "setup: RESUME is answered with a rejection naming resumption, and a reques
     val resumed = rawError(port, true, false);
     val unrouted = rawError(port, false, true);
     val _x = stopRSocketServer(port);
-    assert resumed == "resumption (RESUME / RESUME_OK) is not supported by this responder" && unrouted == "no route: the request carries no routing metadata", resumed + " / " + unrouted;
+    assert resumed
+        == "resumption (RESUME / RESUME_OK) is not supported by this responder"
+        && unrouted
+            == "no route: the request carries no routing metadata", resumed
+        + " / "
+        + unrouted;
 }

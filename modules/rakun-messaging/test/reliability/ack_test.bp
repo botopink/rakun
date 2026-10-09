@@ -14,7 +14,9 @@ import {reliability.dispatch.Delivery, reliability.dispatch.attemptOf, reliabili
 
 fn clean() -> i32 {
     val _s = stopMessaging();
-    for (["amqp", "kafka", "redis", "stream"]) { a -> val _t = rkSetProp("rakun.messaging." + a + ".transport", "memory"); };
+    for (["amqp", "kafka", "redis", "stream"]) { a ->
+        val _t = rkSetProp("rakun.messaging." + a + ".transport", "memory");
+    }
     val _r = resetReliability();
     return resetMessaging();
 }
@@ -24,13 +26,26 @@ fn set(name: string, key: string, value: string) -> i32 {
 }
 
 fn unset(name: string) -> i32 {
-    for (["retry.initial-interval", "retry.max-interval", "retry.max-attempts", "reliability.ack-mode", "reliability.batch-size", "ack-mode", "prefetch", "concurrency"]) { k -> val _u = set(name, k, ""); };
+    for ([
+        "retry.initial-interval",
+        "retry.max-interval",
+        "retry.max-attempts",
+        "reliability.ack-mode",
+        "reliability.batch-size",
+        "ack-mode",
+        "prefetch",
+        "concurrency",
+    ]) { k ->
+        val _u = set(name, k, "");
+    }
     return 0;
 }
 
 fn publishAll(dest: string, payloads: string[]) -> i32 {
     val b = InProcessBroker(arm: "amqp");
-    for (payloads) { p -> val _x = b.publish(dest, "", p); };
+    for (payloads) { p ->
+        val _x = b.publish(dest, "", p);
+    }
     return payloads.length;
 }
 
@@ -40,7 +55,7 @@ test "ack: auto settles a Done once" {
     val _c = clean();
     val _l = reliableListener("aa", "amqp", "aa", "", { d ->
         val _r = rkMsgBump("aa:" + d.body);
-        Outcome.Done
+        Outcome.Done;
     });
     val _s = startReliability();
     val _b = startMessaging();
@@ -50,7 +65,11 @@ test "ack: auto settles a Done once" {
     val settled = rkMsgInflight("aa");
     val cnt0 = rkMsgCount("aa:one");
     val _z = clean();
-    assert done && settled == 0 && cnt0 == 1, done.toString() + " " + settled.toString() + " " + cnt0.toString();
+    assert done && settled == 0 && cnt0 == 1, done.toString()
+        + " "
+        + settled.toString()
+        + " "
+        + cnt0.toString();
 }
 
 test "ack: manual settles nothing for the handler, and a Done without an ack warns naming the listener" {
@@ -59,16 +78,16 @@ test "ack: manual settles nothing for the handler, and a Done without an ack war
     val _r = set("am", "reliability.ack-mode", "manual");
     val _l = reliableListener("am", "amqp", "am", "", { d ->
         val n = rkMsgBump("am:" + d.body);
-        if (d.body == "acked" || n > 1) {
-            val _a = ackDelivery(d);
-        };
-        Outcome.Done
+        if (d.body == "acked" || n > 1) val _a = ackDelivery(d);
+        Outcome.Done;
     });
     val _s = startReliability();
     val _b = startMessaging();
     val _p = publishAll("am", ["acked", "forgot"]);
     val redelivered = rkMsgWaitUntil(3000, { -> rkMsgCount("am:forgot") == 2 });
-    val warned = reliabilityLog().filter({ l -> l.contains("listener am returned Done without acking") }).length;
+    val warned = reliabilityLog().filter(
+        { l -> l.contains("listener am returned Done without acking") },
+    ).length;
     val _u = unset("am");
     val cnt0 = rkMsgCount("am:acked");
     val _z = clean();
@@ -83,7 +102,7 @@ test "ack: batch settles every size messages, and a crash replays at most size -
     val _q = set("ab", "prefetch", "10");
     val _l = reliableListener("ab", "amqp", "ab", "", { d ->
         val _r2 = rkMsgBump("ab:" + d.body);
-        Outcome.Done
+        Outcome.Done;
     });
     val _s = startReliability();
     val _b = startMessaging();
@@ -92,18 +111,28 @@ test "ack: batch settles every size messages, and a crash replays at most size -
     val _w = rkMsgWaitUntil(200, { -> false });
     val held = rkMsgInflight("ab");
     val killed = rkMsgKillWorker("ab", 1);
-    val replayed = rkMsgWaitUntil(3000, { -> rkMsgCount("ab:4") == 2 && rkMsgCount("ab:5") == 2 });
+    val replayed = rkMsgWaitUntil(
+        3000,
+        { -> rkMsgCount("ab:4") == 2 && rkMsgCount("ab:5") == 2 },
+    );
     val first = rkMsgCount("ab:1");
     val _u = unset("ab");
     val _z = clean();
-    assert handled && held == 2 && killed != "" && replayed && first == 1, held.toString();
+    assert handled
+        && held == 2
+        && killed != ""
+        && replayed
+        && first == 1, held.toString();
 }
 
 test "ack: an unknown ack mode fails at boot naming the key" {
     val _c = clean();
     val _r = set("ax", "reliability.ack-mode", "sometimes");
     val _l = reliableListener("ax", "amqp", "ax", "", { d -> Outcome.Done });
-    try asserts.throwsWith({ -> startReliability() }, "rakun.messaging.listener.ax.reliability.ack-mode is `sometimes` - it must be auto, manual or batch");
+    try asserts.throwsWith(
+        { -> startReliability() },
+        "rakun.messaging.listener.ax.reliability.ack-mode is `sometimes` - it must be auto, manual or batch",
+    );
     val _u = unset("ax");
     val _z = clean();
 }
@@ -115,14 +144,17 @@ test "concurrency: four consumers, one killed and replaced while the others cons
     val _n = set("ac", "concurrency", "4");
     val _l = reliableListener("ac", "amqp", "ac", "", { d ->
         val _r = rkMsgBump("ac:" + d.body);
-        Outcome.Done
+        Outcome.Done;
     });
     val _s = startReliability();
     val _b = startMessaging();
     val four = containerWorkers("ac");
     val killed = rkMsgKillWorker("ac", 2);
     val _p = publishAll("ac", ["a", "b", "c", "d", "e", "f"]);
-    val consumed = rkMsgWaitUntil(3000, { -> rkMsgCount("ac:a") == 1 && rkMsgCount("ac:f") == 1 });
+    val consumed = rkMsgWaitUntil(
+        3000,
+        { -> rkMsgCount("ac:a") == 1 && rkMsgCount("ac:f") == 1 },
+    );
     val back = rkMsgWaitUntil(3000, { -> containerWorkers("ac") == 4 });
     val _u = unset("ac");
     val _z = clean();
@@ -136,7 +168,7 @@ test "prefetch: with prefetch 1 and a blocked handler the second message is not 
     val _l = reliableListener("ap", "amqp", "ap", "", { d ->
         val _r = rkMsgBump("ap:" + d.body);
         val _w = rkMsgWaitUntil(5000, { -> rkProp("test.ap.release") == "1" });
-        Outcome.Done
+        Outcome.Done;
     });
     val _s = startReliability();
     val _b = startMessaging();
@@ -162,15 +194,29 @@ test "observe: deliveries, retries, dead-letters and handler duration are counte
     val r0 = counter("rakun.messaging.retries", t).count();
     val l0 = counter("rakun.messaging.dead_letters", t).count();
     val h0 = timer("rakun.messaging.handler.duration", t).count();
-    val _l = reliableListener("ao", "amqp", "ao", "", { d -> Outcome.Retry(reason: "down") });
+    val _l = reliableListener(
+        "ao",
+        "amqp",
+        "ao",
+        "",
+        { d -> Outcome.Retry(reason: "down") },
+    );
     val _s = startReliability();
     val _b = startMessaging();
     val _p = publishAll("ao", ["x"]);
-    val done = rkMsgWaitUntil(3000, { -> counter("rakun.messaging.dead_letters", t).count() == l0 + 1 });
-    val warned = reliabilityLog().filter({ l -> l.contains("listener ao dead-lettered") }).length;
+    val done = rkMsgWaitUntil(
+        3000,
+        { -> counter("rakun.messaging.dead_letters", t).count() == l0 + 1 },
+    );
+    val warned = reliabilityLog().filter(
+        { l -> l.contains("listener ao dead-lettered") },
+    ).length;
     val _u = unset("ao");
     val _z = clean();
-    assert done && counter("rakun.messaging.deliveries", t).count() == d0 + 2 && counter("rakun.messaging.retries", t).count() == r0 + 1 && timer("rakun.messaging.handler.duration", t).count() == h0 + 2;
+    assert done
+        && counter("rakun.messaging.deliveries", t).count() == d0 + 2
+        && counter("rakun.messaging.retries", t).count() == r0 + 1
+        && timer("rakun.messaging.handler.duration", t).count() == h0 + 2;
     assert warned == 1;
 }
 
@@ -184,5 +230,10 @@ test "observe: the messaging health indicator reports each listener's broker con
     val down = messagingHealth();
     val _z = clean();
     assert healthIndicatorIds().indexOf("messaging") >= 0;
-    assert up.status == "UP" && up.details == "{\"listeners\":{\"ah\":\"UP\"}}" && down.status == "DOWN" && down.details.contains("\"ah\":\"DOWN\""), up.details + " " + down.details;
+    assert up.status == "UP"
+        && up.details == "{\"listeners\":{\"ah\":\"UP\"}}"
+        && down.status == "DOWN"
+        && down.details.contains("\"ah\":\"DOWN\""), up.details
+        + " "
+        + down.details;
 }

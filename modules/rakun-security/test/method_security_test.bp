@@ -64,15 +64,24 @@ fn depthAs(a: Authentication) -> i32 {
 test "method: #[methodSecurity] emits <Type>Sec with one forwarding method per method" {
     val sec: LedgerSec = LedgerSec.make();
     val v: string = withAuthentication(root(), { ->
-        sec.purge(3).toString() + " " + sec.depth().toString() + " " + sec.status() + " " + sec.balance("acc");
+        sec.purge(3).toString()
+            + " "
+            + sec.depth().toString()
+            + " "
+            + sec.status()
+            + " "
+            + sec.balance("acc");
     });
     assert v == "3 42 ok acc:100", v;
-    val _t = withAuthentication(root(), { -> sec.touch(); 0; });
+    val _t = withAuthentication(root(), { ->
+        sec.touch();
+        0;
+    });
     assert LedgerSec.make().inner.status() == "ok";
 }
 
 test "method: #[secured(ROLE_ADMIN)] refuses a caller without the authority" {
-    try asserts.throwsWith({ -> purgeAs(ana()); }, "rakun.security.forbidden");
+    try asserts.throwsWith({ -> purgeAs(ana()) }, "rakun.security.forbidden");
     assert rkSecDecision() == "denied secured ROLE_ADMIN";
     assert purgeAs(root()) == 7;
     assert rkSecDecision() == "granted secured ROLE_ADMIN";
@@ -81,12 +90,15 @@ test "method: #[secured(ROLE_ADMIN)] refuses a caller without the authority" {
 test "method: #[secured(ROLE_A,ROLE_B)] admits a caller holding either" {
     assert depthAs(ops()) == 42;
     assert depthAs(root()) == 42;
-    try asserts.throwsWith({ -> depthAs(ana()); }, "rakun.security.forbidden");
+    try asserts.throwsWith({ -> depthAs(ana()) }, "rakun.security.forbidden");
     assert holdsAnyOf(ops(), "ROLE_ADMIN, ROLE_OPERATOR");
 }
 
 test "method: #[permitAll] admits an anonymous caller" {
-    val s: string = withAuthentication(anonymous(), { -> LedgerSec.make().status() });
+    val s: string = withAuthentication(
+        anonymous(),
+        { -> LedgerSec.make().status() },
+    );
     assert s == "ok";
     assert rkSecDecision() == "granted permitAll";
 }
@@ -94,10 +106,14 @@ test "method: #[permitAll] admits an anonymous caller" {
 test "method: an unmarked method inherits the type's requirement, and an unmarked type requires authentication" {
     // Ledger carries no type-level marker: `balance` needs an authenticated caller.
     try asserts.throwsWith({ ->
-        val _b = withAuthentication(anonymous(), { -> LedgerSec.make().balance("x") });
+        val _b = withAuthentication(
+            anonymous(),
+            { -> LedgerSec.make().balance("x") },
+        );
         0;
     }, "rakun.security.unauthorized");
-    assert withAuthentication(ana(), { -> LedgerSec.make().balance("x") }) == "x:100";
+    assert withAuthentication(ana(), { -> LedgerSec.make().balance("x") })
+        == "x:100";
 }
 
 test "method: calling a secured method outside a request is a hard failure, not an implicit allow" {
@@ -121,8 +137,22 @@ fn secret() -> string {
 fn chainCalling(withErrorEntry: bool) -> i32 {
     val _r = resetChain();
     val _s = rkSetProp("rakun.security.jwt.secret", secret());
-    val _p = installSecurityWith(SecurityPolicy(rules: [PathRule(pattern: "/public/:rest*", requirement: "permitAll")], defaultRequirement: "authenticated"));
-    val _e = if (withErrorEntry) registerFilter("problem", orderProblem(), { req, chain -> errorEntry(req, chain) }) else 0;
+    val _p = installSecurityWith(
+        SecurityPolicy(
+            rules: [
+                PathRule(pattern: "/public/:rest*", requirement: "permitAll"),
+            ],
+            defaultRequirement: "authenticated",
+        ),
+    );
+    val _e = if (withErrorEntry)
+        registerFilter(
+            "problem",
+            orderProblem(),
+            { req, chain -> errorEntry(req, chain) },
+        )
+    else
+        0;
     return rkChainSetTerminal({ method, path, headersWire, queryWire, body ->
         Response.ok(LedgerSec.make().purge(9).toString());
     });
@@ -132,16 +162,34 @@ test "method: a refusal inside the handler answers 403 naming the required autho
     val _a = chainCalling(false);
     val userToken: string = testToken("ana", ["ROLE_USER"], 3600);
     val adminToken: string = testToken("root", ["ROLE_ADMIN"], 3600);
-    val bare: Response = runChain("DELETE", "/audit", "authorization\tBearer " + userToken, "", "");
+    val bare: Response = runChain(
+        "DELETE",
+        "/audit",
+        "authorization\tBearer " + userToken,
+        "",
+        "",
+    );
     assert bare.status == 403, bare.body;
     try asserts.contains(bare.body, "Access requires the authority ROLE_ADMIN");
     try asserts.notContains(bare.body, "ROLE_USER");
     val _b = chainCalling(true);
-    val boundary: Response = runChain("DELETE", "/audit", "authorization\tBearer " + userToken, "", "");
+    val boundary: Response = runChain(
+        "DELETE",
+        "/audit",
+        "authorization\tBearer " + userToken,
+        "",
+        "",
+    );
     assert boundary.status == 403, boundary.body;
     assert boundary.body == bare.body, boundary.body;
     assert headerValue("Content-Type") == "application/problem+json";
-    val granted: Response = runChain("DELETE", "/audit", "authorization\tBearer " + adminToken, "", "");
+    val granted: Response = runChain(
+        "DELETE",
+        "/audit",
+        "authorization\tBearer " + adminToken,
+        "",
+        "",
+    );
     assert granted.status == 200;
     assert granted.body == "9";
     // An anonymous caller on a public path reaching a secured method: 401.

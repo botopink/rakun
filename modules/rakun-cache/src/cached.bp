@@ -39,9 +39,10 @@ pub fn cached(comptime decl: @Decl) {
     var readers: Array<string> = [];
     decl.methods.forEach({ m ->
         m.annotations.forEach({ a ->
-            if (a.name == "cacheable") {
-                readers.push(a.args.join("").replaceAll("\"", "").trim() + "|" + m.name);
-            };
+            if (a.name == "cacheable")
+                readers.push(
+                    a.args.join("").replaceAll("\"", "").trim() + "|" + m.name,
+                );
         });
     });
     var methods: Array<string> = [];
@@ -57,72 +58,154 @@ pub fn cached(comptime decl: @Decl) {
             if (a.name == "cacheable") {
                 readName = a.args.join("").replaceAll("\"", "").trim();
                 marks = marks + 1;
-            };
+            }
             if (a.name == "cacheEvict") {
                 val first = a.args[0] ?? "";
                 val second = a.args[1] ?? "false";
                 evictName = first.replaceAll("\"", "").trim();
                 evictAll = second.trim() == "true";
                 marks = marks + 1;
-            };
+            }
         });
-        val two = if (marks > 1 && twice == "") decl.name + "." + m.name else twice;
+        val two = if (marks > 1 && twice == "")
+            decl.name + "." + m.name
+        else
+            twice;
         twice = two;
         var params: Array<string> = [];
         var args: Array<string> = [];
         var keyArgs: Array<string> = [];
         m.params.forEach({ p ->
             val lost = p.typeName == "";
-            val note = if ((lost && p.name != "self" && lossy == "")) decl.name + "." + m.name + " parameter '" + p.name + "'" else lossy;
+            val note = if ((lost && p.name != "self" && lossy == ""))
+                decl.name + "." + m.name + " parameter '" + p.name + "'"
+            else
+                lossy;
             lossy = note;
             if (p.name != "self") {
                 params.push(p.name + ": " + p.typeName);
                 args.push(p.name);
-                keyArgs.push(if (p.typeName == "string") p.name else p.name + ".toString()");
-            };
+                keyArgs.push(
+                    if (p.typeName == "string")
+                        p.name
+                    else
+                        p.name + ".toString()",
+                );
+            }
         });
         val ret = m.returnType;
         val lostRet = false;
-        val retNote = if ((lostRet && lossy == "")) decl.name + "." + m.name + " return type '" + ret + "'" else lossy;
+        val retNote = if ((lostRet && lossy == ""))
+            decl.name + "." + m.name + " return type '" + ret + "'"
+        else
+            lossy;
         lossy = retNote;
-        val badRet = if (readName != "" && ret != "string" && badReturn == "") decl.name + "." + m.name + " returns `" + ret + "`" else badReturn;
+        val badRet = if (readName != "" && ret != "string" && badReturn == "")
+            decl.name + "." + m.name + " returns `" + ret + "`"
+        else
+            badReturn;
         badReturn = badRet;
         val call = "self.inner." + m.name + "(" + args.join(", ") + ")";
-        val head = if (params.length > 0) "pub fn " + m.name + "(self: Self, " + params.join(", ") + ")" else "pub fn " + m.name + "(self: Self)";
+        val head = if (params.length > 0)
+            "pub fn " + m.name + "(self: Self, " + params.join(", ") + ")"
+        else
+            "pub fn " + m.name + "(self: Self)";
         val sig = if (ret != "") head + " -> " + ret else head;
-        val parts = if (keyArgs.length > 0) "[\"" + m.name + "\", " + keyArgs.join(", ") + "]" else "[\"" + m.name + "\"]";
+        val parts = if (keyArgs.length > 0)
+            "[\"" + m.name + "\", " + keyArgs.join(", ") + "]"
+        else
+            "[\"" + m.name + "\"]";
         var evictKeys: Array<string> = [];
         readers.forEach({ r ->
             val bar = r.indexOf("|");
             val rname = r.slice(0, bar);
             val rmethod = r.slice(bar + 1, r.length());
-            if (rname == evictName) {
-                evictKeys.push(if (keyArgs.length > 0) "[\"" + rmethod + "\", " + keyArgs.join(", ") + "]" else "[\"" + rmethod + "\"]");
-            };
+            if (rname == evictName)
+                evictKeys.push(
+                    if (keyArgs.length > 0)
+                        "[\"" + rmethod + "\", " + keyArgs.join(", ") + "]"
+                    else
+                        "[\"" + rmethod + "\"]",
+                );
         });
-        val evictCall = if (evictAll) "cacheEvictAll(\"" + evictName + "\")" else "cacheEvictKeys(\"" + evictName + "\", [" + evictKeys.join(", ") + "])";
-        val body = if (readName != "") {
-            "return cacheMethod(\"" + readName + "\", " + parts + ", { -> " + call + " });";
-        } else {
-            if (evictName != "") {
-                if (ret != "") "val out = " + call + ";\n        val _e = " + evictCall + ";\n        return out;" else call + ";\n        val _e = " + evictCall + ";";
-            } else {
-                if (ret != "") "return " + call + ";" else call + ";";
-            };
-        };
+        val evictCall = if (evictAll)
+            "cacheEvictAll(\"" + evictName + "\")"
+        else
+            "cacheEvictKeys(\""
+                + evictName
+                + "\", ["
+                + evictKeys.join(", ")
+                + "])";
+        val body = if (readName != "")
+            "return cacheMethod(\""
+                + readName
+                + "\", "
+                + parts
+                + ", { -> "
+                + call
+                + " });"
+        else if (evictName != "") {
+            if (ret != "")
+                "val out = "
+                    + call
+                    + ";\n        val _e = "
+                    + evictCall
+                    + ";\n        return out;"
+            else
+                call + ";\n        val _e = " + evictCall + ";";
+        } else if (ret != "") "return " + call + ";" else call + ";";
         methods.push(sig + " {\n        " + body + "\n    }");
     });
-    if (decl.kind != DeclKind.Behavior) decl.fail("#[cached] must annotate a behavior - it reflects the behavior's method signatures and gives it the " + decl.name + ".Cached twin that implements it");
-    if (twice != "") decl.fail("#[cached]: " + twice + " carries both #[cacheable] and #[cacheEvict] - one cache role per method");
-    if (badReturn != "") decl.fail("#[cached]: " + badReturn + " - a #[cacheable] method returns string, the only value the store holds");
-    if (lossy != "") decl.fail("#[cached] cannot forward " + lossy + ": reflection gave no type for it, so the twin cannot redeclare it");
-    decl.addType("Cached", "(inner: " + decl.name + ") implement " + decl.name + " {\n    " + methods.join("\n\n    ") + "\n}");
+    if (decl.kind != DeclKind.Behavior)
+        decl.fail(
+            "#[cached] must annotate a behavior - it reflects the behavior's method signatures and gives it the "
+                + decl.name
+                + ".Cached twin that implements it",
+        );
+    if (twice != "")
+        decl.fail(
+            "#[cached]: "
+                + twice
+                + " carries both #[cacheable] and #[cacheEvict] - one cache role per method",
+        );
+    if (badReturn != "")
+        decl.fail(
+            "#[cached]: "
+                + badReturn
+                + " - a #[cacheable] method returns string, the only value the store holds",
+        );
+    if (lossy != "")
+        decl.fail(
+            "#[cached] cannot forward "
+                + lossy
+                + ": reflection gave no type for it, so the twin cannot redeclare it",
+        );
+    decl.addType(
+        "Cached",
+        "(inner: "
+            + decl.name
+            + ") implement "
+            + decl.name
+            + " {\n    "
+            + methods.join("\n\n    ")
+            + "\n}",
+    );
 }
 
 pub fn cacheable(comptime decl: @Decl, comptime name: string) {
-    if (decl.kind != DeclKind.Method) decl.fail("#[cacheable] must annotate a method of a #[cached] behavior");
+    if (decl.kind != DeclKind.Method)
+        decl.fail(
+            "#[cacheable] must annotate a method of a #[cached] behavior",
+        );
 }
 
-pub fn cacheEvict(comptime decl: @Decl, comptime name: string, comptime allEntries: bool) {
-    if (decl.kind != DeclKind.Method) decl.fail("#[cacheEvict] must annotate a method of a #[cached] behavior");
+pub fn cacheEvict(
+    comptime decl: @Decl,
+    comptime name: string,
+    comptime allEntries: bool,
+) {
+    if (decl.kind != DeclKind.Method)
+        decl.fail(
+            "#[cacheEvict] must annotate a method of a #[cached] behavior",
+        );
 }

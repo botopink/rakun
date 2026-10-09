@@ -23,13 +23,15 @@ fn chain(enabled: string, include: string) -> i32 {
     val _t = rkChainSetTerminal({ method, path, headersWire, queryWire, body ->
         if (path == "/boom") @panic("handler exploded");
         val _k = writeCookies("SESSION=abc; Path=/");
-        withHeader(Response.ok("hi"), "X-Trace", "t1")
+        withHeader(Response.ok("hi"), "X-Trace", "t1");
     });
     return installExchangeRecording();
 }
 
 fn done() -> i32 {
-    for (["recording.enabled", "recording.include", "capacity"]) { k -> val _u = rkSetProp(key(k), ""); };
+    for (["recording.enabled", "recording.include", "capacity"]) { k ->
+        val _u = rkSetProp(key(k), "");
+    }
     val _c = clearExchanges();
     return resetChain();
 }
@@ -39,7 +41,14 @@ fn wire() -> string {
 }
 
 fn latest() -> HttpExchange {
-    return exchangesNewestFirst().at(0) ?? HttpExchange(atMs: wide(0), method: "", uri: "", status: 0, tookMs: 0, fields: []);
+    return exchangesNewestFirst().at(0) ?? HttpExchange(
+        atMs: wide(0),
+        method: "",
+        uri: "",
+        status: 0,
+        tookMs: 0,
+        fields: [],
+    );
 }
 
 fn keys(e: HttpExchange) -> string {
@@ -54,7 +63,9 @@ test "exchanges: with recording disabled the chain carries no recorder entry" {
     val _r = runChain("GET", "/a", wire(), "", "");
     val recorded = exchangesNewestFirst().length;
     val _z = done();
-    assert installed == 0 && names.indexOf("httpexchanges") < 0 && recorded == 0, names.join(">");
+    assert installed == 0
+        && names.indexOf("httpexchanges") < 0
+        && recorded == 0, names.join(">");
 }
 
 test "exchanges: enabled with no include list keeps method, URI, status and duration only" {
@@ -63,7 +74,11 @@ test "exchanges: enabled with no include list keeps method, URI, status and dura
     val e = latest();
     val first = chainNames().at(0) ?? "";
     val _z = done();
-    assert first == "httpexchanges" && e.method == "GET" && e.status == 200 && e.tookMs >= 0 && e.fields.length == 0, keys(e);
+    assert first == "httpexchanges"
+        && e.method == "GET"
+        && e.status == 200
+        && e.tookMs >= 0
+        && e.fields.length == 0, keys(e);
 }
 
 test "exchanges: request-headers never carries authorization or cookie" {
@@ -75,23 +90,36 @@ test "exchanges: request-headers never carries authorization or cookie" {
 }
 
 test "exchanges: authorization-header and cookie-headers are their own switches" {
-    val _c = chain("true", "authorization-header,cookie-headers,response-headers");
+    val _c = chain(
+        "true",
+        "authorization-header,cookie-headers,response-headers",
+    );
     val _r = runChain("GET", "/a", wire(), "", "");
     val e = latest();
     val _z = done();
-    assert keys(e) == "request.header.authorization,request.header.cookie,response.header.x-trace,response.header.set-cookie", keys(e);
+    assert keys(e)
+        == "request.header.authorization,request.header.cookie,response.header.x-trace,response.header.set-cookie", keys(
+        e,
+    );
 }
 
 test "exchanges: an unknown include name refuses the boot listing the eight" {
-    assert unknownIncludes(["request-headers", "trace", "principal"]).join(",") == "trace";
+    assert unknownIncludes(["request-headers", "trace", "principal"]).join(",")
+        == "trace";
     val _i = rkSetProp(key("recording.include"), "request-headers,everything");
-    try asserts.throwsWith({ -> installExchangeRecording() }, "names everything - the valid values are request-headers, response-headers, cookie-headers, authorization-header, principal, remote-address, session-id");
+    try asserts.throwsWith(
+        { -> installExchangeRecording() },
+        "names everything - the valid values are request-headers, response-headers, cookie-headers, authorization-header, principal, remote-address, session-id",
+    );
     val _z = done();
 }
 
 test "exchanges: a request that raises in the chain is recorded with status 500" {
     val _c = chain("true", "");
-    try asserts.throwsWith({ -> runChain("GET", "/boom", "", "", "").status }, "handler exploded");
+    try asserts.throwsWith(
+        { -> runChain("GET", "/boom", "", "", "").status },
+        "handler exploded",
+    );
     val e = latest();
     val _z = done();
     assert e.status == 500 && e.uri == "/boom";
@@ -100,8 +128,16 @@ test "exchanges: a request that raises in the chain is recorded with status 500"
 test "exchanges: the projection is pure - principal, remote address and session only when included" {
     val headers = [#("Accept", "x"), #("Authorization", "Bearer t")];
     val none = exchangeFields([], headers, "ana", "10.0.0.1", "s1");
-    val some = exchangeFields(["principal", "remote-address", "session-id"], headers, "ana", "10.0.0.1", "s1");
-    assert none.length == 0 && some.map({ f -> f._0 + "=" + f._1 }).join(",") == "principal=ana,remote-address=10.0.0.1,session-id=s1";
+    val some = exchangeFields(
+        ["principal", "remote-address", "session-id"],
+        headers,
+        "ana",
+        "10.0.0.1",
+        "s1",
+    );
+    assert none.length == 0
+        && some.map({ f -> f._0 + "=" + f._1 }).join(",")
+            == "principal=ana,remote-address=10.0.0.1,session-id=s1";
 }
 
 // ── steps 6 and 7 ───────────────────────────────────────────────────────────
@@ -114,32 +150,66 @@ test "httpexchanges: exposed only by front 76, read-only, newest first with its 
     val _1 = runChain("GET", "/one", "", "", "");
     val _2 = runChain("GET", "/two", "", "", "");
     val _3 = runChain("GET", "/three", "", "", "");
-    val hidden = rkDispatchHttp("GET", "/actuator/httpexchanges", "{}", "{}", "").status;
+    val hidden = rkDispatchHttp(
+        "GET",
+        "/actuator/httpexchanges",
+        "{}",
+        "{}",
+        "",
+    ).status;
     val _x = installExposure({ id -> id == "httpexchanges" || id == "health" });
     val res = rkDispatchHttp("GET", "/actuator/httpexchanges", "{}", "{}", "");
-    val post = rkDispatchHttp("POST", "/actuator/httpexchanges", "{}", "{}", "").status;
+    val post = rkDispatchHttp(
+        "POST",
+        "/actuator/httpexchanges",
+        "{}",
+        "{}",
+        "",
+    ).status;
     val _y = clearExposure();
     val _z = done();
     val three = res.body.indexOf("/three");
     val two = res.body.indexOf("/two");
     assert hidden == 404 && res.status == 200 && post >= 400, res.body;
-    assert res.body.contains("\"capacity\":2") && three > 0 && two > three && res.body.contains("/one") == false, res.body;
+    assert res.body.contains("\"capacity\":2")
+        && three > 0
+        && two > three
+        && res.body.contains("/one") == false, res.body;
 }
 
 test "httpexchanges: capacity 0 refuses the boot" {
     val _k = rkSetProp(key("capacity"), "0");
-    try asserts.throwsWith({ -> installExchangeRecording() }, "rakun.management.httpexchanges.capacity is 0 - a repository that records nothing is refused");
+    try asserts.throwsWith(
+        { -> installExchangeRecording() },
+        "rakun.management.httpexchanges.capacity is 0 - a repository that records nothing is refused",
+    );
     val _z = done();
 }
 
 test "httpexchanges: recorded header values go through front 76's sanitizer" {
     val _c = chain("true", "request-headers");
-    val _v = rkSetProp("rakun.management.endpoint.httpexchanges.show-values", "always");
-    val _r = runChain("GET", "/a", "accept\ttext/html\nx-api-key\tk-123", "", "");
+    val _v = rkSetProp(
+        "rakun.management.endpoint.httpexchanges.show-values",
+        "always",
+    );
+    val _r = runChain(
+        "GET",
+        "/a",
+        "accept\ttext/html\nx-api-key\tk-123",
+        "",
+        "",
+    );
     val body = exchangesJson();
-    val _u = rkSetProp("rakun.management.endpoint.httpexchanges.show-values", "");
+    val _u = rkSetProp(
+        "rakun.management.endpoint.httpexchanges.show-values",
+        "",
+    );
     val hidden = exchangesJson();
     val _z = done();
-    assert body.contains("k-123") == false && body.contains("{\"key\":\"request.header.x-api-key\",\"value\":\"******\"}") && body.contains("text/html"), body;
+    assert body.contains("k-123") == false
+        && body.contains(
+            "{\"key\":\"request.header.x-api-key\",\"value\":\"******\"}",
+        )
+        && body.contains("text/html"), body;
     assert hidden.contains("text/html") == false, hidden;
 }

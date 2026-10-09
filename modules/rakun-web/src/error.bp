@@ -30,10 +30,17 @@ import {filter.WebRequest, filter.Chain, filter.withHeader};
 pub declare fn rkRaiseProblem(tag: string, detail: string) -> i32;
 
 #[@External.Erlang("rakun_chain", "run_guarded")]
-pub declare fn rkRunGuarded<T>(work: fn() -> T, onProblem: fn(tag: string, detail: string) -> T) -> T;
+pub declare fn rkRunGuarded<T>(
+    work: fn() -> T,
+    onProblem: fn(tag: string, detail: string) -> T,
+) -> T;
 
 #[@External.Erlang("rakun_chain", "advice_register")]
-pub declare fn rkAdviceRegister<T>(tag: string, owner: string, handler: fn(detail: string) -> T) -> i32;
+pub declare fn rkAdviceRegister<T>(
+    tag: string,
+    owner: string,
+    handler: fn(detail: string) -> T,
+) -> i32;
 
 #[@External.Erlang("rakun_chain", "advice_owner")]
 pub declare fn rkAdviceOwner(tag: string) -> string;
@@ -107,7 +114,11 @@ pub fn statusReason(status: i32) -> string {
 
 // The defaults RFC 9457 names, filled in one place so a handler that sets only
 // `detail` still produces a conforming document.
-pub fn problemFor(status: i32, detail: string, instance: string) -> ProblemDetail {
+pub fn problemFor(
+    status: i32,
+    detail: string,
+    instance: string,
+) -> ProblemDetail {
     return ProblemDetail(
         typeUri: blankType(),
         title: statusReason(status),
@@ -123,13 +134,15 @@ pub fn problemFor(status: i32, detail: string, instance: string) -> ProblemDetai
 // not only `\n` `\r` `\t`, so a `detail` carrying U+0001 still reads back as
 // the same text through `json.decode`.
 pub fn problemJson(p: ProblemDetail) -> string {
-    return json.object([
-        #("type", json.quote(p.typeUri)),
-        #("title", json.quote(p.title)),
-        #("status", p.status.toString()),
-        #("detail", json.quote(p.detail)),
-        #("instance", json.quote(p.instance)),
-    ]);
+    return json.object(
+        [
+            #("type", json.quote(p.typeUri)),
+            #("title", json.quote(p.title)),
+            #("status", p.status.toString()),
+            #("detail", json.quote(p.detail)),
+            #("instance", json.quote(p.instance)),
+        ],
+    );
 }
 
 // The one place a `ProblemDetail` becomes a `Response`: the content type is set
@@ -142,23 +155,37 @@ pub fn problemResponse(p: ProblemDetail) -> Response {
 // ── the raise ───────────────────────────────────────────────────────────────
 
 pub fn raiseProblem(tag: string, detail: string) -> i32 {
-    if (tag == "") {
-        @panic("rakun-web: raiseProblem needs a tag - an untagged raise is what "
-            + "the error entry turns into a 500 with a digest, and asking for "
-            + "one deliberately would be asking for an unreadable response");
-    };
+    if (tag == "")
+        @panic(
+            "rakun-web: raiseProblem needs a tag - an untagged raise is what "
+                + "the error entry turns into a 500 with a digest, and asking for "
+                + "one deliberately would be asking for an unreadable response",
+        );
     return rkRaiseProblem(tag, detail);
 }
 
 // ── the advice registry ─────────────────────────────────────────────────────
 
-pub fn duplicateAdviceProblem(tag: string, first: string, second: string) -> string {
-    return "rakun-web: the problem tag `" + tag + "` is already handled by `"
-        + first + "` - `" + second + "` would be the second handler for one tag "
+pub fn duplicateAdviceProblem(
+    tag: string,
+    first: string,
+    second: string,
+) -> string {
+    return "rakun-web: the problem tag `"
+        + tag
+        + "` is already handled by `"
+        + first
+        + "` - `"
+        + second
+        + "` would be the second handler for one tag "
         + "and only one of them could ever run";
 }
 
-pub fn registerAdvice<T>(tag: string, owner: string, handler: fn(detail: string) -> T) -> i32 {
+pub fn registerAdvice<T>(
+    tag: string,
+    owner: string,
+    handler: fn(detail: string) -> T,
+) -> i32 {
     if (tag == "") @panic("rakun-web: an #[exceptionHandler] needs a tag");
     val first: string = rkAdviceOwner(tag);
     if (first != "") @panic(duplicateAdviceProblem(tag, first, owner));
@@ -195,21 +222,39 @@ pub fn problemDetailsEnabled() -> bool {
 // A tagged raise nothing registered for is still unmatched, and an unmatched
 // raise answers the same way an untagged one does. The tag and its detail go to
 // the log under the digest; the body carries the digest alone.
-fn unmatched(tag: string, detail: string, instance: string, accept: string) -> Response {
-    val digest: string = if (tag == "") detail else rkProblemDigest(tag + " " + detail);
-    if (tag != "") {
-        val _n = rkProblemNote(digest + " unmatched problem tag `" + tag + "`: " + detail);
-    };
+fn unmatched(
+    tag: string,
+    detail: string,
+    instance: string,
+    accept: string,
+) -> Response {
+    val digest: string = if (tag == "")
+        detail
+    else
+        rkProblemDigest(tag + " " + detail);
+    if (tag != "")
+        val _n = rkProblemNote(
+            digest + " unmatched problem tag `" + tag + "`: " + detail,
+        );
     val page: string = staticPage(500, accept);
     if (page != "") return pageResponse(500, page);
     return problemResponse(problemFor(500, "correlation " + digest, instance));
 }
 
-pub fn renderProblem(tag: string, detail: string, instance: string) -> Response {
+pub fn renderProblem(
+    tag: string,
+    detail: string,
+    instance: string,
+) -> Response {
     return renderProblemFor(tag, detail, instance, "application/json");
 }
 
-pub fn renderProblemFor(tag: string, detail: string, instance: string, accept: string) -> Response {
+pub fn renderProblemFor(
+    tag: string,
+    detail: string,
+    instance: string,
+    accept: string,
+) -> Response {
     if (tag == "") return unmatched(tag, detail, instance, accept);
     val hit: ?ProblemDetail = rkAdviceInvoke(tag, detail);
     val found: ProblemDetail = hit ?? problemFor(0, "", "");
@@ -235,7 +280,10 @@ pub fn errorPagePath() -> string {
 pub fn errorPageFiles(status: i32) -> string[] {
     val base: string = errorPagePath();
     val family: string = if (status >= 500) "5xx" else "4xx";
-    return [base + "/" + status.toString() + ".html", base + "/" + family + ".html"];
+    return [
+        base + "/" + status.toString() + ".html",
+        base + "/" + family + ".html",
+    ];
 }
 
 // The page for `status`, or `""` when the client does not prefer HTML or no
@@ -245,12 +293,16 @@ pub fn staticPage(status: i32, accept: string) -> string {
     var found = "";
     for (errorPageFiles(status)) { f ->
         if ((found == "") && fs.exists(f)) found = fs.readText(f).unwrapOr("");
-    };
+    }
     return found;
 }
 
 fn pageResponse(status: i32, page: string) -> Response {
-    return withHeader(Response.withStatus(status, page), "Content-Type", "text/html; charset=utf-8");
+    return withHeader(
+        Response.withStatus(status, page),
+        "Content-Type",
+        "text/html; charset=utf-8",
+    );
 }
 
 // The pass-through half. A handler's own `Response` WITH A BODY is never
@@ -260,7 +312,9 @@ pub fn fillProblem(res: Response, instance: string) -> Response {
     if (problemDetailsEnabled() == false) return res;
     if (res.status < 400) return res;
     if (res.body != "") return res;
-    return problemResponse(problemFor(res.status, statusReason(res.status), instance));
+    return problemResponse(
+        problemFor(res.status, statusReason(res.status), instance),
+    );
 }
 
 pub fn errorEntry(req: WebRequest, chain: Chain) -> Response {

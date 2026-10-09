@@ -6,11 +6,7 @@ import {testing.asserts} from "std";
 import {rkSetProp, service, rkScan, rkSingleton, rkEnter, rkDone} from "rakun";
 import {jobstore.markers.jobs, jobstore.markers.persistentJob};
 import {startDataSource, defaultDataSourceName} from "rakun-data";
-import {
-    jobstore.store.Trigger, jobstore.store.JobDetail, jobstore.store.MisfirePolicy, jobstore.store.installJobStore, jobstore.store.registerJob, jobstore.store.registerTrigger, jobstore.store.registerTriggerOn,
-    jobstore.store.registerJobHandler, jobstore.store.forgetJobHandler, jobstore.store.jobStoreDataSource, jobstore.store.jobData, jobstore.store.jobField, jobstore.store.storedDataOn, jobstore.store.countRows,
-    jobstore.store.orphanJobs, jobstore.store.jobStatusOn, jobstore.store.setJobClock, jobstore.store.clearJobClock, jobstore.store.instantOf, jobstore.store.rkPersistentJob, jobstore.store.hasJobHandler, jobstore.store.declaredCron, jobstore.store.runJobHandler,
-};
+import {jobstore.store.Trigger, jobstore.store.JobDetail, jobstore.store.MisfirePolicy, jobstore.store.installJobStore, jobstore.store.registerJob, jobstore.store.registerTrigger, jobstore.store.registerTriggerOn, jobstore.store.registerJobHandler, jobstore.store.forgetJobHandler, jobstore.store.jobStoreDataSource, jobstore.store.jobData, jobstore.store.jobField, jobstore.store.storedDataOn, jobstore.store.countRows, jobstore.store.orphanJobs, jobstore.store.jobStatusOn, jobstore.store.setJobClock, jobstore.store.clearJobClock, jobstore.store.instantOf, jobstore.store.rkPersistentJob, jobstore.store.hasJobHandler, jobstore.store.declaredCron, jobstore.store.runJobHandler};
 import {jobstore.scheduler.tickOn, jobstore.scheduler.historyOf};
 import {cron.rkI64};
 
@@ -30,7 +26,16 @@ fn done() -> i32 {
 }
 
 fn nightly(name: string, job: string) -> Trigger {
-    return Trigger(name: name, job: job, cron: "0 0 3 * * *", startAt: rkI64(0), endAt: rkI64(0), misfire: MisfirePolicy.FireNow, retries: 0, backoffMs: 0);
+    return Trigger(
+        name: name,
+        job: job,
+        cron: "0 0 3 * * *",
+        startAt: rkI64(0),
+        endAt: rkI64(0),
+        misfire: MisfirePolicy.FireNow,
+        retries: 0,
+        backoffMs: 0,
+    );
 }
 
 #[service]
@@ -46,10 +51,37 @@ pub type Billing() {
 
 test "jobstore: a job registered twice is one row, replaced only with overwrite-existing-jobs" {
     val ds = fresh("js1");
-    val a = registerJob(ds, JobDetail(name: "report", group: "g", handler: "report", data: "v=1", durable: true));
-    val b = registerJob(ds, JobDetail(name: "report", group: "g", handler: "report", data: "v=1", durable: true));
+    val a = registerJob(
+        ds,
+        JobDetail(
+            name: "report",
+            group: "g",
+            handler: "report",
+            data: "v=1",
+            durable: true,
+        ),
+    );
+    val b = registerJob(
+        ds,
+        JobDetail(
+            name: "report",
+            group: "g",
+            handler: "report",
+            data: "v=1",
+            durable: true,
+        ),
+    );
     val _o = rkSetProp("rakun.scheduling.overwrite-existing-jobs", "true");
-    val c = registerJob(ds, JobDetail(name: "report", group: "g", handler: "report", data: "v=2", durable: true));
+    val c = registerJob(
+        ds,
+        JobDetail(
+            name: "report",
+            group: "g",
+            handler: "report",
+            data: "v=2",
+            durable: true,
+        ),
+    );
     val rows = countRows(ds, "rakun_job", "name", "report");
     val data = storedDataOn(ds, "report");
     val _z = done();
@@ -58,10 +90,25 @@ test "jobstore: a job registered twice is one row, replaced only with overwrite-
 
 test "jobstore: a changed definition without overwrite refuses the boot naming the job" {
     val ds = fresh("js2");
-    val _a = registerJob(ds, JobDetail(name: "report", group: "g", handler: "report", data: "v=1", durable: true));
-    try asserts.throwsWith({ -> registerJob(ds, JobDetail(name: "report", group: "g", handler: "report", data: "v=2", durable: true)) }, "job `g.report` is stored with a different definition - set rakun.scheduling.overwrite-existing-jobs=true");
+    val _a = registerJob(
+        ds,
+        JobDetail(
+            name: "report",
+            group: "g",
+            handler: "report",
+            data: "v=1",
+            durable: true,
+        ),
+    );
+    try asserts.throwsWith(
+        { -> registerJob(ds, JobDetail(name: "report", group: "g", handler: "report", data: "v=2", durable: true)) },
+        "job `g.report` is stored with a different definition - set rakun.scheduling.overwrite-existing-jobs=true",
+    );
     val _t = registerTriggerOn(ds, nightly("t", "report"));
-    try asserts.throwsWith({ -> registerTriggerOn(ds, Trigger(name: "t", job: "report", cron: "0 0 4 * * *", startAt: rkI64(0), endAt: rkI64(0), misfire: MisfirePolicy.FireNow, retries: 0, backoffMs: 0)) }, "trigger `t` is stored with a different definition");
+    try asserts.throwsWith(
+        { -> registerTriggerOn(ds, Trigger(name: "t", job: "report", cron: "0 0 4 * * *", startAt: rkI64(0), endAt: rkI64(0), misfire: MisfirePolicy.FireNow, retries: 0, backoffMs: 0)) },
+        "trigger `t` is stored with a different definition",
+    );
     val data = storedDataOn(ds, "report");
     val _z = done();
     assert data == "v=1";
@@ -69,13 +116,19 @@ test "jobstore: a changed definition without overwrite refuses the boot naming t
 
 test "jobstore: a trigger whose cron does not parse refuses, naming the trigger and the parse error" {
     val ds = fresh("js3");
-    try asserts.throwsWith({ -> registerTriggerOn(ds, Trigger(name: "bad", job: "report", cron: "0 3 * * *", startAt: rkI64(0), endAt: rkI64(0), misfire: MisfirePolicy.FireNow, retries: 0, backoffMs: 0)) }, "trigger `bad` has a cron that does not parse - rakun-scheduling: a cron expression has six fields");
+    try asserts.throwsWith(
+        { -> registerTriggerOn(ds, Trigger(name: "bad", job: "report", cron: "0 3 * * *", startAt: rkI64(0), endAt: rkI64(0), misfire: MisfirePolicy.FireNow, retries: 0, backoffMs: 0)) },
+        "trigger `bad` has a cron that does not parse - rakun-scheduling: a cron expression has six fields",
+    );
     val _z = done();
 }
 
 test "jobstore: a trigger that ends before it starts refuses" {
     val ds = fresh("js4");
-    try asserts.throwsWith({ -> registerTriggerOn(ds, Trigger(name: "late", job: "report", cron: "0 0 3 * * *", startAt: 2000, endAt: 1000, misfire: MisfirePolicy.FireNow, retries: 0, backoffMs: 0)) }, "trigger `late` ends (1000) before it starts (2000)");
+    try asserts.throwsWith(
+        { -> registerTriggerOn(ds, Trigger(name: "late", job: "report", cron: "0 0 3 * * *", startAt: 2000, endAt: 1000, misfire: MisfirePolicy.FireNow, retries: 0, backoffMs: 0)) },
+        "trigger `late` ends (1000) before it starts (2000)",
+    );
     val _z = done();
 }
 
@@ -95,7 +148,9 @@ test "jobstore: job data round-trips &, =, a newline and a four-byte character" 
     val _t = registerTrigger(nightly("t6", "j6"), data);
     val back = storedDataOn(ds, "j6");
     val _z = done();
-    assert jobField(back, "period") == "2026-09" && jobField(back, "note") == "a=b&c\nd 😀" && jobField(back, "absent") == "", back;
+    assert jobField(back, "period") == "2026-09"
+        && jobField(back, "note") == "a=b&c\nd 😀"
+        && jobField(back, "absent") == "", back;
 }
 
 // ── step 2 ──────────────────────────────────────────────────────────────────
@@ -124,18 +179,27 @@ test "jobstore: a job whose handler is gone is orphaned at boot, keeps its histo
     val kept = countRows(ds, "rakun_job", "name", "j8");
     val hist = historyOf(ds, "j8").length;
     val _z = done();
-    assert first == 1 && orphaned == 1 && second == 0 && state == "orphaned" && kept == 1 && hist == 1, state;
+    assert first == 1
+        && orphaned == 1
+        && second == 0
+        && state == "orphaned"
+        && kept == 1
+        && hist == 1, state;
 }
 
 test "jobstore: a trigger naming a job whose #[persistentJob] declares another cron is refused" {
     val ds = fresh("js9");
     val _h = registerJobHandler("j9", "0 0 5 * * *", { data -> "ran" });
-    try asserts.throwsWith({ -> registerTriggerOn(ds, nightly("t9", "j9")) }, "trigger `t9` fires `0 0 3 * * *`, and job `j9` declares `0 0 5 * * *`");
+    try asserts.throwsWith(
+        { -> registerTriggerOn(ds, nightly("t9", "j9")) },
+        "trigger `t9` fires `0 0 3 * * *`, and job `j9` declares `0 0 5 * * *`",
+    );
     val _f = forgetJobHandler("j9");
     val _z = done();
 }
 
 test "jobstore: #[jobs] registers each #[persistentJob] method as the job's handler, with its cron" {
-    assert hasJobHandler("billing-invoices") && declaredCron("billing-invoices") == "0 0 3 * * *";
+    assert hasJobHandler("billing-invoices")
+        && declaredCron("billing-invoices") == "0 0 3 * * *";
     assert runJobHandler("billing-invoices", "p=1") == "billed p=1";
 }
