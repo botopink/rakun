@@ -29,7 +29,7 @@ refusal is the core's `config_check.bp`.
 | [rakun-actuator](./rakun-actuator/) | root · endpoint_host · health · info · registry_endpoints · instrumentation · management · actuator | erlang | `-actuator` (host) | 11 · 76 · 87 | real code, 77 tests |
 | [rakun-cache](./rakun-cache/) | root · cache_host · cache · cached · cache_endpoint | erlang | `-cache` | 12 | real code, 55 tests |
 | [rakun-cli](./rakun-cli/) | root · args · plugins · cli (+ `templates/`) | erlang | Spring Boot CLI, `spring-boot:run` / `bootRun` | 88 | real code, 25 tests |
-| [rakun-client](./rakun-client/) | root · address · settings · response · cache · transport · health · client · request · exchange | erlang | `RestClient` / `WebClient` | 13 | real code, 70 tests |
+| [rakun-client](./rakun-client/) | root · address · settings · response · cache · transport · health · client · request · exchange · ws (SOAP) | erlang | `RestClient` / `WebClient` + `-web-services` (SOAP — not WebSocket) | 13 · 93 (`ws/`) | real code, 83 tests |
 | [rakun-data](./rakun-data/) | root · datasource · sql · orm_host · migration_host · orm · migration | erlang | `-data-jpa` / `-data-jdbc` / `-data-mongodb` / `-data-redis` | 08 · 09 · 77 · 78 | real code, 128 tests |
 | [rakun-devtools](./rakun-devtools/) | root · devtools · db_console | erlang | `spring-boot-devtools` | 80 | real code, 21 tests |
 | [rakun-mail](./rakun-mail/) | root · mail · fixture | erlang | `-mail` | 85 | real code, 32 tests |
@@ -44,7 +44,6 @@ refusal is the core's `config_check.bp`.
 | [rakun-test](./rakun-test/) | root | erlang | `-test` | 19 | FakeRequest (implements Request) + toRequest, expect* assertions, MockMvc, resetSingletons/resetContext/contextSnapshot; 27 tests |
 | [rakun-websocket](./rakun-websocket/) | root · ws_host · ws · endpoint | erlang | `-websocket` | 20 | real code, 27 tests (no JavaScript) |
 | [rakun-tx](./rakun-tx/) | root · outbox · saga · twopc | erlang | JTA (`spring-boot-starter-jta-*`), Kafka/Pulsar transactions | 83 | real code, 32 tests |
-| [rakun-ws](./rakun-ws/) | root · ws | erlang | `-web-services` (SOAP — not WebSocket) | 93 | real code, 13 tests |
 | [rakun-web](./rakun-web/) | root · filter · negotiation · error · middleware · cors · compression · customizer · apiversion · shutdown · convention · tls · rules · static · hateoas (hal) | erlang | `-webmvc` + `-hateoas` (websocket is `rakun-websocket`) | 07 · 65 · 82 · 21 (`hateoas/`) | real code, 223 tests |
 
 `modules/rakun-web/` stopped being a scaffold with front 07: it carries the filter chain, CORS and
@@ -98,7 +97,7 @@ which owns its `botopink.json` — several of them name members that do not exis
 | `rakun-pulsar` | 91 | split from `rakun-messaging` |
 | `rakun-rsocket` | 92 | keep, separate |
 | `rakun-mail` | 85 | keep, separate |
-| `rakun-soap` | 93 | rename of the 1.0.9 `rakun-ws` (never scaffolded — nothing to move) |
+| `rakun-ws` (SOAP) | 93 | created as `rakun-ws`, then merged into `rakun-client` by front 128 (`modules/rakun-client/src/ws/`; merged, not renamed — decision 187) |
 | [`../starters/rakun-starter-*`](../starters/) | 73 | eight workspace members beside `modules/` — manifests and a docblock-only root, no code; the version set is `rakun/version_set` |
 
 Twenty-seven members in all when every front has landed, plus `starters/`. `rakun-core` and

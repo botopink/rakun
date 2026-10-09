@@ -2634,9 +2634,16 @@ hashes, module facts).
   path dependencies with a SHA-256 of their tree; `registerSbomEndpoint(file)`
   serves it at `sbom`.
 
-## SOAP web services — `modules/rakun-ws/` (front 93)
+## SOAP web services — `modules/rakun-client/src/ws/` (front 93)
 
-Not WebSocket (that is rakun-web's `websocket`). `src/sidecars/rakun_ws.erl`
+The former member `rakun-ws`, merged into `rakun-client` by front 128 (decision 187 —
+merged, not renamed): `modules/rakun-client/src/ws/ws.bp`, its tests
+`modules/rakun-client/test/ws/{client,envelope}_test.bp`, its sidecar keeps its name and atom
+(`modules/rakun-client/src/sidecars/rakun_ws.erl`), its names are reached `from "rakun-client"`.
+The one template that names a compiled record spells the absorber's module atom:
+`rakun_client@ws@ws@@SoapFault` (a record's atom is `<package>@<module path>@@<Type>`).
+
+Not WebSocket (that is the member `rakun-websocket`). `src/sidecars/rakun_ws.erl`
 over xmerl reads envelopes by namespace URI and local name (any prefix):
 `soapEnvelope` / `soapBody` (1.1 and 1.2), `parseFault` (`?SoapFault`, both
 shapes, raw detail), `wrappedElement`, `xmlEscape`. `wsCall(client, action,
