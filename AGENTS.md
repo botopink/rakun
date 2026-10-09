@@ -615,14 +615,14 @@ it was minted with; a handle used after `endRequest`, or from the next request o
 the same connection, RAISES rather than writing into somebody else's response.
 That is the first test in `test/request_context_test.bp`, deliberately.
 
-**`RequestScope` owns the context: `implement @Context<RequestBase>`.**
-`RequestBase` (`pub type RequestBase {}`, a marker with no fields) is the base
-a request hook's `use`s anchor at — `-> @Component<RequestBase, T>` (decision
-128, front 24's guide § 4.4) — so the one-base rule refuses a request hook
-inside a jhonstart component (`ElementBase`) at the second `use`. No accessor
+**`RequestScope` implements `@Renderable`** (decision 354 replaced the owner
+marker `@Context<RequestBase>`). `RequestBase` (`pub type RequestBase {}`, a
+marker with no fields) was the base decision 128's `@Component<C, T>` named;
+`@Component<R>` names none, and the request becomes the root context
+`RequestContext` the pipeline provides (`04-rakun/128`). No accessor
 here is a hook yet: every reader below is an ordinary function that raises
 outside a frame, and turning one into a hook is a front of its own (every caller
-would then need a `@Component<RequestBase, …>` return).
+would then need a `@Component<…>` return).
 
 | Verb | Who calls it | What it does |
 |---|---|---|
