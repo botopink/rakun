@@ -2602,7 +2602,13 @@ here they are `rakun.management.endpoints.web.base-path`, `rakun.management.endp
 `rakun.management.health.<id>.timeout` and `rakun.info.*`.
 
 
-## Packaging and release — `modules/rakun-release/` (front 81)
+## Packaging and release — `modules/rakun-cli/src/release/` (front 81)
+
+The former member `rakun-release`, merged into `rakun-cli` by front 128 (decision 187):
+`modules/rakun-cli/src/release/{release,sbom}.bp`, its test `modules/rakun-cli/test/release/release_test.bp`,
+its sidecar keeps its name and atom (`modules/rakun-cli/src/sidecars/rakun_release.erl`), its names are
+reached `from "rakun-cli"` (`rakun-cli/release/release` for the module path). `rakun-cli` took its
+`rakun-web` dependency, so the member depends on `rakun`, `rakun-actuator` and `rakun-web`.
 
 Generates files; changes no running code. Sidecar `rakun_release.erl` (term
 rendering, a deterministic ustar writer, `deterministic` beam compiles, tree
@@ -2716,7 +2722,7 @@ and names onze as the CLI of a full-stack project.
   `modules/rakun` the project depends on); refuses a non-empty directory;
   `full-stack` needs onze (`rakun.cli.onze`, else `onze` on PATH).
 - `test` / `build` are front ends: `botopink test --target erlang
-  [--filter]`, and `botopink build` then rakun-release's `buildTarball`
+  [--filter]`, and `botopink build` then the member's own `release/`'s `buildTarball`
   (`.rakun/release/<name>-<vsn>.tar`). Every invocation is recorded
   (`cliInvocations()`).
 - `routes`, `beans`, `config` inspect without starting: the project is copied
