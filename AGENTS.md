@@ -3579,7 +3579,8 @@ field and its type and adding nothing; a module using it imports `halObject`, `h
 `halBool`, `halFloat` and `Link`. `halCollection(rel, renderedItems, links)`:
 `_embedded` first (an empty one is `[]`), `_links` last. `linkTo(rel, pattern,
 params)` validates the pattern against the core router's paths and, when
-`rakun-app` is in the build, its table (`[name]` read as `:name`), naming the
+`rakun-app` is in the build, its table (`[name]` read as `:name` by `routing`'s
+`segment.toColonPattern`), naming the
 nearest registered path on a miss; every `:param` needs an entry and every
 entry a `:param`; values are `encoding.percentEncode`d. `halResponse` /
 `halResponseFor(accept, body)` set the content type through rakun-web's
