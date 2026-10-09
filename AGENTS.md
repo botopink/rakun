@@ -4830,8 +4830,11 @@ repository: the runner discovers this workspace's members — the 25 modules,
 the 8 starters and the 3 examples, one row each (the umbrella has no row) —
 and nothing else. onze, jhonstart and emilia are checked out under
 `botopink-lang/repository/` because `starters/rakun-starter-test` depends on
-`onze` and `onze-test` by `path` (and `onze` on the other two); they are
-dependencies, not rows — run from inside the checkout they would be, and an
+`onze` and `onze-test` by `path` (and `onze` on the other two), and
+`actions`, `routing` and `validation` at `feat` because the members declare
+them as `git` dependencies, transitively (rakun's, onze's and jhonstart's;
+`actions` itself declares `routing`), resolved by name through that root
+(decision 326); they are dependencies, not rows — run from inside the checkout they would be, and an
 onze red would be rakun's. Then the hook's other stages run from the hook's
 own runner on every row: `runRepositoryStagesGate` (the front 22/23 greps of
 `scripts/git-hooks/repository-stages.sh`), `runExamplesGate "$bin" erlang`,
