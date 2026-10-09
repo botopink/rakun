@@ -145,7 +145,7 @@ rakun/
 │   │                             scan order · singleton/build count · the parseInt rule ·
 │   │                             route order · the `Response` round-trip shape. The same
 │   │                             assertions on BOTH rows — green on commonJS and on erlang
-│   │                    (front 14's `rakun-validation` member moved to the bundled library
+│   │                    (front 14's `rakun-validation` member moved to the library
 │   │                    `validation`, decision 116 rule 5; its `boot.bp` is
 │   │                    `modules/rakun/src/config_check.bp` — § Validation)
 │   ├── rakun-app/     ← THE SERVER HALF OF THE `app/` ROUTER (front 95 relocated fronts 22 and
@@ -157,7 +157,7 @@ rakun/
 │   │   │   ├── root.bp        ← `pub mod file_router; pub mod ssr;`
 │   │   │   ├── file_router.bp ← THE ROUTE TABLE (§ The file-convention route table):
 │   │   │   │                    the registry (`rkAppRegisterEntry` / `rkAppRegisterPage` /
-│   │   │   │                    `rkAppRegisterHandler`) and the `app/` scan, over the bundled
+│   │   │   │                    `rkAppRegisterHandler`) and the `app/` scan, over the
 │   │   │   │                    `routing` library's grammar, wire and matcher
 │   │   │   ├── sidecars/rakun_file_router.erl ← the registry on the BEAM, in ETS
 │   │   │   │                    behind a dedicated owner process
@@ -168,7 +168,7 @@ rakun/
 │   │   │                        state; chunked HTTP/1.1 on the socket, a buffer without one
 │   │   └── test/            (+ `test/fixtures/{routing,conflict-both,conflict-roots,middleware}`)
 │   │       ├── file_router_test.bp ← the registry: entries, pages, handlers, the
-│   │       │                     refusals, the table against the bundled matcher
+│   │       │                     refusals, the table against the `routing` matcher
 │   │       ├── file_router_scan_test.bp ← the scan over real fixture trees: the
 │   │       │                     conflicts, the `_` skip, `app` vs `src/app`, the root
 │   │       │                     `middleware.bp`, `rakun.appDir`
@@ -189,7 +189,7 @@ rakun/
 │   │   │   │                    the `Set-Cookie` list · the route read
 │   │   │   ├── middleware.bp  ← `Next` (pass · redirect · permanentRedirect ·
 │   │   │   │                    rewrite), the matcher (`validateMatcher` /
-│   │   │   │                    `matcherAdmits` over the bundled `routing` `pattern`
+│   │   │   │                    `matcherAdmits` over the library `routing` `pattern`
 │   │   │   │                    grammar; `""` runs everywhere) and the one-middleware rule
 │   │   │   ├── cors.bp        ← `CorsPolicy`, the three restrictive defaults, the
 │   │   │   │                    preflight, the per-controller mappings
@@ -320,7 +320,7 @@ to erlang here. The node host halves (`runtime.mjs`, `context.mjs`, `request_con
 `autoconfig.mjs`, `ssl_bundle.mjs`, `rakun-app`'s `file_router.mjs` / `ssr.mjs`, `rakun-web`'s
 `chain.mjs`) are deleted and no `#[@External.Node]` form remains in any member: every host
 cell is one `@External.Erlang` form. What both a browser and the server run is not a rakun
-member — the matcher and the navigation vocabulary are the bundled `routing`, the action
+member — the matcher and the navigation vocabulary are the library `routing`, the action
 protocol `actions`, validation `validation` (decisions 115, 116). The sections below that
 reason about "both rows", a "node twin" or `runtime.mjs:N` record why each piece was
 shaped as it is while the core still ran on commonJS; the `runtime.mjs:N` citations name
@@ -559,7 +559,7 @@ HTTP on the BEAM until the `build` path ships and loads the sidecar too.
 
 The route table is rakun's; what a UI convention file DECLARES belongs to the
 HTML library, and rakun names none of its types (decisions 113, 114). The
-grammar, the `kind|pattern|slot|verb` wire and the matcher are the bundled
+grammar, the `kind|pattern|slot|verb` wire and the matcher are the
 library `routing` (decision 115) — `segment`, `table`, `match` — which the
 browser's router imports too, so the two sides cannot disagree about which
 route a URL is. The wire is `routing`'s `writeTable` form: trailing empty
@@ -1831,7 +1831,7 @@ SHA-256 hash); the renderers are pure botopink.
 
 `notFound()`, `redirect(loc)` (307), `permanentRedirect(loc)` (308) and
 `redirectWithStatus(loc, 303 | 307 | 308)` THROW a string reason built by the
-bundled library `routing`'s `signalReason` (`nav:not-found`,
+library `routing`'s `signalReason` (`nav:not-found`,
 `nav:redirect:<loc>`, …) through `rakun_navigation:signal/1`; they are
 declared `-> i32` and never return. A signal is a throw rather than a sentinel
 so it composes through nested calls and through `await` (eager on the BEAM),
@@ -3861,7 +3861,7 @@ profile active fails at boot); `rakun.security.password.encoder`;
   not by a property.
 - **`security.current()` is `current()`.** A module of a path/workspace dependency is
   not importable as a namespace (`unbound variable 'security'`; the same form against
-  the bundled `routing` builds). A consumer imports flat from
+  the library `routing` builds). A consumer imports flat from
   `"rakun-security/security"` (the module name is needed: `jwt` exports the same
   fixture names).
 - **The test-snap helper `assertSecurity` does not exist**; `test/security_test.bp`
@@ -4323,11 +4323,11 @@ overrides every root (front 80's dev profile sets 0). `Last-Modified` only with
 socket a test must install `rkChainSetRunner(runChain)`, as `static_test.bp`
 does; the 200 MB streaming test asserts `erlang:memory(total)` moves < 4 MB.
 
-## Validation — the bundled `validation` library (front 14, moved by decision 116 rule 5)
+## Validation — the `validation` library (front 14, moved by decision 116 rule 5)
 
 Front 14's member `modules/rakun-validation` is gone: its seven modules are the
-compiler-bundled library `validation` (`libs/validation/` in the compiler repo,
-`01-std/06-validation-lib`), imported by name with no dependency entry, and the
+library `validation` (`repository/validation`, `botopink/validation` — bundled with
+the compiler until decision 326), which `modules/rakun` declares in `dependencies`, and the
 one module that names rakun's configuration — the boot refusal — is
 `modules/rakun/src/config_check.bp`, with its tests in
 `modules/rakun/test/config_check_test.bp`. The message lookup is injected:

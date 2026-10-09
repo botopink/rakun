@@ -42,7 +42,7 @@ sidecar naming rule and what is still blocked.
   a route registration per method; the dispatcher matches `(verb, path)` —
   including `:name` params — and runs the handler over `Request`/`Response`, or 404s.
 - **File-convention routing** — `file_router.bp`: a URL that comes from where a
-  file sits, over the bundled library `routing` (`import {segment.parseSegment,
+  file sits, over the library `routing` (`import {segment.parseSegment,
   table.parseTable, match.matchPath} from "routing";` — no dependency to declare).
   `parseSegment` decodes `blog`, `[slug]`, `[...slug]`, `[[...slug]]`,
   `(group)`, `@slot` and `_private`; `patternOf` builds the URL pattern with
@@ -76,7 +76,7 @@ sidecar naming rule and what is still blocked.
   of entries between the socket and the route handler, with `#[filter]` and
   `#[middleware]` as its two entry points, `Next` for redirect/rewrite, CORS with
   deny-all defaults, and RFC 9457 problem details. See § The filter chain below.
-- **Validation** — the bundled library `validation` (`from "validation"`), and the only one
+- **Validation** — the library `validation` (`from "validation"`), and the only one
   that compiles for **both** rows: `#[validated]` on a record gives it the
   members `validate()` and `constraints()`, built from string comparisons,
   length checks and regex matches alone, so the server and the browser run the
@@ -98,7 +98,7 @@ sidecar naming rule and what is still blocked.
 | `SpringApplication.run(App.class)` | `Rakun.run(App(port: 8080, basePath: "/api"))` |
 | `ApplicationContext` | `Context` (`ctx.resolve<T>()`) — future, declaration-only |
 | `ResponseEntity` | `Response` (`Response.ok(...)`, `Response.json(...)`) |
-| `@Valid` / `@NotBlank` / `@Size` / `@Email` … | `#[validated]` + the constraint markers (the bundled `validation` library) — an explicit `validate<TypeName>(v)` call, not a parameter hook |
+| `@Valid` / `@NotBlank` / `@Size` / `@Email` … | `#[validated]` + the constraint markers (the library `validation` library) — an explicit `validate<TypeName>(v)` call, not a parameter hook |
 
 The decorators (`service`, `restController`, `route`, `getMapping`, …) are
 symbols **exported by rakun** — import them at the call site before applying them
@@ -1208,8 +1208,8 @@ that digest and never into the body.
 
 ## Validation (`from "validation"`)
 
-Validation is the bundled library `validation`, shipped with the compiler and
-imported by name — no dependency to declare (decision 116 rule 5). The server
+Validation is the library `validation` (`botopink/validation`, decision 116 rule
+5), declared in `dependencies` like any library (decision 326). The server
 and the browser run the same predicates from it. rakun hands it rakun's message
 keys at boot (`Rakun.run` installs `config_check.installMessageSource()`), so
 `rakun.validation.locale` and `rakun.validation.messages.<code>` work as before.

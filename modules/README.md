@@ -19,7 +19,7 @@ rather than nothing. `targets` follows `03-rakun/modules.md` § Targets. Three m
 today: the core (`rakun`, fronts 04 · 05 · 06 · 62 · 72 · 74), `rakun-app` (fronts 22 · 23, relocated
 out of the core by front 95) and `rakun-web` (front 07). `rakun-test` holds front 19's request double,
 assertions, MockMvc and context control. Front 14's
-`rakun-validation` moved to the compiler-bundled library `validation` (decision 116 rule 5); its boot
+`rakun-validation` moved to the library `validation` (decision 116 rule 5; a repository of its own since decision 326); its boot
 refusal is the core's `config_check.bp`.
 
 | Member | `files` | `targets` | Spring Boot 4 | Front(s) | State |
@@ -51,10 +51,10 @@ refusal is the core's `config_check.bp`.
 | [rakun-web](./rakun-web/) | root · filter · negotiation · error · middleware · cors · compression · customizer · apiversion · shutdown · convention · tls · rules · static | erlang | `-webmvc` (websocket is `rakun-websocket`) | 07 · 65 · 82 | real code, 209 tests |
 
 `modules/rakun-web/` stopped being a scaffold with front 07: it carries the filter chain, CORS and
-RFC 9457 problem details, its host file (`src/sidecars/rakun_chain.erl`) and its test files — see `repository/rakun/AGENTS.md` § The filter chain. Front 14's `modules/rakun-validation/` is now the bundled `validation` library — see
+RFC 9457 problem details, its host file (`src/sidecars/rakun_chain.erl`) and its test files — see `repository/rakun/AGENTS.md` § The filter chain. Front 14's `modules/rakun-validation/` is now the `validation` library — see
 `repository/rakun/AGENTS.md` § Validation, and the section below.
 
-### `validation` — front 14's member, now a bundled library (decision 116 rule 5)
+### `validation` — front 14's member, now a library of its own (decisions 116 rule 5, 326)
 
 Every other server module is erlang. This one is both, and the reason is the
 mechanism rather than the packaging: `#[validated]` emits a plain botopink
@@ -168,7 +168,7 @@ rakun-<name>/
 - **Decorator-based**: all annotations use `#[decorator]` syntax.
 - **IoC integration**: every component is managed by the core container (`rakun`).
 - **Target per member**: erlang, every member and the workspace root (decision 117 rule 9);
-  what the browser runs too is a bundled library (`routing`, `actions`, `validation`), not a member.
+  what the browser runs too is a shared library (`routing`, `actions`, `validation` — repositories of their own, decision 326), declared in `dependencies`, not a member.
 - **Std lib reuse**: use `std.*` modules when possible; `std` is never listed as a dependency.
 - **No compiler changes**: the compiler core knows nothing about rakun modules.
 
@@ -188,7 +188,7 @@ rakun-<name>/
 | `@RabbitListener` / `@KafkaListener` | `#[rabbitListener]` / `#[kafkaListener]` (rakun-messaging) |
 | `@PreAuthorize` | `#[preAuthorize]` (rakun-security) |
 | `@CrossOrigin` | `#[crossOrigin]` (rakun-web) |
-| `@Valid` / `@NotBlank` / `@Size` / `@Email` … | `#[validated]` + the constraint markers (the bundled `validation`) — an explicit `validate<TypeName>(v)` call, not a parameter hook |
+| `@Valid` / `@NotBlank` / `@Size` / `@Email` … | `#[validated]` + the constraint markers (the library `validation`) — an explicit `validate<TypeName>(v)` call, not a parameter hook |
 | Actuator endpoints | `/actuator/*` (rakun-actuator) |
 | `RestClient` / `WebClient` | `RestClient` / `WebClient` (rakun-client) |
 
