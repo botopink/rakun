@@ -5,7 +5,7 @@
 import {io.fs} from "std";
 import {rkSetProp, rkServe, rkDispatchHttp} from "rakun";
 import {ws.WsSession, ws.rkRegisterWsEndpoint, ws.installWebsocket, ws.resetWebsocket, ws.revokeSession, ws.directFrame, ws.topicFrame};
-import {ws_host.rkWsClientConnect, ws_host.rkWsClientRecv, ws_host.rkWsClientSend, ws_host.rkWsClientSendBinary, ws_host.rkWsClientPause, ws_host.rkWsClientAutopong, ws_host.rkWsClientClose, ws_host.rkWsSessionIds, ws_host.rkWsMaxQueueSeen, ws_host.rkWsClosedWith, ws_host.rkWsSend};
+import {ws_host.rkWsClientConnect, ws_host.rkWsClientRecv, ws_host.rkWsClientSend, ws_host.rkWsClientSendBinary, ws_host.rkWsClientPause, ws_host.rkWsClientAutopong, ws_host.rkWsClientClose, ws_host.rkWsMaxQueueSeen, ws_host.rkWsSend};
 
 fn serve() -> i32 {
     val _k = rkSetProp("rakun.main.keep-alive", "false");
@@ -30,6 +30,19 @@ fn connect(port: i32) -> string {
     return r.slice(4, r.length());
 }
 
+// The session's id once its connection has registered it. The client's
+// handshake answers when the server wrote 101, and the connection registers
+// its session just after that write: reading `rkWsSessionIds()` at once can
+// find none and send every frame to no one. This waits on the registration
+// itself — the sessions table's first row — not on a time.
+#[@External.Erlang("""(fun BpAwaitSession() -> case ets:first(rakun_ws_sessions) of '$end_of_table' -> receive after 1 -> ok end, BpAwaitSession(); __Id -> __Id end end)()""")]
+declare fn awaitSessionId() -> string;
+
+// The close code once the connection has logged its close: the event the
+// assertion reads, waited for, not a time after which it is hoped to be there.
+#[@External.Erlang("""(fun BpAwaitClose(__Id) -> case ets:lookup(rakun_ws_state, {closed, __Id}) of [{_, __C}] -> __C; [] -> receive after 1 -> ok end, BpAwaitClose(__Id) end end)($0)""")]
+declare fn awaitClosedWith(id: string) -> i32;
+
 fn repeat(unit: string, n: i32) -> string {
     return Array.range(0, n).map({ i -> unit }).join("");
 }
@@ -39,14 +52,13 @@ test "limits: a connection that stops reading is closed with 1013, its queue nev
     val _c = rkSetProp("rakun.websocket.max-outbound-queue", "50");
     val c = connect(port);
     val _p = rkWsClientPause(c);
-    val id = rkWsSessionIds()[0] ?? "";
+    val id = awaitSessionId();
     val chunk = repeat("x", 4096);
     var queued = 0;
     for (Array.range(0, 3000)) { i ->
         queued = queued + rkWsSend(id, directFrame(chunk));
     }
-    val _w = rkWsClientRecv(c, 3000);
-    val code = rkWsClosedWith(id);
+    val code = awaitClosedWith(id);
     val maxQueue = rkWsMaxQueueSeen();
     val _z = rkSetProp("rakun.websocket.max-outbound-queue", "");
     assert code == 1013, code.toString();
