@@ -1,0 +1,113 @@
+//// styled/variants — what `@variant <name> { … }` means (Tailwind v4's names).
+////
+//// A pseudo-class or pseudo-element variant appends to the selector
+//// (`hover` → `&:hover`); a media variant wraps the block in `@media`
+//// (`dark`, `print`); any other name is a breakpoint of the theme —
+//// `md` → `@media (width >= <--breakpoint-md>)`, `max-md` → `(width < …)`.
+//// Read inside the template function: strings only, no enum.
+
+import {theme.Theme, theme.themeValue, theme.wasCleared};
+
+// The resolution of one variant name: a selector suffix, or an `@media`
+// prelude, or the reason it is refused.
+// LANGUAGE GAP: a function a template body reaches cannot name an enum variant (nor build a private record), so a variant's kind is which of these strings is set, not an enum.
+pub type VariantRead(suffix: string, media: string, problem: string)
+
+fn pseudoSuffix(name: string) -> string {
+    val classes = [
+        "hover",
+        "focus",
+        "focus-visible",
+        "focus-within",
+        "active",
+        "visited",
+        "target",
+        "disabled",
+        "enabled",
+        "checked",
+        "indeterminate",
+        "default",
+        "required",
+        "optional",
+        "valid",
+        "invalid",
+        "in-range",
+        "out-of-range",
+        "placeholder-shown",
+        "autofill",
+        "read-only",
+        "read-write",
+        "empty",
+        "open",
+        "first-of-type",
+        "last-of-type",
+        "only-of-type",
+    ];
+    val elements = [
+        "before",
+        "after",
+        "placeholder",
+        "selection",
+        "marker",
+        "backdrop",
+        "first-line",
+        "first-letter",
+    ];
+    var out = "";
+    if (classes.contains(name)) out = ":" + name;
+    if (elements.contains(name)) out = "::" + name;
+    if (name == "first") out = ":first-child";
+    if (name == "last") out = ":last-child";
+    if (name == "only") out = ":only-child";
+    if (name == "odd") out = ":nth-child(odd)";
+    if (name == "even") out = ":nth-child(even)";
+    if (name == "file") out = "::file-selector-button";
+    return out;
+}
+
+fn mediaPrelude(name: string) -> string {
+    var out = "";
+    if (name == "dark") out = "(prefers-color-scheme: dark)";
+    if (name == "motion-safe") out = "(prefers-reduced-motion: no-preference)";
+    if (name == "motion-reduce") out = "(prefers-reduced-motion: reduce)";
+    if (name == "contrast-more") out = "(prefers-contrast: more)";
+    if (name == "contrast-less") out = "(prefers-contrast: less)";
+    if (name == "portrait") out = "(orientation: portrait)";
+    if (name == "landscape") out = "(orientation: landscape)";
+    if (name == "print") out = "print";
+    return out;
+}
+
+// `@variant <name>` under `th`.
+pub fn readVariant(th: Theme, name: string) -> VariantRead {
+    val suffix = pseudoSuffix(name);
+    if (suffix != "")
+        return VariantRead(suffix: suffix, media: "", problem: "");
+    val media = mediaPrelude(name);
+    if (media != "") return VariantRead(suffix: "", media: media, problem: "");
+    val below = name.startsWith("max-");
+    val point = if (below) name.slice(4, name.length) else name;
+    val entry = "--breakpoint-" + point;
+    val value = themeValue(th, entry);
+    if (value != "") {
+        val op = if (below) " < " else " >= ";
+        return VariantRead(
+            suffix: "",
+            media: "(width" + op + value + ")",
+            problem: "",
+        );
+    }
+    if (wasCleared(th, entry))
+        return VariantRead(
+            suffix: "",
+            media: "",
+            problem: "breakpoint `" + point + "` was cleared from the theme",
+        );
+    return VariantRead(
+        suffix: "",
+        media: "",
+        problem: "`"
+            + name
+            + "` is no variant: a pseudo-class, a media condition or a breakpoint of the theme",
+    );
+}

@@ -1,0 +1,346 @@
+//// styled — the base for building CSS components (decision 338).
+////
+//// `styled "…"` (the package's `pub default fn`) and `styledProperty "…"`
+//// are template functions over `comptime css: @Expr<string>`: the literal is
+//// read at build (`reader.bp`), values go in `${…}` holes, and each answers
+//// a component in the language's model (decision 128, the pattern of 276's
+//// `View`): `@Component<StyledBase, Styled>` (`StyledView`) and
+//// `@Component<StyledBase, StyledProperty>` (`StyledPropertyView`).
+////
+//// A component's class is the layer's prefix (`s_`) and the content hash of
+//// its rules, so the same rules are the same class. A literal with no hole
+//// is computed at build: the emitted call carries the class and the rules as
+//// constants. A literal with holes is computed when the component runs.
+
+import {hash} from "std";
+import {theme.baseTheme};
+import {reader.Source, reader.readBlock, reader.firstNonDeclaration, reader.classMark};
+import {hash.classHash};
+
+// What a tag annotation and a sheet take: anything that is a `styled`
+// component.
+pub behavior Styleable {
+    fn toStyled(self: Self) -> StyledView;
+}
+
+// The base a style hook anchors at — a phantom, never constructed.
+pub type StyledBase()
+
+// A component: its class and its rules (`.s_<hash>{…}`, nested rules after).
+// LANGUAGE GAP: a wrapper's type alias cannot implement a behavior (a type's conformance is its own clause), so `Styleable` is implemented by the records `Styled` and `StyledProperty`, not by `StyledView` and `StyledPropertyView`.
+pub type Styled(className: string, rules: string) implement Styleable, @Context<StyledBase> {
+    fn toStyled(self: Self) -> StyledView {
+        return styledConstant(self.className, self.rules);
+    }
+}
+
+// A declarations-only component: its class, its rules (`.s_<hash>{…}`) and
+// its declarations, which a `${p}` hole of another literal inlines.
+pub type StyledProperty(className: string, rules: string, declarations: string) implement Styleable, @Context<StyledBase> {
+    fn toStyled(self: Self) -> StyledView {
+        return styledConstant(self.className, self.rules);
+    }
+}
+
+pub type StyledView = @Component<StyledBase, Styled>;
+
+pub type StyledPropertyView = @Component<StyledBase, StyledProperty>;
+
+// ── the run-time half: what the template's code calls ───────────────────────
+
+fn checkedPrefix(prefix: string) -> string {
+    val body = prefix.slice(0, prefix.length - 1);
+    val ok = prefix.endsWith("_")
+        && body != ""
+        && body.chars().all({ c -> "abcdefghijklmnopqrstuvwxyz".contains(c) });
+    if (!ok)
+        @panic(
+            "styled: a layer prefix is lowercase letters and `_`: '"
+                + prefix
+                + "'",
+        );
+    return prefix;
+}
+
+fn classFor(prefix: string, text: string) -> string {
+    return checkedPrefix(prefix) + hash.contentHash(text);
+}
+
+fn withClass(text: string, className: string) -> string {
+    return text.split(classMark()).join("." + className);
+}
+
+// A component computed at build: the class and the rules are constants.
+pub fn styledConstant(
+    className: string,
+    rules: string,
+) -> @Component<StyledBase, Styled> {
+    return Styled(className: className, rules: rules);
+}
+
+pub fn propertyConstant(
+    className: string,
+    rules: string,
+    declarations: string,
+) -> @Component<StyledBase, StyledProperty> {
+    return StyledProperty(
+        className: className,
+        rules: rules,
+        declarations: declarations,
+    );
+}
+
+// The text between holes, each spliced property's declarations in its place.
+fn spliced(
+    texts: string[],
+    views: StyledPropertyView[],
+) -> @Component<StyledBase, string> {
+    var out = texts.at(0).unwrapOr("");
+    var k = 0;
+    for (views) { v ->
+        val p = await v;
+        out = out + p.declarations + texts.at(k + 1).unwrapOr("");
+        k = k + 1;
+    }
+    return out;
+}
+
+// A component computed when it runs: `texts` around `views`, the
+// properties its `${p}` holes splice in.
+pub fn styledComputed(
+    prefix: string,
+    texts: string[],
+    views: StyledPropertyView[],
+) -> @Component<StyledBase, Styled> {
+    val text = await spliced(texts, views);
+    val className = classFor(prefix, text);
+    return Styled(className: className, rules: withClass(text, className));
+}
+
+pub fn propertyComputed(
+    prefix: string,
+    texts: string[],
+    views: StyledPropertyView[],
+) -> @Component<StyledBase, StyledProperty> {
+    val declarations = await spliced(texts, views);
+    val text = classMark() + "{" + declarations + "}";
+    val className = classFor(prefix, text);
+    return StyledProperty(
+        className: className,
+        rules: withClass(text, className),
+        declarations: declarations,
+    );
+}
+
+// A value hole's text.
+pub fn holeText(v: string | i32 | f64) -> string {
+    if (v is string) return v;
+    if (v is i32) return v.toString();
+    if (v is f64) {
+        val s = v.toString();
+        val out = if (s.endsWith(".0")) s.slice(0, s.length - 2) else s;
+        return out;
+    }
+    return "";
+}
+
+// ── the build-time half: the template functions ─────────────────────────────
+
+// `text` as a botopink string literal.
+fn quoted(text: string) -> string {
+    var out = "\"";
+    for (text.chars()) { c ->
+        if (c == "\\")
+            out = out + "\\\\"
+        else if (c == "\"")
+            out = out + "\\\""
+        else if (c == "$")
+            out = out + "\\$"
+        else if (c == "\n")
+            out = out + "\\n"
+        else if (c == "\t")
+            out = out + "\\t"
+        else if (c == "\u{1}")
+            out = out + "\\u{1}"
+        else
+            out = out + c;
+    }
+    return out + "\"";
+}
+
+// The arguments `texts, views` of the computed call for `text`: a value hole
+// (`\u{2}<k>\u{3}`) joins its text through `holeText`, a splice
+// (`\u{4}<k>\u{3}`) ends a text and adds a view.
+fn computedArguments(text: string, codes: string[]) -> string {
+    var texts: string[] = [];
+    var views: string[] = [];
+    var current = "\"\"";
+    var lit = "";
+    var hole = "";
+    var mode = "text";
+    for (text.chars()) { c ->
+        if (mode == "text" && (c == "\u{2}" || c == "\u{4}")) {
+            mode = if (c == "\u{2}") "value" else "splice";
+            hole = "";
+        } else if (mode != "text" && c == "\u{3}") {
+            val code = holeCode(codes, hole);
+            if (mode == "value")
+                current = current
+                    + " + "
+                    + quoted(lit)
+                    + " + holeText("
+                    + code
+                    + ")"
+            else {
+                texts = texts.append([current + " + " + quoted(lit)]);
+                views = views.append([code]);
+                current = "\"\"";
+            }
+            lit = "";
+            mode = "text";
+        } else if (mode != "text") hole = hole + c else lit = lit + c;
+    }
+    texts = texts.append([current + " + " + quoted(lit)]);
+    return "[" + texts.join(", ") + "], [" + views.join(", ") + "]";
+}
+
+// The code of the hole numbered `index` (its decimal text).
+fn holeCode(codes: string[], index: string) -> string {
+    var out = "";
+    var k = 0;
+    for (codes) { code ->
+        if (k.toString() == index) out = code;
+        k = k + 1;
+    }
+    return out;
+}
+
+fn holed(text: string) -> bool {
+    return text.contains("\u{2}") || text.contains("\u{4}");
+}
+
+// The code of a `styled` literal whose rules are `text`.
+fn styledCode(text: string, codes: string[]) -> string {
+    if (holed(text))
+        return "styledComputed(\"s_\", " + computedArguments(text, codes) + ")";
+    val className = "s_" + classHash(text);
+    return "styledConstant("
+        + quoted(className)
+        + ", "
+        + quoted(text.split(classMark()).join("." + className))
+        + ")";
+}
+
+// The code of a `styledProperty` literal whose declarations are `decls`.
+fn propertyCode(decls: string, codes: string[]) -> string {
+    if (holed(decls))
+        return "propertyComputed(\"s_\", "
+            + computedArguments(decls, codes)
+            + ")";
+    val text = classMark() + "{" + decls + "}";
+    val className = "s_" + classHash(text);
+    val rules = text.split(classMark()).join("." + className);
+    return "propertyConstant("
+        + quoted(className)
+        + ", "
+        + quoted(rules)
+        + ", "
+        + quoted(decls)
+        + ")";
+}
+
+// `styled "…"`: a component — declarations, nested rules, variants, at-rules.
+// LANGUAGE GAP: a library's template function cannot read the program's catalogue (`@TypeInfo.all(with: theme)` in an imported module), so both literals read `baseTheme()`, never the application's `#[theme]`.
+pub default fn styled(comptime css: @Expr<string>) -> @ExprCustom<StyledView> {
+    var cs: string[] = [];
+    var starts: i32[] = [];
+    var ends: i32[] = [];
+    var codes: string[] = [];
+    for (css.parts()) { part ->
+        if (part.kind == "Interp") {
+            cs = cs.append(["\u{2}" + codes.length.toString() + "\u{3}"]);
+            starts = starts.append([part.span.start]);
+            ends = ends.append([part.span.end]);
+            codes = codes.append([part.code]);
+        } else {
+            var k = part.span.start;
+            for (part.text.chars()) { c ->
+                cs = cs.append([c]);
+                starts = starts.append([k]);
+                ends = ends.append([k + 1]);
+                k = k + 1;
+            }
+        }
+    }
+    val src = Source(cs: cs, starts: starts, ends: ends, codes: codes);
+    val read = readBlock(src, 0, [classMark()], "", "", baseTheme(), true, 0);
+    var text = read.rules;
+    if (read.problem != "") {
+        val a = starts.at(read.at).unwrapOr(0);
+        val b = ends.at(read.at).unwrapOr(a);
+        css.failAt(Span(a, b, 1), "styled: " + read.problem);
+        text = "";
+    } else if (text == "")
+        css.fail("styled: a component holds at least one declaration");
+    val root = CustomNode(
+        kind: "styled",
+        span: Span(0, 0, 1),
+        label: "string",
+        ref: null,
+        children: [],
+    );
+    return css.custom(root, css.build(styledCode(text, codes)));
+}
+
+// `styledProperty "…"`: declarations only — a `{`, `&` or `@` is refused at
+// the character.
+pub fn styledProperty(
+    comptime css: @Expr<string>,
+) -> @ExprCustom<StyledPropertyView> {
+    var cs: string[] = [];
+    var starts: i32[] = [];
+    var ends: i32[] = [];
+    var codes: string[] = [];
+    for (css.parts()) { part ->
+        if (part.kind == "Interp") {
+            cs = cs.append(["\u{2}" + codes.length.toString() + "\u{3}"]);
+            starts = starts.append([part.span.start]);
+            ends = ends.append([part.span.end]);
+            codes = codes.append([part.code]);
+        } else {
+            var k = part.span.start;
+            for (part.text.chars()) { c ->
+                cs = cs.append([c]);
+                starts = starts.append([k]);
+                ends = ends.append([k + 1]);
+                k = k + 1;
+            }
+        }
+    }
+    val src = Source(cs: cs, starts: starts, ends: ends, codes: codes);
+    val bad = firstNonDeclaration(cs);
+    val read = readBlock(src, 0, [classMark()], "", "", baseTheme(), true, 0);
+    var decls = read.decls;
+    if (bad >= 0) {
+        val a = starts.at(bad).unwrapOr(0);
+        css.failAt(
+            Span(a, a + 1, 1),
+            "styled: styledProperty holds declarations only — use styled for selectors, variants and at-rules",
+        );
+        decls = "";
+    } else if (read.problem != "") {
+        val a = starts.at(read.at).unwrapOr(0);
+        val b = ends.at(read.at).unwrapOr(a);
+        css.failAt(Span(a, b, 1), "styled: " + read.problem);
+        decls = "";
+    } else if (decls == "")
+        css.fail("styled: styledProperty holds at least one declaration");
+    val root = CustomNode(
+        kind: "styled",
+        span: Span(0, 0, 1),
+        label: "string",
+        ref: null,
+        children: [],
+    );
+    return css.custom(root, css.build(propertyCode(decls, codes)));
+}

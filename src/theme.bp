@@ -1,0 +1,272 @@
+//// styled/theme — the theme mechanism (decisions 300 and 338).
+////
+//// A theme is CSS's flat entry list, typed: `entry(ns, name, value)` adds or
+//// overrides one custom property of a namespace, `clear(ns, name)` drops one,
+//// `clearNs(ns)` drops a namespace, `clearAll()` drops everything, and
+//// `extendTheme(theme, changes)` applies a list of them in order. The values
+//// are the application's (a design system supplies Tailwind's); the
+//// mechanism is this module's. `baseTheme()` is what a literal reads when the
+//// program declares no `#[theme]`: the spacing unit and the five breakpoints.
+////
+//// A name that a change cleared is remembered, so a literal that names it
+//// (`@variant 2xl`, `--theme(--breakpoint-2xl)`) is refused with the reason,
+//// not reported as unknown.
+////
+//// The functions a template body reaches (`baseTheme`, `themeValue`,
+//// `wasCleared`) name no enum variant: a function the comptime runtime runs
+//// cannot (see `language-gaps.md`).
+
+// One custom property: `name` with its `--` prefix, `value` rendered.
+pub type ThemeEntry(name: string, value: string)
+
+// The theme: its entries in declaration order, and every name a change
+// cleared since.
+pub type Theme(entries: ThemeEntry[], cleared: string[])
+
+// The namespaces a theme carries (Tailwind v4's).
+pub type Ns {
+    Color,
+    Font,
+    Text,
+    FontWeight,
+    Tracking,
+    Leading,
+    Breakpoint,
+    Container,
+    Spacing,
+    Radius,
+    Shadow,
+    InsetShadow,
+    DropShadow,
+    Blur,
+    Perspective,
+    Aspect,
+    Ease,
+    Animate,
+}
+
+// A theme value. A namespace whose values are lengths takes `Rem`, `Px` or
+// `Em` only; `Raw` is the text of any other value (a colour, a font stack, a
+// shadow, an easing).
+pub type ThemeValue {
+    Rem(amount: f64),
+    Px(amount: f64),
+    Em(amount: f64),
+    Number(amount: f64),
+    Raw(text: string),
+}
+
+// One change `extendTheme` applies.
+pub type ThemeChange {
+    Put(name: string, value: string),
+    Drop(name: string),
+    DropPrefix(prefix: string),
+    DropEverything,
+}
+
+// The ONLY place a namespace prefix is written. `--spacing` is one variable,
+// not a family, so its entry name is empty.
+pub fn nsPrefix(ns: Ns) -> string {
+    return case ns {
+        Color -> "--color-";
+        Font -> "--font-";
+        Text -> "--text-";
+        FontWeight -> "--font-weight-";
+        Tracking -> "--tracking-";
+        Leading -> "--leading-";
+        Breakpoint -> "--breakpoint-";
+        Container -> "--container-";
+        Spacing -> "--spacing";
+        Radius -> "--radius-";
+        Shadow -> "--shadow-";
+        InsetShadow -> "--inset-shadow-";
+        DropShadow -> "--drop-shadow-";
+        Blur -> "--blur-";
+        Perspective -> "--perspective-";
+        Aspect -> "--aspect-";
+        Ease -> "--ease-";
+        Animate -> "--animate-";
+    };
+}
+
+fn takesLength(ns: Ns) -> bool {
+    return case ns {
+        Breakpoint -> true;
+        Container -> true;
+        Spacing -> true;
+        Radius -> true;
+        Blur -> true;
+        Perspective -> true;
+        Tracking -> true;
+        _ -> false;
+    };
+}
+
+// `52.0` is `52` on every target (erlang writes a float as `52.0`).
+fn amountText(x: f64) -> string {
+    val s = x.toString();
+    val out = if (s.endsWith(".0")) s.slice(0, s.length - 2) else s;
+    return out;
+}
+
+fn isLength(v: ThemeValue) -> bool {
+    return case v {
+        Rem(amount) -> true;
+        Px(amount) -> true;
+        Em(amount) -> true;
+        _ -> false;
+    };
+}
+
+// The value as CSS writes it.
+pub fn valueText(v: ThemeValue) -> string {
+    return case v {
+        Rem(amount) -> amountText(amount) + "rem";
+        Px(amount) -> amountText(amount) + "px";
+        Em(amount) -> amountText(amount) + "em";
+        Number(amount) -> amountText(amount);
+        Raw(text) -> text;
+    };
+}
+
+fn validName(name: string) -> bool {
+    if (name == "") return false;
+    val allowed = "abcdefghijklmnopqrstuvwxyz0123456789-_.";
+    return name.chars().all({ c -> allowed.contains(c) });
+}
+
+// The entry name of `name` in `ns`. `Spacing` holds one variable: its name is
+// written `""`.
+fn entryName(ns: Ns, name: string) -> string {
+    val prefix = nsPrefix(ns);
+    if (prefix == "--spacing") {
+        if (name != "")
+            @panic(
+                "styled theme: the spacing namespace holds one variable, --spacing — write entry(.Spacing, \"\", …)",
+            );
+        return prefix;
+    }
+    if (!validName(name))
+        @panic(
+            "styled theme: '"
+                + name
+                + "' is not a theme name — lowercase letters, digits, - _ and .",
+        );
+    return prefix + name;
+}
+
+// Add or override one entry of `ns`. The value has the namespace's type: a
+// length namespace takes `Rem`, `Px` or `Em`.
+pub fn entry(ns: Ns, name: string, value: ThemeValue) -> ThemeChange {
+    val full = entryName(ns, name);
+    if (takesLength(ns) && !isLength(value))
+        @panic(
+            "styled theme: "
+                + full
+                + " is a length — write Rem(…), Px(…) or Em(…)",
+        );
+    val text = valueText(value);
+    if (text == "")
+        @panic(
+            "styled theme: "
+                + full
+                + " has an empty value — clear it with clear(…)",
+        );
+    return ThemeChange.Put(name: full, value: text);
+}
+
+// Drop one entry of `ns`.
+pub fn clear(ns: Ns, name: string) -> ThemeChange {
+    return ThemeChange.Drop(name: entryName(ns, name));
+}
+
+// Drop every entry of `ns` (`--breakpoint-*: initial`).
+pub fn clearNs(ns: Ns) -> ThemeChange {
+    return ThemeChange.DropPrefix(prefix: nsPrefix(ns));
+}
+
+// Drop every entry (`--*: initial`).
+pub fn clearAll() -> ThemeChange {
+    return ThemeChange.DropEverything;
+}
+
+fn put(th: Theme, name: string, value: string) -> Theme {
+    val present = th.entries.any({ e -> e.name == name });
+    val fresh = ThemeEntry(name: name, value: value);
+    val one: ThemeEntry[] = [fresh];
+    val entries = if (present)
+        th.entries.map({ e ->
+            val hit = e.name == name;
+            val out = if (hit) fresh else e;
+            out;
+        })
+    else
+        th.entries.append(one);
+    return Theme(
+        entries: entries,
+        cleared: th.cleared.filter({ c -> c != name }),
+    );
+}
+
+fn dropWhere(th: Theme, gone: fn(name: string) -> bool) -> Theme {
+    val dropped = th.entries.filter({ e -> gone(e.name) }).map({ e -> e.name });
+    val kept = th.entries.filter({ e -> !gone(e.name) });
+    return Theme(entries: kept, cleared: th.cleared.append(dropped));
+}
+
+fn apply(th: Theme, change: ThemeChange) -> Theme {
+    return case change {
+        Put(name, value) -> put(th, name, value);
+        Drop(name) -> dropWhere(th, { n -> n == name });
+        DropPrefix(prefix) -> dropWhere(th, { n -> n.startsWith(prefix) });
+        DropEverything -> dropWhere(th, { n -> true });
+    };
+}
+
+// Apply `changes` in order: an entry already present is overridden in place.
+pub fn extendTheme(th: Theme, changes: ThemeChange[]) -> Theme {
+    return changes.fold(th, { acc, c -> apply(acc, c) });
+}
+
+// The theme a literal reads when the program declares no `#[theme]`: the
+// spacing unit and the five breakpoints (Tailwind v4's values).
+pub fn baseTheme() -> Theme {
+    val entries: ThemeEntry[] = [
+        ThemeEntry(name: "--spacing", value: "0.25rem"),
+        ThemeEntry(name: "--breakpoint-sm", value: "40rem"),
+        ThemeEntry(name: "--breakpoint-md", value: "48rem"),
+        ThemeEntry(name: "--breakpoint-lg", value: "64rem"),
+        ThemeEntry(name: "--breakpoint-xl", value: "80rem"),
+        ThemeEntry(name: "--breakpoint-2xl", value: "96rem"),
+    ];
+    val cleared: string[] = [];
+    return Theme(entries: entries, cleared: cleared);
+}
+
+// The value of `name` (`--breakpoint-md`), `""` when the theme does not carry it.
+pub fn themeValue(th: Theme, name: string) -> string {
+    var out = "";
+    for (th.entries) { e ->
+        if (e.name == name) out = e.value;
+    }
+    return out;
+}
+
+// Whether a change cleared `name` and none put it back.
+pub fn wasCleared(th: Theme, name: string) -> bool {
+    var out = false;
+    for (th.cleared) { c ->
+        if (c == name) out = true;
+    }
+    return out;
+}
+
+// The application's one theme: `#[theme] pub val appTheme = extendTheme(…);`.
+pub fn theme(comptime decl: @Decl) {
+    if (decl.kind == DeclKind.Fn
+        || decl.kind == DeclKind.Type
+        || decl.kind == DeclKind.Behavior)
+        decl.fail(
+            "#[theme] annotates the application's theme val: #[theme] pub val appTheme = extendTheme(…);",
+        );
+}

@@ -1,0 +1,40 @@
+//// styled/hash — the class hash, computed where std's cannot be.
+////
+//// A component's class is std's `hash.contentHash` over its rules (decision
+//// 338): djb2 over the text's code points, modulo 2^32, as lowercase hex. A
+//// component whose rules are known at build gets its class at build, inside
+//// the template function, and a template body cannot call a host function —
+//// `contentHash` is one. This is the same fold in pure botopink, in two
+//// 16-bit halves so no intermediate leaves `i32`; the tests hold it equal to
+//// `contentHash` on both targets.
+
+fn hexDigit(n: i32) -> string {
+    return "0123456789abcdef".chars().at(n).unwrapOr("0");
+}
+
+// `n` (`0 <= n < 65536`) as exactly four hex digits.
+fn hex4(n: i32) -> string {
+    return hexDigit(n / 4096)
+        + hexDigit((n / 256) % 16)
+        + hexDigit((n / 16) % 16)
+        + hexDigit(n % 16);
+}
+
+// djb2 of `text` as lowercase hex, no leading zero — `contentHash(text)`.
+// LANGUAGE GAP: a template body cannot call std's host `contentHash` (lg2-w); this fold is its pure twin until std's is pure.
+pub fn classHash(text: string) -> string {
+    var lo = 5381;
+    var hi = 0;
+    for (text.chars()) { c ->
+        val low = lo * 33 + c.charCodeAt(0);
+        val carry = low / 65536;
+        lo = low % 65536;
+        hi = (hi * 33 + carry) % 65536;
+    }
+    val digits = hex4(hi) + hex4(lo);
+    var start = 0;
+    while (start < 7 && digits.chars().at(start).unwrapOr("") == "0") {
+        start = start + 1;
+    }
+    return digits.slice(start, 8);
+}

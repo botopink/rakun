@@ -1,0 +1,199 @@
+//// styled: the two template functions — what a literal renders, its class,
+//// its holes — on both targets. Every expected text is a literal.
+
+import {testing.asserts, hash} from "std";
+import {styled.styled, styled.styledProperty, styled.StyledView, styled.StyledPropertyView};
+import {hash.classHash};
+
+pub val tab4 = styledProperty "tab-size: 4;";
+
+fn padAll(n: i32) -> StyledPropertyView {
+    return styledProperty "padding: --spacing(${n});";
+}
+
+fn hover(inner: StyledPropertyView) -> StyledView {
+    return styled "&:hover { ${inner} }";
+}
+
+pub val code = styled """
+  ${tab4}
+  font-family: var(--font-mono);
+  &:hover { ${padAll(
+    2,
+)} }
+  @variant md { max-width: --theme(--breakpoint-md); }
+""";
+
+pub val nested = styled """
+  color: red;
+  .icon, & > p { margin: 0; }
+  &:focus { &::after { content: "}"; } }
+""";
+
+pub val wrapped = styled """
+  display: grid;
+  @supports (display: grid) { gap: 1rem; }
+  @media (width >= 40rem) { &:hover { gap: 2rem; } }
+  @variant max-lg { gap: 0; }
+  @variant dark { color: white; }
+""";
+
+pub val functions = styled """
+  background: --alpha(var(--color-blue-500) / 80%);
+  margin: --spacing(-2) --spacing(0.5);
+  /* a comment is not served */
+  width: calc(100% - --spacing(4));
+""";
+
+fn sized(width: string, columns: i32, ratio: f64) -> StyledView {
+    return styled "width: ${width}; columns: ${columns}; aspect-ratio: ${ratio};";
+}
+
+test "a property's hole is a value; --spacing() expands" {
+    val p = await padAll(4);
+    try asserts.equals(
+        p.rules,
+        "." + p.className + "{padding:calc(var(--spacing) * 4)}",
+    );
+    try asserts.equals(p.declarations, "padding:calc(var(--spacing) * 4)");
+}
+
+test "a property with no hole is computed at build, its class std's contentHash of its rules" {
+    val t = await tab4;
+    try asserts.equals(t.className, "s_e8b00b8b");
+    try asserts.equals(t.rules, ".s_e8b00b8b{tab-size:4}");
+    try asserts.equals(
+        t.className,
+        "s_" + hash.contentHash("\u{1}{tab-size:4}"),
+    );
+}
+
+test "classHash is std's contentHash" {
+    val texts = [
+        "",
+        "a",
+        "\u{1}{tab-size:4}",
+        "héllo",
+        "a much longer text, with spaces and ; : { } punctuation",
+    ];
+    for (texts) { t ->
+        try asserts.equals(classHash(t), hash.contentHash(t));
+    }
+}
+
+test "a StyledPropertyView in a hole inlines its declarations (@apply)" {
+    val c = await code;
+    try asserts.isTrue(
+        c.rules.contains(
+            "." + c.className + "{tab-size:4;font-family:var(--font-mono)}",
+        ),
+    );
+    try asserts.isTrue(
+        c.rules.contains(
+            "." + c.className + ":hover{padding:calc(var(--spacing) * 2)}",
+        ),
+    );
+}
+
+test "@variant md reads the theme's breakpoint at build" {
+    val c = await code;
+    try asserts.isTrue(
+        c.rules.contains(
+            "@media (width >= 48rem){." + c.className + "{max-width:48rem}}",
+        ),
+    );
+}
+
+test "the whole of a component, in order" {
+    val c = await code;
+    val k = "." + c.className;
+    try asserts.equals(
+        c.rules,
+        k
+            + "{tab-size:4;font-family:var(--font-mono)}"
+            + k
+            + ":hover{padding:calc(var(--spacing) * 2)}@media (width >= 48rem){"
+            + k
+            + "{max-width:48rem}}",
+    );
+}
+
+test "nesting: & is the class, a selector without & is a descendant, lists cross" {
+    val n = await nested;
+    val k = "." + n.className;
+    try asserts.equals(
+        n.rules,
+        k
+            + "{color:red}"
+            + k
+            + " .icon,"
+            + k
+            + " > p{margin:0}"
+            + k
+            + ":focus::after{content:\"}\"}",
+    );
+}
+
+test "at-rules and variants wrap the class; the rules nest inside" {
+    val w = await wrapped;
+    val k = "." + w.className;
+    try asserts.equals(
+        w.rules,
+        k
+            + "{display:grid}@supports (display: grid){"
+            + k
+            + "{gap:1rem}}@media (width >= 40rem){"
+            + k
+            + ":hover{gap:2rem}}@media (width < 64rem){"
+            + k
+            + "{gap:0}}@media (prefers-color-scheme: dark){"
+            + k
+            + "{color:white}}",
+    );
+}
+
+test "--alpha() and --spacing() expand anywhere in a value; a comment is dropped" {
+    val f = await functions;
+    val k = "." + f.className;
+    try asserts.equals(
+        f.rules,
+        k
+            + "{background:color-mix(in oklab, var(--color-blue-500) 80%, transparent);margin:calc(var(--spacing) * -2) calc(var(--spacing) * 0.5);width:calc(100% - calc(var(--spacing) * 4))}",
+    );
+}
+
+test "a value hole takes a string, an i32 or an f64" {
+    val s = await sized("50%", 3, 1.5);
+    try asserts.equals(
+        s.rules,
+        "." + s.className + "{width:50%;columns:3;aspect-ratio:1.5}",
+    );
+}
+
+test "a hole spliced in a nested block" {
+    val h = await hover(tab4);
+    try asserts.equals(h.rules, "." + h.className + ":hover{tab-size:4}");
+}
+
+test "the same rules are the same class, under the layer's prefix" {
+    val a = await padAll(4);
+    val b = await padAll(4);
+    val c = await padAll(8);
+    try asserts.equals(a.className, b.className);
+    try asserts.notEquals(a.className, c.className);
+    try asserts.isTrue(a.className.startsWith("s_"));
+}
+
+test "a computed class is the one a constant literal of the same rules gets" {
+    val computed = await padAll(4);
+    val constant = await styledProperty "padding: --spacing(4);";
+    try asserts.equals(computed.className, constant.className);
+    try asserts.equals(computed.rules, constant.rules);
+}
+
+test "toStyled answers the component under its class" {
+    val t = await tab4;
+    val s = await t.toStyled();
+    try asserts.equals(s.className, t.className);
+    try asserts.equals(s.rules, t.rules);
+}

@@ -1,0 +1,93 @@
+// The suite case of front 119's `styled-example.bp`, byte for byte but for
+// the header, the import line (a module of this package names it by path,
+// decision 206; an application writes `from "styled"`) and the names this
+// package keeps out of its tree (decision 338: `styled` knows no file kind and
+// no framework).
+//
+// Demonstrates: step 1 — the repository `styled`, the base for building CSS
+// components (decision 338). `styled "…"` (the package's `pub default fn`) and
+// `styledProperty "…"` (declarations only) are template functions: values go
+// in `${…}` holes, so the braces stay CSS's; Tailwind v4's CSS syntax works
+// where it is CSS (`--spacing()`, `--theme()`, `@variant`); `@apply` is a hole
+// of a `StyledPropertyView`. Both answer components in the language's model
+// (`@Component<StyledBase, …>`), so a test reads one after `await`.
+
+import {styled.styled, styled.styledProperty, styled.StyledPropertyView, layers.Sheet, layers.layer};
+
+pub val tab4 = styledProperty "tab-size: 4;";
+
+// Tailwind: @utility p-* { padding: --spacing(--value(integer)); }
+fn padAll(n: i32) -> StyledPropertyView {
+    return styledProperty "padding: --spacing(${n});";
+}
+
+pub val code = styled """
+  ${tab4}
+  font-family: var(--font-mono);
+  &:hover { ${padAll(
+    2,
+)} }
+  @variant md { max-width: --theme(--breakpoint-md); }
+""";
+
+test "styled: a property's hole is a value; --spacing() expands" {
+    val p = await padAll(4);
+    assert p.rules == "." + p.className + "{padding:calc(var(--spacing) * 4)}";
+}
+
+test "styled: a StyledPropertyView in a hole inlines its declarations (@apply)" {
+    val c = await code;
+    assert c.rules.contains(
+        "." + c.className + "{tab-size:4;font-family:var(--font-mono)}",
+    );
+    assert c.rules.contains(
+        "." + c.className + ":hover{padding:calc(var(--spacing) * 2)}",
+    );
+}
+
+test "styled: @variant md reads the theme's breakpoint at build" {
+    // the base theme's md (48rem); an app's #[theme] entry moves it once a
+    // template function reads the program's catalogue (language-gaps.md)
+    val c = await code;
+    assert c.rules.contains(
+        "@media (width >= 48rem){." + c.className + "{max-width:48rem}}",
+    );
+}
+
+test "styled: the same rules are the same class, under the layer's prefix" {
+    val a = await padAll(4);
+    val b = await padAll(4);
+    val c = await padAll(8);
+    assert a.className == b.className;
+    assert a.className != c.className;
+    assert a.className.startsWith("s_");
+}
+
+test "styled: a sheet renders its layers in declaration order, each component once" {
+    val c = await code;
+    val p = await padAll(2);
+    // LANGUAGE GAP: a sheet is a value (no assignment to a record's field) and a method's behavior-typed parameter refuses an implementer, so `add` answers the sheet and takes the `Styled` a property's `toStyled()` answers.
+    val sheet = Sheet
+        .of([layer("base"), layer("components")])
+        .add("components", c)
+        .add("components", c)
+        .add("base", await p.toStyled());
+    val out = sheet.render();
+    assert out.indexOf("@layer base") < out.indexOf("@layer components");
+    assert out.split(c.rules).length == 2;
+}
+
+// What does not compile (each a case under `repository/styled/refusals/`):
+//
+//   styledProperty "&:hover { color: red; }"
+//     error: styled: styledProperty holds declarations only — use styled for
+//            selectors, variants and at-rules                             at `&`
+//
+//   styled "@utility tab-* { tab-size: --value(integer); }"
+//     error: styled: name a component with a val or a function           at @utility
+//
+//   styled "@theme { --color-mint-500: oklch(0.72 0.11 178); }"
+//     error: styled: the theme is the typed #[theme] (extendTheme, entry) at @theme
+//
+//   styled "@variant 2xl { … }"            // with 2xl cleared in the theme read
+//     error: styled: breakpoint `2xl` was cleared from the theme         at 2xl
