@@ -24,7 +24,7 @@ refusal is the core's `config_check.bp`.
 
 | Member | `files` | `targets` | Spring Boot 4 | Front(s) | State |
 |---|---|---|---|---|---|
-| [rakun](./rakun/) (core) | root · http · runtime · decorators · bootstrap · rakun.d · … · actuator_api (contract · registration · span · audit_seam) | erlang | `spring-boot-starter` + `spring-boot-actuator` (the API half) | 04 · 05 · 06 · 62 · 72 · 73 · 74 · 11 (Step 0, `actuator_api/`) · 87 (the audit seam) | real code, 385 tests |
+| [rakun](./rakun/) (core) | root · http · runtime · decorators · bootstrap · rakun.d · … · actuator_api (contract · registration · span · audit_seam) · logging (cells · levels · formats · correlation · logging · digest · setup · endpoints) | erlang | `spring-boot-starter` + `spring-boot-actuator` (the API half) + `-logging` | 04 · 05 · 06 · 62 · 72 · 73 · 74 · 11 (Step 0, `actuator_api/`) · 87 (the audit seam) · 17 (`logging/`) | real code, 439 tests |
 | [rakun-app](./rakun-app/) | root · file_router · ssr · navigation · route_handler · actions · static_host · segment_config · static_gen · route_slots · route_intercept · i18n · metadata_routes | erlang | (Next.js `app/` router, server half) | 22 · 23 · 24 · 25 · 60 · 61 · 63 · 64 · 66 | real code, 204 tests |
 | [rakun-actuator](./rakun-actuator/) | root · endpoint_host · health · info · registry_endpoints · instrumentation · management · actuator | erlang | `-actuator` (host) | 11 · 76 · 87 | real code, 77 tests |
 | [rakun-cache](./rakun-cache/) | root · cache_host · cache · cached · cache_endpoint | erlang | `-cache` | 12 | real code, 55 tests |
@@ -33,7 +33,6 @@ refusal is the core's `config_check.bp`.
 | [rakun-data](./rakun-data/) | root · datasource · sql · orm_host · migration_host · orm · migration | erlang | `-data-jpa` / `-data-jdbc` / `-data-mongodb` / `-data-redis` | 08 · 09 · 77 · 78 | real code, 128 tests |
 | [rakun-devtools](./rakun-devtools/) | root · devtools · db_console | erlang | `spring-boot-devtools` | 80 | real code, 21 tests |
 | [rakun-hateoas](./rakun-hateoas/) | root · hal | erlang | `-hateoas` | 21 | real code, 14 tests |
-| [rakun-logging](./rakun-logging/) | root · cells · levels · formats · correlation · logging · digest · setup · endpoints | erlang | `-logging` | 17 | real code, 54 tests |
 | [rakun-mail](./rakun-mail/) | root · mail · fixture | erlang | `-mail` | 85 | real code, 32 tests |
 | [rakun-metrics](./rakun-metrics/) | root · registry · bus · vm · tracing · export · endpoints · install | erlang | Micrometer + `-actuator` (prometheus) + tracing | 75 | real code, 41 tests |
 | [rakun-messaging](./rakun-messaging/) | root · messaging_host · message · registry · markers · messaging_health · container · templates · jms_host · pulsar_host · reliability (policy · dispatch · transaction) · jms · pulsar | erlang | `-amqp` / `-kafka` / `-activemq` / `-artemis` | 15 · 86 · 90 · 91 | real code (in-process broker; JMS over STOMP; Pulsar admin and codec), 91 tests |

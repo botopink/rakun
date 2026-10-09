@@ -3462,12 +3462,18 @@ buffered, not streamed (the 50 MB heap box is open). The file is flat
 (`src/rules.bp`, `test/rules_test.bp`) rather than `src/rules/**`: a test file
 in a subdirectory cannot call into the project on erlang today.
 
-## Structured logging — `modules/rakun-logging/` (front 17)
+## Structured logging — `modules/rakun/src/logging/` (front 17)
 
-One `Logger` type, five levels, over OTP `logger`. Depends on `rakun`
+The former member `rakun-logging`, merged into the core by front 128 (decision 187): its
+files are `modules/rakun/src/logging/**` (the paths below are relative to it), its tests
+`modules/rakun/test/logging/**`, its sidecar keeps its name and atom
+(`modules/rakun/src/sidecars/rakun_logging.erl`), and its names are reached `from "rakun"`.
+No starter names it any more: `rakun-starter` brings `rakun` only.
+
+One `Logger` type, five levels, over OTP `logger`
 (the `loggers`/`logfile` endpoints register through the core's `actuator_api`,
-never the host; `rakun-actuator` is not a dependency). erlang only; the host module
-is `src/sidecars/rakun_logging.erl`.
+never the host; `rakun-actuator` is not a dependency). erlang only; the registration
+owner string stays `"rakun-logging"`.
 
 | File | Holds |
 |---|---|
@@ -3575,8 +3581,8 @@ Not built: the refusal of both routes for an unauthorized caller is front 11/76'
 behaviour and is not asserted here (no host dependency); front 31's client half of the
 digest.
 
-Measured: `rakun-logging` 54 passed / 0 failed / 0 compile failures
-(`format_test.bp` 13, `level_test.bp` 5, `group_test.bp` 6, `correlation_test.bp` 6,
+Measured: the logging suites 54 passed / 0 failed / 0 compile failures, in the core's run
+(`test/logging/`: `format_test.bp` 13, `level_test.bp` 5, `group_test.bp` 6, `correlation_test.bp` 6,
 `digest_test.bp` 5, `file_test.bp` 11, `endpoint_test.bp` 8).
 
 ## HAL — `modules/rakun-hateoas/` (front 21)

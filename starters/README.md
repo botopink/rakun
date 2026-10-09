@@ -9,7 +9,7 @@ module without breaking an import.
 
 | Starter | Pulls | Spring counterpart |
 |---|---|---|
-| [`rakun-starter`](./rakun-starter/) | `rakun`, `rakun-logging` | `spring-boot-starter` |
+| [`rakun-starter`](./rakun-starter/) | `rakun` (logging included: `rakun-logging` is the core's `logging/` since front 128) | `spring-boot-starter` |
 | [`rakun-starter-web`](./rakun-starter-web/) | `rakun-starter`, `rakun-web` (validation is the library `validation`, declared by `rakun` itself) | `spring-boot-starter-webmvc` |
 | [`rakun-starter-data-sql`](./rakun-starter-data-sql/) | `rakun-starter`, `rakun-data` | `spring-boot-starter-data-jpa` + `-jdbc` |
 | [`rakun-starter-security`](./rakun-starter-security/) | `rakun-starter`, `rakun-security`, `rakun-session` | `spring-boot-starter-security` |
