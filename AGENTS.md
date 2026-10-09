@@ -2766,7 +2766,13 @@ fallback.
   an ephemeral port that records commands and DATA bytes, with STARTTLS,
   implicit TLS, AUTH, `fail=<VERB>:<code>`, `silent`, `slow-data`.
 
-## Distributed transactions — `modules/rakun-tx/` (front 83)
+## Distributed transactions — `modules/rakun-data/src/tx/` (front 83)
+
+The former member `rakun-tx`, merged into `rakun-data` by front 128 (decision 187):
+`modules/rakun-data/src/tx/{outbox,saga,twopc}.bp` (the file names below are relative to it),
+its tests `modules/rakun-data/test/tx/{outbox,saga}_test.bp`, its names reached
+`from "rakun-data"` (`rakun-data/tx/outbox` for the module path). The texts that name it
+(`rakun-messaging`'s refusal of an AMQP producer transaction) keep `rakun-tx`.
 
 **Boundary with front 08: one resource is front 08, more than one is here.**
 `#[transactional]` around statements against one database stays in
