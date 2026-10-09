@@ -2726,8 +2726,8 @@ and names onze as the CLI of a full-stack project.
   (command line, environment, application file); secrets are masked with
   front 76's `sanitizePatterns()`. No listener, pool or broker starts.
 - `run [--profile] [--port] [--watch]` passes `RAKUN_PROFILES_ACTIVE` /
-  `RAKUN_SERVER_PORT` to `botopink run`; `--watch` needs rakun-devtools among
-  the project's dependencies.
+  `RAKUN_SERVER_PORT` to `botopink run`; `--watch` needs `rakun-data` (front 80's
+  devtools, merged into it by front 128) among the project's dependencies.
 - Plugin commands: `#[cliCommand(name, summary)]` on a method of a
   `#[cliCommands]` type (with a stereotype) — emits `rkCliRegister`; a name
   registered twice is refused naming both.
@@ -2816,7 +2816,14 @@ involved, the mechanism is here. Tables (`rakun_outbox`, `rakun_inbox`,
   `global:trans` lock on its key; without the lock, concurrent writers lose
   each other's updates.
 
-## DevTools — `modules/rakun-devtools/` (front 80)
+## DevTools — `modules/rakun-data/src/devtools/` (front 80)
+
+The former member `rakun-devtools`, merged into `rakun-data` by front 128 (decision 187):
+`modules/rakun-data/src/devtools/{devtools,db_console}.bp`, its tests
+`modules/rakun-data/test/devtools/{devtools,db_console}_test.bp`, its sidecar keeps its name and
+atom (`modules/rakun-data/src/sidecars/rakun_devtools.erl`), its names are reached
+`from "rakun-data"`; `rakun-cli`'s `--watch` asks for `rakun-data` among a project's
+dependencies. The build directory keeps its name (`.rakun-devtools/out`).
 
 Dev-profile only (`dev` or `development` resolved). Sidecar
 `rakun_devtools.erl`.
