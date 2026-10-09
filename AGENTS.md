@@ -1066,6 +1066,14 @@ underscored upper-case one, so `remoteAddress` binds from `remote-address`, from
 `remoteAddress` and from `REMOTE_ADDRESS` without the caller knowing which
 spelling a file used.
 
+`Duration` and `DataSize` are `#[validated]` (the `validation` library's): a
+`#[validated]` configuration record is its own document schema (validation's
+decisions 306, 327), so every type its fields name is one too, and
+`config.bp` imports `decorators.validated`, `derived` and the report types from
+`"validation"` for the members the decorator adds. A test's nested
+configuration records carry `#[validated]` for the same reason
+(`typed_config_test.bp`).
+
 `Duration` parses `30` (against the `#[unit]` default), `30s`, `500ms`, `2m`,
 `1h`, `1d`, `PT30S` and `PT1H30M`; `DataSize` parses `10`, `10B`, `10KB`,
 `10MB`, `10GB` and `10TB` into `bytes: i64` (a size past 2 GiB is beyond `i32`,
