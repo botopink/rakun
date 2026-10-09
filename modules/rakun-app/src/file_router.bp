@@ -34,7 +34,8 @@
 import {io.fs} from "std";
 import {Request} from "rakun";
 import {rkProp} from "rakun";
-import {segment.parseSegment, segment.parsePath, segment.patternOf, segment.slotOf, segment.pathProblem, segment.kindName, table.RouteEntry, table.writeTable, table.parseTable, match.RouteMatch, match.splitPath, match.matchPath, match.layoutChain} from "routing";
+import {conventions.fileKinds, conventions.kindOf, conventions.kindLetter, conventions.ConventionFile, conventions.conventionConflicts} from "routing";
+import {segment.parsePath, segment.patternOf, segment.slotOf, segment.pathProblem, table.RouteEntry, table.writeTable, table.parseTable, match.RouteMatch, match.matchPath, match.layoutChain} from "routing";
 
 // ── step 2: the registry — table records and opaque page renderers ──────────
 
@@ -189,41 +190,6 @@ pub fn noStrings() -> string[] {
     return out;
 }
 
-// The eight convention filenames, in the order their kind letters are listed.
-pub fn conventionFiles() -> string[] {
-    return [
-        "layout.bp",
-        "template.bp",
-        "page.bp",
-        "default.bp",
-        "route.bp",
-        "loading.bp",
-        "error.bp",
-        "not-found.bp",
-    ];
-}
-
-pub fn conventionKind(file: string) -> string {
-    if (file == "layout.bp")
-        return "L"
-    else if (file == "template.bp")
-        return "T"
-    else if (file == "page.bp")
-        return "P"
-    else if (file == "default.bp")
-        return "D"
-    else if (file == "route.bp")
-        return "R"
-    else if (file == "loading.bp")
-        return "S"
-    else if (file == "error.bp")
-        return "E"
-    else if (file == "not-found.bp")
-        return "N"
-    else
-        return "";
-}
-
 // `appDir` is CONFIGURATION, not a literal (front 05): `rakun.appDir`, `app` or
 // `src/app` (`app` when unset), so moving the tree between the two layouts
 // changes one config line and no source. The orchestrator writes the key at
@@ -267,11 +233,13 @@ pub fn walkSegments(base: string, seg: string) -> string[] {
     return out;
 }
 
+// The convention files present in one segment, by file name, in `routing`'s
+// wrap order (decision 171).
 pub fn conventionsIn(base: string, seg: string) -> string[] {
     val dir = if (seg == "") base else base + "/" + seg;
     var out: string[] = [];
-    for (conventionFiles()) { f ->
-        if (fs.exists(dir + "/" + f)) out.push(f);
+    for (fileKinds()) { k ->
+        if (fs.exists(dir + "/" + k + ".bp")) out.push(k + ".bp");
     }
     return out;
 }
@@ -297,7 +265,7 @@ pub fn scanTable(report: ScanReport) -> RouteEntry[] {
     var out: RouteEntry[] = [];
     for (report.entries) { e ->
         for (e.conventions) { f ->
-            val kind = conventionKind(f);
+            val kind = kindLetter(kindOf(f) ?? "");
             val verb = if (kind == "R") "GET" else "";
             out.push(
                 RouteEntry(
@@ -337,7 +305,22 @@ pub fn scanAppDir(root: string, appDir: string) -> ScanReport {
             }
         }
     }
-    for (conflictProblems(entries)) { p ->
+    var files: ConventionFile[] = [];
+    for (entries) { e ->
+        for (e.conventions) { f ->
+            files.push(
+                ConventionFile(
+                    authoredPath: if (e.seg == "")
+                        base + "/" + f
+                    else
+                        base + "/" + e.seg + "/" + f,
+                    segment: e.seg,
+                    kind: kindOf(f) ?? "",
+                ),
+            );
+        }
+    }
+    for (conventionConflicts(files)) { p ->
         problems.push(p);
     }
     val middlewarePath = if (root == "")
@@ -351,66 +334,6 @@ pub fn scanAppDir(root: string, appDir: string) -> ScanReport {
         middleware: middleware,
         problems: problems,
     );
-}
-
-// The top-level `(group)` a segment sits under, `""` when it sits under none.
-pub fn rootGroupOf(seg: string) -> string {
-    val parts = splitPath(seg);
-    if (parts.length == 0) return "" else {
-        val head = parts.at(0).unwrapOr("");
-        if (kindName(parseSegment(head).kind) == "Group")
-            return head
-        else
-            return "";
-    }
-}
-
-pub fn hasConvention(e: ScanEntry, file: string) -> bool {
-    var found = false;
-    for (e.conventions) { f ->
-        if (f == file) found = true;
-    }
-    return found;
-}
-
-// Two rules the tree can break on its own, both refused by name. The second is
-// § 5 Múltiplos Root Layouts: two route groups may each own a root layout, and
-// that is legal right up to the point where their subtrees claim one URL.
-pub fn conflictProblems(entries: ScanEntry[]) -> string[] {
-    var problems: string[] = [];
-    for (entries) { e ->
-        if ((hasConvention(e, "page.bp") && hasConvention(e, "route.bp")))
-            problems.push(
-                "rakun routing: `"
-                    + e.seg
-                    + "` holds both page.bp and route.bp — a segment is a page or an endpoint, never both",
-            );
-    }
-    var keys: string[] = [];
-    var groups: string[] = [];
-    for (entries) { e ->
-        if (hasConvention(e, "page.bp")) {
-            val key = e.pattern + "|" + e.slot;
-            val group = rootGroupOf(e.seg);
-            val prior = keys.indexOf(key);
-            if (prior >= 0) {
-                val priorGroup = groups.at(prior).unwrapOr("");
-                if (priorGroup != group)
-                    problems.push(
-                        "rakun routing: `"
-                            + e.pattern
-                            + "` is claimed by both `"
-                            + priorGroup
-                            + "` and `"
-                            + group
-                            + "` — two root layouts whose subtrees match one URL",
-                    );
-            }
-            keys.push(key);
-            groups.push(group);
-        }
-    }
-    return problems;
 }
 
 // ── the registered side of the scan ─────────────────────────────────────────

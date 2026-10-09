@@ -23,7 +23,8 @@ fn textBody(out: ChunkWriter, text: string) -> @Task<@Result<void, string>> {
 
 import {navigation.redirect, navigation.notFound};
 import {route_handler.serveApp};
-import {actions.FormData, actions.ActionResult, actions.formValue, actions.serverAction, actions.rkRegisterAction, actions.rkActionsRegistered, actions.actionId, actions.actionIdOf, actions.resolveAction, actions.actionsConfigProblem, actions.serveActions, actions.dispatchAction, actions.ActionOutcome, actions.rkActionsAdmitted, actions.preBodyRefusal};
+import {id.deriveActionId} from "actions";
+import {actions.FormData, actions.ActionResult, actions.formValue, actions.serverAction, actions.rkRegisterAction, actions.rkActionsRegistered, actions.actionIdOf, actions.resolveAction, actions.actionsConfigProblem, actions.serveActions, actions.dispatchAction, actions.ActionOutcome, actions.rkActionsAdmitted, actions.preBodyRefusal};
 
 // ── the actions ─────────────────────────────────────────────────────────────
 
@@ -88,13 +89,15 @@ fn renderWithCookie(out: ChunkWriter) -> @Task<@Result<void, string>> {
 
 // ── the harness ─────────────────────────────────────────────────────────────
 
+// The secret `configure` sets, which the ids a test derives itself are keyed by.
+fn testSecret() -> string {
+    return "front-24-secret-0123456789abcdef-xyz";
+}
+
 fn configure() -> i32 {
     val _f = rkSetProp("rakun.actions.field", "__bp_action");
     val _h = rkSetProp("rakun.actions.header", "X-Bp-Action");
-    val _s = rkSetProp(
-        "rakun.actions.secret",
-        "front-24-secret-0123456789abcdef-xyz",
-    );
+    val _s = rkSetProp("rakun.actions.secret", testSecret());
     return rkSetProp("rakun.actions.bodyLimit", "");
 }
 
@@ -179,7 +182,8 @@ test "actions: #[serverAction] registers a @Task<ActionResult> fn and a fallible
 test "actions: an unmarked pub fn is not reachable - POSTing its name or an id derived for it is 404" {
     val _b = boot();
     assert form("__bp_action=unmarkedPost&title=abc").status == 404;
-    val forged = actionId(
+    val forged = deriveActionId(
+        testSecret(),
         rkActionsRegistered().at(0).unwrapOr("m|x").split("|").at(0) ?? "",
         "unmarkedPost",
         buildId(),
@@ -191,10 +195,13 @@ test "actions: an unmarked pub fn is not reachable - POSTing its name or an id d
 
 test "actions: the id is deterministic, a_ plus 24 hex, and changes with the build id and the module" {
     val _c = configure();
-    val a = actionId("app@posts", "createPost", "build-1");
-    assert a == actionId("app@posts", "createPost", "build-1");
-    assert a != actionId("app@posts", "createPost", "build-2");
-    assert a != actionId("app@drafts", "createPost", "build-1");
+    val a = deriveActionId(testSecret(), "app@posts", "createPost", "build-1");
+    assert a
+        == deriveActionId(testSecret(), "app@posts", "createPost", "build-1");
+    assert a
+        != deriveActionId(testSecret(), "app@posts", "createPost", "build-2");
+    assert a
+        != deriveActionId(testSecret(), "app@drafts", "createPost", "build-1");
     assert a.length() == 26 && a.startsWith("a_");
     assert a
         .slice(2, 26)

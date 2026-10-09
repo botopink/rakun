@@ -2,11 +2,13 @@
 //// `actionIdOf`, the dispatcher, and the envelope written with the bundled
 //// library `actions`.
 ////
-//// THE ID. `a_` + the first 24 hex characters of
-//// `hash.hmacSha256(rakun.actions.secret, module + "." + name + ":" + buildId)`
-//// — stable for a build (any node of it resolves a form another rendered), not
-//// guessable from the name (a `pub fn` nobody marked is not reachable by
-//// naming it), computed only here. The module is the one the function value
+//// THE ID. The `actions` library's `id.deriveActionId(secret, module, name,
+//// buildId)` — `a_` + the first 24 hex characters of
+//// `hash.hmacSha256(secret, module + "." + name + ":" + buildId)`, the secret
+//// `rakun.actions.secret` — stable for a build (any node of it resolves a form
+//// another rendered), not guessable from the name (a `pub fn` nobody marked is
+//// not reachable by naming it), derived in that one function (decision 324;
+//// rakun-app keeps no wrapper). The module is the one the function value
 //// was declared in (`rakun_actions:register/2` reads it off the fun). A
 //// request's id is compared with every registered id by std's
 //// `hash.equalsConstantTime`.
@@ -47,6 +49,7 @@
 //// captured outcome, and the envelope derives `redirect` from it.
 
 import {hash, encoding} from "std";
+import {id.deriveActionId} from "actions";
 import {actions.ActionEnvelope, actions.writeEnvelope, actions.writeState, actions.parseRpcBody, actions.RpcCall, actions.refreshValue} from "actions";
 import {navigation.NavOutcome, navigation.NavKind, navigation.signalToWire} from "routing";
 import {Request, Response, rkProp, requestLive, beginRequest, endRequest, RequestScope, RequestPhase, setPhase, requestPhase, rkReqSlot, rkReqPutSlot, rkReqCookieBlob, rkMakeRequest, toI32} from "rakun";
@@ -234,14 +237,6 @@ pub fn actionsConfigProblem() -> string {
 
 // ── ids ─────────────────────────────────────────────────────────────────────
 
-pub fn actionId(module: string, name: string, buildId: string) -> string {
-    val mac = hash.hmacSha256(
-        rkProp("rakun.actions.secret"),
-        module + "." + name + ":" + buildId,
-    );
-    return "a_" + mac.slice(0, 24);
-}
-
 fn moduleOf(entry: string) -> string {
     return entry.split("|").at(0) ?? "";
 }
@@ -262,7 +257,12 @@ pub fn actionIdOf(name: string) -> string {
     val hits = rkActionsRegistered().filter({ e -> nameOf(e) == name });
     if (hits.length == 0) @panic(unknownActionProblem(name));
     val entry = hits.at(0) ?? "";
-    return actionId(moduleOf(entry), name, buildId());
+    return deriveActionId(
+        rkProp("rakun.actions.secret"),
+        moduleOf(entry),
+        name,
+        buildId(),
+    );
 }
 
 // The registered entry whose id equals `id`, `""` when none. Every entry is
@@ -271,7 +271,12 @@ pub fn resolveAction(id: string) -> string {
     var found = "";
     for (rkActionsRegistered()) { e ->
         val same = hash.equalsConstantTime(
-            actionId(moduleOf(e), nameOf(e), buildId()),
+            deriveActionId(
+                rkProp("rakun.actions.secret"),
+                moduleOf(e),
+                nameOf(e),
+                buildId(),
+            ),
             id,
         );
         if (same && found == "") found = e;

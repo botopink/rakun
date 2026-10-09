@@ -588,7 +588,13 @@ decision 115 rule 4), walks the tree and refuses: a segment holding both
 `page.bp` and `route.bp`, two root layouts meeting at one URL, a registered
 segment with no directory (naming the function), a directory holding a
 convention file nothing registered. `_`-prefixed folders are skipped. A root
-`middleware.bp` beside `botopink.json` is discovered by the same scan.
+`middleware.bp` beside `botopink.json` is discovered by the same scan. What a
+convention file is — the eight kinds in wrap order (decision 171), a file's
+kind, its wire letter (decision 172) and the tree's two conflicts — is the
+`routing` library's `conventions` (`fileKinds`, `kindOf`, `kindLetter`,
+`ConventionFile`, `conventionConflicts`; front 102): the conflict texts are
+`routing`'s (`routing: …`); only the disk walk (`walkSegments`,
+`conventionsIn`) is rakun-app's.
 
 ## The request context
 
@@ -1668,9 +1674,12 @@ return — `@Task<i32>` included — at build time. Sidecar
 fun with `erlang:fun_info/2`), the call (an `ActionResult`, `Ok`, `Error` or a
 raise, a `nav:` signal re-thrown), and the body hook.
 
-- **The id** (envelope version `v: 1`) — `actionId(module, name, buildId)` =
-  `a_` + the first 24 hex of `hash.hmacSha256(rakun.actions.secret, module + "."
-  + name + ":" + buildId)`; `actionIdOf(name)` is what onze hands a form;
+- **The id** (envelope version `v: 1`) — the `actions` library's
+  `id.deriveActionId(secret, module, name, buildId)` = `a_` + the first 24 hex of
+  `hash.hmacSha256(secret, module + "." + name + ":" + buildId)`, the secret
+  `rakun.actions.secret` read at the call (front 103, decision 324: rakun-app
+  keeps no `actionId` wrapper; the read becomes the `#[config("rakun.actions")]`
+  record's field with rakun 04 step 7, decision 299); `actionIdOf(name)` is what onze hands a form;
   `resolveAction(id)` compares every registered id with
   `hash.equalsConstantTime`. The name alone never resolves.
 - **Configuration** — `rakun.actions.field`, `rakun.actions.header` (onze's
@@ -1720,8 +1729,10 @@ gauge and the failure log.
   with nothing enumerated under `dynamicParams: false`; touched → D (front 62's
   reason); else S with `""`. The test asserts all 64 rows.
 - **Enumeration** — `registerStaticParams(seg, fn() -> @Task<StaticParams[]>)`,
-  `expandParams(pattern, rows)` (catch-all spans `/`, optional catch-all may be
-  empty; a missing, extra, slashed or duplicated binding raises).
+  `expandParams(pattern, rows)` — each row filled by `routing`'s
+  `segment.fillPattern` (catch-all spans `/`, optional catch-all may be empty or
+  unbound; a missing, extra, slashed or twice-bound binding raises with
+  `routing`'s text), and two rows producing one path raise.
 - **Prerender** — every page path rendered once in its own front 62 frame
   (`renderOnce`), as unstarted thunks in at most `rakun.static.concurrency`
   processes (default: the scheduler count); `prerenderAll(strict)`,

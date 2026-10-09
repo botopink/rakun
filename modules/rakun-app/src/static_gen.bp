@@ -40,7 +40,7 @@
 //// downgrades any of that.
 
 import {hash, path, io.fs, json.object, json.quote, json.decode, json.Json} from "std";
-import {route_kinds.RouteKind, route_kinds.writeKinds, table.RouteEntry, table.parseTable} from "routing";
+import {route_kinds.RouteKind, route_kinds.writeKinds, table.RouteEntry, table.parseTable, segment.fillPattern} from "routing";
 import {Request, rkProp, rkMakeRequest, toI32, beginRequest, endRequest, RequestScope, RequestPhase, isDynamic, dynamicReason, requestLive, draftBypass} from "rakun";
 import {file_router.rkAppTable, file_router.rkAppRender};
 import {ssr.PageRenderer, ssr.ChunkWriter, ssr.chunkWriter, ssr.writeTo, ssr.matchPage, ssr.PageMatch, ssr.rkSsrBegin, ssr.rkSsrBody, ssr.rkSsrStatus, ssr.rkSsrGuard, ssr.rkSsrPageRequest};
@@ -121,82 +121,22 @@ declare fn rkStaticProduce(
     produce: fn() -> @Task<StaticParams[]>,
 ) -> StaticParams[];
 
-fn segmentName(seg: string) -> string {
-    return seg.replaceAll("[", "").replaceAll("]", "").replaceAll("...", "");
-}
-
 pub fn isDynamicPattern(pattern: string) -> bool {
     return pattern.contains("[");
 }
 
-fn bound(row: StaticParams, name: string) -> ?string {
-    val hit = row.bindings.filter({ b -> b.name == name });
-    if (hit.length == 0) return null;
-    val first: ParamBinding = hit.at(0) ?? ParamBinding(name: "", value: "");
-    return first.value;
-}
-
-fn expandRow(pattern: string, row: StaticParams) -> string {
-    val segs = pattern.split("/").filter({ s -> s != "" });
-    var names: Array<string> = [];
-    var parts: Array<string> = [];
-    for (segs) { s ->
-        val group = s.startsWith("(") && s.endsWith(")");
-        val slot = s.startsWith("@");
-        if (group == false && slot == false)
-            if (s.startsWith("[")) {
-                val name = segmentName(s);
-                names.push(name);
-                val optional = s.startsWith("[[");
-                val catchAll = s.contains("...");
-                val v: ?string = bound(row, name);
-                if (v == null)
-                    @panic(
-                        "rakun static: a generateStaticParams row for `"
-                            + pattern
-                            + "` binds no `"
-                            + name
-                            + "`",
-                    );
-                val value: string = v ?? "";
-                if (catchAll == false && value.contains("/"))
-                    @panic(
-                        "rakun static: `"
-                            + name
-                            + "` of `"
-                            + pattern
-                            + "` is bound to `"
-                            + value
-                            + "`, which holds a `/` - only a catch-all segment spans several",
-                    );
-                if (value == "" && optional == false)
-                    @panic(
-                        "rakun static: `"
-                            + name
-                            + "` of `"
-                            + pattern
-                            + "` is bound to the empty string",
-                    );
-                if (value != "") parts.push(value);
-            } else parts.push(s);
-    }
-    for (row.bindings) { b ->
-        if (names.filter({ n -> n == b.name }).length == 0)
-            @panic(
-                "rakun static: a generateStaticParams row for `"
-                    + pattern
-                    + "` binds `"
-                    + b.name
-                    + "`, which the pattern does not have",
-            );
-    }
-    return "/" + parts.join("/");
-}
-
+// The paths `rows` fill `pattern` with, through `routing`'s `fillPattern`: a
+// row it refuses halts with its text, and two rows filling one path halt too.
 pub fn expandParams(pattern: string, rows: StaticParams[]) -> string[] {
     var out: string[] = [];
     for (rows) { row ->
-        val p = expandRow(pattern, row);
+        val p = case fillPattern(
+            pattern,
+            row.bindings.map({ b -> #(b.name, b.value) }),
+        ) {
+            Ok(filled) -> filled;
+            Error(reason) -> @panic(reason);
+        };
         if (out.filter({ q -> q == p }).length > 0)
             @panic(
                 "rakun static: two generateStaticParams rows for `"
