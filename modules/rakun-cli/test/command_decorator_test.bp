@@ -4,7 +4,8 @@
 
 import {testing.asserts} from "std";
 import {io: {fs, process, env}} from "std";
-import {service, repository, rkScan, rkSingleton, rkEnter, rkDone} from "rakun";
+import {service, repository, rkScan, rkSingleton, rkEnter, rkDone, rkResolve, rkAddBean, rkInstallBeans} from "rakun";
+import {collections.Dict} from "std";
 import {plugins.cliCommand, plugins.cliCommands, plugins.rkCliRegister, plugins.pluginNames, plugins.forgetPlugin};
 import {cli.runCli, cli.cliOutput, cli.clearCliOutput, cli.helpLines};
 
@@ -29,7 +30,20 @@ pub type Seeder(orders: DemoOrders) {
     }
 }
 
+// The entry point's catalogue (decision 256): `Seeder.make()` resolves its
+// `orders` field through it.
+fn beans() -> Dict<string, unknown> {
+    return comptime {
+        var d: Dict<string, unknown> = Dict.empty();
+        for (@TypeInfo.all(with: [service, repository], member: "make")) { b ->
+            d = rkAddBean(d, b.name, b.value);
+        }
+        break d;
+    };
+}
+
 test "plugin: an annotated method is in rakun help with its summary, and rakun seed runs it" {
+    val _beans = rkInstallBeans(beans());
     val help = helpLines().join("\n");
     val _c = clearCliOutput();
     assert pluginNames().indexOf("seed") >= 0 && help.contains("  seed - load the demo orders"), help;
@@ -37,10 +51,12 @@ test "plugin: an annotated method is in rakun help with its summary, and rakun s
 }
 
 test "plugin: the component is wired - the command reads an injected repository - and its answer is the exit code" {
+    val _beans = rkInstallBeans(beans());
     assert runCli(["seed", "--fail"]) == 4;
 }
 
 test "plugin: a raise is exit 1 with the reason printed" {
+    val _beans = rkInstallBeans(beans());
     val _c = clearCliOutput();
     val status = runCli(["explode"]);
     assert status == 1 && cliOutput().filter({ l -> l.contains("the seed file is missing") }).length == 1;

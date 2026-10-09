@@ -31,7 +31,7 @@
 import {rkProp, toI32, shutdown, rkStopAccepting, rkDrain, rkConnectionCount} from "rakun";
 
 #[@External.Erlang("rakun_runtime", "readiness_drained")]
-pub declare fn rkReadinessDrained() -> i32;
+pub declare fn rkReadinessDrained() -> i64;
 
 #[@External.Erlang("rakun_runtime", "on_sigterm")]
 pub declare fn rkOnSigterm(hook: fn() -> i32) -> i32;
@@ -39,8 +39,13 @@ pub declare fn rkOnSigterm(hook: fn() -> i32) -> i32;
 #[@External.Erlang("rakun_runtime", "off_sigterm")]
 pub declare fn rkOffSigterm() -> i32;
 
+// The monotonic clock in milliseconds: an `i64`, far outside `i32`
+// (decision 264).
 #[@External.Erlang("rakun_runtime", "now_ms")]
-pub declare fn rkNowMs() -> i32;
+pub declare fn rkNowMs() -> i64;
+
+#[@External.Erlang("""(fun(__X) -> __X end)($0)""")]
+declare fn wide(n: i32) -> i64;
 
 #[@External.Erlang("rakun_runtime", "halt_with")]
 pub declare fn rkHaltWith(status: i32) -> i32;
@@ -48,11 +53,11 @@ pub declare fn rkHaltWith(status: i32) -> i32;
 // What one shutdown did, for the log and for a test.
 pub type ShutdownReport(
     immediate: bool,
-    readinessAt: i32,
-    stoppedAcceptingAt: i32,
+    readinessAt: i64,
+    stoppedAcceptingAt: i64,
     drained: i32,
     killed: i32,
-    preDestroyAt: i32,
+    preDestroyAt: i64,
     exitCode: i32,
 )
 
@@ -67,12 +72,12 @@ pub fn isImmediate() -> bool {
 
 pub fn gracefulShutdown() -> ShutdownReport {
     val immediate: bool = isImmediate();
-    val readyAt: i32 = if (immediate) 0 else rkReadinessDrained();
-    val closedAt: i32 = if (immediate) 0 else rkStopAccepting();
+    val readyAt: i64 = if (immediate) wide(0) else rkReadinessDrained();
+    val closedAt: i64 = if (immediate) wide(0) else rkStopAccepting();
     val drainedWire: string = if (immediate) "0|0" else rkDrain(shutdownTimeout());
     val counts: string[] = drainedWire.split("|");
     val exit: i32 = shutdown();
-    val destroyedAt: i32 = rkNowMs();
+    val destroyedAt: i64 = rkNowMs();
     return ShutdownReport(
         immediate: immediate,
         readinessAt: readyAt,

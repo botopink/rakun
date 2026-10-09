@@ -54,21 +54,21 @@ fn root() -> Authentication {
 }
 
 fn purgeAs(a: Authentication) -> i32 {
-    return withAuthentication(a, { -> __rkMake_LedgerSec().purge(7) });
+    return withAuthentication(a, { -> LedgerSec.make().purge(7) });
 }
 
 fn depthAs(a: Authentication) -> i32 {
-    return withAuthentication(a, { -> __rkMake_LedgerSec().depth() });
+    return withAuthentication(a, { -> LedgerSec.make().depth() });
 }
 
 test "method: #[methodSecurity] emits <Type>Sec with one forwarding method per method" {
-    val sec: LedgerSec = __rkMake_LedgerSec();
+    val sec: LedgerSec = LedgerSec.make();
     val v: string = withAuthentication(root(), { ->
         sec.purge(3).toString() + " " + sec.depth().toString() + " " + sec.status() + " " + sec.balance("acc");
     });
     assert v == "3 42 ok acc:100", v;
     val _t = withAuthentication(root(), { -> sec.touch(); 0; });
-    assert __rkMake_LedgerSec().inner.status() == "ok";
+    assert LedgerSec.make().inner.status() == "ok";
 }
 
 test "method: #[secured(ROLE_ADMIN)] refuses a caller without the authority" {
@@ -86,7 +86,7 @@ test "method: #[secured(ROLE_A,ROLE_B)] admits a caller holding either" {
 }
 
 test "method: #[permitAll] admits an anonymous caller" {
-    val s: string = withAuthentication(anonymous(), { -> __rkMake_LedgerSec().status() });
+    val s: string = withAuthentication(anonymous(), { -> LedgerSec.make().status() });
     assert s == "ok";
     assert rkSecDecision() == "granted permitAll";
 }
@@ -94,20 +94,20 @@ test "method: #[permitAll] admits an anonymous caller" {
 test "method: an unmarked method inherits the type's requirement, and an unmarked type requires authentication" {
     // Ledger carries no type-level marker: `balance` needs an authenticated caller.
     try asserts.throwsWith({ ->
-        val _b = withAuthentication(anonymous(), { -> __rkMake_LedgerSec().balance("x") });
+        val _b = withAuthentication(anonymous(), { -> LedgerSec.make().balance("x") });
         0;
     }, "rakun.security.unauthorized");
-    assert withAuthentication(ana(), { -> __rkMake_LedgerSec().balance("x") }) == "x:100";
+    assert withAuthentication(ana(), { -> LedgerSec.make().balance("x") }) == "x:100";
 }
 
 test "method: calling a secured method outside a request is a hard failure, not an implicit allow" {
     try asserts.throwsWith({ ->
-        val _p = __rkMake_LedgerSec().purge(1);
+        val _p = LedgerSec.make().purge(1);
         0;
     }, "the security context was read outside a request");
     // Even #[permitAll] reads the context: there is no request to permit.
     try asserts.throwsWith({ ->
-        val _s = __rkMake_LedgerSec().status();
+        val _s = LedgerSec.make().status();
         0;
     }, "outside a request");
 }
@@ -124,7 +124,7 @@ fn chainCalling(withErrorEntry: bool) -> i32 {
     val _p = installSecurityWith(SecurityPolicy(rules: [PathRule(pattern: "/public/:rest*", requirement: "permitAll")], defaultRequirement: "authenticated"));
     val _e = if (withErrorEntry) registerFilter("problem", orderProblem(), { req, chain -> errorEntry(req, chain) }) else 0;
     return rkChainSetTerminal({ method, path, headersWire, queryWire, body ->
-        Response.ok(__rkMake_LedgerSec().purge(9).toString());
+        Response.ok(LedgerSec.make().purge(9).toString());
     });
 }
 

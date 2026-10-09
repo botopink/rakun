@@ -13,19 +13,29 @@
 //   curl -X POST -d 'hi' localhost:8080/api/posts/   → 201  created: hi
 //   curl localhost:8080/api/nope            → 404
 
-// Each module is imported with the whole type closure its exported types name:
-// importing `UserController` re-checks its declaration here, so the types its
-// fields and method signatures mention (`UserService`, `UserRepository`,
-// `Request`, `Response`, …) must be in scope too.
+// `main` names no component: the catalogue below reaches every stereotyped
+// type through `@TypeInfo.all`, and `pub mod` puts its module in the build.
 import {Rakun, App, Request, Response} from "rakun";
-import {users.UserController, users.UserService, users.UserRepository};
-import {posts.PostController, posts.PostService, posts.PostRepository};
-import {config.TimeService, config.Clock};
+import {repository, service, restController, configuration, rkAddBean, rkInstallBeans} from "rakun";
+import {collections.Dict} from "std";
 
 pub mod users; // #[repository]/#[service]/#[restController] — the user resource
 pub mod posts; // the post resource (write endpoints + status codes)
 pub mod config; // #[configuration]/#[bean]/#[value] showcase
 
+// The application's bean catalogue (decision 256): every stereotyped type's
+// `make()`, collected at compile time and installed before anything resolves.
+fn beans() -> Dict<string, unknown> {
+    return comptime {
+        var d: Dict<string, unknown> = Dict.empty();
+        for (@TypeInfo.all(with: [repository, service, restController, configuration], member: "make")) { b ->
+            d = rkAddBean(d, b.name, b.value);
+        }
+        break d;
+    };
+}
+
 fn main() {
+    val _beans = rkInstallBeans(beans());
     Rakun.run(App(port: 8080, basePath: "/api"));
 }

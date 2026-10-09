@@ -27,9 +27,12 @@
 import {rkProp, toI32} from "rakun";
 import {Param, param, Row, Rows, SqlTemplate, Tx, sqlTemplate} from "rakun-data";
 
-// Milliseconds since the epoch (an erlang integer: no overflow).
+// Milliseconds since the epoch: an `i64` (decision 264 — an epoch in
+// milliseconds is beyond `i32`'s range, so arithmetic on it as an `i32` aborts).
 #[@External.Erlang("""(fun() -> erlang:system_time(millisecond) end)()""")]
-pub declare fn nowMs() -> i32;
+pub declare fn nowMs() -> i64;
+#[@External.Erlang("""(fun(__X) -> __X end)($0)""")]
+declare fn wide(n: i32) -> i64;
 #[@External.Erlang("""(fun() -> list_to_binary(pid_to_list(self()) ++ "@" ++ atom_to_list(node())) end)()""")]
 declare fn me() -> string;
 #[@External.Erlang("""(fun(__F) -> try __F(), <<>> catch _:{panic, __R} when is_binary(__R) -> __R; _:__R -> iolist_to_binary(io_lib:format("~p", [__R])) end end)($0)""")]
@@ -133,7 +136,7 @@ pub fn relayTick(ds: string, publisher: fn(topic: string, key: string, payload: 
     var sent = 0;
     for (pending) { r ->
         val row = rowOf(r);
-        val due = toI32(r.get("next_at")) <= now;
+        val due = r.long("next_at") <= now;
         if (seenAggregates.indexOf(row.aggregate) < 0 && blocked.indexOf(row.aggregate) < 0) {
             seenAggregates.push(row.aggregate);
             val claimed = if (due) sql.update("UPDATE rakun_outbox SET status = 'claimed', owner = :me WHERE id = :id AND status = 'pending'", [param("me", me()), param("id", row.id.toString())]) else 0;
@@ -145,7 +148,7 @@ pub fn relayTick(ds: string, publisher: fn(topic: string, key: string, payload: 
                 } else {
                     val tries = row.attempts + 1;
                     val status = if (tries >= maxAttempts()) "failed" else "pending";
-                    val _f = sql.update("UPDATE rakun_outbox SET status = :st, owner = '', attempts = :n, next_at = :next, last_error = :e WHERE id = :id", [param("st", status), param("n", tries.toString()), param("next", (nowMs() + backoffMs(tries)).toString()), param("e", err), param("id", row.id.toString())]);
+                    val _f = sql.update("UPDATE rakun_outbox SET status = :st, owner = '', attempts = :n, next_at = :next, last_error = :e WHERE id = :id", [param("st", status), param("n", tries.toString()), param("next", (nowMs() + wide(backoffMs(tries))).toString()), param("e", err), param("id", row.id.toString())]);
                 };
             };
         };
@@ -163,8 +166,8 @@ pub fn reclaimStale(ds: string) -> i32 {
 // Deletes up to `batch` sent rows older than `retentionMs`.
 pub fn pruneSent(ds: string, retentionMs: i32, batch: i32) -> i32 {
     val sql = sqlTemplate(ds);
-    val cutoff = nowMs() - retentionMs;
-    val old = sql.query("SELECT id, created_at FROM rakun_outbox WHERE status = 'sent' ORDER BY id", []).toList().filter({ r -> toI32(r.get("created_at")) <= cutoff }).slice(0, batch);
+    val cutoff = nowMs() - wide(retentionMs);
+    val old = sql.query("SELECT id, created_at FROM rakun_outbox WHERE status = 'sent' ORDER BY id", []).toList().filter({ r -> r.long("created_at") <= cutoff }).slice(0, batch);
     var n = 0;
     for (old) { r -> n = n + sql.update("DELETE FROM rakun_outbox WHERE id = :id", [param("id", r.get("id"))]); };
     return n;
@@ -197,9 +200,9 @@ pub fn pruneInbox(ds: string, retentionMs: i32, redeliveryWindowMs: i32, batch: 
     val problem = inboxRetentionProblem(retentionMs, redeliveryWindowMs);
     if (problem != "") @panic(problem);
     val sql = sqlTemplate(ds);
-    val cutoff = nowMs() - retentionMs;
+    val cutoff = nowMs() - wide(retentionMs);
     val rows: Rows = sql.query("SELECT grp, message_id, received_at FROM rakun_inbox", []);
-    val old = rows.toList().filter({ r -> toI32(r.get("received_at")) <= cutoff }).slice(0, batch);
+    val old = rows.toList().filter({ r -> r.long("received_at") <= cutoff }).slice(0, batch);
     var n = 0;
     for (old) { r -> n = n + sql.update("DELETE FROM rakun_inbox WHERE grp = :g AND message_id = :m", [param("g", r.get("grp")), param("m", r.get("message_id"))]); };
     return n;

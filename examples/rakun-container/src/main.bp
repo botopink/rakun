@@ -21,13 +21,14 @@
 
 import {Rakun, App, Request, Response} from "rakun";
 import {service, repository, restController, route, getMapping, postMapping} from "rakun";
-import {rkScan, rkSingleton, rkEnter, rkDone, rkRegisterRoute} from "rakun";
+import {rkScan, rkSingleton, rkEnter, rkDone, rkResolve, rkRegisterRoute, rkAddBean, rkInstallBeans} from "rakun";
+import {collections.Dict} from "std";
 
 // Front 06's surface. `#[managed]`'s emitted lines call `rkRegisterBean`,
 // `rkRegisterLifecycle` and `rkRegisterListener` HERE, at the application site,
 // the same way a `#[service]`'s emitted factory calls `rkSingleton` — so the
 // consumer imports them by name beside the markers.
-import {Context, Event, event, __rkMake_Context} from "rakun";
+import {Context, Event, event} from "rakun";
 import {managed, provides, qualifier, primary} from "rakun";
 import {postConstruct, preDestroy, eventListener, exitCode} from "rakun";
 import {rkRegisterBean, rkRegisterLifecycle, rkRegisterListener, rkRegisterExitCode} from "rakun";
@@ -43,8 +44,8 @@ pub type Clock(
     }
 }
 
-// `#[primary]` is what makes this one own `__rkMake_Clock()`, so an unqualified
-// `clock: Clock` field gets it and `ctx.resolve("Clock")` answers the same
+// `#[primary]` is what makes this one answer `rkResolve("Clock")`, so an
+// unqualified `clock: Clock` field gets it and `ctx.resolve("Clock")` answers the same
 // instance. Drop it and both providers stay reachable by qualifier while an
 // unqualified resolve refuses to guess.
 #[provides]
@@ -155,7 +156,21 @@ pub fn drainExitCode() -> i32 {
 
 // ---- bootstrap ----
 
+// The application's bean catalogue (decision 256): every stereotyped type's
+// `make()`, collected at compile time and installed before the boot resolves
+// anything. `Context` and the `#[provides]` beans are the context table's.
+fn beans() -> Dict<string, unknown> {
+    return comptime {
+        var d: Dict<string, unknown> = Dict.empty();
+        for (@TypeInfo.all(with: [repository, service, restController], member: "make")) { b ->
+            d = rkAddBean(d, b.name, b.value);
+        }
+        break d;
+    };
+}
+
 fn main() {
+    val _beans = rkInstallBeans(beans());
     // Publishes ApplicationStarting → ApplicationEnvironmentPrepared →
     // ApplicationContextInitialized → ApplicationPrepared, constructs every
     // registered bean and runs every #[postConstruct] (eager by default), then

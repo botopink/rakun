@@ -38,7 +38,9 @@ declare fn loadProbeStandIn(preDrainMs: i32) -> i32;
 declare fn unloadProbeStandIn() -> i32;
 
 #[@External.Erlang("""persistent_term:get(rakun_probe_ready_false_at, 0)""")]
-declare fn probeReadyFalseAt() -> i32;
+declare fn probeReadyFalseAt() -> i64;
+#[@External.Erlang("""(fun(__X) -> __X end)($0)""")]
+declare fn wide(n: i32) -> i64;
 
 #[@External.Erlang("""(fun() -> os:cmd("kill -TERM " ++ os:getpid()), 0 end)()""")]
 declare fn sendSigterm() -> i32;
@@ -137,11 +139,11 @@ test "rakun-web shutdown: with front 76 absent readinessDrained returns at once 
     // with the probe absent the step returns long before — a runtime that
     // waited the period anyway would take the whole minute.
     val _pd = rkSetProp("rakun.lifecycle.pre-drain-period", "60000");
-    val before: i32 = rkNowMs();
+    val before: i64 = rkNowMs();
     val r: ShutdownReport = gracefulShutdown();
     val _pu = rkSetProp("rakun.lifecycle.pre-drain-period", "");
     val _r = reset();
-    assert r.readinessAt - before < 30000;
+    assert r.readinessAt - before < wide(30000);
     assert r.readinessAt <= r.stoppedAcceptingAt;
     assert r.stoppedAcceptingAt <= r.preDestroyAt;
     assert httpGet(port, "/down/fast") == "refused";
@@ -151,11 +153,11 @@ test "rakun-web shutdown: readiness goes false at least the pre-drain period bef
     val _p = loadProbeStandIn(200);
     val port: i32 = start("10");
     val r: ShutdownReport = gracefulShutdown();
-    val readyFalseAt: i32 = probeReadyFalseAt();
+    val readyFalseAt: i64 = probeReadyFalseAt();
     val _u = unloadProbeStandIn();
     val _r = reset();
-    assert readyFalseAt != 0;
-    assert r.stoppedAcceptingAt - readyFalseAt >= 200;
+    assert readyFalseAt != wide(0);
+    assert r.stoppedAcceptingAt - readyFalseAt >= wide(200);
     assert httpGet(port, "/down/fast") == "refused";
 }
 
@@ -178,7 +180,7 @@ test "rakun-web shutdown: rakun.server.shutdown=immediate skips the drain" {
     val stillServing: string = httpGet(port, "/down/fast");
     val _r = reset();
     assert r.immediate;
-    assert r.stoppedAcceptingAt == 0;
+    assert r.stoppedAcceptingAt == wide(0);
     assert stillServing == "200|fast";
 }
 

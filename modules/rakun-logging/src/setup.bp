@@ -119,15 +119,25 @@ pub fn logFilePath() -> string {
     return dir + "/rakun.log";
 }
 
-pub fn maxSizeBytes() -> i32 {
+// A data size is an `i64` (`DataSize.bytes`): a cap of a few gigabytes is
+// beyond `i32`, and integer overflow aborts (decision 264).
+#[@External.Erlang("""(fun(__X) -> __X end)($0)""")]
+declare fn wide(n: i32) -> i64;
+
+// The archive count back as the `i32` the handler takes: it is at most
+// `max-history` (an `i32`), so a value outside `i32` is a bug and raises.
+#[@External.Erlang("""(fun(__X) when __X >= -2147483648, __X =< 2147483647 -> __X; (__X) -> erlang:error({integer_overflow, iolist_to_binary(io_lib:format("rakun-logging: an archive count of ~p is outside i32", [__X]))}) end)($0)""")]
+declare fn narrow(x: i64) -> i32;
+
+pub fn maxSizeBytes() -> i64 {
     val v = rkPropSize("rakun.logging.file.max-size", "bytes").bytes;
-    if (v <= 0) return 10485760;
+    if (v <= wide(0)) return wide(10485760);
     return v;
 }
 
-pub fn totalSizeCapBytes() -> i32 {
+pub fn totalSizeCapBytes() -> i64 {
     val v = rkPropSize("rakun.logging.file.total-size-cap", "bytes").bytes;
-    if (v <= 0) return 104857600;
+    if (v <= wide(0)) return wide(104857600);
     return v;
 }
 
@@ -137,11 +147,12 @@ pub fn maxHistory() -> i32 {
 
 // Archives kept: the history, lowered so live file + archives fit the cap.
 pub fn archiveCount() -> i32 {
-    val byCap = totalSizeCapBytes() / maxSizeBytes() - 1;
+    val byCap = totalSizeCapBytes() / maxSizeBytes() - wide(1);
     val history = maxHistory();
-    val kept = if (byCap < history) byCap else history;
-    if (kept < 0) return 0;
-    return kept;
+    if (byCap < wide(0)) return 0;
+    if (byCap < wide(history)) return narrow(byCap);
+    if (history < 0) return 0;
+    return history;
 }
 
 // ── thresholds ──────────────────────────────────────────────────────────────
@@ -195,16 +206,18 @@ pub fn bootLogging() -> @Result<string, string> {
 
 // ── the startup summary ─────────────────────────────────────────────────────
 
-fn seconds(millis: i32) -> string {
-    val whole = millis / 1000;
-    val frac = millis - whole * 1000;
+// Epoch and uptime milliseconds are `i64` (decision 264: an epoch in
+// milliseconds is beyond `i32`, and overflow aborts).
+fn seconds(millis: i64) -> string {
+    val whole = millis / wide(1000);
+    val frac = millis - whole * wide(1000);
     return whole.toString() + "." + frac.toString().padStart(3, "0") + "s";
 }
 
 pub fn startupSummary(
     app: string,
-    elapsedMillis: i32,
-    uptimeMillis: i32,
+    elapsedMillis: i64,
+    uptimeMillis: i64,
     osPid: string,
     node: string,
     port: i32,
@@ -217,7 +230,7 @@ pub fn startupSummary(
         + ", profiles [" + profiles.join(", ") + "], logging config " + config;
 }
 
-pub fn logStartupSummary(startedAtMillis: i32, port: i32) -> i32 {
+pub fn logStartupSummary(startedAtMillis: i64, port: i32) -> i32 {
     val app = applicationName();
     val line = startupSummary(
         if (app == "") "application" else app,
@@ -235,7 +248,7 @@ pub fn logStartupSummary(startedAtMillis: i32, port: i32) -> i32 {
 // Registers the summary on front 06's `ApplicationReady`, so it is written
 // once, when the application is ready. A second registration is a no-op (the
 // listener table appends, so registering twice would double the line).
-pub fn registerStartupSummary(startedAtMillis: i32, port: i32) -> i32 {
+pub fn registerStartupSummary(startedAtMillis: i64, port: i32) -> i32 {
     var already = false;
     for (listenersFor("ApplicationReady")) { l -> if (l.owner == "rakun-logging") already = true; };
     if (already) return 0;

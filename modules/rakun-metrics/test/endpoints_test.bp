@@ -9,6 +9,10 @@ import {installExposure, clearExposure} from "rakun-actuator/endpoint_host";
 import {registry.Tag, registry.counter, registry.gauge, registry.timer, registry.prometheusTextFor};
 import {endpoints.registerMetricsEndpoints, endpoints.processSorts};
 
+// A timer sample is an `i64` (decision 264); a literal is `i32`.
+#[@External.Erlang("""(fun(__X) -> __X end)($0)""")]
+declare fn wide(n: i32) -> i64;
+
 fn t(k: string, v: string) -> Tag {
     return Tag(key: k, value: v);
 }
@@ -18,8 +22,8 @@ test "prometheus: a fixed registry renders the exact exposition block" {
     val _c = c.increment(3);
     val _g = gauge("p1.queue", [], { -> 7 });
     val tm = timer("p1.latency", [t("kind", "web")]);
-    val _a = tm.record(3000);
-    val _b = tm.record(40000);
+    val _a = tm.record(wide(3000));
+    val _b = tm.record(wide(40000));
     val text = prometheusTextFor("p1.");
     assert text == "# TYPE p1_latency_seconds histogram\np1_latency_seconds_bucket{kind=\"web\",le=\"0.005\"} 1\np1_latency_seconds_bucket{kind=\"web\",le=\"0.01\"} 1\np1_latency_seconds_bucket{kind=\"web\",le=\"0.025\"} 1\np1_latency_seconds_bucket{kind=\"web\",le=\"0.05\"} 2\np1_latency_seconds_bucket{kind=\"web\",le=\"0.1\"} 2\np1_latency_seconds_bucket{kind=\"web\",le=\"0.25\"} 2\np1_latency_seconds_bucket{kind=\"web\",le=\"0.5\"} 2\np1_latency_seconds_bucket{kind=\"web\",le=\"1.0\"} 2\np1_latency_seconds_bucket{kind=\"web\",le=\"2.5\"} 2\np1_latency_seconds_bucket{kind=\"web\",le=\"5.0\"} 2\np1_latency_seconds_bucket{kind=\"web\",le=\"10.0\"} 2\np1_latency_seconds_bucket{kind=\"web\",le=\"+Inf\"} 2\np1_latency_seconds_count{kind=\"web\"} 2\np1_latency_seconds_sum{kind=\"web\"} 0.043\n# TYPE p1_orders_total counter\np1_orders_total{kind=\"web\"} 3\n# TYPE p1_queue gauge\np1_queue 7\n", text;
 }

@@ -51,10 +51,12 @@ import {reliability.policy.RetryPolicy, reliability.policy.Outcome, reliability.
 
 #[@External.Erlang("""(fun(__Ms) -> timer:sleep(__Ms), 0 end)($0)""")]
 declare fn pause(ms: i32) -> i32;
+// Epoch milliseconds and monotonic microseconds are `i64`: both are far
+// outside `i32`, and integer overflow aborts (decision 264).
 #[@External.Erlang("""erlang:system_time(millisecond)""")]
-declare fn nowMs() -> i32;
+declare fn nowMs() -> i64;
 #[@External.Erlang("""erlang:monotonic_time(microsecond)""")]
-declare fn nowMicros() -> i32;
+declare fn nowMicros() -> i64;
 #[@External.Erlang("""(fun(__F, __D) -> try {ok, __F(__D)} catch _:{panic, __R} when is_binary(__R) -> {error, __R}; _:__R -> {error, iolist_to_binary(io_lib:format("~p", [__R]))} end end)($0, $1)""")]
 declare fn guarded(handler: fn(d: Delivery) -> Outcome, d: Delivery) -> @Result<Outcome, string>;
 #[@External.Erlang("""(fun(__N, __D) -> __L = persistent_term:get(rakun_rel_listeners, []), case lists:keymember(__N, 1, __L) of true -> ok; false -> persistent_term:put(rakun_rel_listeners, __L ++ [{__N, __D}]) end, 0 end)($0, $1)""")]
@@ -88,7 +90,7 @@ fn marker() -> string {
 }
 
 // The payload a redelivery is published with.
-pub fn redeliveryPayload(attempt: i32, firstSeenMs: i32, body: string) -> string {
+pub fn redeliveryPayload(attempt: i32, firstSeenMs: i64, body: string) -> string {
     return marker() + "x-rakun-attempt=" + attempt.toString() + "&x-rakun-first-seen=" + firstSeenMs.toString() + "\u{1e}" + body;
 }
 
@@ -204,11 +206,20 @@ fn settle(mode: AckMode) -> i32 {
     };
 }
 
+// The `x-rakun-first-seen` header's instant; a value that is not one is the
+// first sight (now), as an absent header is.
+fn firstSeenOf(raw: string) -> i64 {
+    return case raw.trim().parseInt() {
+        Ok(n) -> n;
+        Error(reason) -> nowMs();
+    };
+}
+
 fn handleReliably(name: string, msg: Message, handler: fn(d: Delivery) -> Outcome, publisher: fn(broker: string, destination: string, key: string, payload: string) -> i32) -> i32 {
     val d = deliveryOf(msg);
     val attempt = attemptOf(d);
     val seen = d.header("x-rakun-first-seen");
-    val firstSeen = if (seen == "") nowMs() else parseCount(seen, nowMs());
+    val firstSeen = if (seen == "") nowMs() else firstSeenOf(seen);
     val policy = policyFor(name);
     val mode = ackModeFor(name);
     val _c = counter("rakun.messaging.deliveries", tags(name)).increment(1);

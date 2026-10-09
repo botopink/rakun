@@ -54,7 +54,7 @@ pub declare fn clearCollected(store: string) -> i32;
 #[@External.Erlang("""erlang:system_time(millisecond)""")]
 declare fn nowMs() -> i64;
 #[@External.Erlang("""(fun(__X) -> __X end)($0)""")]
-declare fn narrow(x: i64) -> i32;
+declare fn wide(n: i32) -> i64;
 #[@External.Erlang("""(fun(__S) -> try binary_to_integer(__S) catch _:_ -> 0 end end)($0)""")]
 declare fn toInt(s: string) -> i32;
 #[@External.Erlang("""(fun(__Ms) -> timer:sleep(__Ms), 0 end)($0)""")]
@@ -140,7 +140,7 @@ fn sourceDestination(s: Source) -> string {
 
 fn poison(p: Pipeline, stage: string, item: string, reason: string) -> i32 {
     val dest = sourceDestination(p.source);
-    val letter = DeadLetter(destination: dest, body: item, reason: "stage " + stage + ": " + reason, attempt: 1, firstSeenMs: narrow(nowMs()));
+    val letter = DeadLetter(destination: dest, body: item, reason: "stage " + stage + ": " + reason, attempt: 1, firstSeenMs: nowMs());
     val _c = bump(p.name + ".dead-letters");
     return rkMsgPublish(publishArm(p.name), dest + ".dlq", "", deadLetterJson(letter));
 }
@@ -193,19 +193,19 @@ pub fn storedCursor(ds: string, name: string) -> string {
 // Takes (or keeps) the cursor row's lease for `node`; true when it holds it.
 fn takeLease(ds: string, name: string, node: string, initial: string, leaseMs: i32) -> bool {
     val sql = sqlTemplate(ds);
-    val now = narrow(nowMs());
+    val now = nowMs();
     val rows: Rows = sql.query("SELECT cursor, owner, lease_until FROM rakun_stream_cursor WHERE name = :n", [param("n", name)]);
     val r: ?Row = rows.first();
     if (r == null) {
-        val _i = sql.update("INSERT INTO rakun_stream_cursor (name, cursor, owner, lease_until) VALUES (:n, :c, :o, :l)", [param("n", name), param("c", initial), param("o", node), param("l", (now + leaseMs).toString())]);
+        val _i = sql.update("INSERT INTO rakun_stream_cursor (name, cursor, owner, lease_until) VALUES (:n, :c, :o, :l)", [param("n", name), param("c", initial), param("o", node), param("l", (now + wide(leaseMs)).toString())]);
         return storedOwner(ds, name) == node;
     };
     val row = r ?? Row(columns: [], values: []);
     val owner = row.get("owner");
-    val until = row.int("lease_until");
+    val until = row.long("lease_until");
     val free = owner == node || owner == "" || until < now;
     if (free == false) return false;
-    val got = sql.update("UPDATE rakun_stream_cursor SET owner = :me, lease_until = :l WHERE name = :n AND owner = :old AND lease_until = :u", [param("me", node), param("l", (now + leaseMs).toString()), param("n", name), param("old", owner), param("u", until.toString())]);
+    val got = sql.update("UPDATE rakun_stream_cursor SET owner = :me, lease_until = :l WHERE name = :n AND owner = :old AND lease_until = :u", [param("me", node), param("l", (now + wide(leaseMs)).toString()), param("n", name), param("old", owner), param("u", until.toString())]);
     return got == 1;
 }
 

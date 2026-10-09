@@ -113,8 +113,12 @@ pub declare fn exchangesNewestFirst() -> Array<HttpExchange>;
 pub declare fn clearExchanges() -> i32;
 #[@External.Erlang("""erlang:system_time(millisecond)""")]
 declare fn nowMs() -> i64;
+// The monotonic clock is far outside `i32` (decision 264); a request's
+// duration is back in `i32`, and one beyond it raises rather than wraps.
 #[@External.Erlang("""erlang:monotonic_time(millisecond)""")]
-declare fn monoMs() -> i32;
+declare fn monoMs() -> i64;
+#[@External.Erlang("""(fun(__X) when __X >= -2147483648, __X =< 2147483647 -> __X; (__X) -> erlang:error({integer_overflow, iolist_to_binary(io_lib:format("rakun-actuator: a request that took ~p ms is outside i32", [__X]))}) end)($0)""")]
+declare fn tookOf(ms: i64) -> i32;
 #[@External.Erlang("""(fun(__F) -> try {ok, __F()} catch __C:__R:__S -> {error, {__C, __R, __S}} end end)($0)""")]
 declare fn attempt(run: fn() -> Response) -> @Result<Response, string>;
 #[@External.Erlang("""(fun(__E) -> {__C, __R, __S} = __E, erlang:raise(__C, __R, __S) end)($0)""")]
@@ -138,7 +142,7 @@ fn sessionIdOf(cookies: string) -> string {
     return hit.at(0) ?? "";
 }
 
-fn record(req: WebRequest, status: i32, started: i32, at: i64) -> i32 {
+fn record(req: WebRequest, status: i32, started: i64, at: i64) -> i32 {
     val include = recordingIncludes();
     val reqHeaders = pairsOf(req.headersWire, "\t");
     var resHeaders = pairsOf(headerLines().join("\n"), ":");
@@ -149,7 +153,7 @@ fn record(req: WebRequest, status: i32, started: i32, at: i64) -> i32 {
     for (fields) { f -> out.push(f); };
     for (responseFields(include, resHeaders)) { f -> out.push(f); };
     val uri = if (req.queryWire == "") req.path else req.target;
-    return ringPut(exchangeCapacity(), HttpExchange(atMs: at, method: req.method, uri: uri, status: status, tookMs: monoMs() - started, fields: out));
+    return ringPut(exchangeCapacity(), HttpExchange(atMs: at, method: req.method, uri: uri, status: status, tookMs: tookOf(monoMs() - started), fields: out));
 }
 
 pub fn exchangeEntry(req: WebRequest, chain: Chain) -> Response {

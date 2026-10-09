@@ -7,18 +7,21 @@
 //// their params, return types and own annotations, and emits
 ////
 ////     pub type AdminServiceSec(inner: AdminService) {
+////         pub fn make() -> AdminServiceSec { … rkSingleton … AdminService.make() … }
 ////         pub fn purge(self: Self, olderThanDays: i32) -> i32 {
 ////             val _sec = rkRequireAuthority("AdminService.purge", "ROLE_ADMIN");
 ////             return self.inner.purge(olderThanDays);
 ////         }
 ////     }
-////     pub fn __rkMake_AdminServiceSec() -> AdminServiceSec { … rkSingleton … }
+////     val __rkSec_AdminService = rkRegisterBean("AdminServiceSec", …, { -> AdminServiceSec.make() });
 ////
 //// A caller injects `AdminServiceSec`; injecting `AdminService` gets the
 //// unchecked object, visible in the field declaration rather than hidden behind
-//// a proxy the container swapped in. The application site imports
-//// `rkRequireAuthority` (this module) and the core's `rkSingleton`, and the
-//// type carries a stereotype for `__rkMake_<Type>()`.
+//// a proxy the container swapped in. The proxy enters the context table, so a
+//// field `svc: AdminServiceSec` resolves through `rkResolve`'s fallback. The
+//// application site imports `rkRequireAuthority` (this module) and the core's
+//// `rkSingleton` and `rkRegisterBean`, and the type carries a stereotype for
+//// `<Type>.make()`.
 ////
 //// THE SUPPORTED FORMS: `#[secured("ROLE")]`, `#[secured("ROLE_A,ROLE_B")]`
 //// (any of) and `#[permitAll]`, on a method or on the type. A method with no
@@ -138,8 +141,9 @@ pub fn methodSecurity(comptime decl: @Decl) {
         val body = if (ret != "") guard + "\n        return " + call + ";" else guard + "\n        " + call + ";";
         methods.push(sig + " {\n        " + body + "\n    }");
     });
-    @emit("pub type " + decl.name + "Sec(inner: " + decl.name + ") {\n    " + methods.join("\n\n    ") + "\n}");
-    @emit("pub fn __rkMake_" + decl.name + "Sec() -> " + decl.name + "Sec { return rkSingleton(\"" + decl.name + "Sec\", { -> " + decl.name + "Sec(inner: __rkMake_" + decl.name + "()) }); }");
+    val make = "pub fn make() -> " + decl.name + "Sec {\n        return rkSingleton(\"" + decl.name + "Sec\", { -> " + decl.name + "Sec(inner: " + decl.name + ".make()) });\n    }";
+    @emit("pub type " + decl.name + "Sec(inner: " + decl.name + ") {\n    " + make + "\n\n    " + methods.join("\n\n    ") + "\n}");
+    @emit("val __rkSec_" + decl.name + " = rkRegisterBean(\"" + decl.name + "Sec\", \"\", \"singleton\", false, false, \"" + decl.name + "\", { -> " + decl.name + "Sec.make() });");
     if (decl.kind != DeclKind.Type) decl.fail("#[methodSecurity] must annotate a type - a decorator cannot wrap a method body, so the check lives on the <Type>Sec proxy the type-level marker emits");
     if (decl.variants.length > 0) decl.fail("#[methodSecurity] must annotate a type with fields or methods, not an enum - an enum has no methods to secure");
     if (expression != "") decl.fail("#[preAuthorize] is not ported: expression-based security needs an expression language and botopink has none (" + expression + "). Supported forms: #[secured(\"ROLE\")], #[secured(\"ROLE_A,ROLE_B\")] (any of) and #[permitAll]; write a subject check as ordinary code in the method");

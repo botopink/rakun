@@ -60,8 +60,18 @@ pub declare fn rkClientTlsConnect(addr: string, port: i32, host: string, bundle:
 #[@External.Erlang("rakun_client", "no_handle")]
 pub declare fn rkClientNoHandle() -> unknown;
 
+// The monotonic clock in milliseconds: an `i64` — the BEAM's monotonic time is
+// far outside `i32`, and integer overflow aborts (decision 264).
 #[@External.Erlang("rakun_client", "now_ms")]
-pub declare fn rkClientNowMs() -> i32;
+pub declare fn rkClientNowMs() -> i64;
+
+#[@External.Erlang("""(fun(__X) -> __X end)($0)""")]
+declare fn wide(n: i32) -> i64;
+
+// What is left of a read budget, back as the `i32` the socket takes: it is at
+// most the budget, so a value outside `i32` is a bug and raises.
+#[@External.Erlang("""(fun(__X) when __X >= -2147483648, __X =< 2147483647 -> __X; (__X) -> erlang:error({integer_overflow, iolist_to_binary(io_lib:format("rakun-client: ~p ms left of a read budget is outside i32", [__X]))}) end)($0)""")]
+declare fn narrowMs(x: i64) -> i32;
 
 #[@External.Erlang("rakun_client", "encode_segment")]
 pub declare fn rkClientEncodeSegment(value: string) -> string;
@@ -148,10 +158,10 @@ fn connClose(c: Conn) -> i32 {
 }
 
 // Read until the response is complete, the peer closes, or the deadline.
-fn readUntil(c: Conn, isHead: bool, deadline: i32, acc: string) -> Received {
+fn readUntil(c: Conn, isHead: bool, deadline: i64, acc: string) -> Received {
     val left = deadline - rkClientNowMs();
-    if (left <= 0) return Received(raw: acc, error: "timeout");
-    val chunk = connRecv(c, left);
+    if (left <= wide(0)) return Received(raw: acc, error: "timeout");
+    val chunk = connRecv(c, narrowMs(left));
     val closedAfterData = chunk.error == "closed" && acc != "";
     if (closedAfterData) return Received(raw: acc, error: "");
     if (chunk.error != "") return Received(raw: acc, error: chunk.error);
@@ -189,7 +199,7 @@ fn once(out: Outbound, traceparent: string) -> ClientResponse {
     val opened = open(t, check.addr, out.settings);
     if (opened.error != "") return failedResponse(describe(out.method, out.url, "connect to " + check.addr + " failed: " + opened.error));
     val sendError = connSend(opened.conn, requestText(out.method, t, out.headers, out.body, traceparent));
-    val deadline = rkClientNowMs() + out.settings.readTimeoutMillis;
+    val deadline = rkClientNowMs() + wide(out.settings.readTimeoutMillis);
     val got = if (sendError == "") readUntil(opened.conn, out.method == "HEAD", deadline, "") else Received(raw: "", error: sendError);
     val _c = connClose(opened.conn);
     val timedOut = got.error == "timeout";

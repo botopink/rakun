@@ -1062,7 +1062,8 @@ spelling a file used.
 
 `Duration` parses `30` (against the `#[unit]` default), `30s`, `500ms`, `2m`,
 `1h`, `1d`, `PT30S` and `PT1H30M`; `DataSize` parses `10`, `10B`, `10KB`,
-`10MB`, `10GB` and `10TB`. An unparsable value is a startup failure naming the
+`10MB`, `10GB` and `10TB` into `bytes: i64` (a size past 2 GiB is beyond `i32`,
+decision 264). An unparsable value is a startup failure naming the
 key, the value and the accepted forms — never a zero. The refusal MESSAGE is its
 own function (`durationProblem` / `dataSizeProblem` / `boolProblem`) and the
 parser asserts on it, which is what lets a test read the message without the
@@ -3082,8 +3083,8 @@ on `rakun-web`. `modules/rakun` is untouched by this front.
 |---|---|
 | `src/datasource.bp` | `DataSource` / `Connection` behaviors (generic: `connect`, `close`, `stats` — front 09 reads it), `PooledDataSource`, `PoolStats`, arm selection from `rakun.datasource.url`, the refusals, `startDataSource`, `dataSourceBoot`, `rkPoolStats` |
 | `src/sql/params.bp` | `Param`, `param`, `bindNamed` (`:name` → `$1` / `?`), the missing / unused / duplicate refusals |
-| `src/sql/rows.bp` | `SqlOutcome` (the host's one answer), `Row` (`get` / `int` / `bool` / `has`), `Rows` (`rowCount` / `at` / `first` / `toList` / `column`) |
-| `src/sql/template.bp` | `SqlTemplate`, `Tx`, `__rkMake_SqlTemplate`, `rkTxRun`, the `*Async` twins, `withRollback` |
+| `src/sql/rows.bp` | `SqlOutcome` (the host's one answer), `Row` (`get` / `int` / `long` / `bool` / `has`), `Rows` (`rowCount` / `at` / `first` / `toList` / `column`) |
+| `src/sql/template.bp` | `SqlTemplate`, `Tx`, `defaultSqlTemplate` (the `#[provides]` behind `rkResolve("SqlTemplate")`), `rkTxRun`, the `*Async` twins, `withRollback` |
 | `src/sql/query.bp` | `#[query]`, `rkRegisterQuery`, `rkRegisteredQueries` |
 | `src/sql/transactional.bp` | `#[transactional]` (the `<Type>Tx` proxy), `#[noTransaction]`, `#[propagation]` |
 | `src/sql/health.bp` | the `db` indicator (`#[healthIndicator("db")]` + `registerDbHealth()`) |
@@ -3120,16 +3121,18 @@ registered under the method's name. A call to a member a type does not have —
 `City.revisionsOf(…)` on an entity without `#[revisions]`, `Ghost.entityMeta()` in a
 `#[belongsTo]` naming a non-entity — is the compiler's `unknown-associated-fn` at
 the call. A consumer imports `query`, `rkRegisterQuery`, `param`, the
-types it names (`SqlTemplate`, `Rows`, `Row`, `Param`) and `__rkMake_SqlTemplate`
-(the injectable template's factory) beside the core's stereotype imports.
+types it names (`SqlTemplate`, `Rows`, `Row`, `Param`) beside the core's stereotype
+imports and `rkResolve`; a `sql: SqlTemplate` field resolves to `defaultSqlTemplate`,
+the `#[provides]` in the context table.
 
 ### Two surfaces, one answer
 
 `query` / `update` / `single` RAISE on a driver error (`JdbcTemplate`'s shape);
 `tryQuery` / `tryUpdate` answer `@Result`. Both read one host answer, `SqlOutcome`,
 so they cannot disagree about what failed. `single` answers `null` on no row and
-raises naming the statement on two. `Row.int` / `Row.bool` refuse a value that is not
-one, naming the column. Everything is a string at this layer: typed mapping is front
+raises naming the statement on two. `Row.int` / `Row.long` / `Row.bool` refuse a value
+that is not one, naming the column (`long` is the `i64` an epoch in milliseconds
+needs, decision 264). Everything is a string at this layer: typed mapping is front
 78's.
 
 Parameters are named. `bindNamed` rewrites `:name` to the arm's placeholder in the
@@ -3692,7 +3695,8 @@ Keys `rakun.scheduling.jobstore.{datasource, lease-ms (60000), interval-ms
 (1000), misfire-threshold-ms (60000), fire-all-ceiling (10)}`,
 `rakun.scheduling.overwrite-existing-jobs`,
 `rakun.management.endpoint.quartz.max-executions` (20). Time is `jobClock()`
-(`setJobClock` pins it in tests). No sidecar: every host cell is an inline
+(`setJobClock` pins it in tests), every instant an `i64` of epoch milliseconds
+(decision 264). No sidecar: every host cell is an inline
 template (a sidecar called only from a folder is not shipped).
 
 - `store.bp`: the three tables (`installJobStore`), `JobDetail` / `Trigger` /
@@ -3829,10 +3833,11 @@ profile active fails at boot); `rakun.security.password.encoder`;
 - **Context**: process dictionary installed for the rest of the chain and restored in
   an `after`; reading it outside a request raises (no anonymous default, no
   predicate). `withAuthentication(auth, work)` is the explicit way in for a job.
-- **Method security**: `#[methodSecurity]` emits `<Type>Sec(inner: <Type>)` + 
-  `__rkMake_<Type>Sec()`, `#[transactional]`'s shape; the application site imports
-  `methodSecurity`, `secured`, `permitAll`, `rkRequireAuthority` and the core's
-  `rkSingleton`. A method's marker wins over the type's (`#[secured]` / `#[permitAll]`
+- **Method security**: `#[methodSecurity]` emits `<Type>Sec(inner: <Type>)` with its
+  `make()` member, registered in the context table (`rkRegisterBean`) so a field
+  `svc: <Type>Sec` resolves through `rkResolve` — `#[transactional]`'s shape; the
+  application site imports `methodSecurity`, `secured`, `permitAll`,
+  `rkRequireAuthority` and the core's `rkSingleton` and `rkRegisterBean`. A method's marker wins over the type's (`#[secured]` / `#[permitAll]`
   on the type); unmarked everywhere is `authenticated`. `#[permitAll]` still reads the
   context, so ANY proxy method outside a request raises. `#[preAuthorize]` fails the
   build naming the supported forms; `#[secured]` with an expression fails too;
@@ -3852,7 +3857,7 @@ profile active fails at boot); `rakun.security.password.encoder`;
   directly does), so the container cannot hold a behavior value. The seam is
   `UserStore(name, load: fn(username) -> ?UserDetails)`; an application
   `#[provides] fn … -> UserStore { return userStore("x", { n -> Mine().loadByUsername(n) }) }`
-  and it wins. The SQL arm is selected the same way (`sqlUserStore(__rkMake_SqlTemplate())`),
+  and it wins. The SQL arm is selected the same way (`sqlUserStore(sqlTemplate(defaultDataSourceName()))`),
   not by a property.
 - **`security.current()` is `current()`.** A module of a path/workspace dependency is
   not importable as a namespace (`unbound variable 'security'`; the same form against
@@ -4813,9 +4818,9 @@ every row hard — no `allow_fail`, no `commonJS` row (no member declares it;
 rakun is erlang-only, decision 113), no `beam` row (`botopink test` cannot run
 beam, so such a row measured nothing), no windows row (gate-f: botopink-lang's
 own workflow has none, so a row here would measure the compiler's windows
-port; it returns with the compiler's). The linux runner is `ubuntu-24.04`, not
-22.04: the compiler links against a pinned glibc 2.38 and imports
-`arc4random_buf` (GLIBC_2.36), which ubuntu-22.04's glibc 2.35 cannot load.
+port; it returns with the compiler's). The linux runner is `ubuntu-24.04`; the
+compiler links against a pinned glibc 2.35 (decision 219, ubuntu-22.04's), so
+it starts on either runner — the 22.04 floor is the compiler's own workflow's.
 Erlang/OTP 28 is installed on every row before `zig build install` (the build
 runs `erlc`), pinned on both runners — the release the root `botopink.json`'s `"otp"` names (`"28"`), read by a step before the installs (decision 228; the compiler refuses any other `erl` on PATH) — `erlef/setup-beam` on linux, `brew install erlang@<release> && brew link --force erlang@<release>` with its `bin` on `$GITHUB_PATH` on macos (decision 227; Homebrew's plain `erlang` is the latest OTP), and a step after both fails the job unless `erl` reports that release.
 

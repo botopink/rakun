@@ -4,8 +4,8 @@
 //// 78's `#[entity]`, and a half version of it here would leave two. What this
 //// front owns is a column name, a value, and the three coercions a handler
 //// needs before an ORM exists: `get` (`""` when the column is absent or NULL),
-//// `int` and `bool` — which REFUSE a value that is not one, naming the column,
-//// rather than answering 0 or false.
+//// `int`, `long` (an `i64`, for epoch milliseconds) and `bool` — which REFUSE a
+//// value that is not one, naming the column, rather than answering 0 or false.
 ////
 //// Column names compare case-insensitively: an unquoted SQL identifier is.
 
@@ -60,6 +60,17 @@ fn isInteger(v: string) -> bool {
     return ok;
 }
 
+// `Row.long`'s parse, a free function: `parseInt` called inside a `type`'s
+// method lowers to an undefined local `startsWith/2` on erlang (a compiler
+// defect, reported with the 264 gate fix).
+fn longOf(column: string, v: string) -> i64 {
+    if (isInteger(v) == false) @panic("rakun-data: column '" + column + "' is '" + v + "', which is not an integer");
+    return case v.trim().parseInt() {
+        Ok(n) -> n;
+        Error(reason) -> @panic("rakun-data: column '" + column + "' is '" + v + "' - " + reason);
+    };
+}
+
 pub type Row(
     columns: string[],
     values: string[],
@@ -77,6 +88,13 @@ pub type Row(
         val v = self.get(column);
         if (isInteger(v) == false) @panic("rakun-data: column '" + column + "' is '" + v + "', which is not an integer");
         return toI32(v);
+    }
+
+    // An `i64` column — an epoch in milliseconds is beyond `i32`, and an
+    // integer that leaves its type's range aborts (decision 264). A value that
+    // is not an integer, or one beyond 2^53 - 1, is refused naming the column.
+    pub fn long(self: Self, column: string) -> i64 {
+        return longOf(column, self.get(column));
     }
 
     pub fn bool(self: Self, column: string) -> bool {

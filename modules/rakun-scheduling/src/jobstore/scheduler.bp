@@ -44,6 +44,7 @@
 
 import {rkProp, toI32} from "rakun";
 import {param, Row, Rows, sqlTemplate} from "rakun-data";
+import {cron.rkI64};
 import {jobstore.store.jobClock, jobstore.store.cronAfter, jobstore.store.formatInstant, jobstore.store.runJobHandler, jobstore.store.jobStatusOn};
 
 #[@External.Erlang("""(fun(__Ms) -> timer:sleep(__Ms), 0 end)($0)""")]
@@ -65,9 +66,9 @@ declare fn spawnLoop(node: string, tick: fn() -> i32, everyMs: i32) -> i32;
 #[@External.Erlang("""(fun(__N) -> case persistent_term:get({rakun_job_loop, __N}, undefined) of undefined -> 0; __P -> __P ! stop, persistent_term:erase({rakun_job_loop, __N}), 1 end end)($0)""")]
 pub declare fn stopJobScheduler(node: string) -> i32;
 #[@External.Erlang("""(fun(__K) -> persistent_term:get({rakun_job_down, __K}, -1) end)($0)""")]
-declare fn downSince(node: string) -> i32;
+declare fn downSince(node: string) -> i64;
 #[@External.Erlang("""(fun(__K, __T) -> case __T of -1 -> persistent_term:erase({rakun_job_down, __K}); _ -> persistent_term:put({rakun_job_down, __K}, __T) end, 0 end)($0, $1)""")]
-declare fn setDownSince(node: string, at: i32) -> i32;
+declare fn setDownSince(node: string, at: i64) -> i32;
 #[@External.Erlang("""(fun(__T) -> logger:warning("~ts", [__T]), persistent_term:put(rakun_job_log, persistent_term:get(rakun_job_log, []) ++ [__T]), 0 end)($0)""")]
 declare fn logLine(line: string) -> i32;
 #[@External.Erlang("""persistent_term:get(rakun_job_log, [])""")]
@@ -91,17 +92,17 @@ pub fn jitterMs(node: string, interval: i32) -> i32 {
 
 // ── history ─────────────────────────────────────────────────────────────────
 
-fn history(ds: string, job: string, trig: string, node: string, window: i32, started: i32, outcome: string, detail: string) -> i32 {
+fn history(ds: string, job: string, trig: string, node: string, window: i64, started: i64, outcome: string, detail: string) -> i32 {
     return sqlTemplate(ds).update("INSERT INTO rakun_job_history (id, job, trig, node, window_at, started, ended, outcome, detail) VALUES (:id, :j, :t, :n, :w, :s, :e, :o, :d)", [
         param("id", freshId().toString()), param("j", job), param("t", trig), param("n", node), param("w", window.toString()),
         param("s", started.toString()), param("e", jobClock().toString()), param("o", outcome), param("d", detail),
     ]);
 }
 
-pub type Execution(job: string, trigger: string, node: string, window: i32, started: i32, ended: i32, outcome: string, detail: string)
+pub type Execution(job: string, trigger: string, node: string, window: i64, started: i64, ended: i64, outcome: string, detail: string)
 
 fn executionOf(r: Row) -> Execution {
-    return Execution(job: r.get("job"), trigger: r.get("trig"), node: r.get("node"), window: r.int("window_at"), started: r.int("started"), ended: r.int("ended"), outcome: r.get("outcome"), detail: r.get("detail"));
+    return Execution(job: r.get("job"), trigger: r.get("trig"), node: r.get("node"), window: r.long("window_at"), started: r.long("started"), ended: r.long("ended"), outcome: r.get("outcome"), detail: r.get("detail"));
 }
 
 // Every history row of `job`, oldest first.
@@ -113,7 +114,7 @@ pub fn executionsOf(ds: string, job: string) -> Execution[] {
 // One line per history row: `<outcome> owner=<node> window=<instant> <detail>`.
 pub fn historyOf(ds: string, job: string) -> string[] {
     return executionsOf(ds, job).map({ e ->
-        val window = if (e.window > 0) { formatInstant(e.window) } else { "-" };
+        val window = if (e.window > rkI64(0)) { formatInstant(e.window) } else { "-" };
         return e.outcome + " owner=" + e.node + " window=" + window + " " + e.detail;
     });
 }
@@ -121,9 +122,9 @@ pub fn historyOf(ds: string, job: string) -> string[] {
 // Deletes at most `batch` rows that ended more than `retentionMs` ago.
 pub fn pruneHistory(ds: string, retentionMs: i32, batch: i32) -> i32 {
     val sql = sqlTemplate(ds);
-    val cutoff = jobClock() - retentionMs;
+    val cutoff = jobClock() - rkI64(retentionMs);
     val rows: Rows = sql.query("SELECT id, ended FROM rakun_job_history ORDER BY id", []);
-    val old = rows.toList().filter({ r -> r.int("ended") <= cutoff }).slice(0, batch);
+    val old = rows.toList().filter({ r -> r.long("ended") <= cutoff }).slice(0, batch);
     var n = 0;
     for (old) { r -> n = n + sql.update("DELETE FROM rakun_job_history WHERE id = :id", [param("id", r.get("id"))]); };
     return n;
@@ -132,18 +133,18 @@ pub fn pruneHistory(ds: string, retentionMs: i32, batch: i32) -> i32 {
 // ── one pass ────────────────────────────────────────────────────────────────
 
 fn renew(ds: string, trig: string, node: string) -> i32 {
-    return sqlTemplate(ds).update("UPDATE rakun_job_trigger SET lease_until = :l WHERE name = :n AND owner = :me AND state = 'acquired'", [param("l", (jobClock() + leaseMs()).toString()), param("n", trig), param("me", node)]);
+    return sqlTemplate(ds).update("UPDATE rakun_job_trigger SET lease_until = :l WHERE name = :n AND owner = :me AND state = 'acquired'", [param("l", (jobClock() + rkI64(leaseMs())).toString()), param("n", trig), param("me", node)]);
 }
 
 // The windows of `cron` from `first` up to `now`, at most `cap` listed;
 // `total` counts every one (up to 100000).
-pub type Windows(listed: i32[], total: i32)
+pub type Windows(listed: i64[], total: i32)
 
-pub fn windowsUpTo(cron: string, first: i32, now: i32, cap: i32) -> Windows {
-    var out: i32[] = [];
+pub fn windowsUpTo(cron: string, first: i64, now: i64, cap: i32) -> Windows {
+    var out: i64[] = [];
     var w = first;
     var total = 0;
-    while (w >= 0 && w <= now && total < 100000) {
+    while (w >= rkI64(0) && w <= now && total < 100000) {
         if (out.length < cap) out.push(w);
         total = total + 1;
         w = cronAfter(cron, w);
@@ -151,7 +152,7 @@ pub fn windowsUpTo(cron: string, first: i32, now: i32, cap: i32) -> Windows {
     return Windows(listed: out, total: total);
 }
 
-fn execute(ds: string, node: string, trig: string, job: string, data: string, cron: string, window: i32, retries: i32, backoff: i32) -> i32 {
+fn execute(ds: string, node: string, trig: string, job: string, data: string, cron: string, window: i64, retries: i32, backoff: i32) -> i32 {
     val nextWindow = cronAfter(cron, window);
     var attempt = 1;
     var done = false;
@@ -166,7 +167,7 @@ fn execute(ds: string, node: string, trig: string, job: string, data: string, cr
             val _h = history(ds, job, trig, node, window, started, "failed", "attempt=" + attempt.toString() + " reason=" + reason);
             if (attempt > retries) {
                 done = true;
-            } else if (nextWindow >= 0 && jobClock() >= nextWindow) {
+            } else if (nextWindow >= rkI64(0) && jobClock() >= nextWindow) {
                 val _a = history(ds, job, trig, node, window, jobClock(), "abandoned", "retries stop: the next window " + formatInstant(nextWindow) + " is due");
                 done = true;
             } else {
@@ -187,12 +188,12 @@ fn fire(ds: string, node: string, trig: string) -> i32 {
     val j = jr.first() ?? Row(columns: ["data", "state"], values: ["", "orphaned"]);
     val now = jobClock();
     val cron = t.get("cron");
-    val first = t.int("next_fire");
+    val first = t.long("next_fire");
     val ceiling = fireAllCeiling();
     val ws = windowsUpTo(cron, first, now, ceiling);
-    val misfired = ws.total > 1 || now - first > misfireThreshold();
+    val misfired = ws.total > 1 || now - first > rkI64(misfireThreshold());
     val policy = t.get("misfire");
-    var toRun: i32[] = [];
+    var toRun: i64[] = [];
     if (misfired == false) {
         toRun = [first];
     } else if (policy == "FireNow") {
@@ -210,8 +211,8 @@ fn fire(ds: string, node: string, trig: string) -> i32 {
         for (toRun) { w -> ran = ran + execute(ds, node, trig, job, j.get("data"), cron, w, t.int("retries"), t.int("backoff_ms")); };
     };
     val next = cronAfter(cron, jobClock());
-    val endAt = t.int("end_at");
-    val state = if (endAt > 0 && (next < 0 || next > endAt)) "complete" else "waiting";
+    val endAt = t.long("end_at");
+    val state = if (endAt > rkI64(0) && (next < rkI64(0) || next > endAt)) "complete" else "waiting";
     val _u = sql.update("UPDATE rakun_job_trigger SET state = :s, owner = '', lease_until = 0, next_fire = :f, prev_fire = :p WHERE name = :n AND owner = :me", [param("s", state), param("f", next.toString()), param("p", now.toString()), param("n", trig), param("me", node)]);
     return ran;
 }
@@ -219,21 +220,21 @@ fn fire(ds: string, node: string, trig: string) -> i32 {
 fn tickBody(ds: string, node: string) -> i32 {
     val sql = sqlTemplate(ds);
     val now = jobClock();
-    val lease = (now + leaseMs()).toString();
+    val lease = (now + rkI64(leaseMs())).toString();
     var mine: string[] = [];
     val acquired: Rows = sql.query("SELECT name, job, owner, lease_until FROM rakun_job_trigger WHERE state = 'acquired'", []);
     for (acquired.toList()) { r ->
-        if (r.int("lease_until") < now) {
+        if (r.long("lease_until") < now) {
             val got = sql.update("UPDATE rakun_job_trigger SET owner = :me, lease_until = :l WHERE name = :n AND state = 'acquired' AND owner = :old AND lease_until = :ol", [param("me", node), param("l", lease), param("n", r.get("name")), param("old", r.get("owner")), param("ol", r.get("lease_until"))]);
             if (got == 1) {
-                val _h = history(ds, r.get("job"), r.get("name"), node, 0, now, "takeover", "from " + r.get("owner") + ", whose lease ended " + formatInstant(r.int("lease_until")));
+                val _h = history(ds, r.get("job"), r.get("name"), node, rkI64(0), now, "takeover", "from " + r.get("owner") + ", whose lease ended " + formatInstant(r.long("lease_until")));
                 mine.push(r.get("name"));
             };
         };
     };
     val waiting: Rows = sql.query("SELECT name, next_fire, start_at FROM rakun_job_trigger WHERE state = 'waiting' ORDER BY next_fire", []);
     for (waiting.toList()) { r ->
-        val due = r.int("next_fire") >= 0 && r.int("next_fire") <= now && r.int("start_at") <= now;
+        val due = r.long("next_fire") >= rkI64(0) && r.long("next_fire") <= now && r.long("start_at") <= now;
         if (due) {
             val got = sql.update("UPDATE rakun_job_trigger SET state = 'acquired', owner = :me, lease_until = :l WHERE name = :n AND state = 'waiting' AND next_fire = :f", [param("me", node), param("l", lease), param("n", r.get("name")), param("f", r.get("next_fire"))]);
             if (got == 1) mine.push(r.get("name"));
@@ -253,15 +254,15 @@ pub fn tickOn(ds: string, node: string) -> i32 {
     val r = guarded({ -> tickBody(ds, node) });
     val since = downSince(node);
     if (r.isOk()) {
-        if (since >= 0) {
+        if (since >= rkI64(0)) {
             val _l = logLine("rakun-scheduling: node " + node + " reaches the job store again");
-            val _c = setDownSince(node, -1);
+            val _c = setDownSince(node, rkI64(0 - 1));
         };
         return r.unwrapOr(0);
     };
     val reason = case r { Ok(v) -> ""; Error(e) -> e; };
     val now = jobClock();
-    if (since < 0 || now - since >= intervalMs()) {
+    if (since < rkI64(0) || now - since >= rkI64(intervalMs())) {
         val _l = logLine("rakun-scheduling: node " + node + " cannot reach the job store - " + reason);
         val _s = setDownSince(node, now);
     };

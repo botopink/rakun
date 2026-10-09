@@ -19,7 +19,9 @@
 //// structured value (contracts § 3).
 ////
 //// Time is `jobClock()`: the wall clock in milliseconds, or the instant a test
-//// pinned with `setJobClock` — the scheduler never reads another clock.
+//// pinned with `setJobClock` — the scheduler never reads another clock. Every
+//// instant is an `i64` of epoch milliseconds: it is beyond `i32`, and an
+//// integer that leaves its type's range aborts (decision 264).
 
 import {rkProp, toI32} from "rakun";
 import {param, Row, Rows, sqlTemplate, defaultDataSourceName} from "rakun-data";
@@ -43,8 +45,8 @@ pub type Trigger(
     name: string,
     job: string,
     cron: string,
-    startAt: i32,
-    endAt: i32,
+    startAt: i64,
+    endAt: i64,
     misfire: MisfirePolicy,
     retries: i32,
     backoffMs: i32,
@@ -53,25 +55,22 @@ pub type Trigger(
 // ── the clock ───────────────────────────────────────────────────────────────
 
 #[@External.Erlang("""persistent_term:get(rakun_job_clock, erlang:system_time(millisecond))""")]
-pub declare fn jobClock() -> i32;
+pub declare fn jobClock() -> i64;
 #[@External.Erlang("""(fun(__T) -> persistent_term:put(rakun_job_clock, __T), __T end)($0)""")]
-pub declare fn setJobClock(ms: i32) -> i32;
+pub declare fn setJobClock(ms: i64) -> i64;
 #[@External.Erlang("""(fun(__D) -> __T = persistent_term:get(rakun_job_clock, erlang:system_time(millisecond)) + __D, persistent_term:put(rakun_job_clock, __T), __T end)($0)""")]
-pub declare fn advanceJobClock(ms: i32) -> i32;
+pub declare fn advanceJobClock(ms: i32) -> i64;
 #[@External.Erlang("""(fun() -> persistent_term:erase(rakun_job_clock), 0 end)()""")]
 pub declare fn clearJobClock() -> i32;
 #[@External.Erlang("""calendar:rfc3339_to_system_time(binary_to_list($0), [{unit, millisecond}])""")]
-pub declare fn instantOf(rfc3339: string) -> i32;
-#[@External.Erlang("""(fun(__X) -> __X end)($0)""")]
-pub declare fn msOf(x: i64) -> i32;
-
-pub fn formatInstant(ms: i32) -> string {
-    return rkFormatUtc(rkI64(ms));
+pub declare fn instantOf(rfc3339: string) -> i64;
+pub fn formatInstant(ms: i64) -> string {
+    return rkFormatUtc(ms);
 }
 
 // The first instant of `cron` strictly after `after` (UTC); -1 when none.
-pub fn cronAfter(cron: string, after: i32) -> i32 {
-    return msOf(nextFire(compileCron(cron), rkI64(after), 0));
+pub fn cronAfter(cron: string, after: i64) -> i64 {
+    return nextFire(compileCron(cron), after, 0);
 }
 
 // ── job data ────────────────────────────────────────────────────────────────
@@ -144,7 +143,7 @@ pub fn misfireName(m: MisfirePolicy) -> string {
 pub fn triggerProblem(t: Trigger) -> string {
     val c = cronProblem(t.cron);
     if (c != "") return "rakun-scheduling: trigger `" + t.name + "` has a cron that does not parse - " + c;
-    if (t.endAt > 0 && t.endAt < t.startAt) return "rakun-scheduling: trigger `" + t.name + "` ends (" + t.endAt.toString() + ") before it starts (" + t.startAt.toString() + ")";
+    if (t.endAt > rkI64(0) && t.endAt < t.startAt) return "rakun-scheduling: trigger `" + t.name + "` ends (" + t.endAt.toString() + ") before it starts (" + t.startAt.toString() + ")";
     if (t.retries < 0 || t.backoffMs < 0) return "rakun-scheduling: trigger `" + t.name + "` has a negative retry count or backoff";
     val declared = declaredCron(t.job);
     if (declared != "" && declared != t.cron) return "rakun-scheduling: trigger `" + t.name + "` fires `" + t.cron + "`, and job `" + t.job + "` declares `" + declared + "` on its #[persistentJob]";
@@ -176,14 +175,14 @@ pub fn registerTriggerOn(ds: string, t: Trigger) -> i32 {
     val sql = sqlTemplate(ds);
     val found: ?Row = one(sql.query("SELECT name, job, cron, start_at, end_at, misfire, retries, backoff_ms FROM rakun_job_trigger WHERE name = :n", [param("n", t.name)]));
     val now = jobClock();
-    val origin = if (t.startAt > now) t.startAt - 1 else now;
+    val origin = if (t.startAt > now) t.startAt - rkI64(1) else now;
     val first = cronAfter(t.cron, origin);
     if (found == null) return sql.update("INSERT INTO rakun_job_trigger (name, job, cron, start_at, end_at, misfire, retries, backoff_ms, state, owner, lease_until, next_fire, prev_fire) VALUES (:n, :j, :c, :s, :e, :m, :r, :b, 'waiting', '', 0, :f, 0)", [
         param("n", t.name), param("j", t.job), param("c", t.cron), param("s", t.startAt.toString()), param("e", t.endAt.toString()),
         param("m", misfireName(t.misfire)), param("r", t.retries.toString()), param("b", t.backoffMs.toString()), param("f", first.toString()),
     ]);
     val row = found ?? Row(columns: [], values: []);
-    val same = row.get("job") == t.job && row.get("cron") == t.cron && row.int("start_at") == t.startAt && row.int("end_at") == t.endAt && row.get("misfire") == misfireName(t.misfire) && row.int("retries") == t.retries && row.int("backoff_ms") == t.backoffMs;
+    val same = row.get("job") == t.job && row.get("cron") == t.cron && row.long("start_at") == t.startAt && row.long("end_at") == t.endAt && row.get("misfire") == misfireName(t.misfire) && row.int("retries") == t.retries && row.int("backoff_ms") == t.backoffMs;
     if (same) return 0;
     if (overwrite() == false) @panic("rakun-scheduling: trigger `" + t.name + "` is stored with a different definition - set rakun.scheduling.overwrite-existing-jobs=true to replace it, or rename the trigger");
     return sql.update("UPDATE rakun_job_trigger SET job = :j, cron = :c, start_at = :s, end_at = :e, misfire = :m, retries = :r, backoff_ms = :b, next_fire = :f WHERE name = :n", [
