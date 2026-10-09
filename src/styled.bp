@@ -4,8 +4,8 @@
 //// are template functions over `comptime css: @Expr<string>`: the literal is
 //// read at build (`reader.bp`), values go in `${…}` holes, and each answers
 //// a component in the language's model (decision 128, the pattern of 276's
-//// `View`): `@Component<StyledBase, Styled>` (`StyledView`) and
-//// `@Component<StyledBase, StyledProperty>` (`StyledPropertyView`).
+//// `View`): `@Component<Styled>` (`StyledView`) and
+//// `@Component<StyledProperty>` (`StyledPropertyView`).
 ////
 //// A component's class is the layer's prefix (`s_`) and the content hash of
 //// its rules, so the same rules are the same class. A literal with no hole
@@ -23,12 +23,14 @@ pub behavior Styleable {
     fn toStyled(self: Self) -> StyledView;
 }
 
-// The base a style hook anchors at — a phantom, never constructed.
+// The base decision 128's wrapper named for a style hook — a phantom, never
+// constructed. `@Component<R>` names none (decision 354); the root context
+// `StyledContext` (352, 354 (7), front 119) retires it.
 pub type StyledBase()
 
 // A component: its class and its rules (`.s_<hash>{…}`, nested rules after).
 // LANGUAGE GAP: a wrapper's type alias cannot implement a behavior (a type's conformance is its own clause), so `Styleable` is implemented by the records `Styled` and `StyledProperty`, not by `StyledView` and `StyledPropertyView`.
-pub type Styled(className: string, rules: string) implement Styleable, @Context<StyledBase> {
+pub type Styled(className: string, rules: string) implement Styleable, @Renderable {
     fn toStyled(self: Self) -> StyledView {
         return styledConstant(self.className, self.rules);
     }
@@ -36,15 +38,15 @@ pub type Styled(className: string, rules: string) implement Styleable, @Context<
 
 // A declarations-only component: its class, its rules (`.s_<hash>{…}`) and
 // its declarations, which a `${p}` hole of another literal inlines.
-pub type StyledProperty(className: string, rules: string, declarations: string) implement Styleable, @Context<StyledBase> {
+pub type StyledProperty(className: string, rules: string, declarations: string) implement Styleable, @Renderable {
     fn toStyled(self: Self) -> StyledView {
         return styledConstant(self.className, self.rules);
     }
 }
 
-pub type StyledView = @Component<StyledBase, Styled>;
+pub type StyledView = @Component<Styled>;
 
-pub type StyledPropertyView = @Component<StyledBase, StyledProperty>;
+pub type StyledPropertyView = @Component<StyledProperty>;
 
 // ── the run-time half: what the template's code calls ───────────────────────
 
@@ -71,10 +73,7 @@ fn withClass(text: string, className: string) -> string {
 }
 
 // A component computed at build: the class and the rules are constants.
-pub fn styledConstant(
-    className: string,
-    rules: string,
-) -> @Component<StyledBase, Styled> {
+pub fn styledConstant(className: string, rules: string) -> @Component<Styled> {
     return Styled(className: className, rules: rules);
 }
 
@@ -82,7 +81,7 @@ pub fn propertyConstant(
     className: string,
     rules: string,
     declarations: string,
-) -> @Component<StyledBase, StyledProperty> {
+) -> @Component<StyledProperty> {
     return StyledProperty(
         className: className,
         rules: rules,
@@ -91,10 +90,7 @@ pub fn propertyConstant(
 }
 
 // The text between holes, each spliced property's declarations in its place.
-fn spliced(
-    texts: string[],
-    views: StyledPropertyView[],
-) -> @Component<StyledBase, string> {
+fn spliced(texts: string[], views: StyledPropertyView[]) -> @Component<string> {
     var out = texts.at(0) ?? "";
     var k = 0;
     for (views) { v ->
@@ -111,7 +107,7 @@ pub fn styledComputed(
     prefix: string,
     texts: string[],
     views: StyledPropertyView[],
-) -> @Component<StyledBase, Styled> {
+) -> @Component<Styled> {
     val text = await spliced(texts, views);
     val className = classFor(prefix, text);
     return Styled(className: className, rules: withClass(text, className));
@@ -121,7 +117,7 @@ pub fn propertyComputed(
     prefix: string,
     texts: string[],
     views: StyledPropertyView[],
-) -> @Component<StyledBase, StyledProperty> {
+) -> @Component<StyledProperty> {
     val declarations = await spliced(texts, views);
     val text = classMark() + "{" + declarations + "}";
     val className = classFor(prefix, text);

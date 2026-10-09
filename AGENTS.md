@@ -4,8 +4,8 @@
 
 The `styled` library (decision 338): the base for building CSS components. `styled "…"` and
 `styledProperty "…"` are template functions that read a CSS rule body at build and answer a
-component in the language's model — `@Component<StyledBase, Styled>` (`StyledView`) and
-`@Component<StyledBase, StyledProperty>` (`StyledPropertyView`); the layered `Sheet` holds
+component in the language's model — `@Component<Styled>` (`StyledView`) and
+`@Component<StyledProperty>` (`StyledPropertyView`); the layered `Sheet` holds
 components in `@layer`s; the theme mechanism (`Theme`, `entry`, `clear`, `clearNs`, `clearAll`,
 `extendTheme`, `#[theme]`) is what `@variant md` and `--theme(…)` read. The middle of the three
 CSS layers: it imports `css` (the reader's character walk) and `std`, and knows no file kind, no
@@ -86,7 +86,8 @@ or comment; in `styledProperty`, any `{`, `&` or `@`.
 while hashed), so the same rules are the same class. A literal with no hole is computed at build:
 the template emits `styledConstant("s_…", ".s_…{…}")` / `propertyConstant(…)` with literals
 (`hash.bp`'s fold, held equal to `contentHash`; `repository-stages.sh` reads the emitted module
-on both targets). A literal with holes emits `styledComputed` / `propertyComputed`, which build
+on both targets — the call's first argument is the hidden context map every component function
+takes, decision 354: `undefined` on erlang, `null` on commonJS, outside a render). A literal with holes emits `styledComputed` / `propertyComputed`, which build
 the text when the component runs (an `async function` on commonJS, decision 338 p9). A computed component
 registers in no sheet: where it registers at render is the meta's question `119-b`, and whether a
 literal whose holes are known at build is built at build is `119-c`.

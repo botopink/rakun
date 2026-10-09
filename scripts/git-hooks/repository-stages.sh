@@ -22,9 +22,11 @@ for target in erlang commonJS; do
     out=$(mktemp -d)
     ( cd "$example" && "$bin" build --target "$target" --out "$out" ) >/dev/null 2>&1 \
         || { rm -rf "$out"; fail "examples/styled-example does not build on $target"; }
+    # A component function takes the hidden context map first (decision 354):
+    # a call outside a render passes none — `undefined` on erlang, `null` on commonJS.
     case "$target" in
-        erlang) want='propertyConstant(<<"s_e8b00b8b">>, <<".s_e8b00b8b{tab-size:4}">>' ;;
-        commonJS) want='propertyConstant("s_e8b00b8b", ".s_e8b00b8b{tab-size:4}"' ;;
+        erlang) want='propertyConstant(undefined, <<"s_e8b00b8b">>, <<".s_e8b00b8b{tab-size:4}">>' ;;
+        commonJS) want='propertyConstant(null, "s_e8b00b8b", ".s_e8b00b8b{tab-size:4}"' ;;
     esac
     if ! grep -rF -- "$want" "$out" >/dev/null; then
         rm -rf "$out"
