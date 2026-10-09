@@ -51,7 +51,8 @@ styled/
 │   ├── reader.bp      ← Source, Block, Value, readBlock, firstNonDeclaration — the literal read at build
 │   ├── layers.bp      ← Layer, layer, SheetEntry, Sheet (of, add, classIn, render)
 │   └── styled.bp      ← StyledBase, Styled, StyledProperty, StyledView, StyledPropertyView, Styleable,
-│                        styled (default), styledProperty, the constant/computed constructors, holeText
+│                        styled (default), styledProperty, the constant/computed constructors, holeText,
+│                        Holes (what a literal's holes are worth at build, decision 355)
 ├── test/              ← styled_test (the literals), theme_test, sheet_test, styled_example_test (front 119's
 │                        example as a suite case, but for the import line)
 ├── examples/styled-example/   ← front 119's example as an application of `from "styled"`
@@ -83,14 +84,23 @@ property name or a selector, a breakpoint the theme cleared or lacks, an unclose
 or comment; in `styledProperty`, any `{`, `&` or `@`.
 
 **The class.** `s_` and std's `contentHash` of the rules (the class selector written `\u{1}`
-while hashed), so the same rules are the same class. A literal with no hole is computed at build:
-the template emits `styledConstant("s_…", ".s_…{…}")` / `propertyConstant(…)` with literals
+while hashed), so the same rules are the same class. A literal whose every hole is known at build
+— no hole, or holes whose values are literals, `comptime` values or `val`s known at build
+(decision 355: each `Interp` part's `known` / `value`, `styled.bp` `withHole` and `atBuild`; a value
+hole's text through `holeText`, a splice's `declarations`) — is computed at build: `styled "${tab4}
+color: red;"` with `tab4 = styledProperty "tab-size: 4;"` emits `styledConstant("s_b480a37a",
+".s_b480a37a{tab-size:4;color:red}")`. A known value that does not fit where it stands (a record in a
+value, a string where a declaration stands) leaves the literal computed, so the computed call's
+types refuse it as before. The constant path emits `styledConstant("s_…", ".s_…{…}")` /
+`propertyConstant(…)` with literals
 (`hash.bp`'s fold, held equal to `contentHash`; `repository-stages.sh` reads the emitted module
 on both targets — the call's first argument is the hidden context map every component function
-takes, decision 354: `undefined` on erlang, `null` on commonJS, outside a render). A literal with holes emits `styledComputed` / `propertyComputed`, which build
-the text when the component runs (an `async function` on commonJS, decision 338 p9). A computed component
-registers in no sheet: where it registers at render is the meta's question `119-b`, and whether a
-literal whose holes are known at build is built at build is `119-c`.
+takes, decision 354: `undefined` on erlang, `null` on commonJS, outside a render; it also reads
+`tabRed`'s constant and `code`'s computed call). A literal with a hole computed at render (a
+parameter, a call such as `${padAll(2)}`, a `val` another module exports) emits `styledComputed` /
+`propertyComputed`, which build the text when the component runs (an `async function` on commonJS,
+decision 338 p9). A computed component registers in no sheet yet: where it registers at render is
+352 and 354 (`use context(StyledContext)`).
 
 **The sheet** is a value: `Sheet.of([layer("base"), Layer(name: "utilities", prefix: "e_")])`,
 `sheet.add(layerName, styled)` answers the sheet with the component in that layer once, under the

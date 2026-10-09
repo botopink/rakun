@@ -8,9 +8,12 @@
 //// `@Component<StyledProperty>` (`StyledPropertyView`).
 ////
 //// A component's class is the layer's prefix (`s_`) and the content hash of
-//// its rules, so the same rules are the same class. A literal with no hole
-//// is computed at build: the emitted call carries the class and the rules as
-//// constants. A literal with holes is computed when the component runs.
+//// its rules, so the same rules are the same class. A literal whose every
+//// hole is known at build — no hole, or holes whose values are literals,
+//// `comptime` values or `val`s known at build (decision 355) — is computed at
+//// build: the emitted call carries the class and the rules as constants. A
+//// literal with a hole computed at render is computed when the component
+//// runs.
 
 import {hash} from "std";
 import {theme.baseTheme};
@@ -215,10 +218,98 @@ fn holed(text: string) -> bool {
     return text.contains("\u{2}") || text.contains("\u{4}");
 }
 
+// What the template knows of a literal's holes at build (decision 355), by
+// hole index: whether the hole's value is known at build, whether that value
+// is a `string`, an `i32` or an `f64` (`scalar`, what a value takes) and its
+// text, and the value read as a `StyledProperty` (what a declaration's place
+// takes) — read only where a declaration stands.
+pub type Holes(
+    known: bool[],
+    scalar: bool[],
+    texts: string[],
+    properties: StyledProperty[],
+)
+
+fn isScalar(v: string | i32 | f64) -> bool {
+    return v is string || v is i32 || v is f64;
+}
+
+// One hole's entry of `Holes`, from its part: `known` and its build value,
+// read as a value (`v`) and as a property (`p`) — the part's `value` is
+// untyped data, and where the hole stands says which of the two it must be.
+fn withHole(
+    holes: Holes,
+    known: bool,
+    v: string | i32 | f64,
+    p: StyledProperty,
+) -> Holes {
+    val scalar = known && isScalar(v);
+    return Holes(
+        known: holes.known.append([known]),
+        scalar: holes.scalar.append([scalar]),
+        texts: holes.texts.append([if (scalar) holeText(v) else ""]),
+        properties: holes.properties.append([p]),
+    );
+}
+
+// The rules `text` with every hole's build value in place, or `""` when a
+// hole is computed at render or a value hole's value is not a `string`, an
+// `i32` or an `f64` — the computed call then carries the hole, and its type
+// is checked there. A splice's value is a `StyledProperty`: one that is not
+// fails the template here.
+fn atBuild(text: string, holes: Holes) -> string {
+    var out = "";
+    var hole = "";
+    var mode = "text";
+    var ok = true;
+    for (text.chars()) { c ->
+        if (mode == "text" && (c == "\u{2}" || c == "\u{4}")) {
+            mode = if (c == "\u{2}") "value" else "splice";
+            hole = "";
+        } else if (mode != "text" && c == "\u{3}") {
+            val k = holeIndex(hole, holes.known.length);
+            val known = holes.known.at(k) ?? false;
+            val scalar = holes.scalar.at(k) ?? false;
+            if (!known || (mode == "value") != scalar) ok = false;
+            if (ok && mode == "value") {
+                val piece = holes.texts.at(k) ?? "";
+                out = out + piece;
+            }
+            if (ok && mode == "splice") {
+                val p = holes.properties.at(k);
+                if (p) {
+                    q ->
+                    out = out + q.declarations;
+                }
+            }
+            mode = "text";
+        } else if (mode != "text") hole = hole + c else out = out + c;
+    }
+    val built = if (ok) out else "";
+    return built;
+}
+
+// The hole numbered by the decimal text `index`, of `count`; -1 for none.
+fn holeIndex(index: string, count: i32) -> i32 {
+    var out = -1;
+    var k = 0;
+    while (k < count) {
+        if (k.toString() == index) out = k;
+        k = k + 1;
+    }
+    return out;
+}
+
 // The code of a `styled` literal whose rules are `text`.
-fn styledCode(text: string, codes: string[]) -> string {
-    if (holed(text))
-        return "styledComputed(\"s_\", " + computedArguments(text, codes) + ")";
+fn styledCode(text: string, codes: string[], holes: Holes) -> string {
+    if (holed(text)) {
+        val built = atBuild(text, holes);
+        if (built == "")
+            return "styledComputed(\"s_\", "
+                + computedArguments(text, codes)
+                + ")";
+        return styledCode(built, codes, holes);
+    }
     val className = "s_" + classHash(text);
     return "styledConstant("
         + quoted(className)
@@ -228,11 +319,15 @@ fn styledCode(text: string, codes: string[]) -> string {
 }
 
 // The code of a `styledProperty` literal whose declarations are `decls`.
-fn propertyCode(decls: string, codes: string[]) -> string {
-    if (holed(decls))
-        return "propertyComputed(\"s_\", "
-            + computedArguments(decls, codes)
-            + ")";
+fn propertyCode(decls: string, codes: string[], holes: Holes) -> string {
+    if (holed(decls)) {
+        val built = atBuild(decls, holes);
+        if (built == "")
+            return "propertyComputed(\"s_\", "
+                + computedArguments(decls, codes)
+                + ")";
+        return propertyCode(built, codes, holes);
+    }
     val text = classMark() + "{" + decls + "}";
     val className = "s_" + classHash(text);
     val rules = text.split(classMark()).join("." + className);
@@ -252,12 +347,14 @@ pub default fn styled(comptime css: @Expr<string>) -> @ExprCustom<StyledView> {
     var starts: i32[] = [];
     var ends: i32[] = [];
     var codes: string[] = [];
+    var holes = Holes(known: [], scalar: [], texts: [], properties: []);
     for (css.parts()) { part ->
         if (part.kind == "Interp") {
             cs = cs.append(["\u{2}" + codes.length.toString() + "\u{3}"]);
             starts = starts.append([part.span.start]);
             ends = ends.append([part.span.end]);
             codes = codes.append([part.code]);
+            holes = withHole(holes, part.known, part.value, part.value);
         } else {
             var k = part.span.start;
             for (part.text.chars()) { c ->
@@ -285,7 +382,7 @@ pub default fn styled(comptime css: @Expr<string>) -> @ExprCustom<StyledView> {
         ref: null,
         children: [],
     );
-    return css.custom(root, css.build(styledCode(text, codes)));
+    return css.custom(root, css.build(styledCode(text, codes, holes)));
 }
 
 // `styledProperty "…"`: declarations only — a `{`, `&` or `@` is refused at
@@ -297,12 +394,14 @@ pub fn styledProperty(
     var starts: i32[] = [];
     var ends: i32[] = [];
     var codes: string[] = [];
+    var holes = Holes(known: [], scalar: [], texts: [], properties: []);
     for (css.parts()) { part ->
         if (part.kind == "Interp") {
             cs = cs.append(["\u{2}" + codes.length.toString() + "\u{3}"]);
             starts = starts.append([part.span.start]);
             ends = ends.append([part.span.end]);
             codes = codes.append([part.code]);
+            holes = withHole(holes, part.known, part.value, part.value);
         } else {
             var k = part.span.start;
             for (part.text.chars()) { c ->
@@ -338,5 +437,5 @@ pub fn styledProperty(
         ref: null,
         children: [],
     );
-    return css.custom(root, css.build(propertyCode(decls, codes)));
+    return css.custom(root, css.build(propertyCode(decls, codes, holes)));
 }
