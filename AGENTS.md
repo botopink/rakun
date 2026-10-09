@@ -3585,9 +3585,13 @@ Measured: the logging suites 54 passed / 0 failed / 0 compile failures, in the c
 (`test/logging/`: `format_test.bp` 13, `level_test.bp` 5, `group_test.bp` 6, `correlation_test.bp` 6,
 `digest_test.bp` 5, `file_test.bp` 11, `endpoint_test.bp` 8).
 
-## HAL — `modules/rakun-hateoas/` (front 21)
+## HAL — `modules/rakun-web/src/hateoas/` (front 21)
 
-`src/hal.bp`, no host cell. `Link(rel, href, mediaType, title, templated)`
+The former member `rakun-hateoas`, merged into `rakun-web` by front 128 (decision 187):
+`modules/rakun-web/src/hateoas/hal.bp`, its test `modules/rakun-web/test/hateoas/hal_test.bp`,
+its names reached `from "rakun-web"`; the texts it raises keep their `rakun-hateoas:` prefix.
+
+`src/hateoas/hal.bp`, no host cell. `Link(rel, href, mediaType, title, templated)`
 (`mediaType`, not `type`), `link(rel, href)`, `linksObject` (one key per `rel`
 in first-appearance order; a repeated `rel` is an array; empty `mediaType` /
 `title` omitted, `templated` only when true; std's `json` writes and escapes).
@@ -3606,7 +3610,7 @@ entry a `:param`; values are `encoding.percentEncode`d. `halResponse` /
 `halResponseFor(accept, body)` set the content type through rakun-web's
 `withHeader`: `application/hal+json`, or `application/json` when
 `rakun.hateoas.use-hal-as-default-json-media-type=false` and the client did not
-ask for HAL. Depends on `rakun` and `rakun-web`.
+ask for HAL. Uses the core and its own member's `withHeader`.
 
 ## Scheduling — `modules/rakun-scheduling/` (front 16)
 
