@@ -2688,7 +2688,15 @@ against REQUEST_N credit) registers the route in front 15's registry under
 concurrency by thunks), `fireAndForget`, `requestStream` / `request` / `next`
 / `cancelStream`.
 
-## Stream pipelines — `modules/rakun-stream/` (front 89)
+## Stream pipelines — `modules/rakun-messaging/src/stream/` (front 89)
+
+The former member `rakun-stream`, merged into `rakun-messaging` by front 128 (decision 187):
+`modules/rakun-messaging/src/stream/{pipeline,state,runtime}.bp`, its tests
+`modules/rakun-messaging/test/stream/{runtime,stages,state}_test.bp`, its sidecar keeps its name and
+atom (`modules/rakun-messaging/src/sidecars/rakun_stream.erl`), its names are reached
+`from "rakun-messaging"`. `rakun-messaging` took its two dependencies, `rakun-actuator` and
+`rakun-data` (the SQL state arm and the leased cursor), so every messaging consumer loads the data
+member. The texts it raises keep their `rakun-stream:` prefix.
 
 GenStage / Broadway's shape over front 15's arms, no Elixir library.
 `Pipeline(name, source, stages, sink)` is a value; `Stage` is `Transform`,
@@ -4159,7 +4167,8 @@ resurrected a stale prerendered entry and started a second regeneration);
 
 ## Messaging — `modules/rakun-messaging/` (front 15)
 
-Depends on `rakun` (the actuator contract is the core's). Sidecar `rakun_messaging.erl`: the
+Depends on `rakun` (the actuator contract is the core's), `rakun-metrics`, `rakun-client`,
+`rakun-actuator` and `rakun-data` (the last two since front 128 moved `stream/` in). Sidecar `rakun_messaging.erl`: the
 listener registry, the IN-PROCESS broker (an append-only log per
 `{broker, destination}`; per consumer group a cursor, a redelivery list and the
 in-flight set, kept by `rakun_messaging_owner`, which monitors every worker), the

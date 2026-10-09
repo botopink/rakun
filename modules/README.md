@@ -33,11 +33,10 @@ refusal is the core's `config_check.bp`.
 | [rakun-data](./rakun-data/) | root · datasource · sql · orm_host · migration_host · orm · migration · tx (outbox · saga · twopc) · devtools (devtools · db_console) | erlang | `-data-jpa` / `-data-jdbc` / `-data-mongodb` / `-data-redis` + JTA (`spring-boot-starter-jta-*`), Kafka/Pulsar transactions + `spring-boot-devtools` | 08 · 09 · 77 · 78 · 83 (`tx/`) · 80 (`devtools/`) | real code, 181 tests |
 | [rakun-mail](./rakun-mail/) | root · mail · fixture | erlang | `-mail` | 85 | real code, 32 tests |
 | [rakun-metrics](./rakun-metrics/) | root · registry · bus · vm · tracing · export · endpoints · install | erlang | Micrometer + `-actuator` (prometheus) + tracing | 75 | real code, 41 tests |
-| [rakun-messaging](./rakun-messaging/) | root · messaging_host · message · registry · markers · messaging_health · container · templates · jms_host · pulsar_host · reliability (policy · dispatch · transaction) · jms · pulsar · rsocket (rsocket_host · rsocket) | erlang | `-amqp` / `-kafka` / `-activemq` / `-artemis` + `-rsocket` | 15 · 86 · 90 · 91 · 92 (`rsocket/`) | real code (in-process broker; JMS over STOMP; Pulsar admin and codec; RSocket over TCP), 107 tests |
+| [rakun-messaging](./rakun-messaging/) | root · messaging_host · message · registry · markers · messaging_health · container · templates · jms_host · pulsar_host · reliability (policy · dispatch · transaction) · jms · pulsar · rsocket (rsocket_host · rsocket) · stream (pipeline · state · runtime) | erlang | `-amqp` / `-kafka` / `-activemq` / `-artemis` + `-rsocket` + Spring Integration / Kafka Streams | 15 · 86 · 90 · 91 · 92 (`rsocket/`) · 89 (`stream/`) | real code (in-process broker; JMS over STOMP; Pulsar admin and codec; RSocket over TCP; stream pipelines), 131 tests |
 | [rakun-scheduling](./rakun-scheduling/) | root · cron · registry · markers · executor · endpoint · jobstore (store · scheduler · markers · endpoint) | erlang | `@Scheduled` / `-quartz` | 16 · 84 | real code, 100 tests |
 | [rakun-security](./rakun-security/) | root · principal · policy · jwt · password · users · users_sql · basic · csrf · method_security · security_filter · security · oauth2_host · oauth2 · saml2 · ldap_host · ldap | erlang | `-security`, `-oauth2-client`, `-saml2` | 10 · 79 · 87 (audit events) | real code, 100 tests |
 | [rakun-session](./rakun-session/) | root · host · session · signing · session_config · session_cookie · store_ets · store_sql · store_redis · session_filter · session_endpoint | erlang | `spring-session-jdbc` / `-data-redis` | 18 | real code, 36 tests |
-| [rakun-stream](./rakun-stream/) | root · pipeline · state · runtime | erlang | Spring Integration / Kafka Streams | 89 | real code, 24 tests |
 | [rakun-test](./rakun-test/) | root | erlang | `-test` | 19 | FakeRequest (implements Request) + toRequest, expect* assertions, MockMvc, resetSingletons/resetContext/contextSnapshot; 27 tests |
 | [rakun-websocket](./rakun-websocket/) | root · ws_host · ws · endpoint | erlang | `-websocket` | 20 | real code, 27 tests (no JavaScript) |
 | [rakun-web](./rakun-web/) | root · filter · negotiation · error · middleware · cors · compression · customizer · apiversion · shutdown · convention · tls · rules · static · hateoas (hal) | erlang | `-webmvc` + `-hateoas` (websocket is `rakun-websocket`) | 07 · 65 · 82 · 21 (`hateoas/`) | real code, 223 tests |
@@ -89,7 +88,7 @@ which owns its `botopink.json` — several of them name members that do not exis
 | `rakun-websocket` | 20 | split from `rakun-web` |
 | `rakun-tx` | 83 | created, then merged into `rakun-data` by front 128 (`modules/rakun-data/src/tx/`, decision 187) |
 | `rakun-cli` | 88 | keep, separate |
-| `rakun-stream` | 89 | keep, separate |
+| `rakun-stream` | 89 | created, then merged into `rakun-messaging` by front 128 (`modules/rakun-messaging/src/stream/`, decision 187) |
 | `rakun-pulsar` | 91 | split from `rakun-messaging` |
 | `rakun-rsocket` | 92 | created, then merged into `rakun-messaging` by front 128 (`modules/rakun-messaging/src/rsocket/`, decision 187) |
 | `rakun-mail` | 85 | keep, separate |
