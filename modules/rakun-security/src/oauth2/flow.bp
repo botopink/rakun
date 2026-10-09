@@ -106,7 +106,7 @@ pub fn authorize(req: Request) -> Response {
     val p: ?OAuth2Provider = provider(id);
     if (p == null) return problem(404, "no OAuth2 provider is registered as " + id, req.path);
     val session: Session = currentSession();
-    val a = authorizationRequestFor(p ?? OAuth2Provider(id: "", clientId: "", clientSecret: "", issuerUri: "", scopes: [], pkce: true, redirectPath: "", authorizationUri: "", tokenUri: "", userinfoUri: "", jwksUri: ""), req.query("returnTo"), session.id);
+    val a = authorizationRequestFor(p, req.query("returnTo"), session.id);
     return redirect(a.url);
 }
 
@@ -184,7 +184,7 @@ pub fn callback(req: Request) -> Response {
     val f = flow.split("\t");
     val p: ?OAuth2Provider = provider(id);
     if (p == null || (f.at(0) ?? "") != id) return problem(400, "the login callback carries no known state", req.path);
-    val prov = p ?? OAuth2Provider(id: "", clientId: "", clientSecret: "", issuerUri: "", scopes: [], pkce: true, redirectPath: "", authorizationUri: "", tokenUri: "", userinfoUri: "", jwksUri: "");
+    val prov = p;
     val e = discover(prov);
     val res = tokenCall(e, prov, [#("grant_type", "authorization_code"), #("code", req.query("code")), #("redirect_uri", redirectUri(prov)), #("code_verifier", f.at(2) ?? "")]);
     if (res.isOk() == false) return problem(401, "the token exchange failed with status " + res.status.toString(), req.path);
@@ -204,7 +204,7 @@ pub fn callback(req: Request) -> Response {
 pub fn tokenSet(providerId: string) -> ?TokenSet {
     val s: ?Session = optionalSession();
     if (s == null) return null;
-    val id = (s ?? currentSession()).id;
+    val id = s.id;
     return decodeTokens(oauthTokenGet("session:" + providerId, id));
 }
 
@@ -219,7 +219,7 @@ fn marginSeconds() -> i32 {
 pub fn accessToken(providerId: string) -> string {
     val t: ?TokenSet = tokenSet(providerId);
     if (t == null) return "";
-    val cur = t ?? TokenSet(accessToken: "", refreshToken: "", idToken: "", expiresAt: 0, scopes: []);
+    val cur = t;
     if (cur.expiresAt - oauthNow() > marginSeconds()) return cur.accessToken;
     val p: ?OAuth2Provider = provider(providerId);
     val prov = p ?? OAuth2Provider(id: "", clientId: "", clientSecret: "", issuerUri: "", scopes: [], pkce: true, redirectPath: "", authorizationUri: "", tokenUri: "", userinfoUri: "", jwksUri: "");

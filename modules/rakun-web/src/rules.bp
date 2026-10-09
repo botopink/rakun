@@ -134,7 +134,7 @@ pub fn capturesOf(m: Matcher, pathname: string) -> Array<#(string, string)> {
 
 fn captureValue(caps: Array<#(string, string)>, name: string) -> string {
     val hit = caps.filter({ c -> c._0 == name });
-    return hit.at(0).map({ c -> c._1 }).unwrapOr("");
+    return hit.at(0)?._1 ?? "";
 }
 
 // Each substituted value is percent-encoded segment by segment: a space is
@@ -351,12 +351,14 @@ pub fn pathRulesOfCompiled(c: CompiledRules) -> PathRules {
 
 pub fn redirectFor(c: CompiledRules, pathname: string) -> ?RedirectRule {
     val hits = c.redirects.filter({ p -> matches(p._0, pathname) });
-    return hits.at(0).map({ p -> p._1 });
+    return hits.at(0)?._1;
 }
 
 pub fn rewriteFor(c: CompiledRules, pathname: string) -> ?string {
     val hits = c.rewrites.filter({ p -> matches(p._0, pathname) });
-    return hits.at(0).map({ p -> interpolate(p._1.destination, p._0, pathname) });
+    val hit = hits.at(0);
+    if (hit == null) return null;
+    return interpolate(hit._1.destination, hit._0, pathname);
 }
 
 pub fn headersFor(c: CompiledRules, pathname: string) -> Array<#(string, string)> {
@@ -369,7 +371,7 @@ pub fn applyRules(c: CompiledRules, pathname: string) -> RuleOutcome {
     val canonical: string = canonicalize(pathRulesOfCompiled(c), pathname);
     val redirectHits = c.redirects.filter({ p -> matches(p._0, canonical) });
     if (redirectHits.length > 0) {
-        val hit = redirectHits.at(0).unwrapOr(c.redirects.at(0).unwrapOr(#(mustMatcher("/"), RedirectRule(source: "", destination: "", permanent: false))));
+        val hit = redirectHits.at(0) ?? (c.redirects.at(0) ?? #(mustMatcher("/"), RedirectRule(source: "", destination: "", permanent: false)));
         val location: string = interpolate(hit._1.destination, hit._0, canonical);
         val status: i32 = if (hit._1.permanent) 308 else 307;
         return RuleOutcome(kind: "redirect", location: location, status: status, target: "");
