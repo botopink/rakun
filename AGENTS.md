@@ -48,7 +48,7 @@ rakun/
 │                        rule 9 — every member declares [erlang] too) · workspaces
 │                        ["modules/*", "starters/*", "examples/*"]. Nothing importable from it.
 ├── modules/
-│   ├── README.md      ← the member table (14 today, 13 planned with their fronts), the
+│   ├── README.md      ← the member table (16 since front 128's nine merges), the
 │   │                    module ↔ Spring starter map, how to add a member
 │   ├── rakun/         ← THE CORE — what `from "rakun"` gives a consumer
 │   │   ├── botopink.json  name rakun · entry root.bp · target erlang · targets [erlang]
@@ -234,12 +234,14 @@ rakun/
 │   ├── rakun-websocket/ ← WEBSOCKET (§ WebSocket, front 20): the upgrade hook, the
 │   │                    connection loop, `pg` topics and the test client
 │   │                    (`sidecars/rakun_websocket.erl`), `#[wsEndpoint]`, health
-│   └── rakun-<area>/  ← the remaining scaffolds (actuator · client ·
-│                        data · hateoas · logging · scheduling · security ·
-│                        session): `botopink.json` (files [root.bp] · targets per
-│                        `specs/1.0.10-beta/03-rakun/modules.md` § Targets · dependencies
-│                        { "rakun": { "workspace": true } }) + a two-comment `src/root.bp`;
-│                        contents land per front
+│   └── rakun-<area>/  ← the other members (actuator · cache · cli · client · data · mail ·
+│                        metrics · scheduling · security · session — `modules/README.md`).
+│                        Front 128 (decision 187) merged nine members into the one that
+│                        needs them, each in a same-named sub-directory of the absorber's
+│                        `src/` and `test/`: the core's `actuator_api/` and `logging/`,
+│                        rakun-web's `hateoas/`, rakun-client's `ws/` (SOAP), rakun-data's
+│                        `tx/` and `devtools/`, rakun-cli's `release/`, rakun-messaging's
+│                        `rsocket/` and `stream/`; a sidecar keeps its name and atom
 ├── starters/          ← front 73: eight `rakun-starter*` members — a curated dependency set
 │                        each (in-repo `{ "workspace": true }`, `onze` by `path`), `files`
 │                        [root.bp], a docblock-only root; README.md is the table, the

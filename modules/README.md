@@ -12,13 +12,15 @@ to a sibling or to the umbrella is a located error.
 
 ## Members today
 
-Fifteen members exist (`rakun-websocket` was created by front 20). The ten remaining scaffolds are **kept under their names** by the reconciliation
-table of `03-rakun/modules.md` § Verdicts (no rename applied to a scaffold); each is a two-comment
-`src/root.bp` until its front lands, and its manifest lists `files: ["root.bp"]` so it ships one module
-rather than nothing. `targets` follows `03-rakun/modules.md` § Targets. Three members hold real code
-today: the core (`rakun`, fronts 04 · 05 · 06 · 62 · 72 · 74), `rakun-app` (fronts 22 · 23, relocated
-out of the core by front 95) and `rakun-web` (front 07). `rakun-test` holds front 19's request double,
-assertions, MockMvc and context control. Front 14's
+Sixteen members (decision 187). Front 128 merged nine members into the member that needs them:
+`rakun-actuator-api` and `rakun-logging` into the core (`actuator_api/`, `logging/`), `rakun-hateoas`
+into `rakun-web` (`hateoas/`), `rakun-ws` (SOAP — merged, not renamed) into `rakun-client` (`ws/`),
+`rakun-tx` and `rakun-devtools` into `rakun-data` (`tx/`, `devtools/`), `rakun-release` into `rakun-cli`
+(`release/`), `rakun-rsocket` and `rakun-stream` into `rakun-messaging` (`rsocket/`, `stream/`). A
+merged member's files sit in a same-named sub-directory of the absorber's `src/` and `test/`, its
+sidecar keeps its name and atom, and its names are imported from the absorber
+(`from "rakun-data"`, `from "rakun-data/tx/outbox"`). Every member holds real code; `rakun-test` holds
+front 19's request double, assertions, MockMvc and context control. Front 14's
 `rakun-validation` moved to the library `validation` (decision 116 rule 5; a repository of its own since decision 326); its boot
 refusal is the core's `config_check.bp`.
 
@@ -79,7 +81,7 @@ Every scaffold's `dependencies` is `{ "rakun": { "workspace": true } }` only. Th
 rakun-data, rakun-client, rakun-session`, …) are added by the lowest-numbered front of each module,
 which owns its `botopink.json` — several of them name members that do not exist yet.
 
-## Planned members (not created here — each is its front's job)
+## How the members came to be (the 1.0.10 cut, then decision 187)
 
 | Member | Front | Origin in the cut |
 |---|---|---|
@@ -89,13 +91,13 @@ which owns its `botopink.json` — several of them name members that do not exis
 | `rakun-tx` | 83 | created, then merged into `rakun-data` by front 128 (`modules/rakun-data/src/tx/`, decision 187) |
 | `rakun-cli` | 88 | keep, separate |
 | `rakun-stream` | 89 | created, then merged into `rakun-messaging` by front 128 (`modules/rakun-messaging/src/stream/`, decision 187) |
-| `rakun-pulsar` | 91 | split from `rakun-messaging` |
+| `rakun-pulsar` | 91 | never split: Pulsar stays in `rakun-messaging/src/pulsar/` (decision 274) |
 | `rakun-rsocket` | 92 | created, then merged into `rakun-messaging` by front 128 (`modules/rakun-messaging/src/rsocket/`, decision 187) |
 | `rakun-mail` | 85 | keep, separate |
 | `rakun-ws` (SOAP) | 93 | created as `rakun-ws`, then merged into `rakun-client` by front 128 (`modules/rakun-client/src/ws/`; merged, not renamed — decision 187) |
 | [`../starters/rakun-starter-*`](../starters/) | 73 | eight workspace members beside `modules/` — manifests and a docblock-only root, no code; the version set is `rakun/version_set` |
 
-Twenty-seven members in all when every front has landed, plus `starters/`. `rakun-core` and
+Sixteen members since front 128 (decision 187), plus `starters/`. `rakun-core` and
 `rakun-observability` are aliases the cut drops.
 
 ## Consuming a member

@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### The nine merges (decision 187, front 128)
+
+- 25 members → 16. `rakun-actuator-api` → `modules/rakun/src/actuator_api/`, `rakun-logging` →
+  `modules/rakun/src/logging/`, `rakun-hateoas` → `modules/rakun-web/src/hateoas/`, `rakun-ws` →
+  `modules/rakun-client/src/ws/`, `rakun-tx` → `modules/rakun-data/src/tx/`, `rakun-devtools` →
+  `modules/rakun-data/src/devtools/`, `rakun-release` → `modules/rakun-cli/src/release/`,
+  `rakun-rsocket` → `modules/rakun-messaging/src/rsocket/`, `rakun-stream` →
+  `modules/rakun-messaging/src/stream/`; tests under the same sub-directory of `test/`, sidecars
+  unchanged. Import the names from the absorbing member; drop the merged name from a manifest.
+- `rakun-cli` depends on `rakun-web` (from `rakun-release`); `rakun-messaging` on `rakun-actuator` and
+  `rakun-data` (from `rakun-stream`). `rakun-starter` brings `rakun` only. `rakun run --watch` asks
+  for `rakun-data` (devtools) among the project's dependencies.
+- Tests: every member's count unchanged (1 819 in all, now in 16 members).
+
 ### Decorator outputs (botopink decision 216, front 130)
 
 - `#[entity]` gives the record members instead of loose functions:
