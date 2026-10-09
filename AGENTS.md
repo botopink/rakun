@@ -2306,7 +2306,7 @@ quietly matches nothing is the failure mode decision 67 exists to prevent.
 - **A negative integer literal in a decorator argument does not parse.**
   `#[mark(-20)]` is `error: this token cannot appear here … unexpected 20`, on
   BOTH targets, while `#[mark(20)]` compiles. Measured against `2e6bb4ac` with
-  the smallest program there is (a `pub fn mark(comptime decl: @Decl, n: i32)`
+  the smallest program there is (a `pub fn mark(comptime decl: @Decl, comptime n: i32)`
   and two one-type test files). Every order in the band below zero is therefore
   unwritable as an integer, so **`#[order]` takes a STRING** — `#[order("-100")]`
   — parsed with front 05's `toI32`, and the emitted line is
