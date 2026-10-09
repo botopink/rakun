@@ -24,9 +24,8 @@ refusal is the core's `config_check.bp`.
 
 | Member | `files` | `targets` | Spring Boot 4 | Front(s) | State |
 |---|---|---|---|---|---|
-| [rakun](./rakun/) (core) | root · http · runtime · decorators · bootstrap · rakun.d · … | erlang | `spring-boot-starter` | 04 · 05 · 06 · 62 · 72 · 73 · 74 | real code, 374 tests |
+| [rakun](./rakun/) (core) | root · http · runtime · decorators · bootstrap · rakun.d · … · actuator_api (contract · registration · span · audit_seam) | erlang | `spring-boot-starter` + `spring-boot-actuator` (the API half) | 04 · 05 · 06 · 62 · 72 · 73 · 74 · 11 (Step 0, `actuator_api/`) · 87 (the audit seam) | real code, 385 tests |
 | [rakun-app](./rakun-app/) | root · file_router · ssr · navigation · route_handler · actions · static_host · segment_config · static_gen · route_slots · route_intercept · i18n · metadata_routes | erlang | (Next.js `app/` router, server half) | 22 · 23 · 24 · 25 · 60 · 61 · 63 · 64 · 66 | real code, 204 tests |
-| [rakun-actuator-api](./rakun-actuator-api/) | root · contract · registration · span · audit_seam | erlang | `spring-boot-actuator` (the API half) | 11 (Step 0) · 87 (the audit seam) | real code, 10 tests |
 | [rakun-actuator](./rakun-actuator/) | root · endpoint_host · health · info · registry_endpoints · instrumentation · management · actuator | erlang | `-actuator` (host) | 11 · 76 · 87 | real code, 77 tests |
 | [rakun-cache](./rakun-cache/) | root · cache_host · cache · cached · cache_endpoint | erlang | `-cache` | 12 | real code, 55 tests |
 | [rakun-cli](./rakun-cli/) | root · args · plugins · cli (+ `templates/`) | erlang | Spring Boot CLI, `spring-boot:run` / `bootRun` | 88 | real code, 25 tests |
@@ -92,7 +91,7 @@ which owns its `botopink.json` — several of them name members that do not exis
 
 | Member | Front | Origin in the cut |
 |---|---|---|
-| `rakun-actuator-api` | 11 (Step 0) | keep (create) — the API half every indicator registers into |
+| `rakun-actuator-api` | 11 (Step 0) | created, then merged into the core by front 128 (`modules/rakun/src/actuator_api/`, decision 187) |
 | `rakun-app` | 22 (+ 23 · 24 · 25 · 60 · 61 · 63 · 64 · 66) | split from core — the `app/` router, SSR, actions; depends on `jhonstart`, `emilia` |
 | `rakun-websocket` | 20 | split from `rakun-web` |
 | `rakun-tx` | 83 | keep, separate |

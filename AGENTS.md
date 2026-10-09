@@ -2490,14 +2490,20 @@ Every step of the front's spec is now in. What is still open is recorded in the
 front README (the Definition of done's q-value box names `br` refusal and both
 headers, which hold; the shutdown box waits on front 76 for the readiness half).
 
-## The actuator — `modules/rakun-actuator-api/` and `modules/rakun-actuator/` (front 11)
+## The actuator — `modules/rakun/src/actuator_api/` and `modules/rakun-actuator/` (front 11)
 
-Two members, one rule: **a registration is API, a decision is host.**
+Two halves, one rule: **a registration is API, a decision is host.**
 
-### `rakun-actuator-api` — the contract (Step 0, wave 1)
+### `actuator_api/` — the contract, in the core (Step 0, wave 1)
 
-Depends on `rakun` only; every front that ships an indicator, a contributor or an
-endpoint (08, 09, 12, 15–18, 77, 85) depends on this member and never on the host.
+The former member `rakun-actuator-api`, merged into the core by front 128 (decision 187):
+its files are `modules/rakun/src/actuator_api/**`, its tests `modules/rakun/test/actuator_api/**`,
+its sidecar keeps its name and atom (`src/sidecars/rakun_actuator_api.erl`), and every name it
+exported is reached `from "rakun"` (`startSpan`, `endSpan`, the `Span` record and its
+`traceId` among them). Every front that ships an indicator, a contributor or an endpoint
+(08, 09, 12, 15–18, 77, 85) imports the contract from the core and never depends on the host.
+The file paths below are relative to `modules/rakun/src/actuator_api/`, the sidecar's to
+`modules/rakun/`.
 
 | File | Holds |
 |---|---|
@@ -2530,7 +2536,7 @@ Decisions:
 
 ### `rakun-actuator` — the host (Steps 1–6, 8)
 
-Depends on `rakun`, `rakun-actuator-api`, `rakun-web` (problem details, CORS mapping,
+Depends on `rakun` (the contract is the core's `actuator_api/`), `rakun-web` (problem details, CORS mapping,
 the chain). `rakun-security`/`rakun-data` in `modules.md`'s row are fronts 76/87's.
 
 | File | Holds |
@@ -2582,8 +2588,8 @@ Decisions:
   `startSpan`/`endSpan`); the outbound `traceparent` (front 13 sends
   `currentTraceparent()`).
 
-Measured: `rakun-actuator-api` 10 passed / 0 failed / 0 compile failures
-(`registration_test.bp`, `span_test.bp`); `rakun-actuator` 38 / 0 / 0
+Measured: the contract's 10 passed / 0 failed / 0 compile failures
+(`modules/rakun/test/actuator_api/{registration,span}_test.bp`, in the core's run); `rakun-actuator` 38 / 0 / 0
 (`endpoint_test.bp`, `health_test.bp`, `info_test.bp`, `registry_endpoints_test.bp`,
 `instrumentation_test.bp`). Compiler findings met here: `Array.sort()` type-checks but
 is not lowered on erlang (`function sort/1 undefined`); a `return` inside an `if`
@@ -2851,7 +2857,7 @@ retention is the caller's decision, e.g. a front 16 `#[scheduled]` DELETE on
 `at_ms` — and logs and counts a failed write (`auditWriteFailures()`) instead
 of raising it: an unavailable audit database must not take the application
 down, at the price of an unrecorded event the counter shows. `installAudit`
-makes a repository active and installs rakun-actuator-api's sink, so front
+makes a repository active and installs the core's `actuator_api` sink, so front
 10's `rkAudit(kind, principal, data)` (a no-op with no sink) lands here — the
 arrow runs security → actuator-api, never security → actuator.
 `mountAudit()` (capacity `rakun.management.auditevents.capacity`, 1000; 0
@@ -3047,7 +3053,7 @@ process diagnostics, the OTLP pusher) and `rakun_telemetry.erl` (the bus).
   `execute/3` over ETS, delegating to a loaded `telemetry`. An emitter never
   imports rakun-metrics: the core router executes `[rakun, http, request,
   stop]` (route = the REGISTERED pattern, `NOT_FOUND`, or `fallback`),
-  rakun-actuator-api forwards every span event, rakun-cache
+  the core's `actuator_api` forwards every span event, rakun-cache
   `[rakun, cache, get|put|evict, stop]`, rakun-messaging
   `[rakun, messaging, publish|consume, stop]` — each behind
   `function_exported(rakun_telemetry, execute, 3)`. `installAutomaticMeters`
@@ -3071,12 +3077,12 @@ process diagnostics, the OTLP pusher) and `rakun_telemetry.erl` (the bus).
   pusher's own client span is never sampled. StatsD over UDP
   (`rakun.metrics.export.statsd.host` / `.port`), failures swallowed.
 - **Tracing** (`tracing.bp`) — front 11 continues the inbound `traceparent`
-  (flags included: `rkSpanFlags` / `rkSpanSetFlags` in rakun-actuator-api);
+  (flags included: `rkSpanFlags` / `rkSpanSetFlags` in the core's `actuator_api`);
   this module's chain entry at `orderMetrics() + 1` decides once, for a trace
   minted here, against `rakun.tracing.sampling.probability` (default 0.1).
   Sampled stop events are buffered as OTLP spans. `traceId`, `spanId`,
   `parentSpanId`, `sampled`, `traceparent`, `adoptTraceparent`, `openSpan` /
-  `closeSpan` (not `startSpan` / `endSpan`: rakun-actuator-api exports those
+  `closeSpan` (not `startSpan` / `endSpan`: the core exports those
   names and the package import would be ambiguous), `exportedSpanCount`.
 - **Remote shell** — the BEAM's JMX: `erl -sname ops -setcookie "$(cat
   ~/.erlang.cookie)" -remsh <node>@<host>` (the cookie must match the node's),
@@ -3095,7 +3101,7 @@ manifest's `files`) in front-number order and reorder nothing.
 **Measured 2026-09-26 against compiler `f011850c`:** `botopink test` in
 `modules/rakun-data/` (erlang, the member's only target) is **77 passed / 0 failed /
 0 compile failures**, with no database: every cell runs against the ETS arm. The
-member depends on `rakun` and `rakun-actuator-api` (`{ "workspace": true }`), never
+member depends on `rakun` and `rakun-actuator` (`{ "workspace": true }`), never
 on `rakun-web`. `modules/rakun` is untouched by this front.
 
 | File | What |
@@ -3301,7 +3307,7 @@ application calls it beside `dataSourceBoot()`.
    methods wrap.
 2. **Transitive dependencies are not loaded**: A → B (path) → C (path); compiling A,
    B's call into C is `unbound variable` (`transitive/a`). A consumer of rakun-data
-   lists `rakun-actuator-api` itself, BEFORE `rakun-data` (`sql_build_test.bp`'s
+   lists `rakun` itself, BEFORE `rakun-data` (`sql_build_test.bp`'s
    fixture manifest does).
 3. **A library module's body never runs on erlang**: `'_botopink_init'/0` is called
    for the entry module (build) or the test module (test) only, so a module-level
@@ -3326,8 +3332,8 @@ The member `modules/rakun-client` (erlang only) is rakun's one outbound HTTP
 client: `RestClient` over one builder with two terminal operations, global and
 per-client settings, the SSRF address filter every connect goes through,
 response caching over front 12's store (a soft seam), `#[httpExchange]` service
-interfaces and a per-group health indicator. Dependencies: `rakun`,
-`rakun-actuator-api` (spans + health registry). NOT `rakun-cache`: front 12
+interfaces and a per-group health indicator. Dependencies: `rakun`
+(spans + health registry: the core's `actuator_api/`). NOT `rakun-cache`: front 12
 depends on this member (its Redis transport), so the cache edge is a runtime slot.
 
 ### Files (`botopink.json` `files`, dependency order)
@@ -3410,7 +3416,7 @@ depends on this member (its Redis transport), so the cache edge is a runtime slo
 - Import `RestClient` WITH its type closure — `HttpClientSettings`, `CacheLife`,
   `ClientResponse` — or the build reds with `unknown type` (the known "importing a
   type re-checks its declaration" defect).
-- List `rakun-actuator-api` in the consumer's own `dependencies`, before
+- List `rakun` in the consumer's own `dependencies`, before
   `rakun-client` (transitive dependencies are not loaded — front 08 finding 2).
 - IPv6: the filter judges v6 addresses, but std `net.connect` cannot dial one
   (`gen_tcp` without `inet6` answers `nxdomain`), so the transport dials the first IPv4
@@ -3458,8 +3464,8 @@ in a subdirectory cannot call into the project on erlang today.
 
 ## Structured logging — `modules/rakun-logging/` (front 17)
 
-One `Logger` type, five levels, over OTP `logger`. Depends on `rakun` and
-`rakun-actuator-api` (the `loggers`/`logfile` endpoints register through the API,
+One `Logger` type, five levels, over OTP `logger`. Depends on `rakun`
+(the `loggers`/`logfile` endpoints register through the core's `actuator_api`,
 never the host; `rakun-actuator` is not a dependency). erlang only; the host module
 is `src/sidecars/rakun_logging.erl`.
 
@@ -3601,7 +3607,7 @@ ask for HAL. Depends on `rakun` and `rakun-web`.
 In-VM scheduling: three trigger markers, one registry, a supervised executor, the
 `scheduledtasks` endpoint and the `scheduling` health indicator. Depends on `rakun`,
 `rakun-web` (listed directly: `shutdownTimeout()` here, and a transitive of the host),
-`rakun-actuator-api` and `rakun-actuator` (the host: the POST route is gated by its
+and `rakun-actuator` (the host: the POST route is gated by its
 `exposed()` decision and answers its `notFoundProblem`). `rakun-data` is front 84's
 dependency (the durable job store, `src/jobstore/**`).
 A task here lives in ONE node's memory; every node of a cluster runs its own copy —
@@ -3754,9 +3760,8 @@ template (a sidecar called only from a folder is not shipped).
 manifest, `src/root.bp`, every `src/*.bp` and `src/sidecars/rakun_security.erl`;
 front 79 appends `pub mod oauth2;` / `oidc` / `saml2` / `ldap` (and their files to
 the manifest's `files`) and reorders nothing. The member depends on `rakun`,
-`rakun-actuator-api`, `rakun-web` and `rakun-data` (all `{ "workspace": true }`;
-`rakun-actuator-api` is listed because rakun-data needs it and a transitive
-dependency is not loaded). `modules/rakun` and `modules/rakun-web` are untouched.
+`rakun-web` and `rakun-data` (all `{ "workspace": true }`; the core carries the
+actuator contract rakun-data needs, and a transitive dependency is not loaded). `modules/rakun` and `modules/rakun-web` are untouched.
 
 **Measured 2026-09-26:** `botopink test` in `modules/rakun-security/` (erlang, the
 only target) is **73 passed / 0 failed / 0 compile failures**; the run includes a
@@ -3971,7 +3976,7 @@ and ships no runner (tests are `test` blocks under `botopink test`).
 ## Sessions — `modules/rakun-session/` (front 18)
 
 Depends on `rakun`, `rakun-web` (the chain), `rakun-data` (the SQL arm),
-`rakun-actuator-api` / `rakun-actuator` (endpoint, health) and
+`rakun-actuator` (endpoint, health; the contract is the core's) and
 `rakun-scheduling` (the sweeper). Sidecar `rakun_session.erl`: per-request
 slots in the process dictionary, the installed repository in a
 `persistent_term`, the ETS arm's table owned by the dedicated
@@ -4029,7 +4034,7 @@ one connection per command).
 
 Depends on `rakun`, `rakun-session` (the private scope's session id and the
 Redis wire, `rkSessRedis`, reused rather than copied — no `rakun-client` edge),
-`rakun-actuator-api`, `rakun-actuator` and `rakun-web` (a test resets the chain);
+`rakun-actuator` and `rakun-web` (a test resets the chain);
 their own dependencies follow transitively (decision 143). Sidecar
 `rakun_cache.erl`: ONE ETS table for every cache keyed by `{name, key}` (no atom
 per cache name), owned by `rakun_cache_owner`; the names table (resolved
@@ -4112,7 +4117,7 @@ resurrected a stale prerendered entry and started a second regeneration);
 
 ## Messaging — `modules/rakun-messaging/` (front 15)
 
-Depends on `rakun` and `rakun-actuator-api`. Sidecar `rakun_messaging.erl`: the
+Depends on `rakun` (the actuator contract is the core's). Sidecar `rakun_messaging.erl`: the
 listener registry, the IN-PROCESS broker (an append-only log per
 `{broker, destination}`; per consumer group a cursor, a redelivery list and the
 in-flight set, kept by `rakun_messaging_owner`, which monitors every worker), the
@@ -4253,8 +4258,7 @@ a transaction refuses: AMQP channel transactions are not offered, and front
 
 ## WebSocket — `modules/rakun-websocket/` (front 20)
 
-Depends on `rakun`, `rakun-web`, `rakun-security` (and, for it, `rakun-data`,
-`rakun-actuator-api`). A member of its own (`03-rakun/modules.md` splits it out of
+Depends on `rakun`, `rakun-web`, `rakun-security` (and, for it, `rakun-data`). A member of its own (`03-rakun/modules.md` splits it out of
 `rakun-web`), with flat test files. **Not one line of JavaScript**: the browser
 half is the browser's own `WebSocket` against the wire contract below.
 
