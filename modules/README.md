@@ -33,8 +33,7 @@ refusal is the core's `config_check.bp`.
 | [rakun-data](./rakun-data/) | root · datasource · sql · orm_host · migration_host · orm · migration · tx (outbox · saga · twopc) · devtools (devtools · db_console) | erlang | `-data-jpa` / `-data-jdbc` / `-data-mongodb` / `-data-redis` + JTA (`spring-boot-starter-jta-*`), Kafka/Pulsar transactions + `spring-boot-devtools` | 08 · 09 · 77 · 78 · 83 (`tx/`) · 80 (`devtools/`) | real code, 181 tests |
 | [rakun-mail](./rakun-mail/) | root · mail · fixture | erlang | `-mail` | 85 | real code, 32 tests |
 | [rakun-metrics](./rakun-metrics/) | root · registry · bus · vm · tracing · export · endpoints · install | erlang | Micrometer + `-actuator` (prometheus) + tracing | 75 | real code, 41 tests |
-| [rakun-messaging](./rakun-messaging/) | root · messaging_host · message · registry · markers · messaging_health · container · templates · jms_host · pulsar_host · reliability (policy · dispatch · transaction) · jms · pulsar | erlang | `-amqp` / `-kafka` / `-activemq` / `-artemis` | 15 · 86 · 90 · 91 | real code (in-process broker; JMS over STOMP; Pulsar admin and codec), 91 tests |
-| [rakun-rsocket](./rakun-rsocket/) | root · rsocket_host · rsocket | erlang | `-rsocket` | 92 | real code (TCP), 16 tests |
+| [rakun-messaging](./rakun-messaging/) | root · messaging_host · message · registry · markers · messaging_health · container · templates · jms_host · pulsar_host · reliability (policy · dispatch · transaction) · jms · pulsar · rsocket (rsocket_host · rsocket) | erlang | `-amqp` / `-kafka` / `-activemq` / `-artemis` + `-rsocket` | 15 · 86 · 90 · 91 · 92 (`rsocket/`) | real code (in-process broker; JMS over STOMP; Pulsar admin and codec; RSocket over TCP), 107 tests |
 | [rakun-scheduling](./rakun-scheduling/) | root · cron · registry · markers · executor · endpoint · jobstore (store · scheduler · markers · endpoint) | erlang | `@Scheduled` / `-quartz` | 16 · 84 | real code, 100 tests |
 | [rakun-security](./rakun-security/) | root · principal · policy · jwt · password · users · users_sql · basic · csrf · method_security · security_filter · security · oauth2_host · oauth2 · saml2 · ldap_host · ldap | erlang | `-security`, `-oauth2-client`, `-saml2` | 10 · 79 · 87 (audit events) | real code, 100 tests |
 | [rakun-session](./rakun-session/) | root · host · session · signing · session_config · session_cookie · store_ets · store_sql · store_redis · session_filter · session_endpoint | erlang | `spring-session-jdbc` / `-data-redis` | 18 | real code, 36 tests |
@@ -92,7 +91,7 @@ which owns its `botopink.json` — several of them name members that do not exis
 | `rakun-cli` | 88 | keep, separate |
 | `rakun-stream` | 89 | keep, separate |
 | `rakun-pulsar` | 91 | split from `rakun-messaging` |
-| `rakun-rsocket` | 92 | keep, separate |
+| `rakun-rsocket` | 92 | created, then merged into `rakun-messaging` by front 128 (`modules/rakun-messaging/src/rsocket/`, decision 187) |
 | `rakun-mail` | 85 | keep, separate |
 | `rakun-ws` (SOAP) | 93 | created as `rakun-ws`, then merged into `rakun-client` by front 128 (`modules/rakun-client/src/ws/`; merged, not renamed — decision 187) |
 | [`../starters/rakun-starter-*`](../starters/) | 73 | eight workspace members beside `modules/` — manifests and a docblock-only root, no code; the version set is `rakun/version_set` |

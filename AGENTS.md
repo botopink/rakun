@@ -2664,7 +2664,13 @@ fault, a raise → Server fault; `rakun.ws.security.{username,password,
 nonce-window-ms}` verifies incoming tokens and rejects a replayed nonce. The
 WSDL/XSD generator is not written.
 
-## RSocket — `modules/rakun-rsocket/` (front 92)
+## RSocket — `modules/rakun-messaging/src/rsocket/` (front 92)
+
+The former member `rakun-rsocket`, merged into `rakun-messaging` by front 128 (decision 187):
+`modules/rakun-messaging/src/rsocket/{rsocket_host,rsocket}.bp`, its tests
+`modules/rakun-messaging/test/rsocket/{codec,interaction}_test.bp`, its sidecar keeps its name and
+atom (`modules/rakun-messaging/src/sidecars/rakun_rsocket.erl`), its names are reached
+`from "rakun-messaging"`; it imports the registry and the host cells of its own member by path.
 
 `src/sidecars/rakun_rsocket.erl` is the wire (no byte type in botopink): the
 codec for the twelve frame types (24-bit length on TCP, metadata split,
