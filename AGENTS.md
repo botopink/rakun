@@ -87,7 +87,9 @@ while hashed), so the same rules are the same class. A literal with no hole is c
 the template emits `styledConstant("s_…", ".s_…{…}")` / `propertyConstant(…)` with literals
 (`hash.bp`'s fold, held equal to `contentHash`; `repository-stages.sh` reads the emitted module
 on both targets). A literal with holes emits `styledComputed` / `propertyComputed`, which build
-the text when the component runs (an `async function` on commonJS, decision 338 p9).
+the text when the component runs (an `async function` on commonJS, decision 338 p9). A computed component
+registers in no sheet: where it registers at render is the meta's question `119-b`, and whether a
+literal whose holes are known at build is built at build is `119-c`.
 
 **The sheet** is a value: `Sheet.of([layer("base"), Layer(name: "utilities", prefix: "e_")])`,
 `sheet.add(layerName, styled)` answers the sheet with the component in that layer once, under the
@@ -113,6 +115,9 @@ Each `// LANGUAGE GAP` marker names its row of the milestone's `language-gaps.md
   comptime runtime does not lower them): `reader.bp` and `variants.bp` carry kinds as strings
   and their records are `pub`. The run-time constructors are the template's emitted code, so
   they use enums freely.
+- A library's template function cannot read the program's catalogue: both literals read
+  `baseTheme()`, never the application's `#[theme]`, so a second `#[theme]` is not refused and a
+  cleared breakpoint is refused only against the base theme (`119-d`).
 - A template body cannot call a host function: the build-time class is `hash.bp`'s fold.
 - A component's fields are read after `await` (`(await code).rules`) — on commonJS a component
   call is a promise.
