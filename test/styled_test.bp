@@ -1,8 +1,8 @@
 //// styled: the two template functions — what a literal renders, its class,
 //// its holes — on both targets. Every expected text is a literal.
 
-import {testing.asserts, hash} from "std";
-import {styled.styled, styled.styledProperty, styled.StyledView, styled.StyledPropertyView};
+import {testing.asserts, hash, context.provide} from "std";
+import {styled.styled, styled.styledProperty, styled.StyledView, styled.StyledPropertyView, styled.StyledContext, styled.StyledSheet, styled.Styled, styled.StyledProperty};
 import {hash.classHash};
 
 pub val tab4 = styledProperty "tab-size: 4;";
@@ -15,14 +15,37 @@ fn hover(inner: StyledPropertyView) -> StyledView {
     return styled "&:hover { ${inner} }";
 }
 
-pub val code = styled """
+// The render's root a test renders under (decisions 352, 354): a component
+// computed at render reads `StyledContext`, so it runs below a provider. This
+// sheet keeps nothing — what registers is `context_test.bp`'s.
+fn Render(view: fn() -> StyledView) -> @Component<Styled> {
+    use provide(StyledContext, StyledSheet(layer: "components", add: dropped));
+    val out = await view();
+    return out;
+}
+
+fn RenderProperty(
+    view: fn() -> StyledPropertyView,
+) -> @Component<StyledProperty> {
+    use provide(StyledContext, StyledSheet(layer: "components", add: dropped));
+    val out = await view();
+    return out;
+}
+
+fn dropped(layer: string, item: Styled) -> void {}
+
+// A call in a hole: computed at render, so a function — a `val` is evaluated
+// outside every render.
+fn code() -> StyledView {
+    return styled """
   ${tab4}
   font-family: var(--font-mono);
   &:hover { ${padAll(
-    2,
-)} }
+        2,
+    )} }
   @variant md { max-width: --theme(--breakpoint-md); }
 """;
+}
 
 pub val nested = styled """
   color: red;
@@ -57,7 +80,7 @@ pub val half = "50%";
 pub val sizedAtBuild = styled "width: ${half}; columns: ${3}; aspect-ratio: ${1.5};";
 
 test "a property's hole is a value; --spacing() expands" {
-    val p = await padAll(4);
+    val p = await RenderProperty({ -> padAll(4) });
     try asserts.equals(
         p.rules,
         "." + p.className + "{padding:calc(var(--spacing) * 4)}",
@@ -89,7 +112,7 @@ test "classHash is std's contentHash" {
 }
 
 test "a StyledPropertyView in a hole inlines its declarations (@apply)" {
-    val c = await code;
+    val c = await Render({ -> code() });
     try asserts.isTrue(
         c.rules.contains(
             "." + c.className + "{tab-size:4;font-family:var(--font-mono)}",
@@ -103,7 +126,7 @@ test "a StyledPropertyView in a hole inlines its declarations (@apply)" {
 }
 
 test "@variant md reads the theme's breakpoint at build" {
-    val c = await code;
+    val c = await Render({ -> code() });
     try asserts.isTrue(
         c.rules.contains(
             "@media (width >= 48rem){." + c.className + "{max-width:48rem}}",
@@ -112,7 +135,7 @@ test "@variant md reads the theme's breakpoint at build" {
 }
 
 test "the whole of a component, in order" {
-    val c = await code;
+    val c = await Render({ -> code() });
     val k = "." + c.className;
     try asserts.equals(
         c.rules,
@@ -170,7 +193,7 @@ test "--alpha() and --spacing() expand anywhere in a value; a comment is dropped
 }
 
 test "a value hole takes a string, an i32 or an f64" {
-    val s = await sized("50%", 3, 1.5);
+    val s = await Render({ -> sized("50%", 3, 1.5) });
     try asserts.equals(
         s.rules,
         "." + s.className + "{width:50%;columns:3;aspect-ratio:1.5}",
@@ -178,21 +201,21 @@ test "a value hole takes a string, an i32 or an f64" {
 }
 
 test "a hole spliced in a nested block" {
-    val h = await hover(tab4);
+    val h = await Render({ -> hover(tab4) });
     try asserts.equals(h.rules, "." + h.className + ":hover{tab-size:4}");
 }
 
 test "the same rules are the same class, under the layer's prefix" {
-    val a = await padAll(4);
-    val b = await padAll(4);
-    val c = await padAll(8);
+    val a = await RenderProperty({ -> padAll(4) });
+    val b = await RenderProperty({ -> padAll(4) });
+    val c = await RenderProperty({ -> padAll(8) });
     try asserts.equals(a.className, b.className);
     try asserts.notEquals(a.className, c.className);
     try asserts.isTrue(a.className.startsWith("s_"));
 }
 
 test "a computed class is the one a constant literal of the same rules gets" {
-    val computed = await padAll(4);
+    val computed = await RenderProperty({ -> padAll(4) });
     val constant = await styledProperty "padding: --spacing(4);";
     try asserts.equals(computed.className, constant.className);
     try asserts.equals(computed.rules, constant.rules);
@@ -203,7 +226,7 @@ test "a literal whose every hole is known at build is the one the render compute
     try asserts.equals(built.className, "s_b480a37a");
     try asserts.equals(built.rules, ".s_b480a37a{tab-size:4;color:red}");
     val values = await sizedAtBuild;
-    val rendered = await sized("50%", 3, 1.5);
+    val rendered = await Render({ -> sized("50%", 3, 1.5) });
     try asserts.equals(values.className, rendered.className);
     try asserts.equals(values.rules, rendered.rules);
 }

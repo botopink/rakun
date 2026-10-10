@@ -13,9 +13,12 @@
 //// `comptime` values or `val`s known at build (decision 355) — is computed at
 //// build: the emitted call carries the class and the rules as constants. A
 //// literal with a hole computed at render is computed when the component
-//// runs.
+//// runs, and registers its class and rules in the render's sheet through
+//// `use context(StyledContext)` (decisions 352, 354): whoever renders
+//// provides the context — the sheet is the provider's, `styled` holds no
+//// store. A `${p}` splice and a literal computed at build register nothing.
 
-import {hash} from "std";
+import {hash, context.Context, context.provide, context.context} from "std";
 import {theme.baseTheme};
 import {reader.Source, reader.readBlock, reader.firstNonDeclaration, reader.classMark};
 import {hash.classHash};
@@ -26,10 +29,16 @@ pub behavior Styleable {
     fn toStyled(self: Self) -> StyledView;
 }
 
-// The base decision 128's wrapper named for a style hook — a phantom, never
-// constructed. `@Component<R>` names none (decision 354); the root context
-// `StyledContext` (352, 354 (7), front 119) retires it.
-pub type StyledBase()
+// The render's sheet as a component computed at render sees it (decisions
+// 352, 354): the layer it writes to and the writer of the sheet the provider
+// holds — the renderer's per-render sheet, emilia's `flush()`, the build's
+// sheet at a prerender. `add` puts a component in `layer`; a provider adds a
+// component already there once (`Sheet.add`).
+pub type StyledSheet(layer: string, add: fn(layer: string, item: Styled))
+
+// Provided at the root by whoever renders (354 (7)); read by every literal
+// computed at render. With no provider above, `context-unbound` at run time.
+pub val StyledContext = Context<StyledSheet>();
 
 // A component: its class and its rules (`.s_<hash>{…}`, nested rules after).
 // LANGUAGE GAP: a wrapper's type alias cannot implement a behavior (a type's conformance is its own clause), so `Styleable` is implemented by the records `Styled` and `StyledProperty`, not by `StyledView` and `StyledPropertyView`.
@@ -105,15 +114,20 @@ fn spliced(texts: string[], views: StyledPropertyView[]) -> @Component<string> {
 }
 
 // A component computed when it runs: `texts` around `views`, the
-// properties its `${p}` holes splice in.
+// properties its `${p}` holes splice in. Its class and rules go in the
+// render's sheet (352, 354); the spliced properties add nothing of their own
+// here — their declarations are inlined.
 pub fn styledComputed(
     prefix: string,
     texts: string[],
     views: StyledPropertyView[],
 ) -> @Component<Styled> {
+    val sheet = use context(StyledContext);
     val text = await spliced(texts, views);
     val className = classFor(prefix, text);
-    return Styled(className: className, rules: withClass(text, className));
+    val out = Styled(className: className, rules: withClass(text, className));
+    sheet.add(sheet.layer, out);
+    return out;
 }
 
 pub fn propertyComputed(
@@ -121,15 +135,29 @@ pub fn propertyComputed(
     texts: string[],
     views: StyledPropertyView[],
 ) -> @Component<StyledProperty> {
+    val sheet = use context(StyledContext);
     val declarations = await spliced(texts, views);
     val text = classMark() + "{" + declarations + "}";
     val className = classFor(prefix, text);
+    val rules = withClass(text, className);
+    sheet.add(sheet.layer, Styled(className: className, rules: rules));
     return StyledProperty(
         className: className,
-        rules: withClass(text, className),
+        rules: rules,
         declarations: declarations,
     );
 }
+
+// A `${p}` hole's property, run under a provider that keeps nothing: a splice
+// inlines `p`'s declarations and registers no class of its own (352, 338) —
+// `p`, computed at render, would otherwise add its class when it runs.
+pub fn splice(view: fn() -> StyledPropertyView) -> @Component<StyledProperty> {
+    use provide(StyledContext, StyledSheet(layer: "", add: discard));
+    val p = await view();
+    return p;
+}
+
+fn discard(layer: string, item: Styled) -> void {}
 
 // A value hole's text.
 pub fn holeText(v: string | i32 | f64) -> string {
@@ -169,7 +197,7 @@ fn quoted(text: string) -> string {
 
 // The arguments `texts, views` of the computed call for `text`: a value hole
 // (`\u{2}<k>\u{3}`) joins its text through `holeText`, a splice
-// (`\u{4}<k>\u{3}`) ends a text and adds a view.
+// (`\u{4}<k>\u{3}`) ends a text and adds a view, run through `splice`.
 fn computedArguments(text: string, codes: string[]) -> string {
     var texts: string[] = [];
     var views: string[] = [];
@@ -192,7 +220,7 @@ fn computedArguments(text: string, codes: string[]) -> string {
                     + ")"
             else {
                 texts = texts.append([current + " + " + quoted(lit)]);
-                views = views.append([code]);
+                views = views.append(["splice({ -> " + code + " })"]);
                 current = "\"\"";
             }
             lit = "";

@@ -12,18 +12,22 @@ CSS layers: it imports `css` (the reader's character walk) and `std`, and knows 
 markup, no manifest and no framework.
 
 ```bp
-import styled, {styledProperty, StyledPropertyView} from "styled";
+import styled, {styledProperty, StyledView, StyledPropertyView} from "styled";
 
 pub val tab4 = styledProperty "tab-size: 4;";
 fn padAll(n: i32) -> StyledPropertyView { return styledProperty "padding: --spacing(${n});"; }
 
-pub val code = styled """
+// `${padAll(2)}` is a call: computed at render, so a function run below the
+// render's `StyledContext` provider (a `val` is evaluated outside every render).
+fn code() -> StyledView {
+    return styled """
   ${tab4}
   font-family: var(--font-mono);
   &:hover { ${padAll(2)} }
   @variant md { max-width: --theme(--breakpoint-md); }
 """;
-// (await code).rules ==
+}
+// (await code()).rules, under a provider ==
 //   .s_<h>{tab-size:4;font-family:var(--font-mono)}.s_<h>:hover{padding:calc(var(--spacing) * 2)}
 //   @media (width >= 48rem){.s_<h>{max-width:48rem}}
 ```
@@ -50,12 +54,17 @@ styled/
 │   ├── variants.bp    ← VariantRead, readVariant — what `@variant <name>` means under a theme
 │   ├── reader.bp      ← Source, Block, Value, readBlock, firstNonDeclaration — the literal read at build
 │   ├── layers.bp      ← Layer, layer, SheetEntry, Sheet (of, add, classIn, render)
-│   └── styled.bp      ← StyledBase, Styled, StyledProperty, StyledView, StyledPropertyView, Styleable,
-│                        styled (default), styledProperty, the constant/computed constructors, holeText,
-│                        Holes (what a literal's holes are worth at build, decision 355)
-├── test/              ← styled_test (the literals), theme_test, sheet_test, styled_example_test (front 119's
-│                        example as a suite case, but for the import line)
+│   └── styled.bp      ← StyledSheet, StyledContext, Styled, StyledProperty, StyledView, StyledPropertyView,
+│                        Styleable, styled (default), styledProperty, the constant/computed constructors,
+│                        splice, holeText, Holes (what a literal's holes are worth at build, decision 355)
+├── test/              ← styled_test (the literals), theme_test, sheet_test, context_test (what registers through
+│                        StyledContext, the provider's writer a std mock), styled_example_test (front 119's
+│                        example as a suite case, but for the import lines)
 ├── examples/styled-example/   ← front 119's example as an application of `from "styled"`
+├── examples/styled-context/   ← a render's root providing StyledContext, its writer printing each registration;
+│                                `expected.out` (the repository stage runs it)
+├── examples/styled-context-unbound/ ← a computed literal with no provider: `before`, then context-unbound
+│                                (`expected.out`, `expected.stderr`)
 ├── refusals/<case>/   ← a literal or annotation that must not compile, with its exact message
 └── scripts/git-hooks/ ← pre-commit, lib/runner-standalone.sh (shared text), repository-stages.sh (styled's own)
 ```
@@ -96,11 +105,24 @@ types refuse it as before. The constant path emits `styledConstant("s_…", ".s_
 (`hash.bp`'s fold, held equal to `contentHash`; `repository-stages.sh` reads the emitted module
 on both targets — the call's first argument is the hidden context map every component function
 takes, decision 354: `undefined` on erlang, `null` on commonJS, outside a render; it also reads
-`tabRed`'s constant and `code`'s computed call). A literal with a hole computed at render (a
+`tabRed`'s constant and `code`'s computed call under the map `code` received, its splice through
+`splice`). A literal with a hole computed at render (a
 parameter, a call such as `${padAll(2)}`, a `val` another module exports) emits `styledComputed` /
 `propertyComputed`, which build the text when the component runs (an `async function` on commonJS,
-decision 338 p9). A computed component registers in no sheet yet: where it registers at render is
-352 and 354 (`use context(StyledContext)`).
+decision 338 p9).
+
+**Registration** (decisions 352, 354). `pub val StyledContext = Context<StyledSheet>()`; a
+`StyledSheet(layer, add)` is the render's sheet as a component sees it — the layer it writes to and
+the writer of the sheet its provider holds. Whoever renders provides it at the root (jhonstart's
+`compose`, emilia's `flush()`, the build's sheet at a prerender); `styled` holds no store and no
+host cell. `styledComputed` and `propertyComputed` read it with `use context(StyledContext)` at the
+top of their bodies (357) and hand `add` their class and rules every time they run — the provider's
+`Sheet.add` keeps a component once. A `${p}` splice registers nothing: the computed call takes each
+splice as `splice({ -> <hole> })`, which runs the hole under a provider that keeps nothing. A
+literal computed at build registers nothing (its constructor reads no context). With no provider
+above, a computed literal is `context-unbound` at run time — so a `val` whose literal is computed
+at render (`pub val code = styled "${padAll(2)}"`) fails when it is first read, being evaluated
+outside every render (`119-f`); such a component is a function.
 
 **The sheet** is a value: `Sheet.of([layer("base"), Layer(name: "utilities", prefix: "e_")])`,
 `sheet.add(layerName, styled)` answers the sheet with the component in that layer once, under the
@@ -130,8 +152,11 @@ Each `// LANGUAGE GAP` marker names its row of the milestone's `language-gaps.md
   `baseTheme()`, never the application's `#[theme]`, so a second `#[theme]` is not refused and a
   cleared breakpoint is refused only against the base theme (`119-d`).
 - A template body cannot call a host function: the build-time class is `hash.bp`'s fold.
-- A component's fields are read after `await` (`(await code).rules`) — on commonJS a component
+- A component's fields are read after `await` (`(await code()).rules`) — on commonJS a component
   call is a promise.
+- A `val` initializer runs outside every render (erlang caches it on first read, commonJS at module
+  load, a test module at its init), so a `val` holding a literal computed at render is
+  `context-unbound` there and nothing refuses it at build (`119-f`).
 - `botopink format` reflows a call inside a `${…}` hole of a multi-line literal over three lines;
   the code stays the same.
 
@@ -149,7 +174,11 @@ git config core.hooksPath scripts/git-hooks
 The repository is one plain package, so the gate's test stage runs
 `botopink test --target <t>` at the root on each target `botopink.json` declares
 (`erlang`, `commonJS`); `scripts/git-hooks/repository-stages.sh` adds styled's own
-stage (the build-time class), `examples/*/` are built and `refusals/*/` refused.
+stages (the build-time class; `examples/styled-context` and `styled-context-unbound` run on both
+targets against their `expected.out` / `expected.stderr`), `examples/*/` are built and
+`refusals/*/` refused. The language's own cells for the mechanism (erlang, beam, commonJS; wasm
+refuses a `use`) are `tests/language/run/context_sheet_registers` and
+`context_sheet_unbound` in botopink-lang — this package builds on neither beam nor wasm.
 Never commit with `--no-verify`; fix the red instead.
 `scripts/git-hooks/pre-commit` and `scripts/git-hooks/lib/runner-standalone.sh`
 are one text across every library repository: the meta repository's
