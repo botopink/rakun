@@ -1255,7 +1255,7 @@ four values, none of which a string table holds:
 
 | Stored | What it is | Could a `rkSetProp`/`rkProp` string table hold it? |
 |---|---|---|
-| A bean factory | a closure over a constructor, or over `rkSingleton` and a constructor | no — calling it is the point, and a name is not callable (`list_to_existing_atom("__rkMake_" ++ Name)` yields an ATOM, and an atom is not a function) |
+| A bean factory | a closure over a constructor, or over `rkSingleton` and a constructor | no — calling it is the point, and a name is not callable (`list_to_existing_atom(Name)` yields an ATOM, and an atom is not a function) |
 | A `#[postConstruct]`/`#[preDestroy]` hook | a thunk closing over `<Type>.make()` and a method | no |
 | An `#[eventListener]` binding | a closure taking an `Event` | no |
 | An `#[exitCode]` generator | a function returning `i32` | no |
@@ -2547,8 +2547,8 @@ Decisions:
   registering again replaces its row. That is why every registration cell takes an
   `owner` argument (the README's two-argument form could not name both).
 - **The decorators stack under a stereotype** (`#[component]`/`#[service]`/…): the
-  emitted line calls `__rkMake_<Type>()`, which only a stereotype emits (`#[managed]`
-  on a singleton registers `{ -> __rkMake_<Type>() }` but does not define it). A type
+  emitted line calls `<Type>.make()`, the member which only a stereotype emits
+  (`#[managed]` on a singleton registers `{ -> <Type>.make() }` but does not define it). A type
   without one is refused at comptime naming the fix. The consumer imports the
   registration cell beside the marker (`rkRegisterHealthIndicator`, …).
 - **A check is stored wrapped** as `{ -> healthLine(check()) }` (`status\tdetails`), so
@@ -3312,7 +3312,7 @@ the marked connection, and a nested `transaction` JOINS it (REQUIRED: one `begin
 one `commit`). A decorator cannot wrap a method body, so `#[transactional]` is
 TYPE-level and emits `<Type>Tx(inner: <Type>)` with one forwarding method per
 reflected method, each `rkTxRun("<Type>.<method>", "required", { -> self.inner.m(…) })`,
-plus `__rkMake_<Type>Tx()`. Injecting `<Type>Tx` gets the transaction; injecting
+plus the member `<Type>Tx.make()`. Injecting `<Type>Tx` gets the transaction; injecting
 `<Type>` gets the bare type. `#[noTransaction]` on a method emits a plain forward.
 `#[propagation("REQUIRES_NEW")]` / `("NESTED")` fail the build as not implemented,
 and `rkTxRun` refuses any propagation but `required` at run time. The proxy runs on
@@ -3719,7 +3719,7 @@ Decisions:
 - **Three markers, not one `#[scheduled(cron:, fixedRate:, …)]`**: markers take
   positional arguments and a decorator argument's declared default is not
   applied (the comptime call fails). `#[scheduler]` stacks under a STEREOTYPE (its closure is
-  `{ -> __rkMake_<Type>().<fn>() }`, so a task and an HTTP handler share one instance;
+  `{ -> <Type>.make().<fn>() }`, so a task and an HTTP handler share one instance;
   a type without one is refused naming the fix). Refused at comptime, located: a
   marker off a method, `#[scheduler]` with no trigger method, two triggers on one
   method, a parameter besides `self` (named), a return type other than `i32`, a
@@ -3823,7 +3823,7 @@ template (a sidecar called only from a folder is not shipped).
   `executionsOf`, `historyOf`, `pruneHistory`.
 - `markers.bp`: `#[persistentJob(name, cron)]` (method; return `string`) and
   `#[jobs]` (the type: checks `(self, data: string) -> string` and emits
-  `rkPersistentJob(name, cron, { data -> __rkMake_<T>().<fn>(data) })`).
+  `rkPersistentJob(name, cron, { data -> <T>.make().<fn>(data) })`).
 - `endpoint.bp`: `mountJobStore()` registers `quartz` (read-only) and `GET
   <base>/quartz/:job`; data entries go through front 76's
   `sanitizeEntries("quartz", …)`.
@@ -4040,7 +4040,7 @@ and ships no runner (tests are `test` blocks under `botopink test`).
   inside `mocks.bp`, so a consumer writes the double over the qualified runtime
   (`mocks.invoke(self.mockId, "find", [mocks.key(id)], "")`) and a
   `#[configuration]` `#[bean]` returning the behavior makes it the injected
-  implementation — Spring's `@MockBean`. `__rkMake_<Behavior>()` hands the test
+  implementation — Spring's `@MockBean`. `rkResolve("<Behavior>")` hands the test
   the same singleton to stub and `verify` (`test/mocks_pairing_test.bp`).
 - **The test-seam convention.** A front that mutates shared state exposes a
   read-only accessor for tests (a value, never a handle; it clears nothing) and
@@ -4227,7 +4227,7 @@ containers, the arms' state, the published log and the startup log.
   A duplicate `{broker, destination}` is kept and the boot refuses it naming both.
 - **Markers** (`markers.bp`) — `#[listener]` on a stereotyped type emits
   `val __rkListener_<T>_<m> = rkRegisterListenerAs("<T>.<m>", …, { msg ->
-  __rkMake_<T>().<m>(msg) })` per `#[amqpListener(queue)]` ·
+  <T>.make().<m>(msg) })` per `#[amqpListener(queue)]` ·
   `#[kafkaListener(topic, groupId)]` · `#[redisListener(channel)]` ·
   `#[streamListener(stream, offset)]` method; the module imports
   `rkRegisterListenerAs`. Refused at build: no marker, two markers on a method, a
@@ -4252,8 +4252,8 @@ containers, the arms' state, the published log and the startup log.
 - **Templates** (`templates.bp`) — `AmqpTemplate.send(queue, payload)`,
   `KafkaTemplate.send(topic, key, payload)`, `RedisPubSubTemplate.publish(channel,
   payload)`, `StreamTemplate.append(stream, payload)`: 0, or non-zero with no
-  connection (never a raise). Injected through the hand-written
-  `__rkMake_<Template>()`, which a consumer imports.
+  connection (never a raise). Injected through the
+  `#[provides]` function of each (`amqpTemplate()`, `kafkaTemplate()`, …), which a consumer need not import.
 - **Health** (`messaging_health.bp`) — `messaging.<arm>` DOWN naming the arm when
   not connected, DOWN naming the container when an enabled container has no live
   worker; UP otherwise.
