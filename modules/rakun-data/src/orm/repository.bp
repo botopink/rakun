@@ -221,8 +221,8 @@ pub fn derived(comptime decl: @Decl) {
         decl.fail("#[derived] marks a method of an #[entityRepository] type");
 }
 
-pub fn entityRepository(comptime decl: @Decl, comptime entity: string) {
-    val e = entity;
+pub fn entityRepository(comptime decl: @Decl, comptime entity: @Expr<string>) {
+    val e = entity.value;
     val repo = decl.name;
     var problem = "";
     for (decl.methods.filter(
@@ -457,61 +457,61 @@ pub fn entityRepository(comptime decl: @Decl, comptime entity: string) {
 // `<Entity>.entityMeta()`, so a typo is a compile error there.
 pub fn belongsTo(
     comptime decl: @Decl,
-    comptime owner: string,
-    comptime ownerField: string,
-    comptime target: string,
-    comptime targetField: string,
+    comptime owner: @Expr<string>,
+    comptime ownerField: @Expr<string>,
+    comptime target: @Expr<string>,
+    comptime targetField: @Expr<string>,
 ) {
     val n = decl.name;
     val ownerName = decl.fields
-        .filter({ f -> f.typeName == owner })
+        .filter({ f -> f.typeName == owner.value })
         .map({ f -> f.name })
         .at(0) ?? "";
     val targets = decl.fields.filter(
-        { f -> f.typeName == target || f.typeName == "?" + target },
+        { f -> f.typeName == target.value || f.typeName == "?" + target.value },
     );
     val targetName = targets.map({ f -> f.name }).at(0) ?? "";
     val left = (targets.map({ f -> f.typeName }).at(0) ?? "").startsWith("?");
     val join = if (left) " left join " else " join ";
     val cols = "\" + joinColumns("
-        + owner
+        + owner.value
         + ".entityMeta(), \"a\") + \", \" + joinColumns("
-        + target
+        + target.value
         + ".entityMeta(), \"b\") + \"";
     decl.addMember(
         "pub fn sql() -> string { return \"select "
             + cols
             + " from \" + "
-            + owner
+            + owner.value
             + ".entityMeta().table + \" a"
             + join
             + "\" + "
-            + target
+            + target.value
             + ".entityMeta().table + \" b on a.\" + "
-            + owner
+            + owner.value
             + ".columns()."
-            + ownerField
+            + ownerField.value
             + " + \" = b.\" + "
-            + target
+            + target.value
             + ".columns()."
-            + targetField
+            + targetField.value
             + "; }",
     );
     val bindTarget = if (left)
         "val present = r.get(\"b__\" + "
-            + target
+            + target.value
             + ".entityMeta().idColumn) != \"\";\n    val b: ?"
-            + target
+            + target.value
             + " = if (present) "
-            + target
+            + target.value
             + ".fromRow(unprefixed(r, \"b\")) else null;"
     else
-        "val b = " + target + ".fromRow(unprefixed(r, \"b\"));";
+        "val b = " + target.value + ".fromRow(unprefixed(r, \"b\"));";
     decl.addMember(
         "pub fn fromRow(r: Row) -> "
             + n
             + " {\n    val a = "
-            + owner
+            + owner.value
             + ".fromRow(unprefixed(r, \"a\"));\n    "
             + bindTarget
             + "\n    return "
@@ -527,14 +527,14 @@ pub fn belongsTo(
             "#[belongsTo] must annotate a record holding the two entities",
         );
     if (ownerName == "")
-        decl.fail("#[belongsTo] " + n + " has no field of type " + owner);
+        decl.fail("#[belongsTo] " + n + " has no field of type " + owner.value);
     if (targetName == "")
         decl.fail(
             "#[belongsTo] "
                 + n
                 + " has no field of type "
-                + target
+                + target.value
                 + " or ?"
-                + target,
+                + target.value,
         );
 }

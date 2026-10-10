@@ -927,6 +927,9 @@ members, and a member exercising a layout or a server action needs fronts 23 and
   case of the non-ASCII cookie refusal is not expressible as a cell at all; the
   guard, its text and the negative case are asserted instead, and the gap is
   listed here rather than quietly dropped.
+- **A decorator parameter is `comptime x: @Expr<T>`** (decision 364): every marker body reads
+  its argument as `x.value`, known at build; a marker that never reads a parameter (the route
+  markers read their lexemes from `decl.annotations`) accepts any expression of its type.
 - **A refusal is a function.** `noFrameProblem` / `nestedFrameProblem` /
   `staleEpochProblem` are `pub fn`s returning the text, for the reason
   `durationProblem` is one: a test reads the words without the halt taking the
