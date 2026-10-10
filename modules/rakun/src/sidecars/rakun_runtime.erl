@@ -51,7 +51,8 @@
          register_route/3, route_count/0, route_paths/0,
          dispatch/2, dispatch_http/5,
          serve/2,
-         config_check_register/2, config_check_run/0, config_check_reset/0]).
+         config_check_register/2, config_check_run/0, config_check_reset/0,
+         tag_epoch/1, bump_tag/1]).
 
 %% ── the test seam (front 19): a real `Request` from scalars, the resets ──────
 -export([make_request/6, reset_singletons/0, reset_context/0,
@@ -93,6 +94,7 @@
 -define(LOCKS,    rakun_build_locks). %% set:         {Name, Pid} — first construction in flight
 -define(CHECKS,   rakun_config_checks). %% set:       {Name, Seq, Fun} — `#[validated]` records
 -define(CONNS,    rakun_connections). %% set:         {Pid, idle | busy}
+-define(TAGS,     rakun_tag_epochs).  %% set:         {Tag, Epoch} — decision 185
 
 -define(DEFAULT_BACKLOG, 128).
 -define(DEFAULT_IDLE_TIMEOUT, 60000).
@@ -183,6 +185,7 @@ create_tables() ->
     _ = ets:new(?LOCKS,    [set | Common]),
     _ = ets:new(?CHECKS,   [set | Common]),
     _ = ets:new(?CONNS,    [set, {write_concurrency, true} | Common]),
+    _ = ets:new(?TAGS,     [set, {write_concurrency, true} | Common]),
     seed_failures(),
     ok.
 
@@ -232,7 +235,9 @@ reset_singletons() ->
 
 %% Everything a module load registered: the scan registry, the route table,
 %% the fallback, the singletons, and whatever a member hung off `on_reset/2`
-%% (a listener or task registry lives in its own member's host module).
+%% (a listener or task registry lives in its own member's host module). The
+%% tag epochs are not a registration and stay: an epoch only grows (§ tag
+%% epoch below).
 reset_context() ->
     _ = reset_singletons(),
     ets:delete_all_objects(?SCAN),
@@ -402,6 +407,34 @@ config_check_reset() ->
     ensure_started(),
     true = ets:delete_all_objects(?CHECKS),
     0.
+
+%% ═══ tag epoch (front 04 step 1, decision 185) ═══════════════════════════════
+%% What two optional members share lives in the core: `rakun-cache`'s
+%% revalidation verbs bump a tag's epoch, `rakun-client` stores the epochs of a
+%% response's tags beside it and reads a changed one as a miss — no edge
+%% between the two. A tag never bumped is at 0. The bump is
+%% `ets:update_counter/4`, atomic across request processes, so two bumps that
+%% race both count. An epoch only grows: `reset_context/0` leaves the table,
+%% so no epoch a reader stored can match a later state (`04-a`). The empty tag
+%% is a caller's bug and is refused in both cells, naming the cell.
+
+tag_epoch(Tag) ->
+    ensure_started(),
+    ok = check_tag(Tag, <<"rkTagEpoch">>),
+    case ets:lookup(?TAGS, Tag) of
+        [{_, Epoch}] -> Epoch;
+        [] -> 0
+    end.
+
+bump_tag(Tag) ->
+    ensure_started(),
+    ok = check_tag(Tag, <<"rkBumpTag">>),
+    ets:update_counter(?TAGS, Tag, {2, 1}, {Tag, 0}).
+
+check_tag(<<>>, Cell) ->
+    erlang:error({panic, <<"rakun: a tag is a non-empty string (", Cell/binary, ")">>});
+check_tag(Tag, _Cell) when is_binary(Tag) ->
+    ok.
 
 %% ═══ properties ══════════════════════════════════════════════════════════════
 %% `runtime.mjs:84-97`. `prop/1` answers `""` for an absent key and `prop_int/1`

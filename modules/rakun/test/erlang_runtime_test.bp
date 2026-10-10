@@ -21,6 +21,8 @@ import {rkScan, rkScannedNames, rkScannedCount};
 import {rkEnter, rkDone, rkSingleton, rkBuildCount};
 import {rkSetProp, rkProp, rkPropInt};
 import {rkRegisterRoute, rkRouteCount, rkRoutePaths, rkDispatch, rkDispatchHttp};
+import {rkTagEpoch, rkBumpTag, rkResetContext};
+import {testing.asserts} from "std";
 
 // A value the singleton cache hands back, so "the same instance" is observable
 // through a method rather than through identity (which `==` does not give).
@@ -205,4 +207,36 @@ test "rakun runtime: req.method is the HttpMethod variant, so it compares with H
         == "post";
     assert rkDispatchHttp("GET", "/method-probe", "{}", "{}", "").body
         == "other";
+}
+
+// ── tag epoch (front 04 step 1, decision 185) ────────────────────────────────
+// Each tag below is bumped by one test only: the epoch table is node-wide and
+// an epoch only grows, so a tag another test bumped is never at 0 again.
+
+test "rakun runtime: a tag's epoch is 0 before any bump, 1 after one, and another tag's bump leaves it" {
+    assert rkTagEpoch("t") == 0;
+    assert rkBumpTag("t") == 1;
+    assert rkTagEpoch("t") == 1;
+    assert rkBumpTag("u") == 1;
+    assert rkBumpTag("u") == 2;
+    assert rkTagEpoch("t") == 1;
+    assert rkTagEpoch("u") == 2;
+}
+
+test "rakun runtime: an epoch only grows, rkResetContext leaves it" {
+    val _t = rkBumpTag("epoch-r");
+    val _r = rkResetContext();
+    assert rkTagEpoch("epoch-r") == 1;
+    assert rkBumpTag("epoch-r") == 2;
+}
+
+test "rakun runtime: the empty tag is refused by both cells, naming the cell" {
+    try asserts.throwsWith({ ->
+        val _b = rkBumpTag("");
+        return 0;
+    }, "rakun: a tag is a non-empty string (rkBumpTag)");
+    try asserts.throwsWith({ ->
+        val _e = rkTagEpoch("");
+        return 0;
+    }, "rakun: a tag is a non-empty string (rkTagEpoch)");
 }

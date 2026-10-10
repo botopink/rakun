@@ -489,6 +489,29 @@ either `runtime.mjs` unfreezes or a test file can declare its target.
   is available; it does not guess. The table is data, extended by later fronts
   through `add_failure/3` without editing this module.
 
+### The tag epoch — the core's extension point between two members (decision 185)
+
+`rkTagEpoch(tag) -> i64` and `rkBumpTag(tag) -> i64` (`src/runtime.bp`, public
+through `src/root.bp`'s `pub mod runtime`, imported `from "rakun"`) are
+`tag_epoch/1` and `bump_tag/1` over the `rakun_tag_epochs` table. They exist so
+`rakun-cache` and `rakun-client` share a tag without an edge between them
+(decision 185): the cache's revalidation verbs bump (front 12 step 3), the
+client stores the epochs of a response's tags beside it and reads a changed
+one as a miss (front 13 step 1).
+
+- A tag never bumped is at `0`; `rkBumpTag` answers the new epoch. The bump is
+  `ets:update_counter/4`, so two request processes bumping at once both count.
+- An epoch only grows. `rkResetContext` drops registrations, and an epoch is
+  not one: it leaves the table, so an epoch a reader stored before a reset
+  never matches a later state. A test names its own tags. (A crash of
+  `rakun_registry` empties every table, this one with the rest.) `04-a` in the
+  milestone's `decisions-pending.md` holds the choice for confirmation.
+- `i64`, not the `i32` of the other counters: a BEAM counter does not wrap, so
+  an `i32` epoch would leave its type past `2^31 - 1` bumps.
+- The empty tag is refused by both cells, naming the cell
+  (`rakun: a tag is a non-empty string (rkBumpTag)`), asserted in
+  `test/erlang_runtime_test.bp` with the three behaviour cells.
+
 ### Blocked — the erlang-backend gaps
 
 > **Closed (2026-09-26).** Both backend gaps below closed during fronts 05 and 06,

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### The tag epoch (decision 185, front 04 step 1)
+
+- `rkTagEpoch(tag)` / `rkBumpTag(tag)` (core, `runtime.bp`, both `i64`): a per-tag epoch, `0` until
+  the first bump, bumped atomically, never reset (`rkResetContext` leaves it); the empty tag is
+  refused in both. The point `rakun-cache` bumps and `rakun-client` reads, with no edge between them.
+
 ### The nine merges (decision 187, front 128)
 
 - 25 members → 16. `rakun-actuator-api` → `modules/rakun/src/actuator_api/`, `rakun-logging` →
