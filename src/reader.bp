@@ -14,8 +14,12 @@
 //// The source is the literal's characters (`String.chars()`), a hole one
 //// element `\u{2}<k>\u{3}` (`k` its index in `codes`). The rules come out as
 //// one text where `\u{1}` stands for the component's class selector and
-//// `\u{4}<k>\u{3}` for the declarations a hole splices in. Every refusal
-//// names the character index it is read at.
+//// `\u{4}<k>\u{3}` for the declarations a hole splices in. The rules keep
+//// source order (decision 368): a declaration written after a nested rule
+//// opens a new rule of the class, as CSS Nesting's nested-declarations rule
+//// does in a browser — `${bg} &:focus { ${gray} } ${pad}` is
+//// `.k{bg}.k:focus{gray}.k{pad}`, never `.k{bg;pad}.k:focus{gray}`. Every
+//// refusal names the character index it is read at.
 ////
 //// This module runs inside the template function (decision 331): it names
 //// no enum variant (a function the comptime runtime runs cannot, see
@@ -288,10 +292,14 @@ fn rulesOf(
     return open + sels.join(",") + "{" + decls.join(";") + "}" + close;
 }
 
-// A block's body from `i0`: its declarations under `sels`, inside `open` /
-// `close` (the at-rules around it), then its nested rules in order. `top`:
-// the literal itself, which ends at the end of the text; any other block
-// ends at its `}` (opened at `openAt`).
+// A block's body from `i0`, in source order (decision 368): each run of
+// declarations is a rule of `sels`, inside `open` / `close` (the at-rules
+// around it), and each nested rule follows the run before it — a declaration
+// written after a nested rule opens a new rule of `sels`, as CSS Nesting's
+// nested-declarations rule does in a browser. `top`: the literal itself,
+// which ends at the end of the text; any other block ends at its `}` (opened
+// at `openAt`). `Block.decls` is every declaration of the block itself, in
+// order — what a `styledProperty` literal, which nests nothing, holds.
 pub fn readBlock(
     src: Source,
     i0: i32,
@@ -305,7 +313,8 @@ pub fn readBlock(
     val cs = src.cs;
     var i = i0;
     var decls: string[] = [];
-    var nested = "";
+    var run: string[] = [];
+    var rules = "";
     var problem = "";
     var at = 0;
     var done = false;
@@ -340,6 +349,7 @@ pub fn readBlock(
                 at = b;
             } else {
                 decls = decls.append([spliceOf(c)]);
+                run = run.append([spliceOf(c)]);
                 i = if (next == ";") after + 1 else b + 1;
             }
         } else if (c == "@") {
@@ -403,7 +413,10 @@ pub fn readBlock(
                         problem = inner.problem;
                         at = inner.at;
                     } else {
-                        nested = nested + inner.rules;
+                        rules = rules
+                            + rulesOf(sels, run, open, close)
+                            + inner.rules;
+                        run = [];
                         i = inner.next;
                     }
                 }
@@ -435,7 +448,10 @@ pub fn readBlock(
                         problem = inner.problem;
                         at = inner.at;
                     } else {
-                        nested = nested + inner.rules;
+                        rules = rules
+                            + rulesOf(sels, run, open, close)
+                            + inner.rules;
+                        run = [];
                         i = inner.next;
                     }
                 }
@@ -475,7 +491,10 @@ pub fn readBlock(
                         problem = inner.problem;
                         at = inner.at;
                     } else {
-                        nested = nested + inner.rules;
+                        rules = rules
+                            + rulesOf(sels, run, open, close)
+                            + inner.rules;
+                        run = [];
                         i = inner.next;
                     }
                 }
@@ -486,6 +505,7 @@ pub fn readBlock(
                     at = d.at;
                 } else {
                     decls = decls.append([d.text]);
+                    run = run.append([d.text]);
                     i = d.next;
                 }
             } else {
@@ -497,7 +517,7 @@ pub fn readBlock(
     if (problem != "") return fail(at, problem);
     return Block(
         next: i,
-        rules: rulesOf(sels, decls, open, close) + nested,
+        rules: rules + rulesOf(sels, run, open, close),
         decls: decls.join(";"),
         problem: "",
         at: 0,

@@ -106,3 +106,36 @@ for target in erlang commonJS; do
     done
 done
 pass "StyledContext: a component computed at render registers through the render's provider, a splice and a constant register nothing, no provider is context-unbound, on erlang and commonJS"
+
+# The claim of decision 368 (1): the reader keeps source order — a declaration
+# written after a nested rule opens a new rule of the class, as CSS Nesting's
+# nested-declarations rule does in a browser — and a literal whose every hole
+# is known at build stays computed at build. `examples/styled-source-order`
+# holds decision 368's literal, `styled "${bg} &:focus { ${gray} } ${pad}"`
+# with its three holes `val`s of the module: the emitted module carries its
+# class and its three rules, the padding after the `:focus`, as the constant
+# constructor's literals, and the program prints them (`expected.out`).
+order_rules='.s_b2548ea2{background:#ffffff}.s_b2548ea2:focus{background:var(--color-gray-100)}.s_b2548ea2{padding:calc(var(--spacing) * 4)}'
+app="$gate_root/examples/styled-source-order"
+[ -f "$app/expected.out" ] || fail "examples/styled-source-order/expected.out is missing — the source-order stage has nothing to compare"
+for target in erlang commonJS; do
+    case "$target" in
+        erlang) want="styledConstant(undefined, <<\"s_b2548ea2\">>, <<\"$order_rules\">>)" ;;
+        commonJS) want="styledConstant(null, \"s_b2548ea2\", \"$order_rules\")" ;;
+    esac
+    out=$(mktemp -d)
+    ( cd "$app" && "$bin" build --target "$target" --out "$out/build" ) >/dev/null 2>&1 \
+        || { rm -rf "$out"; fail "examples/styled-source-order does not build on $target"; }
+    if ! grep -rF -- "$want" "$out/build" >/dev/null; then
+        rm -rf "$out"
+        fail "$target: focusPad is not the constant of its rules in source order — a declaration after a nested rule opens a new rule of the class (decision 368), computed at build (decision 355)"
+    fi
+    status=0
+    ( cd "$app" && "$bin" run --target "$target" --out "$out/run" ) >"$out/stdout" 2>/dev/null || status=$?
+    if [ "$status" -ne 0 ] || ! cmp -s "$app/expected.out" "$out/stdout"; then
+        rm -rf "$out"
+        fail "$target: examples/styled-source-order's output differs from its expected.out"
+    fi
+    rm -rf "$out"
+done
+pass "source order: a declaration after a nested rule opens a new rule of the class, its class a constant of the emitted module, on erlang and commonJS"

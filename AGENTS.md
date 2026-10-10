@@ -59,12 +59,15 @@ styled/
 │                        splice, holeText, Holes (what a literal's holes are worth at build, decision 355)
 ├── test/              ← styled_test (the literals), theme_test, sheet_test, context_test (what registers through
 │                        StyledContext, the provider's writer a std mock), styled_example_test (front 119's
-│                        example as a suite case, but for the import lines)
+│                        example as a suite case, but for the import lines), source_order_test (the
+│                        reader's source order, decision 368)
 ├── examples/styled-example/   ← front 119's example as an application of `from "styled"`
 ├── examples/styled-context/   ← a render's root providing StyledContext, its writer printing each registration;
 │                                `expected.out` (the repository stage runs it)
 ├── examples/styled-context-unbound/ ← a computed literal with no provider: `before`, then context-unbound
 │                                (`expected.out`, `expected.stderr`)
+├── examples/styled-source-order/ ← decision 368's literal, its padding after the `:focus`: a constant of
+│                                the emitted module, `expected.out` (the repository stage builds and runs it)
 ├── refusals/<case>/   ← a literal or annotation that must not compile, with its exact message
 └── scripts/git-hooks/ ← pre-commit, lib/runner-standalone.sh (shared text), repository-stages.sh (styled's own)
 ```
@@ -85,7 +88,13 @@ A rule body, read at build (`reader.bp`):
 | `@media`, `@supports`, `@container`, `@starting-style` `{ … }` | wrapped: `@media (…){.k{…}}` |
 | `--spacing(n)`, `--alpha(c / p)`, `--theme(--name)` in a value | `calc(var(--spacing) * n)`, `color-mix(in oklab, c p, transparent)`, the theme's value |
 
-Rules come out in order: the block's own declarations, then its nested rules. Refused, each at
+Rules come out in source order (decision 368): each run of a block's declarations is a rule of
+the block's selector, and each nested rule, variant or at-rule follows the run before it — a
+declaration written after a nested rule opens a new rule of the class, as CSS Nesting's
+nested-declarations rule does in a browser. `styled "${bg} &:focus { ${gray} } ${pad}"` renders
+`.k{background:#ffffff}.k:focus{…}.k{padding:…}`, never `.k{background:…;padding:…}.k:focus{…}`;
+the class hashes the rules as rendered, so an order is a class (`reader.bp` `readBlock`, the
+`run` it closes at each nested block; `test/source_order_test.bp`). Refused, each at
 its character (`refusals/`): `@utility` (a `val` or a function names a component), `@theme` (the
 typed `#[theme]`), `@apply` (a hole), `@custom-variant` (a variant is a function), any other
 at-rule, `--value()` (a parameter), a declaration with no `;`, a value in `{ }`, a hole as a
@@ -175,7 +184,9 @@ The repository is one plain package, so the gate's test stage runs
 `botopink test --target <t>` at the root on each target `botopink.json` declares
 (`erlang`, `commonJS`); `scripts/git-hooks/repository-stages.sh` adds styled's own
 stages (the build-time class; `examples/styled-context` and `styled-context-unbound` run on both
-targets against their `expected.out` / `expected.stderr`), `examples/*/` are built and
+targets against their `expected.out` / `expected.stderr`; `examples/styled-source-order`'s
+constant in source order read from the emitted module and its run against `expected.out`),
+`examples/*/` are built and
 `refusals/*/` refused. The language's own cells for the mechanism (erlang, beam, commonJS; wasm
 refuses a `use`) are `tests/language/run/context_sheet_registers` and
 `context_sheet_unbound` in botopink-lang — this package builds on neither beam nor wasm.
