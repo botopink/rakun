@@ -3093,9 +3093,9 @@ the `migrations` endpoint, and — when migrations are on — runs them (or, wit
   (`schemaDiff`: missing table, missing / extra column, type where the arm
   reports one); `create` drops and creates them; `create-drop` also drops them
   in a `#[preDestroy]`-time lifecycle hook.
-- Host cells live in the ROOT-LEVEL `src/migration_host.bp` (and front 78's in
-  `src/orm_host.bp`): a sidecar called only from a module in a folder is
-  never shipped (language-gaps.md).
+- Host cells live in the ROOT-LEVEL `src/migration_host.bp`; front 78's are in
+  `src/orm/host.bp` (a folder module's sidecar ships since `01-compiler/26`
+  step 2 — RX-14 moved it; `migration_host.bp` is not measured and stays).
 - Tests: `test/migration_test.bp` (ETS arm; each test its own datasource).
 
 ## Observability — `modules/rakun-metrics/` (front 75)
