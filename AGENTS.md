@@ -171,13 +171,21 @@ Each `// LANGUAGE GAP` marker names its row of the milestone's `language-gaps.md
 ## Local gate
 
 `scripts/git-hooks/pre-commit` is the tracked pre-commit gate, self-contained:
-it sources `scripts/git-hooks/lib/runner-standalone.sh` from this repository and
+it calls `scripts/gate.sh`, which sources `scripts/git-hooks/lib/runner-standalone.sh` from this repository and
 reaches nothing outside it, so a standalone clone, a checkout inside the botopink
 meta workspace and a worktree run the same gate. Install it once per clone:
 
 ```sh
 git config core.hooksPath scripts/git-hooks
 ```
+
+`scripts/gate.sh [--staged] [--no-conformance] [--jobs <N>]` is the gate's one entry (one text in every
+library repository, CI check 4; it runs `scripts/git-hooks/lib/runner-standalone.sh`): the pre-commit hook
+runs `scripts/gate.sh --staged --no-conformance` (decision 470), and CI on a push to `feat` and a front's
+Conformance step run it whole, which adds the last stage, `botopink cell check conformance/` over this
+repository's `conformance/` cells (decisions 463, 464; the stage exists when the directory does). It knows no
+job pool: `--jobs` is the total it may use, and the meta repository's `scripts/gate.sh run <repository>`
+hands it its share.
 
 The repository is one plain package, so the gate's test stage runs
 `botopink test --target <t>` at the root on each target `botopink.json` declares
