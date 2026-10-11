@@ -112,10 +112,9 @@ value, a string where a declaration stands) leaves the literal computed, so the 
 types refuse it as before. The constant path emits `styledConstant("s_…", ".s_…{…}")` /
 `propertyConstant(…)` with literals
 (`hash.bp`'s fold, held equal to `contentHash`; `repository-stages.sh` reads the emitted module
-on both targets — the call's first argument is the hidden context map every component function
-takes, decision 354: `undefined` on erlang, `null` on commonJS, outside a render; it also reads
-`tabRed`'s constant and `code`'s computed call under the map `code` received, its splice through
-`splice`). A literal with a hole computed at render (a
+on both targets — the call's arguments are the class and the rules as literals, no hidden context
+argument (decision 388 replaced 354 (8)'s map; a component is a lambda over its `RenderScope`); it
+also reads `tabRed`'s constant and `code`'s computed call, its splice through `splice`). A literal with a hole computed at render (a
 parameter, a call such as `${padAll(2)}`, a `val` another module exports) emits `styledComputed` /
 `propertyComputed`, which build the text when the component runs (an `async function` on commonJS,
 decision 338 p9).

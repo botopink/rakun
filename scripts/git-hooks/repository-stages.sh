@@ -15,9 +15,10 @@
 # example application is built on both targets and its module read: `tab4 =
 # styledProperty "tab-size: 4;"` (no hole) and `tabRed = styled "${tab4} color:
 # red;"` (a hole naming a `val` known at build) are constants; `code`, whose
-# `${padAll(2)}` is a call, is computed — a component function that passes the
-# map it received to `styledComputed`, which reads `StyledContext` there
-# (decisions 352, 354), and runs its splice through `splice`.
+# `${padAll(2)}` is a call, is computed — a component, a lambda over its
+# `RenderScope` (decision 388), calls `styledComputed`, which reads
+# `StyledContext` from that scope (decision 352), and runs its splice through
+# `splice`.
 
 bin=$(requireBotopink)
 example="$gate_root/examples/styled-example"
@@ -27,20 +28,20 @@ for target in erlang commonJS; do
     out=$(mktemp -d)
     ( cd "$example" && "$bin" build --target "$target" --out "$out" ) >/dev/null 2>&1 \
         || { rm -rf "$out"; fail "examples/styled-example does not build on $target"; }
-    # A component function takes the hidden context map first (decision 354):
-    # a call outside a render passes none — `undefined` on erlang, `null` on commonJS.
+    # No hidden context argument (decision 388 replaced 354 (8)'s map): the
+    # constants' class and rules are the calls' first arguments, as literals.
     case "$target" in
         erlang)
-            want='propertyConstant(undefined, <<"s_e8b00b8b">>, <<".s_e8b00b8b{tab-size:4}">>'
-            known='styledConstant(undefined, <<"s_b480a37a">>, <<".s_b480a37a{tab-size:4;color:red}">>)'
-            render='code(BpContextMap__) ->'
-            computed='styledComputed(BpContextMap__, <<"s_">>'
+            want='propertyConstant(<<"s_e8b00b8b">>, <<".s_e8b00b8b{tab-size:4}">>'
+            known='styledConstant(<<"s_b480a37a">>, <<".s_b480a37a{tab-size:4;color:red}">>)'
+            render='code() ->'
+            computed='styledComputed(<<"s_">>'
             ;;
         commonJS)
-            want='propertyConstant(null, "s_e8b00b8b", ".s_e8b00b8b{tab-size:4}"'
-            known='styledConstant(null, "s_b480a37a", ".s_b480a37a{tab-size:4;color:red}")'
-            render='function code(bpContextMap__) {'
-            computed='styledComputed(bpContextMap__, "s_"'
+            want='propertyConstant("s_e8b00b8b", ".s_e8b00b8b{tab-size:4}"'
+            known='styledConstant("s_b480a37a", ".s_b480a37a{tab-size:4;color:red}")'
+            render='function code() {'
+            computed='styledComputed("s_"'
             ;;
     esac
     if ! grep -rF -- "$want" "$out" >/dev/null; then
@@ -53,7 +54,7 @@ for target in erlang commonJS; do
     fi
     if ! grep -rh -A1 -F -- "$render" "$out" | grep -F -- "$computed" >/dev/null; then
         rm -rf "$out"
-        fail "$target: code is not computed at render under the map it received — its \${padAll(2)} hole is a call"
+        fail "$target: code is not computed at render — its \${padAll(2)} hole is a call"
     fi
     if ! grep -rh -A3 -F -- "$render" "$out" | grep -F 'splice(' >/dev/null; then
         rm -rf "$out"
@@ -120,8 +121,8 @@ app="$gate_root/examples/styled-source-order"
 [ -f "$app/expected.out" ] || fail "examples/styled-source-order/expected.out is missing — the source-order stage has nothing to compare"
 for target in erlang commonJS; do
     case "$target" in
-        erlang) want="styledConstant(undefined, <<\"s_b2548ea2\">>, <<\"$order_rules\">>)" ;;
-        commonJS) want="styledConstant(null, \"s_b2548ea2\", \"$order_rules\")" ;;
+        erlang) want="styledConstant(<<\"s_b2548ea2\">>, <<\"$order_rules\">>)" ;;
+        commonJS) want="styledConstant(\"s_b2548ea2\", \"$order_rules\")" ;;
     esac
     out=$(mktemp -d)
     ( cd "$app" && "$bin" build --target "$target" --out "$out/build" ) >/dev/null 2>&1 \
