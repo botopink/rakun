@@ -1,0 +1,53 @@
+import {service, repository, managed, scope, Context, rootContext, rkRequestScoped, rkRequestScopeEnd, rkAddBean, rkInstallBeans} from "rakun";
+import {rkScan, rkSingleton, rkEnter, rkDone, rkResolve, rkRegisterBean} from "rakun";
+import {collections.Dict} from "std";
+
+#[repository]
+#[managed]
+pub type OrderRepository() {
+    pub fn ids(self: Self) -> string[] {
+        return ["o-1", "o-2"];
+    }
+}
+
+#[managed]
+#[scope("prototype")]
+pub type TicketMachine(repo: OrderRepository) {
+    pub fn serial(self: Self) -> string { return "ticket"; }
+}
+
+#[managed]
+#[scope("request")]
+pub type RequestBasket(repo: OrderRepository) {
+    pub fn serial(self: Self) -> string { return "basket"; }
+}
+
+fn beans() -> Dict<string, unknown> {
+    return comptime {
+        var d: Dict<string, unknown> = Dict.empty();
+        for (@TypeInfo.all(with: [repository], member: "make")) { b ->
+            d = rkAddBean(d, b.name, b.value);
+        }
+        break d;
+    };
+}
+
+fn main() {
+    val _beans = rkInstallBeans(beans());
+    val ctx: Context = rootContext();
+    // Without a stereotype there is no `__rkMake_TicketMachine`: the bean is
+    // reached through `ctx.resolve`.
+    @print(ctx.has("TicketMachine").toString());
+    @print(ctx.has("RequestBasket").toString());
+    val a: ?TicketMachine = ctx.resolve("TicketMachine");
+    val b: ?TicketMachine = ctx.resolve("TicketMachine");
+    if (a != null) @print(a.serial());
+    if (b != null) @print(b.serial());
+    // `request` caches by key until the request ends: two resolves inside one
+    // request share an instance, two requests do not.
+    val one = rkRequestScoped("k", { -> 1 });
+    val two = rkRequestScoped("k", { -> 2 });
+    val _end = rkRequestScopeEnd();
+    val three = rkRequestScoped("k", { -> 3 });
+    @print(one.toString() + two.toString() + three.toString());
+}

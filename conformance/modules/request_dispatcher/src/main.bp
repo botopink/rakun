@@ -1,0 +1,31 @@
+import {RequestPhase, RequestScope, beginRequest, endRequest, requestId, drainAfter, afterCompleted, after, cookies, Cookies, cookieDefaults, CookieAttrs} from "rakun";
+
+fn runHandler() -> string {
+    // a cookie queued by the handler comes back from `endRequest()`
+    val jar: Cookies = cookies();
+    val _ = jar.set("theme", "dark", CookieAttrs(
+        path: "/", domain: "", maxAge: 3600,
+        httpOnly: true, secure: true, sameSite: "Lax",
+    ));
+    val _later = after({ -> 0; });
+    return "handled " + requestId();
+}
+
+fn main() {
+    val wire = "user-agent\tcurl";
+    val epoch = beginRequest(RequestScope(
+        id: "req-1",
+        phase: RequestPhase.Handler,
+        method: "GET",
+        path: "/api/posts",
+        query: "page=2",
+        headersWire: wire,
+        strict: false,
+    ));
+    val body = runHandler();       // wrapped: a raise must still reach the line below
+    val setCookies = endRequest(); // the queued `Set-Cookie` lines, `\n`-separated
+    @print(body);
+    @print(setCookies);
+    val _ = drainAfter(30000);     // reap the deferred work
+    @print(afterCompleted().toString());
+}

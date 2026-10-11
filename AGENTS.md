@@ -2,7 +2,7 @@
 
 > Path: `repository/rakun/`
 > Parent (workspace): [`../AGENTS.md`](../AGENTS.md) · Sibling (core): [`../botopink-lang/AGENTS.md`](../botopink-lang/AGENTS.md)
-> Docs: [`./docs.md`](docs.md) · Spec: [`../../tasks/v0.beta.11/specs/rakun.md`](../../tasks/v0.beta.11/specs/rakun.md)
+> Docs: [`./conformance/docs.md`](conformance/docs.md) · Spec: [`../../tasks/v0.beta.11/specs/rakun.md`](../../tasks/v0.beta.11/specs/rakun.md)
 
 A **Spring-style application framework** for botopink — an IoC container with
 constructor dependency injection plus a declarative web layer (`#[restController]`
@@ -43,7 +43,14 @@ root, no code). The **core is the member `modules/rakun/`**; `from "rakun"` reso
 ```text
 rakun/
 ├── AGENTS.md          ← you are here
-├── docs.md            ← what this lib provides + Spring mapping + loading notes
+├── conformance/       ← the reference and its examples (decision 463): `docs.md` (what this lib
+│                        provides + Spring mapping + loading notes) and `modules/<example>/` cells
+│                        in the language suite's shape — `botopink.json` (rakun and the members it
+│                        uses as path dependencies, through the symlinks of the cell's `deps/`, a
+│                        workspace of its own), `src/main.bp`, `snapshot/output/main.snap`, `targets`
+│                        (erlang beam; the web cells erlang only) and the `docs.md` paragraph that
+│                        explains it. Every bp fence of `docs.md` is `<!-- example: <cell> -->` or a
+│                        text fence. `botopink cell check conformance/` is green
 ├── botopink.json      ← WORKSPACE: name rakun · version · targets [erlang] (decision 117
 │                        rule 9 — every member declares [erlang] too) · workspaces
 │                        ["modules/*", "starters/*", "examples/*"]. Nothing importable from it.
@@ -912,7 +919,7 @@ own `examples/` directory, which lives in the meta repository's `specs/` tree
 and is not this worktree's to write. The developer's view — a layout auth guard,
 a server action writing a cookie and deferring an analytics write, a route
 handler reading a header, and one `getPost` shared by `generateMetadata` and the
-page — is in `docs.md` instead. `examples/` here is a workspace of buildable
+page — is in `conformance/docs.md` instead. `examples/` here is a workspace of buildable
 members, and a member exercising a layout or a server action needs fronts 23 and
 24, neither of which has landed.
 
@@ -4901,7 +4908,7 @@ completed handshake.
   counts reductions (`erlang:process_info(self(), reductions)`), not
   microseconds; a socket or read budget on a path expected to succeed is ten
   seconds.
-- Keep this file in sync with `docs.md` and the spec in the same change.
+- Keep this file in sync with `conformance/docs.md` and the spec in the same change.
 - `modules/rakun/**` and `modules/rakun-app/**` are `botopink format`-clean
   (`botopink format --check modules/rakun modules/rakun-app` exits 0 — PK-5);
   run the formatter over them before committing. A test that greps a source

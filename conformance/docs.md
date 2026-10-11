@@ -1,9 +1,9 @@
 # rakun — Spring-style application framework
 
 > Path: `repository/rakun/` (a workspace) · core: `repository/rakun/modules/rakun/`
-> Sibling (AGENTS): [`./AGENTS.md`](AGENTS.md) · Members: [`./modules/README.md`](modules/README.md)
-> Parent (workspace): [`../AGENTS.md`](../AGENTS.md)
-> Spec: [`../../tasks/v0.beta.5/specs/rakun.md`](../../tasks/v0.beta.5/specs/rakun.md)
+> Sibling (AGENTS): [`../AGENTS.md`](../AGENTS.md) · Members: [`../modules/README.md`](../modules/README.md)
+> Parent (workspace): [`../../AGENTS.md`](../../AGENTS.md)
+> Spec: [`../../../tasks/v0.beta.5/specs/rakun.md`](../../../tasks/v0.beta.5/specs/rakun.md)
 
 `rakun` is botopink's answer to Java's **Spring** / Spring Boot: a dependency-
 injection container paired with a declarative web layer, plus a real bootstrap
@@ -18,7 +18,7 @@ node row; `src/sidecars/rakun_runtime.erl` answers the erlang row with an OTP
 application, a supervised table owner and ETS. Every cell in `src/runtime.bp`
 carries both forms, and `test/erlang_runtime_test.bp` is one set of assertions
 run on both — the port is only worth as much as that file being green twice.
-See [`./AGENTS.md`](AGENTS.md) § The erlang host module for the OTP shape, the
+See [`../AGENTS.md`](../AGENTS.md) § The erlang host module for the OTP shape, the
 sidecar naming rule and what is still blocked.
 
 ## What it provides
@@ -61,7 +61,7 @@ sidecar naming rule and what is still blocked.
   `kernel`), one supervised process per connection, per-request reply headers,
   the `rakun.main.*` / `rakun.server.*` boot and tuning keys, and a
   startup-failure table that names the port, the transport or the construction
-  stack before the node halts. See [`./AGENTS.md`](AGENTS.md) § The server half.
+  stack before the node halts. See [`../AGENTS.md`](../AGENTS.md) § The server half.
 - **Auto-configuration** — `#[autoConfiguration]` plus `#[conditionalOnModule]`,
   `#[conditionalOnProperty]`, `#[conditionalOnBean]`,
   `#[conditionalOnMissingBean]` and `#[profile]`: a configuration registers only
@@ -107,34 +107,7 @@ because `get`/`set`/`new` are reserved keyword tokens.
 
 ## Usage
 
-```bp
-import {Rakun, App, Request, Response} from "rakun";
-import {service, restController, route, getMapping} from "rakun";
-import {rkScan, rkSingleton, rkEnter, rkDone, rkRegisterRoute} from "rakun";
-
-#[service]
-pub type GreetingService {
-    pub fn greet(self: Self, name: string) -> string {
-        return "Hello, " + name + "!";
-    }
-}
-
-#[restController]
-#[route("/api")]
-pub type GreetingController(
-    // injected by type
-    greeting: GreetingService,
-) {
-    #[getMapping("/hello/:name")]
-    pub fn hello(self: Self, req: Request) -> Response {
-        return Response.ok(self.greeting.greet(req.param("name")));
-    }
-}
-
-fn main() {
-    Rakun.run(App(port: 8080, basePath: "/api"));
-}
-```
+<!-- example: usage -->
 
 `Request.param`/`query`/`header` return a plain `string` (`""` when absent) — a
 matched route's path params are always present, and `""` is the natural default
@@ -144,32 +117,19 @@ The emitted DI/router wiring calls the host runtime by name, so a module
 declaring components imports those fns too (`rkScan`/`rkSingleton`/`rkEnter`/
 `rkDone`/`rkRegisterRoute`; add `rkProp`/`rkPropInt` when it has a `#[value]`
 field). See the runnable end-to-end app under
-[`./examples/rakun/`](examples/rakun/).
+[`../examples/rakun/`](../examples/rakun/).
 
 ## Configuration
 
 `#[value("key")]` reads the property table; `config.bp` fills it. A whole record
 binds at once with `#[configurationProperties]`:
 
-```bp
-#[configurationProperties("my.service")]
-pub type MyService(
-    enabled: bool,
-    remoteAddress: string,                       // binds from remote-address too
-    #[unit("seconds")] sessionTimeout: Duration,
-    #[nested] security: Security,
-)
-```
+<!-- example: configuration_properties -->
 
 The record is then injectable by type into any `#[service]`, and every key it
 declares lands in the run-time catalogue.
 
-```bp
-import {readDocument, rkConfigApply, entryAt} from "rakun";
-
-val docs = try readDocument("application.yaml");
-for (docs) { d -> val _ = rkConfigApply(d.entries); };
-```
+<!-- example: config_document -->
 
 `rkConfigLoad()` is the whole load: eight sources in order (command line,
 `RAKUN_APPLICATION_JSON`, environment, profile documents, base documents,
@@ -177,15 +137,7 @@ configuration trees, `rkSetProp`, declared defaults), profiles resolved and
 written to `rakun.profiles.resolved`, and one refusal naming the input when a
 location, an import, a document or a profile group is wrong.
 
-```bp
-import {rkConfigLoad} from "rakun";
-import {active} from "rakun";
-
-fn main() {
-    try rkConfigLoad();
-    @print(active().join(","));
-}
-```
+<!-- example: config_load -->
 
 `${key}` and `${key:default}` resolve at load time; `${random.uuid}`,
 `${random.int[1024,65536]}` and friends resolve per REFERENCE through
@@ -199,7 +151,7 @@ plus `configtree:` directories (one file per key). A nested JSON object flattens
 to dot keys (`server.port`) and an array to indexed keys (`a[0]`). A YAML
 construct outside the subset (anchor, alias, flow style, block scalar, tag) is a
 located refusal naming the file and the line, never a silent mis-parse. See
-[`AGENTS.md`](AGENTS.md) § Externalized configuration for the table.
+[`AGENTS.md`](../AGENTS.md) § Externalized configuration for the table.
 
 ## File-convention routing
 
@@ -207,7 +159,7 @@ located refusal naming the file and the line, never a silent mis-parse. See
 `rakun-app` member — add `"rakun-app": { "workspace": true }` or its path) is
 the other model — a URL that comes from where a file sits:
 
-```bp
+```text
 import {layout, page, PageContext, LayoutProps, ctxParam, rkAppLayout, rkAppPage} from "rakun-app";
 
 #[layout("")]
@@ -246,21 +198,7 @@ moving between `app/` and `src/app/` is one config line.
 reach the in-flight request: a `Request` lives only inside the function the
 router dispatched to.
 
-```bp
-import {RequestPhase, RequestScope, beginRequest, endRequest, requestPhase} from "rakun";
-
-val epoch = beginRequest(RequestScope(
-    id: "req-77",
-    phase: RequestPhase.Handler,
-    method: "GET",
-    path: "/api/posts",
-    query: "page=2",
-    headersWire: wire,
-    strict: false,
-));
-val body = runHandler();
-val setCookies = endRequest();
-```
+<!-- example: request_context -->
 
 `headersWire` is `name\tvalue` lines, `\n`-separated, names already lowercased
 by the dispatcher. `endRequest()` must run on the failure path too, or the next
@@ -285,21 +223,7 @@ than keeping a second one.
 
 ### The dispatcher contract
 
-```bp
-val epoch = beginRequest(RequestScope(
-    id: newRequestId(),
-    phase: RequestPhase.Handler,
-    method: "GET",
-    path: "/api/posts",
-    query: "page=2",
-    headersWire: wire,
-    strict: false,
-));
-val body = runHandler();       // wrapped: a raise must still reach the line below
-val setCookies = endRequest(); // the queued `Set-Cookie` lines, `\n`-separated
-// … write the response …
-val _ = drainAfter(30000);     // reap the deferred work
-```
+<!-- example: request_dispatcher -->
 
 `endRequest()` must run on the failure path too. The blob splits on `\n` into
 whole header values and a cookie value can never split it — `serializeCookie`
@@ -315,44 +239,11 @@ percent-encodes a newline.
 
 ### A scenario, end to end
 
-```bp
-// a layout's auth guard — front 23 renders this in phase Render
-fn requireSession() -> string {
-    val sid = cookieOf(cookies(), "session", "");
-    if (sid == "") return "" else return sid;
-}
-
-// a server action — front 24 dispatches this in phase Action
-fn setTheme(theme: string) -> i32 {
-    val jar: Cookies = cookies();
-    val _ = jar.set("theme", theme, CookieAttrs(
-        path: "/", domain: "", maxAge: 31536000,
-        httpOnly: false, secure: true, sameSite: "Lax",
-    ));
-    return after({ ->
-        writeAnalytics(requestId(), "theme:" + theme);
-        0;
-    });
-}
-
-// a route handler — front 25 dispatches this in phase Handler
-fn whoAmI() -> string {
-    return headerOf(headers(), "user-agent", "unknown");
-}
-
-// one loader shared by generateMetadata and the page — loads once per request
-fn getPost(id: string) -> string {
-    return memoize(memoKey("post", [id]), { -> loadPost(id) });
-}
-```
+<!-- example: request_scenario -->
 
 ### `headers()`
 
-```bp
-import {headers, headerOf, isDynamic, dynamicReason} from "rakun";
-
-val ua = headerOf(headers(), "User-Agent", "");
-```
+<!-- example: request_headers -->
 
 `get` answers `?string` — `null` for an absent header, not `""`. Read it with
 `headerOf(h, name, fallback)` or bind the handle with its annotation
@@ -368,14 +259,7 @@ route.
 
 ### `cookies()`
 
-```bp
-import {cookies, cookieOf, cookieDefaults, Cookies} from "rakun";
-
-val theme = cookieOf(cookies(), "theme", "light");
-
-val jar: Cookies = cookies();
-val _ = jar.set("theme", "dark", cookieDefaults());
-```
+<!-- example: request_cookies -->
 
 A cookie may be written from a server action, a route handler or middleware; a
 write in phase `Render` or `After` raises. The queued lines come back from
@@ -397,12 +281,7 @@ answer.
 
 ### `draftMode()` and `connection()`
 
-```bp
-import {draftMode, connection, isDynamic, dynamicReason, DraftMode} from "rakun";
-
-val draft: DraftMode = draftMode();
-if (draft.isEnabled()) { … } else { … };
-```
+<!-- example: request_draft_mode -->
 
 `__rakun_draft` is a signed cookie; `enable()` needs `rakun.draft.secret` and
 raises without it rather than issuing an unsigned bypass. Enabling marks the
@@ -412,14 +291,7 @@ to need a header — and `dynamicReason()` names the first function that marked.
 
 ### `after()`
 
-```bp
-import {after, drainAfter} from "rakun";
-
-val _ = after({ ->
-    writeAnalytics(requestId());
-    0;
-});
-```
+<!-- example: request_after -->
 
 The work runs once the response is sent, against a FROZEN copy of the frame
 under phase `After`: it can read the request's headers and cookies and can write
@@ -435,13 +307,7 @@ the fact.
 
 ### Per-request memoization
 
-```bp
-import {memoKey, memoize, preload} from "rakun";
-
-fn getPost(id: string) -> string {
-    return memoize(memoKey("post", [id]), { -> loadPost(id) });
-}
-```
+<!-- example: request_memo -->
 
 One table per request. A miss runs the loader and stores; a hit answers the
 stored value and does not evaluate the loader at all; two requests with the same
@@ -462,7 +328,7 @@ escaped on the way.
 rakun does not know what an element is. It declares no dependency on a UI
 library, so the six things a walker needs are handed to it as a record:
 
-```bp
+```text
 import {ElementView, renderNode} from "rakun-app";
 import {Element, isVoidTag, isRawTextTag} from "jhonstart";
 
@@ -496,7 +362,7 @@ An application that ships no UI library can use rakun's own `Node` through
 
 ### Rendering a tree
 
-```bp
+```text
 val v: ElementView<Element> = jhonstartView();
 val html = renderNode(v, tree);
 ```
@@ -513,7 +379,7 @@ of it is a place a reviewer must look at.
 
 ### Composing a page with its layouts
 
-```bp
+```text
 val table = appTable();
 if (matchPath(table, "/blog/hello")) { hit ->
     val ctx = contextOf(hit, "/blog/hello", emptyParams());
@@ -533,7 +399,7 @@ because that record is the router's and carries three fields.
 
 ### The document and the payload
 
-```bp
+```text
 val doc = await document(renderHead(meta), body, Payload(
     build: buildId(), pathname: "/blog/hello", pattern: "/blog/[slug]",
     params: "slug=hello", query: "page=2", table: rkAppTable(),
@@ -555,7 +421,7 @@ a param carrying `</script><img src=x onerror=…>` produces a document with no
 rakun never imports a bundler or a stylesheet pipeline. Everything a full-stack
 framework adds to a document arrives as a record of functions:
 
-```bp
+```text
 val custom = withHeadExtra(defaultHooks(), { route -> "<link rel=\"stylesheet\" href=\"/app.css\">" });
 val _ = setHooks(custom);
 ```
@@ -569,7 +435,7 @@ app.
 
 ### Rendering a request
 
-```bp
+```text
 val epoch = beginRender(random.uuidV4(), "/blog/hello", "page=2", false);
 val page = await render(view, "/blog/hello", "page=2");
 val cookies = endRender();          // on the failure path too
@@ -588,7 +454,7 @@ on a keep-alive connection starts inside this one's frame.
 
 Reading the search params marks the render dynamic:
 
-```bp
+```text
 val page = searchParam(route, "page");   // sets the payload's `d` to true
 ```
 
@@ -597,7 +463,7 @@ val page = searchParam(route, "page");   // sets the payload's `d` to true
 `@Task<T>` lowers eagerly on erlang, so awaiting two tasks runs them one
 after the other at full latency. Concurrency comes from processes:
 
-```bp
+```text
 var loaders: Array<fn() -> @Task<Element>> = [];
 loaders.push({ -> loadPosts() });
 loaders.push({ -> loadAuthor() });
@@ -609,7 +475,7 @@ function type, so it will not fit, which is the point.
 
 ### Streaming
 
-```bp
+```text
 val resolved = await renderAll(bodies);
 val page = streamChunks(head, shell, ids, markupAll(view, resolved), payload);
 ```
@@ -630,26 +496,7 @@ observing an application event.
 
 ### `#[managed]` — registering a bean
 
-```bp
-import {service, repository} from "rakun";
-import {managed, rkRegisterBean} from "rakun";
-
-#[repository]
-#[managed]
-pub type OrderRepository {
-    pub fn ids(self: Self) -> string[] {
-        return ["o-1", "o-2"];
-    }
-}
-
-#[service]
-#[managed]
-pub type OrderCache(repo: OrderRepository) {
-    pub fn size(self: Self) -> i32 {
-        return self.repo.ids().length;
-    }
-}
-```
+<!-- example: managed -->
 
 `#[managed]` STACKS under a stereotype rather than replacing it — the way
 `#[route]` stacks under `#[restController]` — because the six stereotype
@@ -664,14 +511,7 @@ application's own module and calls those names there.
 
 ### Resolving
 
-```bp
-import {rkResolve, rkResolveNamed, rkHasBean, rkBeanNames} from "rakun";
-
-val cache: ?OrderCache = rkResolve("OrderCache");
-val fixed: ?Clock = rkResolveNamed("Clock", "fixed");
-val known = rkHasBean("OrderCache");
-val every = rkBeanNames();
-```
+<!-- example: resolve -->
 
 The registry key is a STRING and the type comes from the annotated binding.
 `ctx.resolve<OrderCache>()` is not writable: explicit generic arguments do not
@@ -693,20 +533,7 @@ Mark one `#[primary]`, or reach for the one you meant with
 
 ### `Context`
 
-```bp
-import {Context, __rkMake_Context} from "rakun";
-
-#[service]
-#[managed]
-pub type OrderReader(ctx: Context) {
-    pub fn size(self: Self) -> i32 {
-        val cache: ?OrderCache = self.ctx.resolve("OrderCache");
-        var n = 0;
-        if (cache != null) n = cache.size();
-        return n;
-    }
-}
-```
+<!-- example: context -->
 
 `Context` is injectable BY TYPE: a field of it wires with no extra declaration,
 because rakun emits the `__rkMake_Context()` factory the component decorator
@@ -733,28 +560,7 @@ keeps `?OrderCache` an `?OrderCache`.
 
 ### `#[provides]` — a factory function
 
-```bp
-import {provides, qualifier, primary} from "rakun";
-
-pub type Clock(zone: string) {
-    pub fn stamp(self: Self) -> string {
-        return "<now@" + self.zone + ">";
-    }
-}
-
-#[provides]
-#[qualifier("system")]
-#[primary]
-pub fn systemClock() -> Clock {
-    return Clock(zone: "UTC");
-}
-
-#[provides]
-#[qualifier("fixed")]
-pub fn fixedClock() -> Clock {
-    return Clock(zone: "fixed");
-}
-```
+<!-- example: provides -->
 
 `Clock` is now injectable by type — a `clock: Clock` field gets the `#[primary]`
 one — and `ctx.resolveNamed("Clock", "fixed")` reaches the other. It is not
@@ -776,23 +582,7 @@ what the function returns.
 
 ### Lifecycle hooks
 
-```bp
-import {managed, postConstruct, preDestroy, rkRegisterLifecycle} from "rakun";
-
-#[service]
-#[managed]
-pub type OrderCache(repo: OrderRepository) {
-    #[postConstruct]
-    pub fn warm(self: Self) {
-        @print("warming " + self.repo.ids().length.toString() + " entries");
-    }
-
-    #[preDestroy]
-    pub fn close(self: Self) {
-        @print("order cache released");
-    }
-}
-```
+<!-- example: lifecycle -->
 
 A hook may use every injected dependency — it runs on the constructed instance.
 `#[postConstruct]` runs once per singleton however many sites resolve it, in
@@ -810,33 +600,7 @@ sees both and emits the registration.
 
 ### Application events
 
-```bp
-import {Context, Event, event, eventListener, rkRegisterListener} from "rakun";
-
-#[service]
-#[managed]
-pub type AuditListener {
-    #[eventListener("OrderPlaced")]
-    pub fn onOrderPlaced(self: Self, ev: Event) {
-        @print("order placed: " + ev.payload);
-    }
-
-    #[eventListener("ApplicationReady")]
-    pub fn onReady(self: Self, ev: Event) {
-        @print("ready");
-    }
-}
-
-#[restController]
-#[route("/api/orders")]
-pub type OrderController(ctx: Context) {
-    #[postMapping("/")]
-    pub fn place(self: Self, req: Request) -> Response {
-        val _p = self.ctx.publish(event("OrderPlaced", "OrderController", req.body()));
-        return Response.created("accepted");
-    }
-}
-```
+<!-- example: events -->
 
 One `Event` record and a STRING name: Spring dispatches by the listener
 parameter's type, and a method-level `@Decl` carries no parameter list, so the
@@ -853,14 +617,7 @@ A module that imports `Context` must also import `Event`, because
 
 ### The boot sequence
 
-```bp
-import {context} from "rakun";
-
-fn main() {
-    context.bootSequence();
-    Rakun.run(App(port: 8080, basePath: "/api"));
-}
-```
+<!-- example: boot_sequence -->
 
 `bootSequence()` publishes Spring's eight events, with the eager construction of
 every registered bean and the `#[postConstruct]` pass between the fourth and the
@@ -879,17 +636,7 @@ everything after the point of failure and then the boot stops.
 
 ### Scopes
 
-```bp
-import {managed, scope, rkScan, rkRequestScoped} from "rakun";
-
-#[managed]
-#[scope("prototype")]
-pub type TicketMachine(repo: OrderRepository) { … }
-
-#[managed]
-#[scope("request")]
-pub type RequestBasket(repo: OrderRepository) { … }
-```
+<!-- example: scopes -->
 
 `singleton` (the default) is what constructor injection always gets.
 `prototype` constructs on every `resolve`. `request` caches in the request
@@ -931,14 +678,7 @@ key is a default rather than an error — at boot or at any other time. Use fron
 
 ### Shutdown and the exit code
 
-```bp
-import {exitCode, shutdown, rkRegisterExitCode} from "rakun";
-
-#[exitCode]
-pub fn drainExitCode() -> i32 {
-    return 0;
-}
-```
+<!-- example: exit_code -->
 
 `shutdown()` runs every `#[preDestroy]` in reverse registration order — reverse
 dependency order, because a component is registered after the components it was
@@ -953,17 +693,7 @@ status on both hosts.
 
 ### `#[imports]`
 
-```bp
-#[configuration]
-#[managed]
-#[imports("Wallet")]
-pub type WalletConfig {
-    #[bean]
-    pub fn wallet(self: Self) -> Wallet {
-        return Wallet(owner: "treasury");
-    }
-}
-```
+<!-- example: imports -->
 
 Spring's `@Import`: a bean is registered for each named type, so a configuration
 record in a module the application does not otherwise reference is still wired.
@@ -986,28 +716,7 @@ eager pass. All three are read off the declaration by `#[managed]` and
 
 A `rakun-*` module ships a configuration that wires itself only when it should.
 
-```bp
-import {autoConfiguration, conditionalOnModule, conditionalOnProperty} from "rakun";
-import {conditionalOnMissingBean, autoConfigureAfter, profile} from "rakun";
-import {bean, value, service} from "rakun";
-import {rkScan, rkSingleton, rkEnter, rkDone, rkProp, rkPropInt} from "rakun";
-import {rkAutoRegister, rkAutoProvides, rkAutoGate} from "rakun";
-
-#[autoConfiguration]
-#[conditionalOnModule("rakun-mail")]
-#[conditionalOnProperty("rakun.mail.host", "*")]
-#[autoConfigureAfter("RakunCoreAutoConfiguration")]
-pub type RakunMailAutoConfiguration(
-    #[value("rakun.mail.host")] host: string,
-    #[value("rakun.mail.port")] port: i32,
-) {
-    #[bean]
-    #[conditionalOnMissingBean("MailSender")]
-    pub fn mailSender(self: Self) -> MailSender {
-        return MailSender(host: self.host, port: self.port);
-    }
-}
-```
+<!-- example: autoconfig -->
 
 The markers are conjunctive and read top to bottom; `"*"` on a property means
 "set and non-empty" and is spelled out because a decorator argument's declared
@@ -1020,12 +729,7 @@ also the form that reads correctly in the report.
 The application runs the pass itself, once, before `Rakun.run` — `bootstrap.bp`
 is frozen for the milestone, so the line is explicit:
 
-```bp
-fn main() {
-    val _ = autoConfigure();
-    Rakun.run(App(port: 8080, basePath: "/api"));
-}
-```
+<!-- example: autoconfig -->
 
 `autoConfigure()` sorts every registration, evaluates each in that order and
 records the decision. It is idempotent: a second call re-evaluates nothing.
@@ -1067,13 +771,7 @@ configuration is reported, because evaluation short-circuits there.
 
 ### `#[profile]` on an ordinary component
 
-```bp
-#[service]
-#[profile("prod")]
-pub type MailAuditService(
-    sender: MailSender,
-)
-```
+<!-- example: profile_component -->
 
 Same machinery, same report: off its profile the component is left unbuilt and
 appears in the "not applied" block with `F|prod` and the active set as the value
@@ -1095,32 +793,9 @@ CORS policy and hands the runner to the host, so front 04's dispatcher finds it.
 
 ### One chain, two entry points
 
-```bp
-import {filter, order, Chain, WebRequest} from "rakun-web";
-import {Response, rkScan, rkSingleton, rkEnter, rkDone, toI32} from "rakun";
-import {registerFilter} from "rakun-web";
+<!-- example: filter_chain -->
 
-#[filter]
-#[order("-10")]
-pub type TimingFilter {
-    pub fn handle(self: Self, req: WebRequest, chain: Chain) -> Response {
-        return chain.next(req);
-    }
-}
-```
-
-```bp
-// middleware.bp, at the project root
-import {middleware, matcher, Next, Chain, WebRequest} from "rakun-web";
-import {registerMiddleware, gateByMatcher, skip} from "rakun-web";
-
-#[middleware]
-#[matcher("/dashboard/:path*")]
-pub fn appMiddleware(req: WebRequest, chain: Chain) -> Response {
-    val token = req.header("authorization");
-    return if (token == "") Next.redirect("/login") else chain.next(req);
-}
-```
+<!-- example: middleware -->
 
 A filter that does not call `chain.next(req)` short-circuits, which is how a
 security filter answers 401 without the handler ever running. A filter that
@@ -1147,10 +822,7 @@ and never reaches the wire: the chain reads it as "continue".
 
 ### Response headers
 
-```bp
-val res = withHeader(Response.ok("{}"), "Content-Type", "application/json");
-val two = withHeaders(res, [#("X-A", "1"), #("X-B", "2")]);
-```
+<!-- example: response_headers -->
 
 `withHeader` returns the `Response` it was given and **replaces by name**,
 case-insensitively. Two names are special: `Set-Cookie` is refused (queue cookies
@@ -1159,21 +831,11 @@ with front 62's `cookies().set` and hand `endRequest()`'s blob to
 
 ### CORS
 
-```bp
-#[provides]
-pub fn corsPolicy() -> CorsPolicy {
-    return corsPolicy(["https://example.com"], ["GET", "POST"], [], [], false, 600);
-}
-```
+<!-- example: cors -->
 
 or, per controller:
 
-```bp
-#[crossOrigin("https://example.com", "GET,POST")]
-#[route("/api")]
-#[restController]
-pub type ApiController { }
-```
+<!-- example: cors -->
 
 With no policy nothing is allowed and no CORS header is ever set. The wildcard
 together with `allowCredentials: true` fails at boot. A preflight for a path with
@@ -1181,24 +843,7 @@ no route answers 404.
 
 ### Problem details
 
-```bp
-#[controllerAdvice]
-pub type OrderAdvice {
-    #[exceptionHandler("order.not-found")]
-    pub fn notFound(self: Self, detail: string) -> ProblemDetail {
-        return ProblemDetail(
-            typeUri: "https://example.com/problems/not-found",
-            title: "Order not found",
-            status: 404,
-            detail: detail,
-            instance: "/api/orders",
-        );
-    }
-}
-
-// in a handler:
-val _ = raiseProblem("order.not-found", "no order 42");
-```
+<!-- example: problem_details -->
 
 The tag is a **string**, not a type name: botopink has no typed raise and
 `try … catch` works over `@Result` alone. A raise nothing handles answers 500
@@ -1215,27 +860,7 @@ keys at boot (`Rakun.run` installs `config_check.installMessageSource()`), so
 
 ### The record, and the two functions it gets
 
-```bp
-import {validated, notBlank, sizeBetween, email, minValue, maxValue, pattern} from "validation";
-import {ValidationReport, Violation} from "validation";
-import {constraintTableJson} from "validation";
-import {vNotBlank, vSizeBetween, vEmail, vMinValueI32, vMaxValueI32, vPattern} from "validation";
-
-#[validated]
-pub type CreateUserRequest(
-    #[notBlank]
-    #[sizeBetween(2, 50)]
-    name: string,
-
-    #[notBlank]
-    #[email]
-    email: string,
-
-    #[minValue(18)]
-    #[maxValue(120)]
-    age: i32,
-)
-```
+<!-- example: validated -->
 
 `#[validated]` splices two functions into **this** module:
 
@@ -1254,10 +879,7 @@ unqualified call the BEAM compiler refuses.
 Every constraint on a field runs; the first failure does not stop the second,
 which is what makes a three-field form report three errors:
 
-```bp
-val report = validateCreateUserRequest(CreateUserRequest(name: "", email: "nope", age: 7));
-if (report.isValid() == false) return Response.withStatus(400, report.toProblemDetail());
-```
+<!-- example: validated -->
 
 ### The constraint set
 
@@ -1288,14 +910,7 @@ not pass.
 absent. The binders make the distinction and record a violation instead of
 yielding a zero. Bind everything, then ask once:
 
-```bp
-import {bindInt, bindRequired, bindingReport} from "validation";
-
-val name = bindRequired("name", req.query("name"));
-val age = bindInt("age", req.query("age"));
-val bound = bindingReport();          // every violation, and the accumulator is now empty
-if (bound.isValid() == false) return Response.withStatus(400, bound.toProblemDetail());
-```
+<!-- example: binders -->
 
 `bindInt("age", "12x")` answers `0` **and** records a `typeMismatch` naming
 `age`, so the zero can never be mistaken for a value the caller meant. The
@@ -1304,19 +919,7 @@ dictionary, so two concurrent requests cannot see each other's violations.
 
 ### An application constraint
 
-```bp
-import {Constraint, registerConstraint} from "validation";
-
-pub type CpfConstraint {
-    pub fn code(self: Self) -> string { return "cpf"; }
-    pub fn check(self: Self, field: string, value: string) -> string {
-        if (value.length() == 11) return "" else return "{field} must be a CPF, got \"{value}\"";
-    }
-}
-
-val __cpf = CpfConstraint();
-val __cpfRegistration = registerConstraint("cpf", __cpf.code(), { f, v -> __cpf.check(f, v) });
-```
+<!-- example: constraint -->
 
 Reach it from a field with `#[constraint("cpf")]`. `check` answers `""` when the
 value is acceptable and otherwise a message TEMPLATE — `{field}` and `{value}`
@@ -1332,14 +935,7 @@ placeholder the constraint does not have is left as written, because a visible
 
 ### Configuration that refuses to boot
 
-```bp
-#[validated]
-#[configurationProperties("app.billing")]
-pub type BillingConfig(
-    #[notBlank] endpoint: string,
-    #[minValue(1)] #[maxValue(10)] retryLimit: i32,
-)
-```
+<!-- example: billing_config -->
 
 `refuseInvalidConfig("BillingConfig", "app.billing", validateBillingConfig(cfg))`
 halts with one line per violation, each naming its **property key**
@@ -1404,19 +1000,7 @@ bundle, every time.
 
 ### Reading a bundle
 
-```bp
-import {sslBundle, sslBundleNames, sslExpiryDays, sslReload} from "rakun";
-
-val names: string[] = sslBundleNames();
-
-val b = sslBundle("mybundle");
-if (b) { bundle ->
-    @print("presenting " + bundle.certificateFile + " with client-auth " + bundle.clientAuth);
-};
-
-// `sslBundle("absent")` is the empty optional, NOT a bundle with empty fields:
-// "no TLS configured" and "TLS misconfigured" must not have the same shape.
-```
+<!-- example: ssl_bundle -->
 
 `sslBoot()` resolves every configured bundle once, reads each certificate's
 fields, checks that each private key belongs to its chain, and refuses at
@@ -1427,10 +1011,7 @@ refusal.
 
 ### Rotation without a restart
 
-```bp
-sslReload("mybundle");   // true when the new material resolved
-sslPoll();               // reloads every bundle with reload-on-update whose files moved
-```
+<!-- example: ssl_bundle -->
 
 A reload that fails **keeps the previous material** — not by putting anything
 back, but because nothing is written until everything has been read and checked.
@@ -1462,9 +1043,7 @@ contribution is what the certificate already tells anyone who connects.
 
 ### The web layer's side (`from "rakun-web"`)
 
-```bp
-import {tlsEnabled, peerSubject, peerCommonName, registerTls, listenerSummary} from "rakun-web";
-```
+<!-- example: web_tls -->
 
 - `rakun.server.ssl.bundle` names the listener's bundle and
   `rakun.management.ssl.bundle` front 76's. A key naming a bundle nobody
@@ -1511,6 +1090,6 @@ every `#[@External.Node]` require.
 
 ## See also
 
-- The embedded standard library → [`../botopink-lang/libs/std/docs.md`](../botopink-lang/libs/std/docs.md).
-- The runnable end-to-end app → [`./examples/rakun/`](examples/rakun/).
-- The `.bp` libraries group contract → [`../AGENTS.md`](../AGENTS.md).
+- The embedded standard library → [`../../botopink-lang/libs/std/docs.md`](../../botopink-lang/libs/std/docs.md).
+- The runnable end-to-end app → [`../examples/rakun/`](../examples/rakun/).
+- The `.bp` libraries group contract → [`../../AGENTS.md`](../../AGENTS.md).

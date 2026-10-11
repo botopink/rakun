@@ -1,0 +1,53 @@
+import {configurationProperties, nested, unit, Duration, rkSetProp, rkProp} from "rakun";
+import {service, rkScan, rkSingleton, rkEnter, rkDone, rkResolve, rkAddBean, rkInstallBeans} from "rakun";
+import {rkValue, rkValueOr, rkPropBool, rkPropIntOr, rkPropFloat, rkPropList, rkPropDuration, rkPropSize, rkRegisterConfigKeys} from "rakun";
+import {collections.Dict} from "std";
+
+#[configurationProperties("my.service.security")]
+pub type Security(
+    username: string,
+)
+
+#[configurationProperties("my.service")]
+pub type MyService(
+    enabled: bool,
+    remoteAddress: string,                       // binds from remote-address too
+    #[unit("seconds")] sessionTimeout: Duration,
+    #[nested] security: Security,
+)
+
+// The record is injectable by type into any `#[service]`.
+#[service]
+pub type Reporter(
+    cfg: MyService,
+) {
+    pub fn line(self: Self) -> string {
+        return self.cfg.remoteAddress + " " + self.cfg.sessionTimeout.millis.toString();
+    }
+}
+
+fn beans() -> Dict<string, unknown> {
+    return comptime {
+        var d: Dict<string, unknown> = Dict.empty();
+        for (@TypeInfo.all(
+            with: [service, configurationProperties],
+            member: "make",
+        )) { b ->
+            d = rkAddBean(d, b.name, b.value);
+        }
+        break d;
+    };
+}
+
+fn main() {
+    val _beans = rkInstallBeans(beans());
+    val _a = rkSetProp("my.service.enabled", "true");
+    val _b = rkSetProp("my.service.remote-address", "192.168.1.1");
+    val _c = rkSetProp("my.service.session-timeout", "30s");
+    val _d = rkSetProp("my.service.security.username", "admin");
+    val cfg = MyService.make();
+    @print(cfg.enabled.toString());
+    @print(cfg.remoteAddress);
+    @print(cfg.security.username);
+    @print(Reporter.make().line());
+}

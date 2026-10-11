@@ -1,0 +1,45 @@
+import {service, repository, managed, postConstruct, preDestroy, rkRegisterLifecycle, runPostConstruct, runPreDestroy, rkAddBean, rkInstallBeans} from "rakun";
+import {rkScan, rkSingleton, rkEnter, rkDone, rkResolve, rkRegisterBean} from "rakun";
+import {collections.Dict} from "std";
+
+#[repository]
+#[managed]
+pub type OrderRepository() {
+    pub fn ids(self: Self) -> string[] {
+        return ["o-1", "o-2", "o-3"];
+    }
+}
+
+#[service]
+#[managed]
+pub type OrderCache(repo: OrderRepository) {
+    #[postConstruct]
+    pub fn warm(self: Self) {
+        @print("warming " + self.repo.ids().length.toString() + " entries");
+    }
+
+    #[preDestroy]
+    pub fn close(self: Self) {
+        @print("order cache released");
+    }
+}
+
+fn beans() -> Dict<string, unknown> {
+    return comptime {
+        var d: Dict<string, unknown> = Dict.empty();
+        for (@TypeInfo.all(with: [service, repository], member: "make")) { b ->
+            d = rkAddBean(d, b.name, b.value);
+        }
+        break d;
+    };
+}
+
+fn main() {
+    val _beans = rkInstallBeans(beans());
+    // A hook runs on the constructed instance, once however often the pass runs.
+    val _r = runPostConstruct();
+    val _again = runPostConstruct();
+    // The pre pass runs on shutdown, in reverse registration order.
+    val failed = runPreDestroy();
+    @print("[" + failed + "]");
+}

@@ -1,0 +1,47 @@
+import {Context, rootContext, Event, event, eventListener, rkRegisterListener, publishEvent} from "rakun";
+import {service, restController, route, postMapping, managed, Request, Response, rkRegisterRoute, rkDispatch, rkAddBean, rkInstallBeans} from "rakun";
+import {rkScan, rkSingleton, rkEnter, rkDone, rkResolve, rkRegisterBean} from "rakun";
+import {collections.Dict} from "std";
+
+#[service]
+#[managed]
+pub type AuditListener() {
+    #[eventListener("OrderPlaced")]
+    pub fn onOrderPlaced(self: Self, ev: Event) {
+        @print("order placed: " + ev.payload);
+    }
+
+    #[eventListener("ApplicationReady")]
+    pub fn onReady(self: Self, ev: Event) {
+        @print("ready");
+    }
+}
+
+#[restController]
+#[route("/api/orders")]
+pub type OrderController(ctx: Context) {
+    #[postMapping("/")]
+    pub fn place(self: Self, req: Request) -> Response {
+        val _p = self.ctx.publish(event("OrderPlaced", "OrderController", req.path));
+        return Response.created("accepted");
+    }
+}
+
+fn beans() -> Dict<string, unknown> {
+    return comptime {
+        var d: Dict<string, unknown> = Dict.empty();
+        for (@TypeInfo.all(with: [service, restController], member: "make")) { b ->
+            d = rkAddBean(d, b.name, b.value);
+        }
+        break d;
+    };
+}
+
+fn main() {
+    val _beans = rkInstallBeans(beans());
+    val res = rkDispatch("POST", "/api/orders/");
+    @print(res.status.toString());
+    // An event nobody listens for delivers to zero listeners and is not an error.
+    val delivered = publishEvent(event("SomethingElse", "main", ""));
+    @print(delivered.toString());
+}

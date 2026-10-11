@@ -1,0 +1,64 @@
+import {service, repository, managed, provides, qualifier, primary, rkResolve, rkFind, rkFind, rkFindNamed, rkHasBean, rkBeanNames, rkAddBean, rkInstallBeans} from "rakun";
+import {rkScan, rkSingleton, rkEnter, rkDone, rkRegisterBean} from "rakun";
+import {collections.Dict} from "std";
+
+#[repository]
+#[managed]
+pub type OrderRepository() {
+    pub fn ids(self: Self) -> string[] {
+        return ["o-1", "o-2"];
+    }
+}
+
+#[service]
+#[managed]
+pub type OrderCache(repo: OrderRepository) {
+    pub fn size(self: Self) -> i32 {
+        return self.repo.ids().length;
+    }
+}
+
+pub type Clock(zone: string) {
+    pub fn stamp(self: Self) -> string {
+        return "<now@" + self.zone + ">";
+    }
+}
+
+#[provides]
+#[qualifier("system")]
+#[primary]
+pub fn systemClock() -> Clock {
+    return Clock(zone: "UTC");
+}
+
+#[provides]
+#[qualifier("fixed")]
+pub fn fixedClock() -> Clock {
+    return Clock(zone: "fixed");
+}
+
+fn beans() -> Dict<string, unknown> {
+    return comptime {
+        var d: Dict<string, unknown> = Dict.empty();
+        for (@TypeInfo.all(with: [service, repository], member: "make")) { b ->
+            d = rkAddBean(d, b.name, b.value);
+        }
+        break d;
+    };
+}
+
+fn main() {
+    val _beans = rkInstallBeans(beans());
+    val cache: ?OrderCache = rkFind("OrderCache");
+    val fixed: ?Clock = rkFindNamed("Clock", "fixed");
+    val known = rkHasBean("OrderCache");
+    val every = rkBeanNames();
+    if (cache != null) @print(cache.size().toString());
+    if (fixed != null) @print(fixed.stamp());
+    @print(known.toString());
+    @print(every.join(","));
+    // An unregistered type answers null and `rkHasBean` answers false.
+    val missing: ?OrderCache = rkFind("NoSuchBean");
+    @print((missing == null).toString());
+    @print(rkHasBean("NoSuchBean").toString());
+}
