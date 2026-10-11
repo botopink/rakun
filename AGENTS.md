@@ -1,5 +1,7 @@
 # styled
 
+`decisions-taken.md` is generated — from the meta repository's `specs/<milestone>/decisions-taken.md` by `scripts/decisions-split.py`; edit it there, never here.
+
 > Repository: `botopink/styled` (`git@github.com:botopink/styled.git`) · in the meta checkout: `repository/styled/`
 
 The `styled` library (decision 338): the base for building CSS components. `styled "…"` and
