@@ -49,8 +49,8 @@ rakun/
 │                        provides + Spring mapping + loading notes) and `modules/<example>/` cells
 │                        in the language suite's shape — `botopink.json` (rakun and the members it
 │                        uses as path dependencies, through the symlinks of the cell's `deps/`, a
-│                        workspace of its own), `src/main.bp`, `snapshot/output/main.snap`, `targets`
-│                        (erlang beam; the web cells erlang only) and the `docs.md` paragraph that
+│                        workspace of its own), `src/main.bp`, `snapshot/output/main.snap`, its
+│                        `"targets"` in `botopink.json` (erlang beam; the web cells erlang only) and the `docs.md` paragraph that
 │                        explains it. Every bp fence of `docs.md` is `<!-- example: <cell> -->` or a
 │                        text fence. `botopink cell check conformance/` is green
 ├── botopink.json      ← WORKSPACE: name rakun · version · targets [erlang] (decision 117
