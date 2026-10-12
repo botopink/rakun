@@ -350,10 +350,10 @@ fn workspaceRootAbove(dir: string) -> string {
 }
 
 // The directories one workspace pattern names: `modules/*` lists `modules`,
-// anything else is one directory.
+// `*` the workspace's own directory, anything else is one directory.
 fn patternDirs(root: string, pattern: string) -> string[] {
-    if (pattern.endsWith("/*") == false) return [root + "/" + pattern];
-    val base = root + "/" + pattern.slice(0, pattern.length() - 2);
+    if (pattern != "*" && pattern.endsWith("/*") == false) return [root + "/" + pattern];
+    val base = if (pattern == "*") root else root + "/" + pattern.slice(0, pattern.length() - 2);
     val names: string[] = fs.list(base).unwrapOr([]);
     return names.map({ n -> base + "/" + n });
 }
@@ -393,10 +393,40 @@ pub type Resolution(
     i: i32,
 )
 
+// The manifest of the workspace whose patterns list the directory of
+// `file`, or `""`: a member inherits that workspace's `dependencies`, each
+// resolved from the workspace's manifest (decision 512 of the compiler —
+// `conformance/modules/botopink.json` declares the cells' shared ones).
+fn workspaceListing(file: string) -> string {
+    val dir = path.dirname(absolute(file));
+    val root = workspaceRootAbove(dir);
+    if (root == "") return "";
+    val wsFile = root + "/" + manifestName();
+    var listed = false;
+    for (workspacePatterns(readOr(wsFile))) { pat ->
+        for (patternDirs(root, pat)) { d ->
+            if (path.resolve([d]) == dir) listed = true;
+        }
+    }
+    return if (listed) wsFile else "";
+}
+
 fn visit(r: Resolution, file: string) -> Resolution {
     val text = readOr(file);
     var names = r.names;
     var queue = r.queue;
+    // A member's inherited dependencies come first, as the compiler lists them.
+    val ws = workspaceListing(file);
+    if (ws != "") {
+        val wsText = readOr(ws);
+        for (manifestDependencyNames(wsText)) { d ->
+            if (names.filter({ n -> n == d }).length == 0) {
+                names.push(d);
+                val next = dependencyManifest(ws, wsText, d);
+                if (next != "") queue.push(next);
+            }
+        }
+    }
     for (manifestDependencyNames(text)) { d ->
         if (names.filter({ n -> n == d }).length == 0) {
             names.push(d);

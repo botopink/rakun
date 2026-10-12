@@ -47,12 +47,14 @@ rakun/
 ├── AGENTS.md          ← you are here
 ├── conformance/       ← the reference and its examples (decision 463): `docs.md` (what this lib
 │                        provides + Spring mapping + loading notes) and `modules/<example>/` cells
-│                        in the language suite's shape — `botopink.json` (rakun and the members it
-│                        uses as path dependencies, through the symlinks of the cell's `deps/`, a
-│                        workspace of its own), `src/main.bp`, `snapshot/output/main.snap`, its
+│                        in the language suite's shape — `botopink.json` (the members it adds
+│                        beside rakun as path dependencies, through the symlinks of the cell's
+│                        `deps/`; rakun itself, the targets [erlang, beam] and the version are the
+│                        workspace's, `modules/botopink.json`, decision 512), `src/main.bp`, `snapshot/output/main.snap`, its
 │                        `"targets"` in `botopink.json` (erlang beam; the web cells erlang only) and the `docs.md` paragraph that
 │                        explains it. Every bp fence of `docs.md` is `<!-- example: <cell> -->` or a
-│                        text fence. `botopink cell check conformance/` is green
+│                        text fence. `conformance/modules/botopink.json` is a workspace whose members are the cells (`"workspaces": ["*"]`, decision 512 of the compiler): it declares what every cell shares — rakun as the path dependency `../../modules/rakun`, the targets erlang and beam, the version — so a cell's own `botopink.json` holds its name and what it adds, and the cells' dependencies share one code cache, `conformance/modules/.botopinkbuild/cache/` (decision 509; `botopink cell check --cold` reads none of it).
+│                        `botopink cell check conformance/` is green
 ├── botopink.json      ← WORKSPACE: name rakun · version · targets [erlang] (decision 117
 │                        rule 9 — every member declares [erlang] too) · workspaces
 │                        ["modules/*", "starters/*", "examples/*"]. Nothing importable from it.
