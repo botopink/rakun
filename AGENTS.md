@@ -4925,7 +4925,7 @@ completed handshake.
 ## CI
 
 `.github/workflows/test.yml` is the manifests' target set (decision gate-j) on
-the runners the compiler is gated on: `erlang` × {`ubuntu-24.04`, `macos-14`},
+the runners the compiler is gated on: `erlang` × `ubuntu-24.04` (no macos row),
 every row hard — no `allow_fail`, no `commonJS` row (no member declares it;
 rakun is erlang-only, decision 113), no `beam` row (`botopink test` cannot run
 beam, so such a row measured nothing), no windows row (gate-f: botopink-lang's
@@ -4934,7 +4934,7 @@ port; it returns with the compiler's). The linux runner is `ubuntu-24.04`; the
 compiler links against a pinned glibc 2.35 (decision 219, ubuntu-22.04's), so
 it starts on either runner — the 22.04 floor is the compiler's own workflow's.
 Erlang/OTP 28 is installed on every row before `zig build install` (the build
-runs `erlc`), pinned on both runners — the release the root `botopink.json`'s `"otp"` names (`"28"`), read by a step before the installs (decision 228; the compiler refuses any other `erl` on PATH) — `erlef/setup-beam` on linux, `brew install erlang@<release> && brew link --force erlang@<release>` with its `bin` on `$GITHUB_PATH` on macos (decision 227; Homebrew's plain `erlang` is the latest OTP), and a step after both fails the job unless `erl` reports that release.
+runs `erlc`), pinned on the runner — the release the root `botopink.json`'s `"otp"` names (`"28"`), read by a step before the installs (decision 228; the compiler refuses any other `erl` on PATH) — `erlef/setup-beam` (decision 227), and a step after it fails the job unless `erl` reports that release.
 
 Each row runs one `botopink-lib-test --bin "$BOTOPINK_BIN" --target erlang
 --strict` from a scratch directory with `BOTOPINK_LIB_ROOTS` naming this
