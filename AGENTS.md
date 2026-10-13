@@ -20,7 +20,7 @@ pub val tab4 = styledProperty "tab-size: 4;";
 fn padAll(n: i32) -> StyledPropertyView { return styledProperty "padding: --spacing(${n});"; }
 
 // `${padAll(2)}` is a call: computed at render, so a function run below the
-// render's `StyledContext` provider (a `val` is evaluated outside every render).
+// render's `StyledSheet` provider (a `val` is evaluated outside every render).
 fn code() -> StyledView {
     return styled """
   ${tab4}
@@ -56,15 +56,15 @@ styled/
 │   ├── variants.bp    ← VariantRead, readVariant — what `@variant <name>` means under a theme
 │   ├── reader.bp      ← Source, Block, Value, readBlock, firstNonDeclaration — the literal read at build
 │   ├── layers.bp      ← Layer, layer, SheetEntry, Sheet (of, add, classIn, render)
-│   └── styled.bp      ← StyledSheet, StyledContext, Styled, StyledProperty, StyledView, StyledPropertyView,
+│   └── styled.bp      ← StyledSheet, styledContext, Styled, StyledProperty, StyledView, StyledPropertyView,
 │                        Styleable, styled (default), styledProperty, the constant/computed constructors,
 │                        splice, holeText, Holes (what a literal's holes are worth at build, decision 355)
 ├── test/              ← styled_test (the literals), theme_test, sheet_test, context_test (what registers through
-│                        StyledContext, the provider's writer a std mock), styled_example_test (front 119's
+│                        StyledSheet's context, the provider's writer a std mock), styled_example_test (front 119's
 │                        example as a suite case, but for the import lines), source_order_test (the
 │                        reader's source order, decision 368)
 ├── examples/styled-example/   ← front 119's example as an application of `from "styled"`
-├── examples/styled-context/   ← a render's root providing StyledContext, its writer printing each registration;
+├── examples/styled-context/   ← a render's root providing StyledSheet's context, its writer printing each registration;
 │                                `expected.out` (the repository stage runs it)
 ├── examples/styled-context-unbound/ ← a computed literal with no provider: `before`, then context-unbound
 │                                (`expected.out`, `expected.stderr`)
@@ -121,16 +121,18 @@ parameter, a call such as `${padAll(2)}`, a `val` another module exports) emits 
 `propertyComputed`, which build the text when the component runs (an `async function` on commonJS,
 decision 338 p9).
 
-**Registration** (decisions 352, 354). `pub val StyledContext = Context<StyledSheet>()`; a
+**Registration** (decisions 352, 354, 378, 379). `pub val styledContext = createContext(StyledSheet(layer:
+"", add: missingProvider))` declares `StyledSheet`'s default; a
 `StyledSheet(layer, add)` is the render's sheet as a component sees it — the layer it writes to and
 the writer of the sheet its provider holds. Whoever renders provides it at the root (jhonstart's
 `compose`, emilia's `flush()`, the build's sheet at a prerender); `styled` holds no store and no
-host cell. `styledComputed` and `propertyComputed` read it with `use context(StyledContext)` at the
+host cell. `styledComputed` and `propertyComputed` read it with `use context(StyledSheet)` at the
 top of their bodies (357) and hand `add` their class and rules every time they run — the provider's
 `Sheet.add` keeps a component once. A `${p}` splice registers nothing: the computed call takes each
 splice as `splice({ -> <hole> })`, which runs the hole under a provider that keeps nothing. A
 literal computed at build registers nothing (its constructor reads no context). With no provider
-above, a computed literal is `context-unbound` at run time — so a `val` whose literal is computed
+above, a computed literal reads the declared default, whose writer aborts naming the missing
+provider (378 (3)) — so a `val` whose literal is computed
 at render (`pub val code = styled "${padAll(2)}"`) fails when it is first read, being evaluated
 outside every render (`119-f`); such a component is a function.
 

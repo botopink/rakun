@@ -73,7 +73,8 @@ pass "build-time components: tab4 and tabRed are constants of the emitted module
 # nothing, a literal computed at build registers nothing, a property standing
 # on its own registers itself. `examples/styled-context-unbound` renders the
 # same kind of literal with no provider above it: it prints `before` and
-# aborts `context-unbound`, naming `StyledContext` (its `expected.stderr`).
+# aborts in the declared default's writer, naming the missing provider (its
+# `expected.stderr`, decision 378 (3)).
 for target in erlang commonJS; do
     for name in styled-context styled-context-unbound; do
         app="$gate_root/examples/$name"
@@ -89,11 +90,11 @@ for target in erlang commonJS; do
         if [ -f "$app/expected.stderr" ]; then
             if [ "$status" -eq 0 ]; then
                 rm -rf "$out"
-                fail "$target: examples/$name ran to the end — a read of StyledContext with no provider above it is context-unbound"
+                fail "$target: examples/$name ran to the end — a write to the declared default sheet, with no provider above it, aborts"
             fi
             if ! grep -qF -- "$(head -n 1 "$app/expected.stderr")" "$err"; then
                 rm -rf "$out"
-                fail "$target: examples/$name aborted without naming context-unbound on StyledContext"
+                fail "$target: examples/$name aborted without naming the missing StyledContext provider"
             fi
         elif [ "$status" -ne 0 ]; then
             rm -rf "$out"
@@ -106,7 +107,7 @@ for target in erlang commonJS; do
         rm -rf "$out"
     done
 done
-pass "StyledContext: a component computed at render registers through the render's provider, a splice and a constant register nothing, no provider is context-unbound, on erlang and commonJS"
+pass "StyledContext: a component computed at render registers through the render's provider, a splice and a constant register nothing, no provider aborts in the declared default, on erlang and commonJS"
 
 # The claim of decision 368 (1): the reader keeps source order — a declaration
 # written after a nested rule opens a new rule of the class, as CSS Nesting's

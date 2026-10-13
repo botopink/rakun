@@ -14,11 +14,11 @@
 //// build: the emitted call carries the class and the rules as constants. A
 //// literal with a hole computed at render is computed when the component
 //// runs, and registers its class and rules in the render's sheet through
-//// `use context(StyledContext)` (decisions 352, 354): whoever renders
+//// `use context(StyledSheet)` (decisions 352, 354): whoever renders
 //// provides the context — the sheet is the provider's, `styled` holds no
 //// store. A `${p}` splice and a literal computed at build register nothing.
 
-import {hash, context.Context, context.provide, context.context} from "std";
+import {hash, context.createContext, context.provide, context.context} from "std";
 import {theme.baseTheme};
 import {reader.Source, reader.readBlock, reader.firstNonDeclaration, reader.classMark};
 import {hash.classHash};
@@ -37,8 +37,13 @@ pub behavior Styleable {
 pub type StyledSheet(layer: string, add: fn(layer: string, item: Styled))
 
 // Provided at the root by whoever renders (354 (7)); read by every literal
-// computed at render. With no provider above, `context-unbound` at run time.
-pub val StyledContext = Context<StyledSheet>();
+// computed at render. The declared default (decisions 378, 379) is the sheet
+// of no provider: writing to it aborts, naming the missing provider.
+pub val styledContext = createContext(StyledSheet(layer: "", add: missingProvider));
+
+fn missingProvider(layer: string, item: Styled) -> void {
+    @panic("styled: no StyledContext provider — the render's root provides it");
+}
 
 // A component: its class and its rules (`.s_<hash>{…}` and its nested rules, in
 // source order — decision 368).
@@ -123,7 +128,7 @@ pub fn styledComputed(
     texts: string[],
     views: StyledPropertyView[],
 ) -> @Component<Styled> {
-    val sheet = use context(StyledContext);
+    val sheet = use context(StyledSheet);
     val text = await spliced(texts, views);
     val className = classFor(prefix, text);
     val out = Styled(className: className, rules: withClass(text, className));
@@ -136,7 +141,7 @@ pub fn propertyComputed(
     texts: string[],
     views: StyledPropertyView[],
 ) -> @Component<StyledProperty> {
-    val sheet = use context(StyledContext);
+    val sheet = use context(StyledSheet);
     val declarations = await spliced(texts, views);
     val text = classMark() + "{" + declarations + "}";
     val className = classFor(prefix, text);
@@ -153,7 +158,7 @@ pub fn propertyComputed(
 // inlines `p`'s declarations and registers no class of its own (352, 338) —
 // `p`, computed at render, would otherwise add its class when it runs.
 pub fn splice(view: fn() -> StyledPropertyView) -> @Component<StyledProperty> {
-    use provide(StyledContext, StyledSheet(layer: "", add: discard));
+    use provide(createContext(StyledSheet(layer: "", add: discard)));
     val p = await view();
     return p;
 }
