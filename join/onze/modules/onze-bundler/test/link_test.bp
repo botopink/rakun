@@ -1,0 +1,55 @@
+// `botopink test` suite for `src/link.bp` (front 68 step 4, files).
+
+import {link.requiresOf, link.resolveFrom, link.esmToFactoryBody, link.jsClosure, link.linkFiles, link.bootLine, link.clientSubstitutions};
+import {io.fs, io.process, io.clock, path, io.env} from "std";
+
+// The run's own scratch directory — `botopink test` names it in
+// `BOTOPINK_TEST_TMPDIR`, and it is the one place a test writes.
+fn testTmp() -> string {
+    val root = env.read("BOTOPINK_TEST_TMPDIR") ?? "";
+    assert root
+        != "", "BOTOPINK_TEST_TMPDIR is not set: run this suite under `botopink test`";
+    return root;
+}
+
+#[@External.Node("""(function (__t) { try { (0, eval)(__t); return String(globalThis.__onze_require("entry.js").answer()); } catch (__e) { return "error: " + __e.message; } })($0)""")]
+#[@External.Erlang("""(fun(_) -> <<"no-js-engine">> end)($0)""")]
+declare fn evalEntry(text: string) -> string;
+
+fn put(dir: string, rel: string, text: string) -> i32 {
+    val made = process.run("mkdir", ["-p", path.dirname(path.join([dir, rel]))]);
+    val w = fs.writeText(path.join([dir, rel]), text);
+    return 0;
+}
+
+test "link: requires, resolution and the ESM sidecar" {
+    val found = requiresOf("const a = require(\"./x.js\");\nconst fs = require(\"fs\");\nconst b = require(\"../y/z.mjs\");");
+    assert found.join(",") == "./x.js,../y/z.mjs";
+    val nav = resolveFrom("components/nav.js", "../jhonstart/element.js");
+    assert nav == "jhonstart/element.js";
+    assert resolveFrom("entry.js", "./jhonstart/globals.js")
+        == "jhonstart/globals.js";
+    val body = esmToFactoryBody("let n = 0;\nexport function hydrate(p) {\n  return n;\n}\nexport const K = 1;");
+    assert body.contains("function hydrate(p) {");
+    assert body.contains("exports.hydrate = hydrate;");
+    assert body.contains("exports.K = K;");
+    assert body.contains("export ") == false;
+}
+
+test "link: the closure of a tree links into one chunk that runs without a network" {
+    val dir = path.join([testTmp(), "link-" + clock.nowMillis().toString()]);
+    put(dir, "entry.js", "const { two } = require(\"./lib/two.js\");\nconst { hook } = require(\"./jhonstart/hooks.js\");\nexports.answer = function () { return two() + hook(); };");
+    put(dir, "lib/two.js", "const { one } = require(\"../jhonstart/one.mjs\");\nexports.two = function () { return one() + 1; };");
+    put(dir, "jhonstart/one.mjs", "export function one() {\n  return 1;\n}");
+    put(dir, "jhonstart/hooks.js", "exports.hook = function () { return 100; };");
+    put(dir, "jhonstart/client_runtime.mjs", "export function hook() {\n  return 40;\n}");
+    val files = try jsClosure(dir, ["entry.js"], clientSubstitutions());
+    assert files.join(",")
+        == "entry.js,lib/two.js,jhonstart/hooks.js,jhonstart/one.mjs";
+    val text = try linkFiles(dir, files, clientSubstitutions());
+    val got = evalEntry(text);
+    assert got == "42" || got == "no-js-engine";
+    assert bootLine("entry.js")
+        == "globalThis.__onze_require(\"entry.js\").onzeEntryMain();\n";
+    val gone = process.run("rm", ["-rf", dir]);
+}

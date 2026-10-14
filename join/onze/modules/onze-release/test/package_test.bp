@@ -1,0 +1,153 @@
+// `botopink test` suite for `src/package.bp`, `src/lifecycle.bp` and
+// `src/static_export.bp` (front 71 steps 3, 6 and 7).
+
+import {spec.ReleaseSpec, spec.releaseSpec};
+import {package.scanForSecrets, package.missingAssets, package.promisedFiles, package.packageAssets};
+import {lifecycle.DrainReport, lifecycle.Lifecycle, lifecycle.shutdown, lifecycle.shutdownOrder, lifecycle.readinessChecks, lifecycle.isReady, lifecycle.describeDrain, lifecycle.exitCodeOf};
+import {static_export.ExportRoute, static_export.staticExport};
+import {ClientBundleManifest, ChunkRef, formatManifest, staticUrl} from "onze-bundler";
+import {io.fs, io.process, io.clock, path, io.env} from "std";
+import {assertAs} from "snap";
+
+// The run's own scratch directory — `botopink test` names it in
+// `BOTOPINK_TEST_TMPDIR`, and it is the one place a test writes.
+fn testTmp() -> string {
+    val root = env.read("BOTOPINK_TEST_TMPDIR") ?? "";
+    assert root
+        != "", "BOTOPINK_TEST_TMPDIR is not set: run this suite under `botopink test`";
+    return root;
+}
+
+fn manifest() -> ClientBundleManifest {
+    return ClientBundleManifest(version: "1", buildId: "b7f2a1", entry: ChunkRef(id: "entry", url: staticUrl("b7f2a1", "entry.9c1d40.js"), hash: "9c1d40", bytes: 10), shared: [ChunkRef(id: "shared", url: staticUrl("b7f2a1", "shared.41ab08.js"), hash: "41ab08", bytes: 10)], chunks: [ChunkRef(id: "route:/blog/[slug]", url: staticUrl("b7f2a1", "r1.7e0055.js"), hash: "7e0055", bytes: 10)], routes: [], styles: [ChunkRef(id: "styles", url: staticUrl("b7f2a1", "app.2b91cc.css"), hash: "2b91cc", bytes: 10)], publicEnv: []);
+}
+
+fn errorOf(r: @Result<Array<string>, string>) -> string {
+    return case r {
+        Ok(v) -> "ok " + v.join(",");
+        Error(e) -> e;
+    };
+}
+
+// ── the recording lifecycle double ──────────────────────────────────────────
+
+#[@External.Node("""(globalThis.__onzeLife = [], 0)""")]
+#[@External.Erlang("""(fun() -> put(onze_life, []), 0 end)()""")]
+declare fn lifeReset() -> i32;
+
+#[@External.Node("""((globalThis.__onzeLife = (globalThis.__onzeLife || []).concat([$0])), 0)""")]
+#[@External.Erlang("""(fun(__E) -> put(onze_life, (case get(onze_life) of undefined -> []; __L -> __L end) ++ [__E]), 0 end)($0)""")]
+declare fn lifePush(event: string) -> i32;
+
+#[@External.Node("""(globalThis.__onzeLife || [])""")]
+#[@External.Erlang("""(fun() -> case get(onze_life) of undefined -> []; __L -> __L end end)()""")]
+declare fn lifeEvents() -> Array<string>;
+
+fn boolText(flag: bool) -> string {
+    return if (flag) "true" else "false";
+}
+
+fn counting(event: string, value: i32) -> i32 {
+    lifePush(event);
+    return value;
+}
+
+fn life(renders: i32) -> Lifecycle {
+    lifeReset();
+    return Lifecycle(
+        setReady: { ready -> counting("readiness=" + boolText(ready), 0) },
+        stopAccepting: { -> counting("stop-accepting", 0) },
+        inFlightRenders: { -> counting("drain-renders", renders) },
+        pendingAfterTasks: { -> counting("drain-after-tasks", 0) },
+        stopTree: { -> counting("stop-supervision-tree", 0) },
+        elapsedMs: { -> lifeEvents().length * 10 },
+        pause: { ms -> 0 },
+    );
+}
+
+test "release: shutdown ---- the five steps and a clean drain" {
+    val clean = shutdown(life(0), 5000);
+    val order = lifeEvents().filter({ e -> true });
+    var firsts: string[] = [];
+    for (order) { e ->
+        if (firsts.contains(e) == false) firsts.push(e);
+    }
+    assert firsts.join(",") == shutdownOrder().join(",");
+    assert exitCodeOf(clean) == 0;
+    val stuck = shutdown(life(2), 100);
+    assert stuck.timedOut;
+    assert exitCodeOf(stuck) == 1;
+    assert isReady(readinessChecks(["default"]), ["route-table", "client-manifest"])
+        == false;
+    try assertAs(@src(), "shutdown", [
+        "readinessChecks: " + readinessChecks(["default"]).join(", "),
+        "shutdownOrder: " + shutdownOrder().join(" > "),
+        "drain(5000): " + describeDrain(clean),
+        "drain(100) with 2 renders in flight: " + describeDrain(stuck),
+    ].join("\n"));
+}
+
+test "release: secrets ---- a non-public value in a chunk refuses the release" {
+    val tree = [#("static/b7f2a1/shared.41ab08.js", "var api = \"https://api.example.com\";"), #("static/b7f2a1/entry.9c1d40.js", "x")];
+    val secrets = [#("DATABASE_URL", "postgres://secret@db"), #("ONZE_PUBLIC_API_URL", "https://api.example.com")];
+    assert scanForSecrets(tree, secrets).length == 0;
+    val planted = [#("static/b7f2a1/shared.41ab08.js", "var db = \"postgres://secret@db\";")];
+    assert scanForSecrets(planted, secrets).join("")
+        == "release refused — value of DATABASE_URL found in static/b7f2a1/shared.41ab08.js";
+}
+
+test "release: every chunk and stylesheet the manifest names must exist" {
+    assert promisedFiles(manifest()).length == 4;
+    assert missingAssets(manifest(), ["entry.9c1d40.js", "shared.41ab08.js", "r1.7e0055.js", "app.2b91cc.css"]).length
+        == 0;
+    assert missingAssets(manifest(), ["entry.9c1d40.js", "shared.41ab08.js", "app.2b91cc.css"]).join("")
+        == "release refused — the manifest names static/b7f2a1/r1.7e0055.js, which the build did not produce";
+}
+
+test "release: packageAssets copies the static tree and public/ verbatim" {
+    val dir = path.join([testTmp(), "rel-" + clock.nowMillis().toString()]);
+    val staticDir = path.join([dir, "static"]);
+    val publicDir = path.join([dir, "public"]);
+    val made = process.run("mkdir", ["-p", staticDir, path.join([publicDir, "images"])]);
+    for (["entry.9c1d40.js", "shared.41ab08.js", "r1.7e0055.js", "app.2b91cc.css"]) { f ->
+        val w = fs.writeText(path.join([staticDir, f]), "// " + f);
+    }
+    val p1 = fs.writeText(path.join([publicDir, "favicon.ico"]), "ico");
+    val p2 = fs.writeText(path.join([publicDir, "images", "hero.jpg"]), "jpg");
+    val release = path.join([dir, "release"]);
+    val out = errorOf(packageAssets(releaseSpec("blog", "0.1.0", "b7f2a1"), formatManifest(manifest()), staticDir, publicDir, release, []));
+    assert out.startsWith("ok ");
+    assert fs
+        .readText(path.join([release, "public", "images", "hero.jpg"]))
+        .unwrapOr("")
+        == "jpg";
+    assert fs
+        .readText(path.join([release, "static", "b7f2a1", "r1.7e0055.js"]))
+        .unwrapOr("")
+        == "// r1.7e0055.js";
+    assert fs.readText(path.join([release, "BUILD_ID"])).unwrapOr("")
+        == "b7f2a1\n";
+    val gone = fs.rm(path.join([staticDir, "r1.7e0055.js"]));
+    assert errorOf(packageAssets(releaseSpec("blog", "0.1.0", "b7f2a1"), formatManifest(manifest()), staticDir, publicDir, release, [])).contains("r1.7e0055.js");
+    val cleaned = process.run("rm", ["-rf", dir]);
+}
+
+fn exportError(r: @Result<Array<#(string, string)>, string>) -> string {
+    return case r {
+        Ok(files) -> files.map({ f -> f._0 }).join("\n");
+        Error(e) -> "error: " + e;
+    };
+}
+
+test "release: static export ---- three routes out, a dynamic route refused" {
+    val routes = [
+        ExportRoute(pattern: "/", authoredPath: "app/page.bp", html: "<h1>home</h1>", prerenderable: true),
+        ExportRoute(pattern: "/about", authoredPath: "app/about/page.bp", html: "<h1>about</h1>", prerenderable: true),
+        ExportRoute(pattern: "/docs", authoredPath: "app/docs/page.bp", html: "<h1>docs</h1>", prerenderable: true),
+    ];
+    val assets = [#("favicon.ico", "ico"), #("_onze/static/b7f2a1/app.2b91cc.css", "css")];
+    val ok = exportError(staticExport(routes, assets));
+    val refused = exportError(staticExport(routes.append([ExportRoute(pattern: "/blog/[slug]", authoredPath: "app/blog/[slug]/page.bp", html: "", prerenderable: false)]), assets));
+    assert ok.contains("bin/") == false;
+    try assertAs(@src(), "export", ["== without app/blog/[slug]", ok, "== with app/blog/[slug]", refused].join("\n"));
+}

@@ -1,0 +1,89 @@
+// `botopink test` suite for `src/otp.bp` and `src/docker.bp` (front 71 steps
+// 2, 4 and 5) — the generated text, on both rows.
+
+import {spec.ReleaseSpec, spec.releaseSpec, spec.withErts};
+import {otp.relFileText, otp.sysConfigText, otp.vmArgsText, otp.bootScriptText, otp.defaultSysConfig, otp.shellVar, otp.installedVersion, otp.assembleRelease};
+import {io.fs, io.process, io.clock, path, io.env} from "std";
+import {docker.generateDockerfile, docker.generateDockerignore, docker.runnerStage};
+import {assertAs} from "snap";
+
+// The run's own scratch directory — `botopink test` names it in
+// `BOTOPINK_TEST_TMPDIR`, and it is the one place a test writes.
+fn testTmp() -> string {
+    val root = env.read("BOTOPINK_TEST_TMPDIR") ?? "";
+    assert root
+        != "", "BOTOPINK_TEST_TMPDIR is not set: run this suite under `botopink test`";
+    return root;
+}
+
+fn spec() -> ReleaseSpec {
+    return releaseSpec("blog", "0.1.0", "b7f2a1");
+}
+
+test "release: text ---- rel, sys.config, vm.args and the boot script" {
+    val s = spec();
+    val sys = sysConfigText(s, defaultSysConfig());
+    assert relFileText(s).trimEnd().endsWith(".");
+    assert relFileText(s).indexOf("kernel") < relFileText(s).indexOf("stdlib");
+    assert vmArgsText(s).contains("-setcookie " + shellVar("RELEASE_COOKIE"));
+    assert sys.contains("env") == false;
+    assert bootScriptText(s).contains("exec ");
+    assert bootScriptText(s).contains(" &\n") == false;
+    try assertAs(@src(), "release", [
+        "== releases/b7f2a1/onze.rel",
+        relFileText(s).trimEnd(),
+        "== releases/b7f2a1/sys.config",
+        sys.trimEnd(),
+        "== releases/b7f2a1/vm.args",
+        vmArgsText(s).trimEnd(),
+        "== bin/onze",
+        bootScriptText(s).trimEnd(),
+        "== bin/onze without erts",
+        bootScriptText(withErts(s, false))
+            .split("\n")
+            .filter({ l -> l.startsWith("exec") })
+            .join("\n"),
+    ].join("\n"));
+}
+
+test "release: dockerfile ---- two stages, non-root, erts bundled and not" {
+    val with = generateDockerfile(spec());
+    val without = generateDockerfile(withErts(spec(), false));
+    val runner = runnerStage(with).join("\n");
+    assert with.split("\n").filter({ l -> l.startsWith("FROM ") }).length == 2;
+    assert runner.contains("USER onze");
+    assert runner.contains("USER root") == false;
+    assert runner.contains("COPY . .") == false;
+    assert runner.contains("RUN onze build") == false;
+    assert runner.contains("node_modules") == false;
+    assert runner.contains("ENV PORT=3000");
+    assert (runnerStage(without).at(0) ?? "").startsWith("FROM erlang:");
+    assert generateDockerignore().split("\n").contains(".git");
+    try assertAs(@src(), "dockerfile", ["== includeErts: true", with.trimEnd(), "== includeErts: false — runner line", runnerStage(without).at(0) ?? "", "== .dockerignore", generateDockerignore().trimEnd()].join("\n"));
+}
+
+test "release: systools assembles a boot script from the generated .rel" {
+    val erts = installedVersion("erts");
+    if (erts.isError()) @print("skipped: erl is not on PATH") else {
+        val kernel = try installedVersion("kernel");
+        val stdlib = try installedVersion("stdlib");
+        val s = ReleaseSpec(name: "probe", version: "0.1.0", buildId: "b1", apps: [], includeErts: false, ertsVersion: erts.unwrapOr(""), otpRelease: "", outDir: "");
+        val rel = "{release, {\"probe\", \"0.1.0\"}, {erts, \""
+            + s.ertsVersion
+            + "\"}, [{kernel, \""
+            + kernel
+            + "\"}, {stdlib, \""
+            + stdlib
+            + "\"}]}.\n";
+        val dir = path.join([testTmp(), "systools-"
+            + clock.nowMillis().toString()]);
+        val made = process.run("mkdir", ["-p", dir]);
+        val w = fs.writeText(path.join([dir, "onze.rel"]), rel);
+        val boot = try assembleRelease(dir, []);
+        assert fs.exists(boot);
+        val bad = fs.writeText(path.join([dir, "onze.rel"]), "{release, {\"probe\", \"0.1.0\"}, {erts, \"0\"}, [{kernel, \"0.0.0\"}]}.\n");
+        val failed = assembleRelease(dir, []);
+        assert failed.isError();
+        val gone = process.run("rm", ["-rf", dir]);
+    }
+}

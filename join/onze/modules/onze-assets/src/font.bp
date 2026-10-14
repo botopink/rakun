@@ -1,0 +1,401 @@
+//// onze-assets — fonts (front 52): self-hosted Google fonts, local fonts,
+//// the metric-adjusted fallback and the head output.
+////
+//// A font is fetched ONCE, at build time: the Google CSS with a fixed modern
+//// `User-Agent`, its `woff2` URLs for the requested subsets, each file
+//// downloaded (a spawn — `curl` — because a `.woff2` is not a string) and
+//// named `<family>-<weight>[-italic].<hash>.woff2` under
+//// `<outDir>/static/<buildId>/fonts/`, served with the rest of the static
+//// tree. Nothing at request time touches a Google host. Beside each face a
+//// `.metrics.txt` sidecar carries its metrics for front 70.
+////
+//// The fallback: `@font-face { font-family: "<Family> Fallback"; src:
+//// local("<Arial>"); size-adjust; ascent-override; descent-override;
+//// line-gap-override }` — `size-adjust` the ratio of the two faces' average
+//// advance (each over its `unitsPerEm`), the three overrides the real face's
+//// ascent, descent and line gap over its `unitsPerEm`, as percentages with two
+//// decimals. The metrics come from the committed table (`font_metrics`); a
+//// family missing from it with `adjustFontFallback: true` is refused rather
+//// than given an unadjusted fallback. A local font's metrics come from a probe
+//// command; with no probe the face is emitted unadjusted and the degradation
+//// is logged once, naming the family.
+
+import {io.fs, io.process, path, hash} from "std";
+import {font_metrics.FontMetrics, font_metrics.MetricsRow, font_metrics.metricsOf, font_metrics.metricsSidecar};
+
+pub type Font(family: string, className: string, variable: string, css: string, preload: string, style: string)
+
+pub type GoogleFontOptions(
+    weights: string[],
+    styles: string[],
+    subsets: string[],
+    display: string,
+    preload: bool,
+    variable: string,
+    fallback: string[],
+    adjustFontFallback: bool,
+)
+
+pub fn defaultGoogleFontOptions() -> GoogleFontOptions {
+    return GoogleFontOptions(weights: ["400"], styles: ["normal"], subsets: ["latin"], display: "swap", preload: true, variable: "", fallback: ["system-ui", "sans-serif"], adjustFontFallback: true);
+}
+
+pub type LocalFontSource(path: string, weight: string, style: string)
+
+pub type LocalFontOptions(
+    sources: Array<LocalFontSource>,
+    display: string,
+    preload: bool,
+    variable: string,
+    fallback: string[],
+    adjustFontFallback: bool,
+)
+
+// One face as the Google CSS describes it.
+pub type GoogleFace(subset: string, style: string, weight: string, url: string, unicodeRange: string)
+
+// Where the build puts fonts and how they are fetched.
+pub type FontBuild(
+    buildId: string,
+    outDir: string,
+    fetchCss: fn(url: string) -> @Result<string, string>,
+    download: fn(url: string, dest: string) -> @Result<void, string>,
+)
+
+pub fn displays() -> string[] {
+    return ["swap", "block", "fallback", "optional"];
+}
+
+#[@External.Node("""(Number($0) / Number($1) * 100).toFixed(2)""")]
+#[@External.Erlang("""float_to_binary($0 / $1 * 100, [{decimals, 2}])""")]
+declare fn percentOf(num: f64, den: f64) -> string;
+
+#[@External.Node("""Number($0)""")]
+#[@External.Erlang("""float($0)""")]
+declare fn toF64(n: i32) -> f64;
+
+fn pct(num: i32, den: i32) -> string {
+    return percentOf(toF64(num), toF64(den)) + "%";
+}
+
+#[@External.Node("""(Number($0) * Number($3) / (Number($1) * Number($2)) * 100).toFixed(2)""")]
+#[@External.Erlang("""float_to_binary($0 * $3 / ($1 * $2) * 100, [{decimals, 2}])""")]
+declare fn ratioPercent(a: f64, upmA: f64, b: f64, upmB: f64) -> string;
+
+// The adjusted fallback face for `family` over the local face `localFamily`.
+pub fn fallbackFace(family: string, localFamily: string, real: FontMetrics, fallback: FontMetrics) -> string {
+    val size = ratioPercent(toF64(real.avgCharWidth), toF64(real.unitsPerEm), toF64(fallback.avgCharWidth), toF64(fallback.unitsPerEm))
+        + "%";
+    return "@font-face{font-family:\""
+        + family
+        + " Fallback\";src:local(\""
+        + localFamily
+        + "\");size-adjust:"
+        + size
+        + ";ascent-override:"
+        + pct(real.ascent, real.unitsPerEm)
+        + ";descent-override:"
+        + pct(real.descent, real.unitsPerEm)
+        + ";line-gap-override:"
+        + pct(real.lineGap, real.unitsPerEm)
+        + "}";
+}
+
+pub fn slugOfFamily(family: string) -> string {
+    return family.toLower().replaceAll(" ", "-");
+}
+
+// The Google CSS2 URL for `family` and the requested axes.
+pub fn googleCssUrl(family: string, opts: GoogleFontOptions) -> string {
+    val italic = opts.styles.contains("italic");
+    var tuples: string[] = [];
+    for (opts.styles) { st ->
+        for (opts.weights) { w ->
+            val styleFlag = if (st == "italic") "1," else "0,";
+            tuples.push(if (italic) styleFlag + w else w);
+        }
+    }
+    val axes = if (italic) ":ital,wght@" else ":wght@";
+    return "https://fonts.googleapis.com/css2?family="
+        + family.replaceAll(" ", "+")
+        + axes
+        + tuples.join(";")
+        + "&display="
+        + opts.display;
+}
+
+fn valueAfter(block: string, key: string) -> string {
+    val at = block.indexOf(key + ":");
+    if (at < 0) return "";
+    val rest = block.slice(at + key.length() + 1);
+    val end = rest.indexOf(";");
+    val raw = if (end < 0) rest else rest.slice(0, end);
+    return raw.trim();
+}
+
+// The faces of a Google CSS response: each `@font-face` block and the subset
+// its `/* latin */` comment names.
+pub fn parseGoogleCss(css: string) -> Array<GoogleFace> {
+    var out: Array<GoogleFace> = [];
+    var subset = "";
+    for (css.split("@font-face")) { piece ->
+        val open = piece.indexOf("{");
+        val close = piece.indexOf("}");
+        val hasBlock = open >= 0 && close > open;
+        if (hasBlock) {
+            val block = piece.slice(open + 1, close);
+            val src = valueAfter(block, "src");
+            val urlStart = src.indexOf("url(");
+            val url = if (urlStart < 0)
+                ""
+            else
+                src.slice(urlStart + 4, src.indexOf(")"));
+            out.push(GoogleFace(subset: subset, style: valueAfter(block, "font-style"), weight: valueAfter(block, "font-weight"), url: url, unicodeRange: valueAfter(block, "unicode-range").replaceAll(" ", "")));
+        }
+        val comment = piece.lastIndexOf("/*");
+        val commentEnd = piece.lastIndexOf("*/");
+        subset = if (comment >= 0 && commentEnd > comment)
+            piece.slice(comment + 2, commentEnd).trim()
+        else
+            "";
+    }
+    return out;
+}
+
+fn refusal(family: string, opts: GoogleFontOptions) -> string {
+    if (opts.subsets.length == 0)
+        return "subsets is empty — an unsubsetted font is a 300 kB font";
+    if (displays().contains(opts.display) == false)
+        return "display \""
+            + opts.display
+            + "\" is not one of "
+            + displays().join(", ");
+    val notInTable = opts.adjustFontFallback && metricsOf(family) == null;
+    if (notInTable)
+        return "family \""
+            + family
+            + "\" is not in the metrics table and adjustFontFallback is true";
+    return "";
+}
+
+fn familyList(family: string, adjusted: bool, fallback: string[]) -> string {
+    val base = ["\"" + family + "\""];
+    val withFallback = if (adjusted)
+        base.append(["\"" + family + " Fallback\""])
+    else
+        base;
+    return withFallback.append(fallback).join(",");
+}
+
+fn faceCss(family: string, style: string, weight: string, display: string, url: string, unicodeRange: string) -> string {
+    val range = if (unicodeRange == "")
+        ""
+    else
+        ";unicode-range:" + unicodeRange;
+    return "@font-face{font-family:\""
+        + family
+        + "\";font-style:"
+        + style
+        + ";font-weight:"
+        + weight
+        + ";font-display:"
+        + display
+        + ";src:url("
+        + url
+        + ") format(\"woff2\")"
+        + range
+        + "}";
+}
+
+fn preloadTag(url: string) -> string {
+    return "<link rel=\"preload\" as=\"font\" type=\"font/woff2\" href=\""
+        + url
+        + "\" crossorigin>";
+}
+
+// The file's short content hash (its text as read — deterministic for the
+// same bytes).
+fn fileHash(file: string) -> string {
+    return hash
+        .contentHash(fs.readText(file).unwrapOr(file))
+        .padStart(8, "0")
+        .slice(0, 6);
+}
+
+fn assemble(family: string, faces: Array<#(string, string, string, string)>, display: string, preload: bool, variable: string, fallback: string[], adjusted: string) -> Font {
+    val list = familyList(family, adjusted != "", fallback);
+    val cls = "onze-font-" + slugOfFamily(family);
+    var css: string[] = faces.map({ f -> faceCss(family, f._0, f._1, display, f._2, f._3) });
+    if (adjusted != "") css.push(adjusted);
+    if (variable != "") css.push(":root{" + variable + ":" + list + "}");
+    css.push("." + cls + "{font-family:" + list + "}");
+    val tags = if (preload)
+        faces.map({ f -> preloadTag(f._2) }).join("\n")
+    else
+        "";
+    return Font(family: family, className: cls, variable: variable, css: css.join("\n"), preload: tags, style: "font-family:"
+        + list);
+}
+
+// `googleFont` over explicit build seams: fetch the CSS, keep the requested
+// subsets' faces, download each into the static tree, write its metrics
+// sidecar, assemble the `Font`.
+pub fn googleFontWith(family: string, opts: GoogleFontOptions, build: FontBuild) -> @Result<Font, string> {
+    val problem = refusal(family, opts);
+    if (problem != "") throw problem;
+    val fetch = build.fetchCss;
+    val css = try fetch(googleCssUrl(family, opts));
+    val wanted = parseGoogleCss(css).filter({ f -> opts.subsets.contains(f.subset) && opts.weights.contains(f.weight) && opts.styles.contains(f.style) });
+    if (wanted.length == 0)
+        throw "family \""
+            + family
+            + "\": the Google CSS has no face for "
+            + opts.weights.join("/")
+            + " "
+            + opts.styles.join("/")
+            + " in "
+            + opts.subsets.join("/");
+    val row = metricsOf(family);
+    val dir = path.join([build.outDir, "static", build.buildId, "fonts"]);
+    val made = process.run("mkdir", ["-p", dir]);
+    var faces: Array<#(string, string, string, string)> = [];
+    for (wanted) { f ->
+        val italicSuffix = if (f.style == "italic") "-italic" else "";
+        val base = slugOfFamily(family) + "-" + f.weight + italicSuffix;
+        val tmp = path.join([dir, base + ".download"]);
+        val download = build.download;
+        try download(f.url, tmp);
+        val name = base + "." + fileHash(tmp) + ".woff2";
+        val moved = try process.run("mv", [tmp, path.join([dir, name])]);
+        if (row != null) {
+            val r = row;
+            val side = try fs.writeText(path.join([dir, base
+                + "."
+                + fileHash(path.join([dir, name]))
+                + ".metrics.txt"]), metricsSidecar(r.metrics));
+        }
+        faces.push(#(f.style, f.weight, "/_onze/static/"
+            + build.buildId
+            + "/fonts/"
+            + name, f.unicodeRange));
+    }
+    val adjusted = if (opts.adjustFontFallback) adjustedFor(family) else "";
+    return assemble(family, faces, opts.display, opts.preload, opts.variable, opts.fallback, adjusted);
+}
+
+fn adjustedFor(family: string) -> string {
+    val row = metricsOf(family);
+    if (row == null) return "";
+    val r = row;
+    val local = metricsOf(r.localFallback);
+    if (local == null) return "";
+    val l = local;
+    return fallbackFace(family, r.localFallback, r.metrics, l.metrics);
+}
+
+fn curlText(url: string) -> @Result<string, string> {
+    val r = try process.run("curl", ["-fsSL", "-A", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36", url]);
+    if (r.status != 0)
+        throw "curl "
+            + url
+            + " exited "
+            + r.status.toString()
+            + ": "
+            + (r.stderr + r.stdout).trim();
+    return r.stdout;
+}
+
+fn curlFile(url: string, dest: string) -> @Result<void, string> {
+    val r = try process.run("curl", ["-fsSL", "-o", dest, url]);
+    if (r.status != 0)
+        throw "curl "
+            + url
+            + " exited "
+            + r.status.toString()
+            + ": "
+            + (r.stderr + r.stdout).trim();
+    return;
+}
+
+// The build-time fetch through `curl`.
+pub fn curlBuild(buildId: string, outDir: string) -> FontBuild {
+    return FontBuild(buildId: buildId, outDir: outDir, fetchCss: { url -> curlText(url) }, download: { url, dest -> curlFile(url, dest) });
+}
+
+pub fn googleFont(family: string, opts: GoogleFontOptions, buildId: string, outDir: string) -> @Result<Font, string> {
+    return try googleFontWith(family, opts, curlBuild(buildId, outDir));
+}
+
+// A local font: each source copied into the static tree under its content
+// hash. `root` is the project root (a source must stay inside it); `probe`
+// answers a face's metrics, `null` when no probe is available — then the face
+// is unadjusted and `logged` receives one line naming the family.
+pub fn localFont(family: string, opts: LocalFontOptions, root: string, buildId: string, outDir: string, probe: fn(file: string) -> ?FontMetrics, logged: fn(line: string) -> i32) -> @Result<Font, string> {
+    if (displays().contains(opts.display) == false)
+        throw "display \""
+            + opts.display
+            + "\" is not one of "
+            + displays().join(", ");
+    val dir = path.join([outDir, "static", buildId, "fonts"]);
+    val made = process.run("mkdir", ["-p", dir]);
+    var faces: Array<#(string, string, string, string)> = [];
+    var metrics: ?FontMetrics = null;
+    for (opts.sources) { s ->
+        val normalized = path.normalize(path.join([root, s.path]));
+        val inside = normalized.startsWith(path.normalize(root) + "/")
+            && s.path.contains("..") == false;
+        if (inside == false)
+            throw "local font source "
+                + s.path
+                + " is outside the project root";
+        if (fs.exists(normalized) == false)
+            throw "local font source " + s.path + " does not exist";
+        val italicSuffix = if (s.style == "italic") "-italic" else "";
+        val name = slugOfFamily(family)
+            + "-"
+            + s.weight
+            + italicSuffix
+            + "."
+            + fileHash(normalized)
+            + ".woff2";
+        val copied = try process.run("cp", [normalized, path.join([dir, name])]);
+        if (metrics == null) metrics = probe(normalized);
+        faces.push(#(s.style, s.weight, "/_onze/static/"
+            + buildId
+            + "/fonts/"
+            + name, ""));
+    }
+    val adjusted = if (opts.adjustFontFallback == false)
+        ""
+    else if (metrics == null)
+        ""
+    else
+        fallbackFace(family, "Arial", metrics, (metricsOf("Arial") ?? MetricsRow(family: "", category: "", metrics: FontMetrics(unitsPerEm: 1, ascent: 0, descent: 0, lineGap: 0, avgCharWidth: 1), localFallback: "")).metrics);
+    val degraded = opts.adjustFontFallback && metrics == null;
+    if (degraded)
+        logged("font "
+            + family
+            + ": no metrics probe available - the fallback is unadjusted and layout shift mitigation is off for this family");
+    return assemble(family, faces, opts.display, opts.preload, opts.variable, opts.fallback, adjusted);
+}
+
+// Every font's preload tags, then one `<style>` of every distinct
+// `@font-face` and rule — two `Font`s for the same family and weight give one
+// face.
+pub fn fontHead(fonts: Array<Font>) -> string {
+    var tags: string[] = [];
+    var rules: string[] = [];
+    for (fonts) { f ->
+        for (f.preload.split("\n").filter({ t -> t != "" })) { t ->
+            if (tags.contains(t) == false) tags.push(t);
+        }
+        for (f.css.split("\n").filter({ r -> r != "" })) { r ->
+            if (rules.contains(r) == false) rules.push(r);
+        }
+    }
+    val style = if (rules.length == 0)
+        ""
+    else
+        "<style>" + rules.join("") + "</style>";
+    return tags.append([style]).filter({ s -> s != "" }).join("\n");
+}

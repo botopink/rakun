@@ -1,0 +1,124 @@
+// `botopink test` suite for `src/stylesheet.bp` and `src/assets.bp` (front 69
+// steps 2 and 3).
+
+import {style_module.StyleModule, style_module.compileStyleModule};
+import {stylesheet.buildStylesheet, stylesheet.styleRecords, stylesheet.styleChunk, stylesheet.stylesheetFile, stylesheet.stylesheetLinks};
+import {assets.AssetRoot, assets.staticRoots, assets.describeRoots};
+import {ChunkRef, parseManifest, formatManifest, emptyManifest, ClientBundleManifest} from "onze-bundler";
+import {io.fs, path} from "std";
+import {assertAs} from "snap";
+import {head.pageRenderHooks, head.headFragment};
+import {RenderHooks} from "jhonstart";
+
+fn modules() -> @Result<Array<StyleModule>, string> {
+    val a = try compileStyleModule("app/blog/blog.module.css", ".container { padding: 24px; }");
+    val b = try compileStyleModule("app/ui/card.module.css", ".container { display: flex; }");
+    return [a, b];
+}
+
+test "stylesheet: cascade ---- global before module CSS, fingerprinted" {
+    val ms = try modules();
+    val sheet = try buildStylesheet("body { margin: 0; }", ms);
+    val again = try buildStylesheet("body { margin: 0; }", try modules());
+    assert sheet._1 == again._1;
+    assert sheet._0.indexOf("body") < sheet._0.indexOf(".blog_container");
+    val records = styleRecords("b7f2a1", sheet._1, sheet._0.length());
+    val m = try parseManifest("V|1|b7f2a1\n" + records.join("\n") + "\n");
+    val back = formatManifest(m)
+        .split("\n")
+        .filter({ l -> l.startsWith("Y|") });
+    assert back.join("\n") == records.join("\n");
+    assert stylesheetFile(sheet._1).contains(sheet._1);
+    try assertAs(@src(), "stylesheet", [
+        "== /_onze/static/b7f2a1/" + stylesheetFile(sheet._1),
+        sheet._0.trimEnd(),
+        "== Y records",
+        records.join("\n"),
+        "== parseManifest reads back",
+        back.join("\n"),
+        "== head",
+        stylesheetLinks(m.styles),
+    ].join("\n"));
+}
+
+test "assets: roots ---- the two roots handed to rakun-web front 82" {
+    val roots = staticRoots("public", ".onze", "b7f2a1");
+    assert roots.length == 2;
+    val adversarial = staticRoots("content", "/etc", "b7f2a1/../..");
+    assert adversarial.length == 2;
+    try assertAs(@src(), "roots", "staticRoots(public, .onze, b7f2a1) = "
+        + roots.length.toString()
+        + "\n"
+        + describeRoots(roots));
+}
+
+test "head: the stylesheet link precedes the head scripts" {
+    val m = ClientBundleManifest(version: "1", buildId: "b1", entry: ChunkRef(id: "entry", url: "/e.js", hash: "", bytes: 0), shared: [], chunks: [ChunkRef(id: "script:a", url: "/a.js", hash: "", bytes: 0)], routes: [], styles: [styleChunk("b1", "abc123", 10)], publicEnv: []);
+    val h = pageRenderHooks(m);
+    val head = h.headExtra;
+    val text = head("/");
+    assert text
+        == "<link rel=\"stylesheet\" href=\"/_onze/static/b1/app.abc123.css\">\n<script src=\"/a.js\"></script>";
+    val body = h.bodyExtra;
+    assert body("/") == "<script src=\"/e.js\" defer></script>";
+}
+
+// The front's gate (decision 113): no onze source calls emilia's `flush()` or
+// defines a style sink — the flush moments are jhonstart's render's.
+//
+// The gate reads only tracked sources: each sibling member that carries a
+// `botopink.json` contributes the `.bp` files under its own `src/`. It never
+// walks `..` itself — sibling cells running in parallel write and delete their
+// `.botopinkbuild/` trees there, and a walk that crosses them answers another
+// cell's generated files (or a dangling-link `Error` for one deleted mid-walk).
+fn memberSources(modulesDir: string) -> @Result<string[], string> {
+    var out: string[] = [];
+    for (try fs.list(modulesDir)) { m ->
+        val root = path.join([modulesDir, m]);
+        val src = path.join([root, "src"]);
+        if (fs.exists(path.join([root, "botopink.json"])) && fs.exists(src))
+            for (try fs.walk(src)) { f ->
+                if (f.endsWith(".bp")) out.push(m + "/src/" + f);
+            }
+    }
+    return out;
+}
+
+fn flushHits(file: string, text: string) -> string[] {
+    var hits: string[] = [];
+    for (text.split("\n")) { line ->
+        val call = line.contains("await flush()")
+            || line.contains("= flush()")
+            || line.trim().startsWith("flush(");
+        val sink = line.contains("fn styleSink")
+            || line.contains("type StyleSink");
+        if (call || sink) hits.push(file + ": " + line.trim());
+    }
+    return hits;
+}
+
+test "gate: no onze module calls flush() or defines a sink" {
+    val files = try memberSources("..");
+    assert files.length > 10;
+    assert files.filter({ f -> f.contains(".botopinkbuild") || f.contains("node_modules") || f.contains("/out/") }).length
+        == 0;
+    var hits: string[] = [];
+    for (files) { f ->
+        val read = fs.readText(path.join(["..", f]));
+        if (read.isError()) hits.push(f + ": unreadable");
+        for (flushHits(f, read.unwrapOr(""))) { h ->
+            hits.push(h);
+        }
+    }
+    assert hits.length == 0;
+}
+
+test "gate: the flush scan catches a call and a sink" {
+    assert flushHits("x/src/a.bp", "    await flush();").length == 1;
+    assert flushHits("x/src/a.bp", "val r = flush();").length == 1;
+    assert flushHits("x/src/a.bp", "  flush(sheet);").length == 1;
+    assert flushHits("x/src/a.bp", "pub fn styleSink() {}").length == 1;
+    assert flushHits("x/src/a.bp", "type StyleSink = string;").length == 1;
+    assert flushHits("x/src/a.bp", "val flushed = flushAll();\n// no call here").length
+        == 0;
+}

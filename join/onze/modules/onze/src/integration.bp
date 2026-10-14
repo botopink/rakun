@@ -1,0 +1,143 @@
+//// onze core — the boot adapter (front 49 step 4, decisions 113–117).
+////
+//// The one file in onze that imports jhonstart and the `jhonstart-emilia`
+//// bridge (and, once rakun front 23 lands `ChunkWriter` / `page(pattern,
+//// render)`, rakun): every value that crosses between the renderer and the
+//// server is handed across here, and nothing is defined twice.
+////
+//// What the boot hands each side:
+////
+////   jhonstart   `app(plugins: [emiliaPlugin()], allowedRedirects)` — the
+////               bridge is onze's whole part in the CSS moment; the two tag
+////               fields of `RenderHooks` (front 68's `headScriptTags` /
+////               `scriptTags`); the action wire names (`setWireNames`); per
+////               request a `PageInput` whose segment chain is built from the
+////               UI registry (`segmentFor`) over the ancestor patterns rakun
+////               matched, and a `Response` over rakun's `ChunkWriter`
+////   rakun       the `rakun.*` keys (`rakunEntries`): `rakun.appDir`,
+////               `rakun.actions.field` / `.header` / `.bodyLimit` and
+////               `rakun.i18n.exclude` with onze's `/_onze` appended — every
+////               key rakun reads is a `rakun.*` key (decision 115)
+////
+//// Navigation signals never reach onze: jhonstart's render answers a
+//// `notFound` / `redirect` itself (404 / 307 through the `Response` before
+//// the first chunk, markup after it) and checks the target (decision 117).
+//// There is no `case` on a signal here, nothing is imported from `routing`,
+//// and no matcher is handed to jhonstart. No function here calls emilia's
+//// `flush()` and no style sink is defined: the flush moments are jhonstart's
+//// and the adaptation is the bridge's.
+
+import {App, app, RenderPlugin, RequestData, ErrorInfo, LayoutProps, PageContext, OpenGraph, TwitterCard, Icons, Response, PageInput, RenderHooks, setHooks, UiSegment, segmentFor, Element, ElementBase, Metadata, Viewport} from "jhonstart";
+import {setWireNames} from "jhonstart-forms";
+import {plugin as emiliaPlugin} from "jhonstart-emilia";
+import {config.OnzeConfig, config.defaultActionField, config.defaultActionHeader, config.assetPrefix};
+
+// ── the rakun half, as data ─────────────────────────────────────────────────
+
+// The configuration entries the boot writes into rakun, in this order.
+// `i18nExclude` is the application's own `rakun.i18n.exclude` list; onze
+// appends its asset prefix once.
+pub fn rakunEntries(config: OnzeConfig, i18nExclude: string[]) -> Array<#(string, string)> {
+    var exclude: string[] = [];
+    for (i18nExclude) { e ->
+        if (e != assetPrefix) exclude.push(e);
+    }
+    exclude.push(assetPrefix);
+    return [
+        #("rakun.appDir", config.appDir),
+        #("rakun.actions.field", defaultActionField),
+        #("rakun.actions.header", defaultActionHeader),
+        #("rakun.actions.bodyLimit", config.actionsBodyLimit.toString()),
+        #("rakun.i18n.exclude", exclude.join(",")),
+    ];
+}
+
+// ── the jhonstart half ──────────────────────────────────────────────────────
+
+// The render hooks carrying front 68's bundle tags for a route.
+pub fn bundleHooks(headTags: fn(route: string) -> string, bodyTags: fn(route: string) -> string) -> RenderHooks {
+    return RenderHooks(headExtra: headTags, bodyExtra: bodyTags);
+}
+
+// jhonstart's app for this project: the emilia bridge registered, the
+// redirect allow-list and the document's language (`<html lang>`; a value
+// that is not a language tag fails `app`, naming it) handed over, the bundle
+// tags installed and the action wire names set — the same two names
+// `rakunEntries` hands rakun.
+pub fn bootSite(config: OnzeConfig, hooks: RenderHooks) -> App {
+    setWireNames(defaultActionField, defaultActionHeader);
+    setHooks(hooks);
+    return app(plugins: [emiliaPlugin()], allowedRedirects: config.allowedRedirects, lang: config.lang);
+}
+
+// The booted app's render as a function value: what a server hands one
+// request's input, request data and response to. onze-server holds this
+// rather than jhonstart's `App`, because it also constructs rakun's `App` and
+// one module cannot hold two types of one name (language-gaps.md).
+pub type SiteRender = fn(input: PageInput, data: RequestData, res: Response) -> @Task<@Result<void, string>>;
+
+pub fn siteRender(site: App) -> SiteRender {
+    return { input, data, res -> site.renderStream(input, data, res) };
+}
+
+// jhonstart's `Response` over a server's chunk writer: `status` / `header` /
+// `write` / `close` onto `setStatus` / `setHeader` / `write` / `close`, one to
+// one. jhonstart never sees the writer; the writer never sees the `Response`.
+pub fn responseOver(
+    setStatus: fn(code: i32),
+    setHeader: fn(name: string, value: string),
+    write: fn(chunk: string) -> @Task<void>,
+    close: fn() -> @Task<void>,
+) -> Response {
+    return Response(
+        status: { code -> setStatus(code) },
+        header: { name, value -> setHeader(name, value) },
+        write: { chunk -> write(chunk) },
+        close: { -> close() },
+    );
+}
+
+// The segment chain of a matched route, root-first: one `UiSegment` per
+// ancestor pattern rakun's layout chain names, each as jhonstart's UI
+// registry holds it.
+pub fn chainFor(patterns: string[]) -> Array<UiSegment> {
+    return patterns.map({ p -> segmentFor(p) });
+}
+
+// The per-request input of jhonstart's render. `params` / `query` are
+// `encoding.formStringify`-encoded; `table`, `actions` and `build` are the
+// payload's rakun-side strings (`t`, `a`, `b`).
+pub fn pageInput(
+    build: string,
+    pathname: string,
+    pattern: string,
+    params: string,
+    query: string,
+    table: string,
+    actions: Array<#(string, string)>,
+    chainPatterns: string[],
+    page: fn() -> @Component<Element>,
+    metadata: Array<Metadata>,
+    viewports: Array<Viewport>,
+) -> PageInput {
+    return PageInput(
+        build: build,
+        pathname: pathname,
+        pattern: pattern,
+        params: params,
+        query: query,
+        table: table,
+        actions: actions,
+        chain: chainFor(chainPatterns),
+        page: page,
+        metadata: metadata,
+        viewports: viewports,
+    );
+}
+
+// What the boot produced: jhonstart's app and the entries rakun receives.
+pub type OnzeBoot(site: App, rakun: Array<#(string, string)>)
+
+pub fn boot(config: OnzeConfig, hooks: RenderHooks, i18nExclude: string[]) -> OnzeBoot {
+    return OnzeBoot(site: bootSite(config, hooks), rakun: rakunEntries(config, i18nExclude));
+}

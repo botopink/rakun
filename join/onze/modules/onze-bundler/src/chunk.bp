@@ -1,0 +1,292 @@
+//// onze-bundler — chunking and emission (front 68 step 4).
+////
+//// Compilation is the compiler's (`botopink build --target commonJS` over the
+//// client graph, one `.js` per module); linking is concatenation behind a
+//// small module-registry prelude, `__onze_require`, over a table of factory
+//// functions keyed by the module's compiled path — which is what makes
+//// concatenation sufficient: a `require("./x.js")` between two concatenated
+//// modules resolves in the table, never over the network.
+////
+////   shared            every client module two or more routes reach
+////   route:<pattern>   the client modules only that route reaches
+////   entry             the generated hydration entry, last
+////
+//// A chunk's file is `<base>.<hash>.js`, `<hash>` being std's
+//// `hash.contentHash` of the linked text (eight hex digits): two builds of an
+//// unchanged tree give the same names, and one changed byte changes exactly
+//// the chunks that contain it.
+
+import {hash, path, io.fs} from "std";
+import {AliasMap} from "onze";
+import {conventions.classify, segment.parsePath, segment.patternOf} from "routing";
+import {scan.ImportRef};
+import {graph.AppModule, graph.ClientGraph, graph.GraphNode, graph.rootsFrom, graph.graphOfRoots};
+import {manifest.ChunkRef, manifest.ClientBundleManifest, manifest.staticUrl, manifest.manifestVersion};
+
+pub type ChunkPlan(id: string, base: string, modules: Array<string>)
+
+// ── which client modules each route reaches ─────────────────────────────────
+
+fn isAncestorDir(dir: string, child: string) -> bool {
+    return dir == "" || dir == child || child.startsWith(dir + "/");
+}
+
+fn renderKinds() -> string[] {
+    return ["layout", "template", "loading", "error", "not-found"];
+}
+
+// Every page route of the app with the render modules it runs — the page, and
+// each layout, template, loading, error and not-found file on its segment
+// path — in the order `appDir`'s files are listed. A route's pattern is
+// `routing`'s (`patternOf(parsePath(seg))`: groups and slots contribute no URL
+// segment); a segment `routing` refuses halts with its refusal — `onze-cli`'s
+// scan has already refused it, naming the authored path.
+pub fn pageRoutes(
+    modules: Array<AppModule>,
+    appDir: string,
+) -> Array<#(string, string[])> {
+    var out: Array<#(string, string[])> = [];
+    for (modules) { m ->
+        val f = classify(appDir, m.path);
+        val kind = f?.kind ?? "";
+        if (kind == "page") {
+            val seg = f?.segment ?? "";
+            var ids: string[] = [];
+            for (modules) { other ->
+                val g = classify(appDir, other.path);
+                val gk = g?.kind ?? "";
+                val gs = g?.segment ?? "";
+                val wraps = renderKinds().contains(gk)
+                    && isAncestorDir(gs, seg);
+                if (wraps) ids.push(other.id);
+            }
+            ids.push(m.id);
+            out.push(#(patternOf(parsePath(seg)), ids));
+        }
+    }
+    return out;
+}
+
+// For each page route, the client modules it reaches: the closure of the
+// roots its render modules reach on the server side.
+pub fn routeReach(
+    modules: Array<AppModule>,
+    aliases: AliasMap,
+    appDir: string,
+) -> Array<#(string, string[])> {
+    return pageRoutes(modules, appDir).map(
+        { r -> #(r._0, graphOfRoots(modules, aliases, rootsFrom(modules, aliases, r._1)).nodes.map({ n -> n.moduleId })) },
+    );
+}
+
+// ── the plan ────────────────────────────────────────────────────────────────
+
+fn reachCount(reach: Array<#(string, string[])>, id: string) -> i32 {
+    return reach.filter({ r -> r._1.contains(id) }).length;
+}
+
+// The chunk plan: `shared` (every module two or more routes reach, then
+// `runtime` — the jhonstart client runtime every page loads), one
+// `route:<pattern>` chunk per route that reaches a module of its own, and the
+// entry. Modules keep the graph's order.
+pub fn planChunks(
+    graph: ClientGraph,
+    reach: Array<#(string, string[])>,
+    runtime: string[],
+    entryModule: string,
+) -> Array<ChunkPlan> {
+    val ids = graph.nodes.map({ n -> n.moduleId });
+    val shared = ids
+        .filter({ id -> reachCount(reach, id) >= 2 })
+        .append(runtime);
+    var plans: Array<ChunkPlan> = [
+        ChunkPlan(id: "shared", base: "shared", modules: shared),
+    ];
+    var k = 0;
+    for (reach) { r ->
+        val own = ids.filter(
+            { id -> r._1.contains(id) && reachCount(reach, id) == 1 },
+        );
+        if (own.length > 0) {
+            k = k + 1;
+            plans.push(
+                ChunkPlan(
+                    id: "route:" + r._0,
+                    base: "r" + k.toString(),
+                    modules: own,
+                ),
+            );
+        }
+    }
+    plans.push(ChunkPlan(id: "entry", base: "entry", modules: [entryModule]));
+    return plans;
+}
+
+// The compiled path of a module id: `components.like_button` →
+// `components/like_button.js`.
+pub fn compiledPathOf(moduleId: string) -> string {
+    return moduleId.replaceAll(".", "/") + ".js";
+}
+
+// ── linking ─────────────────────────────────────────────────────────────────
+
+// The registry prelude: `__onze_require(path)` over `__onze_factories`,
+// resolving `./` and `../` against the requiring module's path, caching each
+// module's exports. Shared by every chunk; idempotent when several load.
+pub fn prelude() -> string {
+    return [
+        "(function (g) {",
+        "  if (g.__onze_require) return;",
+        "  var factories = g.__onze_factories = g.__onze_factories || {};",
+        "  var cache = {};",
+        "  function resolve(from, spec) {",
+        "    if (spec.charAt(0) !== \".\") return spec;",
+        "    var parts = from.split(\"/\"); parts.pop();",
+        "    spec.split(\"/\").forEach(function (p) { if (p === \"..\") parts.pop(); else if (p !== \".\") parts.push(p); });",
+        "    var out = parts.join(\"/\");",
+        "    return /\\.m?js$/.test(out) ? out : out + \".js\";",
+        "  }",
+        "  function load(path) {",
+        "    if (cache[path]) return cache[path].exports;",
+        "    var f = factories[path];",
+        "    if (!f) throw new Error(\"onze: no module \" + path + \" in the loaded chunks\");",
+        "    var module = { exports: {} }; cache[path] = module;",
+        "    f(module, module.exports, function (spec) { return load(resolve(path, spec)); });",
+        "    return module.exports;",
+        "  }",
+        "  g.__onze_require = load;",
+        "})(globalThis);",
+    ].join("\n");
+}
+
+// One chunk's text: the prelude, then one factory per module, in plan order.
+// `compiled` maps a module id to its compiled JavaScript.
+pub fn linkChunk(
+    plan: ChunkPlan,
+    compiled: Array<#(string, string)>,
+) -> @Result<string, string> {
+    var parts: string[] = [prelude()];
+    for (plan.modules) { id ->
+        val hit = compiled.filter({ c -> c._0 == id });
+        if (hit.length == 0)
+            throw "chunk " + plan.id + ": module " + id + " was not compiled";
+        val js = (hit.at(0) ?? #("", ""))._1;
+        parts.push(
+            "(globalThis.__onze_factories = globalThis.__onze_factories || {})[\""
+                + compiledPathOf(id)
+                + "\"] = function (module, exports, require) {\n"
+                + js
+                + "\n};",
+        );
+    }
+    return parts.join("\n") + "\n";
+}
+
+// Eight hex digits of std's `contentHash`.
+pub fn chunkHash(text: string) -> string {
+    return hash.contentHash(text).padStart(8, "0");
+}
+
+pub fn chunkFileName(plan: ChunkPlan, text: string) -> string {
+    return plan.base + "." + chunkHash(text) + ".js";
+}
+
+pub fn chunkRefOf(buildId: string, plan: ChunkPlan, text: string) -> ChunkRef {
+    val file = chunkFileName(plan, text);
+    return ChunkRef(
+        id: plan.id,
+        url: staticUrl(buildId, file),
+        hash: chunkHash(text),
+        bytes: text.length(),
+    );
+}
+
+// The manifest of a linked build: `linked` holds each plan's text, in plan
+// order; `reach` names the routes (a route with no chunk has no `R` line).
+pub fn manifestOf(
+    buildId: string,
+    plans: Array<ChunkPlan>,
+    linked: Array<string>,
+    reach: Array<#(string, string[])>,
+    publicEnv: Array<#(string, string)>,
+) -> ClientBundleManifest {
+    var entry = ChunkRef(id: "", url: "", hash: "", bytes: 0);
+    var shared: Array<ChunkRef> = [];
+    var chunks: Array<ChunkRef> = [];
+    var i = 0;
+    for (plans) { p ->
+        val made = chunkRefOf(buildId, p, linked.at(i) ?? "");
+        if (p.id == "entry")
+            entry = made
+        else if (p.id == "shared")
+            shared.push(made)
+        else
+            chunks.push(made);
+        i = i + 1;
+    }
+    val routes = reach
+        .filter({ r -> plans.any({ p -> p.id == "route:" + r._0 }) })
+        .map({ r -> #(r._0, "route:" + r._0) });
+    return ClientBundleManifest(
+        version: manifestVersion,
+        buildId: buildId,
+        entry: entry,
+        shared: shared,
+        chunks: chunks,
+        routes: routes,
+        styles: [],
+        publicEnv: publicEnv,
+    );
+}
+
+// Writes one linked chunk under `<outDir>/static/<buildId>/`, reading each
+// module's compiled JavaScript from `compiledDir`.
+pub fn emitChunk(
+    plan: ChunkPlan,
+    compiledDir: string,
+    outDir: string,
+    buildId: string,
+) -> @Result<ChunkRef, string> {
+    var compiled: Array<#(string, string)> = [];
+    for (plan.modules) { id ->
+        val js = try fs.readText(path.join([compiledDir, compiledPathOf(id)]));
+        compiled.push(#(id, js));
+    }
+    val text = try linkChunk(plan, compiled);
+    val dir = path.join([outDir, "static", buildId]);
+    val written = try fs.writeText(
+        path.join([dir, chunkFileName(plan, text)]),
+        text,
+    );
+    return chunkRefOf(buildId, plan, text);
+}
+
+// The plan as the `chunks` snapshots record it.
+pub fn describePlan(
+    plans: Array<ChunkPlan>,
+    linked: Array<string>,
+    reach: Array<#(string, string[])>,
+) -> string {
+    var rows: string[] = [];
+    var i = 0;
+    for (plans) { p ->
+        rows.push(
+            p.id.padEnd(20, " ")
+                + " "
+                + chunkFileName(p, linked.at(i) ?? "").padEnd(22, " ")
+                + " "
+                + p.modules.join(", "),
+        );
+        i = i + 1;
+    }
+    var routes: string[] = [];
+    for (reach) { r ->
+        val target = if (plans.any({ p -> p.id == "route:" + r._0 }))
+            "route:" + r._0
+        else
+            "(none)";
+        routes.push(r._0 + " -> " + target);
+    }
+    rows.push("routes: " + routes.join(" ; "));
+    return rows.join("\n");
+}

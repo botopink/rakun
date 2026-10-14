@@ -1,0 +1,259 @@
+//// onze-bundler — the textual module scanner (front 68 step 1).
+////
+//// The compiler exposes no module-graph API (`@Decl` gives declarations, not
+//// imports), so the graph is read from the source text: every `import … ;`
+//// and `mod …;` line. botopink has no dynamic import — every import is a
+//// literal line — which is what makes a textual scan total rather than
+//// heuristic. A line that starts an import the scanner cannot read fails the
+//// scan, naming the file and the line; an edge is never dropped silently.
+////
+//// A module's id is its package-relative path with `.bp` dropped, `/mod`
+//// dropped and `/` read as `.` — after the staging rename front 50's
+//// generate applies to a directory that is not an identifier (`[slug]` →
+//// `d_slug`, `[...rest]` → `c_rest`, `[[...rest]]` → `o_rest`, `(group)` →
+//// `g_group`, `@slot` → `s_slot`), because the staged tree is the one the
+//// compiler sees.
+
+pub type SourceFile(path: string, source: string)
+
+pub type ImportRef(spec: string, names: Array<string>, isModDecl: bool, line: i32)
+
+// A fixture tree: a line `== <path>` opens a file, every following line up to
+// the next `==` is its content — `test-snap.md`'s fixture convention, and the
+// shape a build reads the project in.
+pub fn parseFixture(text: string) -> Array<SourceFile> {
+    var files: Array<SourceFile> = [];
+    var path = "";
+    var lines: string[] = [];
+    var open = false;
+    for (text.split("\n")) { raw ->
+        val line = if (raw.startsWith(" ")) raw.slice(1) else raw;
+        if (line.startsWith("== ")) {
+            if (open)
+                files.push(SourceFile(path: path, source: lines.join("\n")));
+            path = line.slice(3).trim();
+            lines = [];
+            open = true;
+        } else if (open) lines.push(line);
+    }
+    if (open) files.push(SourceFile(path: path, source: lines.join("\n")));
+    return files;
+}
+
+// ── ids ─────────────────────────────────────────────────────────────────────
+
+// The staged, identifier-safe spelling of one directory name.
+pub fn stagedSegment(seg: string) -> string {
+    if (seg.startsWith("[[...") && seg.endsWith("]]"))
+        return "o_" + seg.slice(5, seg.length() - 2);
+    if (seg.startsWith("[...") && seg.endsWith("]"))
+        return "c_" + seg.slice(4, seg.length() - 1);
+    if (seg.startsWith("[") && seg.endsWith("]"))
+        return "d_" + seg.slice(1, seg.length() - 1);
+    if (seg.startsWith("(") && seg.endsWith(")"))
+        return "g_" + seg.slice(1, seg.length() - 1);
+    if (seg.startsWith("@")) return "s_" + seg.slice(1);
+    return seg;
+}
+
+// The staged, identifier-safe stem of a convention file: `not-found` is not
+// an identifier and `default` is a keyword.
+pub fn stagedStem(stem: string) -> string {
+    if (stem == "not-found") return "not_found";
+    if (stem == "default") return "default_view";
+    return stem;
+}
+
+// The module id of `filePath` under `packageRoot`: stable across platforms —
+// a backslash path and a slash path give the same id.
+pub fn moduleIdOf(packageRoot: string, filePath: string) -> string {
+    val root = packageRoot.replaceAll("\\", "/");
+    val file = filePath.replaceAll("\\", "/");
+    val prefix = if (root == "" || root == ".")
+        ""
+    else if (root.endsWith("/"))
+        root
+    else
+        root + "/";
+    val rel0 = if (prefix != "" && file.startsWith(prefix))
+        file.slice(prefix.length())
+    else
+        file;
+    val rel = if (rel0.startsWith("./")) rel0.slice(2) else rel0;
+    val noExt = if (rel.endsWith(".bp"))
+        rel.slice(0, rel.length() - 3)
+    else
+        rel;
+    val parts = noExt.split("/").filter({ p -> p != "" });
+    val trimmed = if (parts.length > 1
+        && (parts.at(parts.length - 1) ?? "") == "mod")
+        parts.take(parts.length - 1)
+    else
+        parts;
+    val dirs = trimmed.take(trimmed.length - 1).map({ p -> stagedSegment(p) });
+    val last = stagedStem(trimmed.at(trimmed.length - 1) ?? "");
+    return dirs.append([last]).join(".");
+}
+
+// ── the scan ────────────────────────────────────────────────────────────────
+
+fn stripLineComment(line: string) -> string {
+    var out = "";
+    var inString = false;
+    var prev = "";
+    var done = false;
+    for (line.split("")) { c ->
+        if (done == false) {
+            val startsComment = inString == false && c == "/" && prev == "/";
+            if (startsComment) {
+                out = out.slice(0, out.length() - 1);
+                done = true;
+            } else {
+                if (c == "\"" && prev != "\\") inString = inString == false;
+                out = out + c;
+            }
+            prev = c;
+        }
+    }
+    return out;
+}
+
+// The top-level comma-separated items of a brace body, trimmed: `a, b: {c,
+// d}, e.f as g` → `["a", "b: {c, d}", "e.f as g"]`.
+fn topLevelItems(body: string) -> string[] {
+    var items: string[] = [];
+    var depth = 0;
+    var cur = "";
+    for (body.split("")) { c ->
+        if (c == "{") depth = depth + 1;
+        if (c == "}") depth = depth - 1;
+        if (c == "," && depth == 0) {
+            items.push(cur.trim());
+            cur = "";
+        } else cur = cur + c;
+    }
+    if (cur.trim() != "") items.push(cur.trim());
+    return items;
+}
+
+fn readImport(text: string) -> ?#(string, string[]) {
+    val open = text.indexOf("{");
+    val close = text.lastIndexOf("}");
+    val validBraces = open > 0 && close > open;
+    if (validBraces == false) return null;
+    val head = text.slice(0, open).trim();
+    if (head != "import") return null;
+    val body = text.slice(open + 1, close);
+    val tail = text.slice(close + 1).trim();
+    if (tail == ";") return #("", topLevelItems(body));
+    if (tail.startsWith("from ") == false) return null;
+    val rest = tail.slice(5).trim();
+    val quoted = rest.startsWith("\"") && rest.endsWith("\";");
+    if (quoted == false) return null;
+    val spec = rest.slice(1, rest.length() - 2);
+    if (spec.contains("\"")) return null;
+    return #(spec, topLevelItems(body));
+}
+
+fn modDeclName(line: string) -> string {
+    val t = if (line.startsWith("pub default mod "))
+        line.slice(16)
+    else if (line.startsWith("pub mod "))
+        line.slice(8)
+    else if (line.startsWith("mod "))
+        line.slice(4)
+    else
+        "";
+    if (t.endsWith(";") == false) return "";
+    return t.slice(0, t.length() - 1).trim();
+}
+
+// Every import and `mod` declaration of `source`, in order. `file` names the
+// source in an error.
+pub fn importsOf(file: string, source: string) -> @Result<Array<ImportRef>, string> {
+    var refs: Array<ImportRef> = [];
+    var pending = "";
+    var pendingLine = 0;
+    var n = 0;
+    for (source.split("\n")) { raw ->
+        n = n + 1;
+        val line = stripLineComment(raw).trim();
+        if (pending != "") pending = pending + " " + line else if (line
+            == "import"
+            || line.startsWith("import ")
+            || line.startsWith("import{")) {
+            pending = line;
+            pendingLine = n;
+        } else {
+            val m = modDeclName(line);
+            if (m != "")
+                refs.push(ImportRef(spec: m, names: [], isModDecl: true, line: n));
+        }
+        if (pending != "" && pending.endsWith(";")) {
+            val parsed = readImport(pending);
+            if (parsed == null)
+                throw [file, ":", pendingLine.toString(), ": an import the scanner cannot read: ", pending].join("");
+            val none: #(string, string[]) = #("", []);
+            val ok = parsed;
+            refs.push(ImportRef(spec: ok._0, names: ok._1, isModDecl: false, line: pendingLine));
+            pending = "";
+        }
+    }
+    if (pending != "")
+        throw [file, ":", pendingLine.toString(), ": an import with no closing `;`"].join("");
+    return refs;
+}
+
+// ── markers ─────────────────────────────────────────────────────────────────
+
+fn codeLines(source: string) -> string[] {
+    return source.split("\n").map({ l -> stripLineComment(l).trim() });
+}
+
+// A module carrying front 29's client marker: a `#[client]` annotation.
+pub fn isClientModule(source: string) -> bool {
+    return codeLines(source).any({ l -> l.startsWith("#[client]") || l.startsWith("#[client,") });
+}
+
+fn importsName(refs: Array<ImportRef>, spec: string, name: string) -> bool {
+    return refs.any({ r -> r.spec == spec && r.names.contains(name) });
+}
+
+// Front 29's poison pill: the module imports `serverOnly` from jhonstart.
+pub fn importsServerOnly(refs: Array<ImportRef>) -> bool {
+    return importsName(refs, "jhonstart", "serverOnly");
+}
+
+// Front 29's request-scope predicate: the module imports `request`,
+// `cookies` or `headers` from jhonstart.
+pub fn requestScopeImports(refs: Array<ImportRef>) -> string[] {
+    return ["request", "cookies", "headers"].filter({ n -> importsName(refs, "jhonstart", n) });
+}
+
+// The names `source` declares `pub` at the top level (`pub fn`, `pub type`,
+// `pub val`, `pub declare fn`), for the sibling shorthand `import {x};`.
+pub fn publicNamesOf(source: string) -> string[] {
+    var out: string[] = [];
+    for (codeLines(source)) { l ->
+        val rest = if (l.startsWith("pub declare fn "))
+            l.slice(15)
+        else if (l.startsWith("pub fn "))
+            l.slice(7)
+        else if (l.startsWith("pub type "))
+            l.slice(9)
+        else if (l.startsWith("pub val "))
+            l.slice(8)
+        else
+            "";
+        if (rest != "") {
+            var name = "";
+            var open = true;
+            for (rest.split("")) { c ->
+                val word = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_".contains(c);
+                if (open && word) name = name + c else open = false;
+            }
+            if (name != "") out.push(name);
+        }
+    }
+    return out;
+}

@@ -1,0 +1,73 @@
+// `botopink test` suite for `lib/db.bp` (front 53 step 1), both rows.
+
+import {lib.db.Post, lib.db.listPosts, lib.db.listPostsIn, lib.db.readPost, lib.db.readPostIn, lib.db.writePostIn, lib.db.postsDir, lib.db.parsePost, lib.db.postText};
+import {io.fs, io.process, io.clock, path, io.env} from "std";
+
+// The run's own scratch directory — `botopink test` names it in
+// `BOTOPINK_TEST_TMPDIR`, and it is the one place a test writes.
+fn testTmp() -> string {
+    val root = env.read("BOTOPINK_TEST_TMPDIR") ?? "";
+    assert root
+        != "", "BOTOPINK_TEST_TMPDIR is not set: run this suite under `botopink test`";
+    return root;
+}
+
+fn scratch() -> string {
+    val dir = path.join([testTmp(), "blog-db-" + clock.nowMillis().toString()]);
+    val made = process.run("mkdir", ["-p", dir]);
+    return dir;
+}
+
+fn drop(dir: string) -> i32 {
+    val gone = process.run("rm", ["-rf", dir]);
+    return 0;
+}
+
+fn errorOf(r: @Result<Post, string>) -> string {
+    return case r {
+        Ok(p) -> "ok";
+        Error(message) -> message;
+    };
+}
+
+test "db: listPosts returns the three seeded posts, newest first" {
+    val posts = listPosts();
+    assert posts.length == 3;
+    assert posts.map({ p -> p.slug }).join(",")
+        == "styles-that-stay-put,streaming-explained,hello-world";
+    assert (posts.at(2) ?? parsePost("", "")).title == "Hello, world";
+}
+
+test "db: readPost of a missing slug names the slug" {
+    assert errorOf(readPost("missing")).contains("\"missing\"");
+    assert errorOf(readPost("hello-world")) == "ok";
+}
+
+test "db: writePost then listPosts shows four" {
+    val dir = scratch();
+    for (listPosts()) { p ->
+        val copied = writePostIn(dir, p);
+    }
+    val before = listPostsIn(dir).unwrapOr([]);
+    assert before.length == 3;
+    val w = writePostIn(dir, Post(slug: "a-fourth", title: "A fourth", published: "2026-04-01", excerpt: "", body: "Fresh."));
+    assert w.isOk();
+    val after = listPostsIn(dir).unwrapOr([]);
+    assert after.length == 4;
+    assert (after.at(0) ?? parsePost("", "")).slug == "a-fourth";
+    assert readPostIn(dir, "a-fourth").isOk();
+    drop(dir);
+}
+
+test "db: a slug that could leave the directory is refused" {
+    val w = writePostIn(testTmp(), Post(slug: "../escape", title: "x", published: "2026-01-01", excerpt: "", body: ""));
+    assert w.isError();
+}
+
+test "db: parse and text round-trip" {
+    val p = parsePost("s", "Title\n2026-05-05\nBody line\nmore");
+    assert p.title == "Title";
+    assert p.published == "2026-05-05";
+    assert p.excerpt == "Body line";
+    assert parsePost("s", postText(p)).body == p.body;
+}

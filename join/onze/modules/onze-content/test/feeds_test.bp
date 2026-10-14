@@ -1,0 +1,60 @@
+// `feeds` (front 121, step 5): the RSS 2.0 document — one channel, one item
+// per entry, every text node escaped, rooted links made absolute against the
+// site, dates as RFC 822. Both rows.
+
+import {feeds, feeds.RssFeed, feeds.RssItem};
+import {io.clock} from "std";
+
+fn instant(text: string) -> i64 {
+    return case clock.parseIso8601(text) {
+        Ok(ms) -> ms;
+        Error(_) -> clock.nowMillis();
+    };
+}
+
+fn feed() -> RssFeed {
+    val at = instant("2026-01-10T12:00:00Z");
+    return RssFeed(
+        title: "Notes",
+        description: "A blog about <rendering> & such",
+        site: "https://example.dev",
+        items: [
+            RssItem(
+                title: "Hello, world",
+                link: "/blog/hello-world",
+                description: "Says </description> hello",
+                pubDate: at,
+            ),
+            RssItem(
+                title: "Away & back",
+                link: "https://elsewhere.example/x?a=1&b=2",
+            ),
+        ],
+    );
+}
+
+test "feeds: the feed is one channel with one item per entry" {
+    assert feeds.rssFeed(feed())
+        == "<?xml version=\"1.0\" encoding=\"UTF-8\"?><rss version=\"2.0\"><channel>"
+            + "<title>Notes</title>"
+            + "<description>A blog about &lt;rendering&gt; &amp; such</description>"
+            + "<link>https://example.dev</link>"
+            + "<item><title>Hello, world</title><link>https://example.dev/blog/hello-world</link>"
+            + "<guid isPermaLink=\"true\">https://example.dev/blog/hello-world</guid>"
+            + "<description>Says &lt;/description&gt; hello</description>"
+            + "<pubDate>Sat, 10 Jan 2026 12:00:00 GMT</pubDate></item>"
+            + "<item><title>Away &amp; back</title><link>https://elsewhere.example/x?a=1&amp;b=2</link>"
+            + "<guid isPermaLink=\"true\">https://elsewhere.example/x?a=1&amp;b=2</guid></item>"
+            + "</channel></rss>";
+}
+
+test "feeds: text is escaped — a description cannot close its element" {
+    val body = feeds.rssFeed(feed());
+    assert body.split("</description>").length - 1 == 2;
+    assert body.split("<item>").length - 1 == 2;
+}
+
+test "feeds: a date is RFC 822 in GMT" {
+    assert feeds.rfc822(instant("1970-01-01T00:00:00Z"))
+        == "Thu, 01 Jan 1970 00:00:00 GMT";
+}

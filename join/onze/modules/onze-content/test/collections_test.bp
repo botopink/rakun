@@ -1,0 +1,525 @@
+// `collections` (front 121, steps 4–5): the loaders (`glob` over `.json`
+// entries, `file`, an application's own), typed entries and their readers,
+// the sync's problems as `<file>: <path>: <message>`, references, and the
+// store read at run time without the content files. Every fixture is a tree
+// the test writes under `BOTOPINK_TEST_TMPDIR`; both rows.
+
+import {collections, collections.Collection, collections.AnyCollection, collections.Entry, collections.RawEntry};
+import {Element, renderNode} from "jhonstart";
+import {decorators.validated, decorators.notBlank} from "validation";
+import {constraints.vNotBlank, table.constraintTableJson} from "validation";
+import {derived, report.ValidationReport, report.Violation} from "validation";
+import {messages.setMessageSource, messages.builtInOnly} from "validation";
+import {json.Json, io.fs, io.env, path} from "std";
+
+#[validated]
+pub type BlogPost(
+    #[notBlank] title: string,
+    description: string,
+    draft: ?bool,
+    author: string,
+)
+
+#[validated]
+pub type Author(
+    name: string,
+    portfolio: string,
+)
+
+#[validated]
+pub type Note(
+    tags: Array<string>,
+)
+
+// The run's own scratch directory — `botopink test` names it in
+// `BOTOPINK_TEST_TMPDIR`, and it is the one place a test writes.
+fn testTmp() -> string {
+    val root = env.read("BOTOPINK_TEST_TMPDIR") ?? "";
+    assert root
+        != "", "BOTOPINK_TEST_TMPDIR is not set: run this suite under `botopink test`";
+    return root;
+}
+
+fn mkdirs(dir: string) -> void {
+    if (fs.exists(dir)) return;
+    mkdirs(path.dirname(dir));
+    val _made = fs.mkdir(dir);
+}
+
+// A fresh content tree named `name`: every `#(path, text)` written under it.
+fn tree(name: string, files: Array<#(string, string)>) -> string {
+    val root = path.join([testTmp(), "collections-" + name]);
+    val _gone = fs.removeTree(root);
+    for (files) { f ->
+        val file = path.join([root, f._0]);
+        mkdirs(path.dirname(file));
+        val _w = fs.writeText(file, f._1);
+    }
+    collections.useFiles();
+    val _src = setMessageSource(builtInOnly());
+    return root;
+}
+
+fn post(title: string, author: string) -> string {
+    return "{\"title\": \""
+        + title
+        + "\", \"description\": \"D\", \"author\": \""
+        + author
+        + "\"}";
+}
+
+fn blogTree(name: string) -> string {
+    return tree(
+        name,
+        [
+            #("content/blog/Hello World.json", post("Hello, world", "ana")),
+            #(
+                "content/blog/2026/second.json",
+                "{\"title\": \"Second\", \"description\": \"D\", \"draft\": true, \"author\": \"ana\"}",
+            ),
+            #(
+                "content/authors.json",
+                "[{\"id\": \"ana\", \"name\": \"Ana\", \"portfolio\": \"https://ana.example\"}]",
+            ),
+        ],
+    );
+}
+
+fn blog(root: string) -> Collection<BlogPost> {
+    return collections
+        .defineCollection(
+            "blog",
+            collections.glob(path.join([root, "content/blog"]), "**/*.json"),
+            { d -> BlogPost.parse(d) },
+        )
+        .reference("author", "authors");
+}
+
+fn authors(root: string) -> Collection<Author> {
+    return collections.defineCollection(
+        "authors",
+        collections.file(path.join([root, "content/authors.json"])),
+        { d -> Author.parse(d) },
+    );
+}
+
+fn all(root: string) -> Array<AnyCollection> {
+    return [blog(root).erased(), authors(root).erased()];
+}
+
+fn ids<T>(entries: Array<Entry<T>>) -> string {
+    return entries.map({ e -> e.id }).join(",");
+}
+
+// What a problem line says once the scratch root is cut off.
+fn relative(root: string, problems: Array<string>) -> string {
+    return problems.map({ p -> p.replaceAll(root + "/", "") }).join("\n");
+}
+
+test "collections: glob reads one entry per file, ids slugged from the path" {
+    val root = blogTree("glob");
+    val posts = await collections.getCollection(blog(root));
+    assert ids(posts) == "2026/second,hello-world";
+    val first = posts.at(1) ?? (posts.at(0) ?? missing());
+    assert first.data.title == "Hello, world";
+    assert first.collection == "blog";
+    assert first.filePath == path.join([root, "content/blog/Hello World.json"]);
+}
+
+fn missing() -> Entry<BlogPost> {
+    return Entry(
+        id: "",
+        collection: "",
+        data: BlogPost(title: "", description: "", draft: null, author: ""),
+        body: "",
+        filePath: "",
+    );
+}
+
+test "collections: a slug member overrides the id" {
+    val root = tree(
+        "slug",
+        [
+            #(
+                "content/blog/a.json",
+                "{\"slug\": \"first\", \"title\": \"T\", \"description\": \"D\", \"author\": \"ana\"}",
+            ),
+        ],
+    );
+    val c = collections.defineCollection(
+        "blog",
+        collections.glob(path.join([root, "content/blog"]), "*.json"),
+        { d -> Slugged.parse(d) },
+    );
+    val found = await collections.getCollection(c);
+    assert ids(found) == "first";
+}
+
+#[validated]
+pub type Slugged(
+    slug: string,
+    title: string,
+    description: string,
+    author: string,
+)
+
+test "collections: a path that slugs to nothing is refused" {
+    val root = tree("empty-id", [#("content/blog/!!.json", post("T", "ana"))]);
+    val c = collections.defineCollection(
+        "blog",
+        collections.glob(path.join([root, "content/blog"]), "*.json"),
+        { d -> BlogPost.parse(d) },
+    );
+    val problems = await collections.syncProblems([c.erased()]);
+    assert relative(root, problems)
+        == "content/blog/!!.json: its path slugs to an empty id - name the file or give it a `slug`";
+}
+
+test "collections: a filter over entries, and one entry by id" {
+    val root = blogTree("filter");
+    val live = await collections.getCollectionWhere(
+        blog(root),
+        { e -> e.data.draft != true },
+    );
+    assert ids(live) == "hello-world";
+    val hit = await collections.getEntry(blog(root), "2026/second");
+    assert (hit ?? missing()).data.title == "Second";
+    val none = await collections.getEntry(blog(root), "nope");
+    assert none == null;
+}
+
+test "collections: every violation of every entry, as file, path and message" {
+    val root = tree(
+        "violations",
+        [
+            #(
+                "content/blog/broken.json",
+                "{\"title\": \"\", \"author\": 7, \"extra\": 1}",
+            ),
+            #("content/blog/good.json", post("Good", "ana")),
+            #(
+                "content/authors.json",
+                "[{\"id\": \"ana\", \"name\": \"Ana\", \"portfolio\": \"p\"}]",
+            ),
+        ],
+    );
+    val problems = await collections.syncProblems(all(root));
+    val said = relative(root, problems);
+    assert said
+        == "content/blog/broken.json: description: must be present\n"
+            + "content/blog/broken.json: author: must be text, was a number\n"
+            + "content/blog/broken.json: extra: extra is not a field of BlogPost", said;
+}
+
+test "collections: a constraint marker's violation carries its path" {
+    val root = tree(
+        "constraint",
+        [
+            #("content/blog/blank.json", post("  ", "ana")),
+            #(
+                "content/authors.json",
+                "[{\"id\": \"ana\", \"name\": \"Ana\", \"portfolio\": \"p\"}]",
+            ),
+        ],
+    );
+    val problems = await collections.syncProblems(all(root));
+    assert relative(root, problems)
+        == "content/blog/blank.json: title: must not be blank";
+}
+
+test "collections: the store refuses content with a problem, naming it" {
+    val root = tree(
+        "refused",
+        [
+            #(
+                "content/blog/broken.json",
+                "{\"title\": \"T\", \"description\": \"D\"}",
+            ),
+            #("content/authors.json", "[]"),
+        ],
+    );
+    val written = await collections.writeStore(
+        all(root),
+        path.join([root, "out"]),
+    );
+    val problem = case written {
+        Ok(_) -> "";
+        Error(text) -> text;
+    };
+    assert relative(root, [problem])
+        == "content/blog/broken.json: author: must be present";
+    assert !fs.exists(path.join([root, "out/content/blog.json"]));
+}
+
+test "collections: a Markdown entry waits for the frontmatter reader" {
+    val root = tree(
+        "markdown",
+        [#("content/blog/post.md", "---\ntitle: T\n---\nx")],
+    );
+    val c = collections.defineCollection(
+        "blog",
+        collections.glob(path.join([root, "content/blog"]), "*.md"),
+        { d -> BlogPost.parse(d) },
+    );
+    val problems = await collections.syncProblems([c.erased()]);
+    assert relative(root, problems)
+        == "content/blog/post.md: a Markdown entry needs the frontmatter reader of front 121 step 3 (decision 08-f)";
+}
+
+test "collections: file reads an array of objects by id, the id out of the data" {
+    val root = blogTree("file");
+    val found = await collections.getCollection(authors(root));
+    assert ids(found) == "ana";
+    assert (found.at(0) ?? Entry(
+        id: "",
+        collection: "",
+        data: Author(name: "", portfolio: ""),
+        body: "",
+        filePath: "",
+    )).data.name
+        == "Ana";
+}
+
+test "collections: file refuses a missing id, a repeated id and a document that is not a list" {
+    val root = tree(
+        "file-refused",
+        [
+            #(
+                "a.json",
+                "[{\"name\": \"A\", \"portfolio\": \"p\"}, {\"id\": \"b\", \"name\": \"B\", \"portfolio\": \"p\"}, {\"id\": \"b\", \"name\": \"C\", \"portfolio\": \"p\"}, 3]",
+            ),
+            #("b.json", "{\"id\": \"x\"}"),
+        ],
+    );
+    val a = collections.defineCollection(
+        "a",
+        collections.file(path.join([root, "a.json"])),
+        { d -> Author.parse(d) },
+    );
+    val b = collections.defineCollection(
+        "b",
+        collections.file(path.join([root, "b.json"])),
+        { d -> Author.parse(d) },
+    );
+    val problems = await collections.syncProblems([a.erased(), b.erased()]);
+    assert relative(root, problems)
+        == "a.json: [0]: an entry needs an `id`, a non-empty string\n"
+            + "a.json: [2]: id \"b\" repeats entry [1]\n"
+            + "a.json: [3]: an entry is a JSON object, and this is a number\n"
+            + "b.json: a file loader reads an array of entries, and this is an object";
+}
+
+fn notes() -> @Task<@Result<Array<RawEntry>, string>> {
+    return [
+        RawEntry(
+            id: "one",
+            data: Json.Obj(
+                members: [#("tags", Json.Arr(items: [Json.Str(value: "a")]))],
+            ),
+            body: "# One\n\nSee [two](/notes/two).\n\n## Details\n",
+            filePath: "notes:one",
+        ),
+    ];
+}
+
+fn failing() -> @Task<@Result<Array<RawEntry>, string>> {
+    throw "the notes service is down";
+}
+
+test "collections: a custom loader is a function answering raw entries" {
+    collections.useFiles();
+    val c = collections.defineCollection(
+        "notes",
+        notes,
+        { d -> Note.parse(d) },
+    );
+    val found = await collections.getCollection(c);
+    assert ids(found) == "one";
+    assert (found.at(0) ?? Entry(
+        id: "",
+        collection: "",
+        data: Note(tags: []),
+        body: "",
+        filePath: "",
+    )).data.tags.join(",")
+        == "a";
+    val down = collections.defineCollection(
+        "down",
+        failing,
+        { d -> Note.parse(d) },
+    );
+    val problems = await collections.syncProblems([down.erased()]);
+    assert problems.join("\n") == "the notes service is down";
+}
+
+test "collections: render answers the element tree and the headings" {
+    collections.useFiles();
+    val c = collections.defineCollection(
+        "notes",
+        notes,
+        { d -> Note.parse(d) },
+    );
+    val hit = await collections.getEntry(c, "one");
+    val entry = hit ?? Entry(
+        id: "",
+        collection: "",
+        data: Note(tags: []),
+        body: "",
+        filePath: "",
+    );
+    val rendered = collections.render(entry);
+    val markup = renderNode(rendered.content);
+    assert markup.contains("<h1 id=\"one\">One</h1>");
+    assert markup.contains("<a href=\"/notes/two\">two</a>");
+    assert rendered.headings.map({ h -> h.slug }).join(",") == "one,details";
+}
+
+test "collections: two entries with one id are a problem" {
+    val root = tree(
+        "same-id",
+        [
+            #("content/blog/A b.json", post("A", "ana")),
+            #("content/blog/a-b.json", post("B", "ana")),
+            #(
+                "content/authors.json",
+                "[{\"id\": \"ana\", \"name\": \"Ana\", \"portfolio\": \"p\"}]",
+            ),
+        ],
+    );
+    val problems = await collections.syncProblems(all(root));
+    assert relative(root, problems)
+        == "content/blog/a-b.json: id \"a-b\" is also the id of content/blog/A b.json";
+}
+
+test "collections: a collection defined twice is a problem" {
+    val root = blogTree("twice");
+    val problems = await collections.syncProblems(
+        [authors(root).erased(), authors(root).erased()],
+    );
+    assert problems.join("\n") == "collection \"authors\" is defined twice";
+}
+
+test "collections: a reference to a missing entry names both entries" {
+    val root = tree(
+        "orphan",
+        [
+            #("content/blog/orphan.json", post("T", "nobody")),
+            #(
+                "content/authors.json",
+                "[{\"id\": \"ana\", \"name\": \"Ana\", \"portfolio\": \"p\"}]",
+            ),
+        ],
+    );
+    val problems = await collections.syncProblems(all(root));
+    assert relative(root, problems)
+        == "content/blog/orphan.json: author: no entry \"nobody\" in collection \"authors\"";
+}
+
+test "collections: a reference to a collection that is not synced is a problem" {
+    val root = blogTree("unsynced");
+    val problems = await collections.syncProblems([blog(root).erased()]);
+    assert problems.join("\n")
+        == "collection \"blog\": `author` references collection \"authors\", which is not synced";
+}
+
+test "collections: a list of references checks every id" {
+    collections.useFiles();
+    val c = collections
+        .defineCollection("notes", notes, { d -> Note.parse(d) })
+        .reference("tags", "tags");
+    val tags = collections.defineCollection(
+        "tags",
+        tagEntries,
+        { d -> Author.parse(d) },
+    );
+    val problems = await collections.syncProblems([c.erased(), tags.erased()]);
+    assert problems.join("\n")
+        == "notes:one: tags: no entry \"a\" in collection \"tags\"";
+}
+
+fn tagEntries() -> @Task<@Result<Array<RawEntry>, string>> {
+    return [
+        RawEntry(
+            id: "b",
+            data: Json.Obj(
+                members: [
+                    #("name", Json.Str(value: "B")),
+                    #("portfolio", Json.Str(value: "p")),
+                ],
+            ),
+            body: "",
+            filePath: "tags:b",
+        ),
+    ];
+}
+
+test "collections: the store is read at run time without the content files" {
+    val root = blogTree("store");
+    val out = path.join([root, "out"]);
+    val written = await collections.writeStore(all(root), out);
+    val count = case written {
+        Ok(n) -> n;
+        Error(_) -> 0;
+    };
+    assert count == 3;
+    val _gone = fs.removeTree(path.join([root, "content"]));
+    collections.useStore(out);
+    val posts = await collections.getCollection(blog(root));
+    val people = await collections.getCollection(authors(root));
+    collections.useFiles();
+    assert ids(posts) == "2026/second,hello-world";
+    assert (posts.at(0) ?? missing()).data.draft == true;
+    assert ids(people) == "ana";
+    assert fs.exists(collections.storeFile(out, "blog"));
+}
+
+#[validated]
+pub type Score(
+    points: i32,
+    ratio: f64,
+    label: ?string,
+)
+
+fn scores() -> @Task<@Result<Array<RawEntry>, string>> {
+    return [
+        RawEntry(
+            id: "s",
+            data: Json.Obj(
+                members: [
+                    #("points", Json.Num(value: 42.0)),
+                    #("ratio", Json.Num(value: 0.1)),
+                    #("label", Json.Str(value: "a \"quoted\"\nline")),
+                ],
+            ),
+            body: "x",
+            filePath: "scores:s",
+        ),
+    ];
+}
+
+test "collections: the store keeps numbers and text exactly" {
+    val root = tree("store-values", []);
+    val out = path.join([root, "out"]);
+    val c = collections.defineCollection(
+        "scores",
+        scores,
+        { d -> Score.parse(d) },
+    );
+    val written = await collections.writeStore([c.erased()], out);
+    assert written.isOk();
+    collections.useStore(out);
+    val found = await collections.getCollection(c);
+    collections.useFiles();
+    val s = found.at(0) ?? Entry(
+        id: "",
+        collection: "",
+        data: Score(points: 0, ratio: 0.0, label: null),
+        body: "",
+        filePath: "",
+    );
+    assert s.data.points == 42;
+    assert s.data.ratio == 0.1;
+    assert s.data.label == "a \"quoted\"\nline";
+    assert s.body == "x";
+    assert s.filePath == "scores:s";
+}

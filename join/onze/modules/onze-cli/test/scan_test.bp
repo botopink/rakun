@@ -1,0 +1,119 @@
+// `botopink test` suite for `src/scan.bp` and `src/resolve.bp` (front 50
+// steps 2 and 3) — commonJS, the CLI's one row.
+
+import {scan.RouteEntry, scan.scanFiles, scan.scanApp, scan.declaredArgument, scan.describeScan, scan.collisions};
+import {resolve.Project, resolve.resolveProject, resolve.findRoot};
+import {OnzeConfig, AliasMap} from "onze";
+import {io.fs, io.process, io.clock, path, io.env} from "std";
+import {assertAs} from "snap";
+
+// The run's own scratch directory — `botopink test` names it in
+// `BOTOPINK_TEST_TMPDIR`, and it is the one place a test writes.
+fn testTmp() -> string {
+    val root = env.read("BOTOPINK_TEST_TMPDIR") ?? "";
+    assert root
+        != "", "BOTOPINK_TEST_TMPDIR is not set: run this suite under `botopink test`";
+    return root;
+}
+
+fn page(seg: string) -> string {
+    return "#[page(\""
+        + seg
+        + "\")] pub fn p(route: PageContext) -> @Component<Element> { return div([]); }";
+}
+
+fn errorOf(r: @Result<Array<RouteEntry>, string>) -> string {
+    return case r {
+        Ok(v) -> "ok";
+        Error(e) -> e;
+    };
+}
+
+fn projectError(r: @Result<Project, string>) -> string {
+    return case r {
+        Ok(v) -> "ok";
+        Error(e) -> e;
+    };
+}
+
+fn scratch() -> string {
+    val dir = path.join([testTmp(), "cli-" + clock.nowMillis().toString()]);
+    val made = process.run("mkdir", ["-p", dir]);
+    return dir;
+}
+
+fn put(dir: string, rel: string, text: string) -> i32 {
+    val made = process.run("mkdir", ["-p", path.dirname(path.join([dir, rel]))]);
+    val w = fs.writeText(path.join([dir, rel]), text);
+    return 0;
+}
+
+fn drop(dir: string) -> i32 {
+    val gone = process.run("rm", ["-rf", dir]);
+    return 0;
+}
+
+test "scan: every folder form ---- the staging table" {
+    val entries = try scanFiles("", "app", [
+        #("app/page.bp", page("")),
+        #("app/layout.bp", "#[layout(\"\")] pub fn l(props: LayoutProps) -> @Component<Element> { return props.children; }"),
+        #("app/blog/[slug]/page.bp", page("blog/[slug]")),
+        #("app/blog/[slug]/loading.bp", "pub fn Loading() -> Element { return p([]); }"),
+        #("app/blog/[slug]/not-found.bp", "pub fn NotFound() -> Element { return p([]); }"),
+        #("app/(marketing)/about/page.bp", page("(marketing)/about")),
+        #("app/docs/[...rest]/page.bp", page("docs/[...rest]")),
+        #("app/shop/[[...rest]]/page.bp", page("shop/[[...rest]]")),
+        #("app/dashboard/@feed/page.bp", page("dashboard/@feed")),
+        #("app/api/posts/route.bp", "#[getRoute(\"api/posts\")] pub fn list(req: Request) -> @Task<HandlerResponse> { return ok(); }"),
+        #("app/_components/card.bp", "pub fn Card() -> Element { return p([]); }"),
+    ]);
+    assert entries.length == 10;
+    try assertAs(@src(), "scan", describeScan(entries));
+}
+
+test "scan: the group does not reach the pattern" {
+    val entries = try scanFiles("", "app", [#("app/(marketing)/about/page.bp", page("(marketing)/about"))]);
+    assert (entries.at(0) ?? RouteEntry(pattern: "", kind: "", authoredPath: "", modulePath: "", declared: "")).pattern
+        == "/about";
+}
+
+test "scan: refusals ---- page and route together, a missing decorator, a staging clash" {
+    val both = errorOf(scanFiles("", "app", [#("app/api/page.bp", page("api")), #("app/api/route.bp", "#[getRoute(\"api\")] pub fn g(req: Request) -> @Task<HandlerResponse> { return ok(); }")]));
+    val bare = errorOf(scanFiles("", "app", [#("app/blog/page.bp", "pub fn p(route: PageContext) -> @Component<Element> { return div([]); }")]));
+    val clash = errorOf(scanFiles("", "app", [#("app/blog/[slug]/page.bp", page("blog/[slug]")), #("app/blog/d_slug/page.bp", page("blog/d_slug"))]));
+    try assertAs(@src(), "errors", [both, bare, clash].join("\n"));
+}
+
+test "scan: declaredArgument reads the first matching decorator" {
+    assert (declaredArgument("#[page(\"blog/[slug]\")] pub fn p", "page") ?? "")
+        == "blog/[slug]";
+    assert declaredArgument("pub fn p", "page") == null;
+}
+
+test "resolve: from a nested directory, with and without onze.json" {
+    val dir = scratch();
+    put(dir, "botopink.json", "{ \"name\": \"demo\", \"alias\": { \"@/lib\": \"lib\" } }");
+    put(dir, "app/blog/page.bp", page("blog"));
+    val p = try resolveProject(path.join([dir, "app", "blog"]));
+    assert p.root == dir;
+    assert p.config.name == "demo";
+    assert p.config.port == 3000;
+    assert p.aliases.entries.length == 1;
+    put(dir, "onze.json", "{ \"port\": 4000 }");
+    val q = try resolveProject(dir);
+    assert q.config.port == 4000;
+    put(dir, "onze.json", "{ \"prot\": 4000 }");
+    assert projectError(resolveProject(dir)).endsWith("("
+        + path.join([dir, "onze.json"])
+        + ")");
+    put(dir, "onze.json", "{}");
+    put(dir, "botopink.json", "{ \"name\": \"demo\", \"alias\": { \"@/up\": \"..\" } }");
+    assert projectError(resolveProject(dir)).startsWith("alias \"@/up\" -> \"..\" escapes the package root");
+    val entries = try scanApp(dir, "", "app");
+    assert entries.length == 1;
+    drop(dir);
+}
+
+test "resolve: no botopink.json above names the file" {
+    assert projectError(resolveProject("/")).contains("no botopink.json");
+}

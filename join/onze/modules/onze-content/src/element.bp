@@ -1,0 +1,253 @@
+//// onze-content/element — the Markdown tree as jhonstart's `Element`
+//// (front 121, step 2; front 142, step 3).
+////
+//// The `markdown` library answers a tree of its own (`MdDoc` of `MdNode`s) and
+//// names no framework (decision 113); `toElement(doc)` maps it to the
+//// `Element` jhonstart renders, raw HTML passing through `raw(…)` (the author's
+//// own markup, as in a template). The output is the HTML the library's
+//// `toHtml` writes, as elements: a table cell's alignment is
+//// `style="text-align:…"`, a task item an `<input type="checkbox">`, the
+//// footnotes a `<section class="footnotes">` last.
+
+import {markdown.MdNode, markdown.MdDoc, markdown.Footnote, markdown.footnoteId} from "markdown";
+import {Element, text, fragment, el, voidEl, raw} from "jhonstart";
+
+// The document as an `Element` tree.
+pub fn toElement(doc: MdDoc) -> Element {
+    val body = doc.nodes.map({ n -> blockElement(n, false) });
+    if (doc.footnotes.length == 0) return fragment(body, attrs: []);
+    val items = doc.footnotes.map({ f -> footnoteElement(f) });
+    val section = el(
+        "section",
+        [el("ol", items, attrs: [])],
+        attrs: [#("class", "footnotes"), #("data-footnotes", "")],
+    );
+    return fragment(body.append([section]), attrs: []);
+}
+
+fn blockElement(n: MdNode, tight: bool) -> Element {
+    return case n {
+        Paragraph(kids) -> if (tight)
+            fragment(inlineElements(kids), attrs: [])
+        else
+            el("p", inlineElements(kids), attrs: []);
+        Heading(depth, id, kids) -> el(
+            "h" + depth.toString(),
+            inlineElements(kids),
+            attrs: if (id == "") [] else [#("id", id)],
+        );
+        CodeBlock(lang, text) -> codeElement(lang, text);
+        Rule -> voidEl("hr", []);
+        Html(text) -> raw(text);
+        Quote(kids) -> el(
+            "blockquote",
+            kids.map({ k -> blockElement(k, false) }),
+            attrs: [],
+        );
+        List(ordered, start, tight: isTight, items) -> listElement(
+            ordered,
+            start,
+            isTight,
+            items,
+        );
+        Table(aligns, head, rows) -> tableElement(aligns, head, rows);
+        _ -> inlineElement(n);
+    };
+}
+
+fn codeElement(lang: string, body: string) -> Element {
+    val cls = if (lang == "")
+        []
+    else if (lang.startsWith("language-"))
+        [#("class", lang)]
+    else
+        [#("class", "language-" + lang)];
+    return el(
+        "pre",
+        [el("code", [text(body, attrs: [])], attrs: cls)],
+        attrs: [],
+    );
+}
+
+fn taskElement(task: i32) -> Array<Element> {
+    if (task == 0) return [];
+    val checked = if (task == 2) [#("checked", "")] else [];
+    val box = voidEl(
+        "input",
+        [#("type", "checkbox")].append(checked).append([#("disabled", "")]),
+    );
+    return [box, text(" ", attrs: [])];
+}
+
+fn listElement(
+    ordered: bool,
+    start: i32,
+    tight: bool,
+    items: Array<MdNode>,
+) -> Element {
+    val tag = if (ordered) "ol" else "ul";
+    val attrs = if (ordered && start != 1)
+        [#("start", start.toString())]
+    else
+        [];
+    val lis = items.map({ item ->
+        case item {
+            Item(task, kids) -> itemElement(task, kids, tight);
+            _ -> fragment([], attrs: []);
+        }
+    });
+    return el(tag, lis, attrs: attrs);
+}
+
+fn itemElement(task: i32, kids: Array<MdNode>, tight: bool) -> Element {
+    var out: Element[] = [];
+    var first = true;
+    for (kids) { k ->
+        val isPara = case k {
+            Paragraph(_) -> true;
+            _ -> false;
+        };
+        val box = if (first) taskElement(task) else [];
+        if (isPara && !tight && box.length > 0) {
+            val inner = case k {
+                Paragraph(ks) -> inlineElements(ks);
+                _ -> [];
+            };
+            out.push(el("p", box.append(inner), attrs: []));
+        } else {
+            out = out.append(box);
+            out.push(blockElement(k, tight));
+        }
+        first = false;
+    }
+    if (first) out = out.append(taskElement(task));
+    return el("li", out, attrs: []);
+}
+
+fn tableElement(
+    aligns: Array<string>,
+    head: Array<MdNode>,
+    rows: Array<MdNode>,
+) -> Element {
+    val thead = el("thead", [rowElement(head, aligns, "th")], attrs: []);
+    val trs = rows.map({ r ->
+        case r {
+            Row(cells) -> rowElement(cells, aligns, "td");
+            _ -> fragment([], attrs: []);
+        }
+    });
+    val parts = if (rows.length == 0)
+        [thead]
+    else
+        [thead, el("tbody", trs, attrs: [])];
+    return el("table", parts, attrs: []);
+}
+
+fn rowElement(
+    cells: Array<MdNode>,
+    aligns: Array<string>,
+    tag: string,
+) -> Element {
+    var out: Element[] = [];
+    var i = 0;
+    for (cells) { cell ->
+        val align = aligns.at(i) ?? "";
+        val attrs = if (align == "")
+            []
+        else
+            [#("style", "text-align:" + align)];
+        val kids = case cell {
+            Cell(kids) -> kids;
+            _ -> [];
+        };
+        out.push(el(tag, inlineElements(kids), attrs: attrs));
+        i = i + 1;
+    }
+    return el("tr", out, attrs: []);
+}
+
+fn imageAttrs(
+    src: string,
+    alt: string,
+    title: string,
+) -> Array<#(string, string)> {
+    val shown = [#("src", src)].append([#("alt", alt)]);
+    if (title == "") return shown;
+    return shown.append([#("title", title)]);
+}
+
+fn inlineElements(nodes: Array<MdNode>) -> Array<Element> {
+    return nodes.map({ n -> inlineElement(n) });
+}
+
+fn inlineElement(n: MdNode) -> Element {
+    return case n {
+        Text(value) -> text(value, attrs: []);
+        SoftBreak -> text("\n", attrs: []);
+        HardBreak -> voidEl("br", []);
+        Code(body) -> el("code", [text(body, attrs: [])], attrs: []);
+        Emphasis(kids) -> el("em", inlineElements(kids), attrs: []);
+        Strong(kids) -> el("strong", inlineElements(kids), attrs: []);
+        Strike(kids) -> el("del", inlineElements(kids), attrs: []);
+        Link(href, title, kids) -> el(
+            "a",
+            inlineElements(kids),
+            attrs: [#("href", href)].append(
+                if (title == "") [] else [#("title", title)],
+            ),
+        );
+        Image(src, alt, title) -> voidEl("img", imageAttrs(src, alt, title));
+        InlineHtml(body) -> raw(body);
+        FootnoteRef(label, index, nth) -> el(
+            "sup",
+            [
+                el(
+                    "a",
+                    [text(index.toString(), attrs: [])],
+                    attrs: [
+                        #("href", "#fn-" + footnoteId(label)),
+                        #("id", refAnchor(label, nth)),
+                        #("data-footnote-ref", ""),
+                    ],
+                ),
+            ],
+            attrs: [#("class", "footnote-ref")],
+        );
+        _ -> fragment([], attrs: []);
+    };
+}
+
+fn refAnchor(label: string, nth: i32) -> string {
+    val suffix = if (nth > 1) "-" + nth.toString() else "";
+    return "fnref-" + footnoteId(label) + suffix;
+}
+
+fn footnoteElement(f: Footnote) -> Element {
+    val blocks = f.kids.map({ k -> blockElement(k, false) });
+    var refs: Element[] = [];
+    var k = 1;
+    while (k <= f.refs) {
+        val suffix = if (k > 1) "-" + k.toString() else "";
+        refs.push(text(" ", attrs: []));
+        refs.push(
+            el(
+                "a",
+                [text("↩", attrs: [])],
+                attrs: [
+                    #("href", "#fnref-" + footnoteId(f.label) + suffix),
+                    #("class", "footnote-backref"),
+                    #(
+                        "aria-label",
+                        "Back to reference " + f.index.toString() + suffix,
+                    ),
+                ],
+            ),
+        );
+        k = k + 1;
+    }
+    return el(
+        "li",
+        blocks.append(refs),
+        attrs: [#("id", "fn-" + footnoteId(f.label))],
+    );
+}

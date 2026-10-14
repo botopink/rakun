@@ -1,0 +1,92 @@
+//// onze-bundler — `<Script>` and its four strategies (front 68 step 7).
+////
+////   beforeInteractive   a blocking tag in `<head>` — an `H` record of the
+////                       manifest, the only tag `headScriptTags` emits
+////   afterInteractive    scheduled by the entry after hydration
+////   lazyOnload          scheduled by the entry after the load event
+////   worker              a `Worker` started by the entry; it cannot declare
+////                       `onLoad` (a worker has no load callback on the page)
+////
+//// An unknown strategy is refused, naming it and listing the four.
+
+import {manifest.ChunkRef};
+
+pub type ScriptDecl(id: string, src: string, strategy: string, onLoad: string)
+
+pub type ScriptPlan(head: Array<ChunkRef>, workers: Array<ChunkRef>, scheduled: Array<#(string, string, string)>, refusals: Array<string>)
+
+pub fn strategies() -> string[] {
+    return ["beforeInteractive", "afterInteractive", "lazyOnload", "worker"];
+}
+
+// Where a strategy's script lands, `""` for an unknown one.
+pub fn scriptPlacement(strategy: string) -> string {
+    if (strategy == "beforeInteractive") return "<head>, blocking";
+    if (strategy == "afterInteractive") return "entry, after hydrate";
+    if (strategy == "lazyOnload") return "entry, after load";
+    if (strategy == "worker") return "new Worker() in entry";
+    return "";
+}
+
+fn refusalOf(d: ScriptDecl) -> string {
+    if (strategies().contains(d.strategy) == false)
+        return "script \""
+            + d.id
+            + "\" — unknown strategy \""
+            + d.strategy
+            + "\"; expected "
+            + strategies().join(", ");
+    val workerWithLoad = d.strategy == "worker" && d.onLoad != "";
+    if (workerWithLoad)
+        return "script \""
+            + d.id
+            + "\" — a worker script cannot declare onLoad";
+    return "";
+}
+
+pub fn planScripts(decls: Array<ScriptDecl>) -> ScriptPlan {
+    var head: Array<ChunkRef> = [];
+    var workers: Array<ChunkRef> = [];
+    var scheduled: Array<#(string, string, string)> = [];
+    var refusals: string[] = [];
+    for (decls) { d ->
+        val problem = refusalOf(d);
+        if (problem != "")
+            refusals.push(problem)
+        else if (d.strategy == "beforeInteractive")
+            head.push(ChunkRef(id: "script:"
+                + d.id, url: d.src, hash: "", bytes: 0))
+        else {
+            if (d.strategy == "worker")
+                workers.push(ChunkRef(id: "worker:"
+                    + d.id, url: d.src, hash: "", bytes: 0));
+            scheduled.push(#(d.src, d.strategy, d.onLoad));
+        }
+    }
+    return ScriptPlan(head: head, workers: workers, scheduled: scheduled, refusals: refusals);
+}
+
+pub fn describeScripts(decls: Array<ScriptDecl>) -> string {
+    var rows: string[] = [];
+    for (decls) { d ->
+        val problem = refusalOf(d);
+        if (problem == "") {
+            val extra = if (d.strategy == "beforeInteractive")
+                "chunk script:" + d.id
+            else if (d.strategy == "worker")
+                "chunk worker:" + d.id
+            else if (d.onLoad != "")
+                "onLoad " + d.onLoad
+            else
+                "";
+            rows.push((d.id.padEnd(12, " ")
+                + d.strategy.padEnd(20, " ")
+                + scriptPlacement(d.strategy).padEnd(24, " ")
+                + extra).trimEnd());
+        }
+    }
+    for (planScripts(decls).refusals) { r ->
+        rows.push("refused: " + r);
+    }
+    return rows.join("\n");
+}

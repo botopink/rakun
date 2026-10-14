@@ -1,0 +1,491 @@
+//// onze-bundler — the hydration entry (front 68 step 6).
+////
+//// The entry is GENERATED botopink source, `<outDir>/client/entry.bp`,
+//// compiled and linked like any other client module — so it is type-checked
+//// by the same compiler and a developer can read it. It defines no marker, no
+//// global, no `__`-prefixed name and no matcher of its own: the island
+//// marker is jhonstart front 29's (`islandAttrOf`), the globals are
+//// jhonstart's registry (`globals.payload` / `.fill` / `.signal` /
+//// `.starters`), the router matches with the shared `routing` itself, and
+//// nothing of rakun is imported. In order, the generated `main()`:
+////
+////   1. sets the browser's validation message source (`setMessageSource`),
+////   2. registers the fill function under `globals.fill` and the signal
+////      function under `globals.signal` (with the configured
+////      `allowedRedirects`) — before any streamed chunk can arrive,
+////   3. registers one starter per client component with jhonstart's
+////      `registerStarter` (the `globals.starters` table `hydrate()` reads) —
+////      each decodes the island's props into the component's
+////      `#[clientProps]` record, renders it under jhonstart's client runtime
+////      and, before committing the markup, checks every emilia class it
+////      carries against the payload's `s` key (a class the server's
+////      stylesheet does not hold is a hard error naming it),
+////   4. checks the document against the payload — an island or a hole on one
+////      side and not the other is a hard error naming its id,
+////   5. calls jhonstart's `hydrate()`,
+////   6. calls `linkMount()` and `formMount(actionHeader)` once, after every
+////      island,
+////   7. schedules the `afterInteractive`, then the `lazyOnload`, scripts, and
+////      starts the `worker` ones.
+////
+//// The props decoder is generated from the component's source: the parameter
+//// type of `#[client] pub fn Name(props: T)` and `T`'s fields as written, each
+//// on front 29's closed whitelist (`string`, `i32`, `f64`, `bool`).
+
+import {json.Json, json.decode} from "std";
+import {islandAttrOf, Island, propsOf} from "jhonstart";
+import {graph.AppModule, graph.ClientGraph, graph.GraphNode};
+import {scan.ImportRef};
+
+pub type ClientComponent(moduleId: string, name: string, propsType: string, propsModule: string, fields: Array<#(string, string)>)
+
+// `scripts` are the entry-scheduled `<Script>`s as `#(src, strategy,
+// onLoad)`: `afterInteractive`, `lazyOnload` and `worker` (step 7).
+pub type EntryConfig(allowedRedirects: Array<string>, actionHeader: string, scripts: Array<#(string, string, string)>)
+
+// ── reading the components ──────────────────────────────────────────────────
+
+fn identPrefix(text: string) -> string {
+    var out = "";
+    var open = true;
+    for (text.split("")) { c ->
+        val word = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_".contains(
+            c,
+        );
+        if (open && word) out = out + c else open = false;
+    }
+    return out;
+}
+
+// `name: type` pairs of a record's field list text (`a: string, b: i32`).
+fn fieldsOf(list: string) -> Array<#(string, string)> {
+    var out: Array<#(string, string)> = [];
+    for (list.split(",")) { part ->
+        val p = part.trim();
+        val colon = p.indexOf(":");
+        if (colon > 0)
+            out.push(#(p.slice(0, colon).trim(), p.slice(colon + 1).trim()));
+    }
+    return out;
+}
+
+// The fields of `pub type <name>(…)` in `source`, the declaration possibly
+// spanning lines; `[]` when there is none.
+pub fn recordFieldsOf(
+    source: string,
+    name: string,
+) -> Array<#(string, string)> {
+    val flat = source.split("\n").map({ l -> l.trim() }).join(" ");
+    val head = "type " + name + "(";
+    val at = flat.indexOf(head);
+    if (at < 0) return [];
+    val rest = flat.slice(at + head.length());
+    val close = rest.indexOf(")");
+    if (close < 0) return [];
+    return fieldsOf(rest.slice(0, close));
+}
+
+// The `#[client]` components of the client graph, each with its props record
+// when it takes one.
+pub fn clientComponents(
+    graph: ClientGraph,
+    modules: Array<AppModule>,
+) -> Array<ClientComponent> {
+    var out: Array<ClientComponent> = [];
+    for (graph.nodes) { n ->
+        val m = modules.filter({ x -> x.id == n.moduleId }).at(0) ?? AppModule(
+            id: "",
+            path: "",
+            source: "",
+            refs: [],
+            client: false,
+        );
+        var armed = false;
+        for (m.source.split("\n")) { raw ->
+            val l = raw.trim();
+            if (l.startsWith("#[client]")) armed = true else if (armed
+                && l.startsWith("pub fn ")) {
+                val name = identPrefix(l.slice(7));
+                val params = l.slice(l.indexOf("(") + 1, l.indexOf(")"));
+                val typeName = if (params.contains(":"))
+                    params.slice(params.indexOf(":") + 1).trim()
+                else
+                    "";
+                val home = if (typeName == "")
+                    #("", [])
+                else
+                    propsRecordOf(modules, typeName);
+                out.push(
+                    ClientComponent(
+                        moduleId: m.id,
+                        name: name,
+                        propsType: typeName,
+                        propsModule: home._0,
+                        fields: home._1,
+                    ),
+                );
+                armed = false;
+            }
+        }
+    }
+    return out;
+}
+
+// The module declaring the record `typeName`, and its fields.
+fn propsRecordOf(
+    modules: Array<AppModule>,
+    typeName: string,
+) -> #(string, Array<#(string, string)>) {
+    var home = "";
+    var found: Array<#(string, string)> = [];
+    for (modules) { m ->
+        val f = recordFieldsOf(m.source, typeName);
+        val first = found.length == 0 && f.length > 0;
+        if (first) {
+            home = m.id;
+            found = f;
+        }
+    }
+    return #(home, found);
+}
+
+// ── the runtime checks, as pure functions ───────────────────────────────────
+
+// The mismatches between the document and the payload: an island id on one
+// side only, a hole id in the payload with no `[data-jh-h]` element. Empty
+// when they agree; the generated entry raises the first.
+pub fn islandMismatches(
+    domIslands: string[],
+    payloadIslands: string[],
+    domHoles: string[],
+    payloadHoles: string[],
+) -> string[] {
+    var out: string[] = [];
+    for (payloadIslands) { id ->
+        if (domIslands.contains(id) == false)
+            out.push(
+                "island " + id + " is in the payload and not in the document",
+            );
+    }
+    for (domIslands) { id ->
+        if (payloadIslands.contains(id) == false)
+            out.push(
+                "island " + id + " is in the document and not in the payload",
+            );
+    }
+    for (payloadHoles) { id ->
+        if (domHoles.contains(id) == false)
+            out.push(
+                "hole " + id + " is in the payload and not in the document",
+            );
+    }
+    return out;
+}
+
+fn isEmiliaClass(name: string) -> bool {
+    if (name.startsWith("e_") == false || name.length() < 3) return false;
+    var hex = true;
+    for (name.slice(2).split("")) { c ->
+        if ("0123456789abcdef".contains(c) == false) hex = false;
+    }
+    return hex;
+}
+
+// The emilia class names (`e_<hex>`) the `class` attributes of `html` carry,
+// in document order, each once.
+pub fn classNamesIn(html: string) -> string[] {
+    var out: string[] = [];
+    var first = true;
+    for (html.split("class=\"")) { piece ->
+        if (first) first = false else {
+            val value = piece.split("\"").at(0) ?? "";
+            for (value.split(" ")) { name ->
+                if (isEmiliaClass(name) && out.contains(name) == false)
+                    out.push(name);
+            }
+        }
+    }
+    return out;
+}
+
+// The classes an island computed that the payload's `s` key does not list —
+// the runtime half of the class-name check (contract 4): the server's
+// stylesheet holds no rule for them. Empty when every one is listed.
+pub fn unknownClasses(computed: string[], known: string[]) -> string[] {
+    var out: string[] = [];
+    for (computed) { name ->
+        if (known.contains(name) == false)
+            out.push(
+                "class "
+                    + name
+                    + " is not in the payload's s key - the server's stylesheet has no rule for it",
+            );
+    }
+    return out;
+}
+
+// The islands of a payload's `i` value — a JSON array of `[id, component,
+// props]` triples, props form-encoded — as jhonstart's `Island`, props
+// decoded with jhonstart's `propsOf`.
+pub fn parseIslands(field: string) -> @Result<Array<Island>, string> {
+    val doc = try decode(field);
+    var out: Array<Island> = [];
+    for (doc.items()) { row ->
+        val cells = row.items();
+        if (cells.length != 3)
+            throw "payload i: a row is [id, component, props], not "
+                + cells.length.toString()
+                + " cells";
+        out.push(
+            Island(
+                id: (cells.at(0) ?? Json.Null).str(),
+                component: (cells.at(1) ?? Json.Null).str(),
+                props: propsOf((cells.at(2) ?? Json.Null).str()),
+            ),
+        );
+    }
+    return out;
+}
+
+// ── generation ──────────────────────────────────────────────────────────────
+
+fn quote(s: string) -> string {
+    return "\"" + s.replaceAll("\\", "\\\\").replaceAll("\"", "\\\"") + "\"";
+}
+
+fn decodeField(f: #(string, string)) -> string {
+    val raw = "prop(p, " + quote(f._0) + ")";
+    val value = if (f._1 == "i32")
+        "toI32(" + raw + ")"
+    else if (f._1 == "f64")
+        "toF64(" + raw + ")"
+    else if (f._1 == "bool")
+        "(" + raw + " == \"true\")"
+    else
+        raw;
+    return f._0 + ": " + value;
+}
+
+fn starterOf(c: ClientComponent) -> string {
+    val call = if (c.propsType == "")
+        c.name + "()"
+    else
+        c.name
+            + "("
+            + c.propsType
+            + "("
+            + c.fields.map({ f -> decodeField(f) }).join(", ")
+            + "))";
+    return [
+        "fn start"
+            + c.name
+            + "(raw: string, commit: fn(html: string) -> i32) -> i32 {",
+        "    val p = propsOf(raw);",
+        "    return clientRender({ -> "
+            + call
+            + " }, { tree -> commitTree(commit, tree) });",
+        "}",
+    ].join("\n");
+}
+
+fn importsOfComponents(cs: Array<ClientComponent>) -> string[] {
+    var out: string[] = [];
+    for (cs) { c ->
+        // A component's module is one of the application's own: imported by
+        // its path inside the braces (decision 206 — `from` names a package).
+        val at = c.moduleId.replaceAll("/", ".") + ".";
+        val together = c.propsType != "" && c.propsModule == c.moduleId;
+        val names = if (together)
+            at + c.name + ", " + at + c.propsType
+        else
+            at + c.name;
+        out.push("import {" + names + "};");
+        val apart = c.propsType != ""
+            && c.propsModule != c.moduleId
+            && c.propsModule != "";
+        if (apart)
+            out.push(
+                "import {"
+                    + c.propsModule.replaceAll("/", ".")
+                    + "."
+                    + c.propsType
+                    + "};",
+            );
+    }
+    return out;
+}
+
+fn scheduleLine(s: #(string, string, string)) -> string {
+    val cell = if (s._1 == "lazyOnload") "scheduleLazy" else "scheduleNow";
+    return "    " + cell + "(" + quote(s._0) + ", " + quote(s._2) + ");";
+}
+
+// The generated twin of `islandMismatches` — the entry is a client module and
+// imports nothing of onze, so the check is written into it; the entry suite
+// asserts the two agree.
+pub fn islandMismatchesSource() -> string {
+    return [
+        "fn islandMismatches(domIslands: string[], payloadIslands: string[], domHoles: string[], payloadHoles: string[]) -> string[] {",
+        "    var out: string[] = [];",
+        "    for (payloadIslands) { id ->",
+        "        if (domIslands.contains(id) == false) out.push(\"island \" + id + \" is in the payload and not in the document\");",
+        "    };",
+        "    for (domIslands) { id ->",
+        "        if (payloadIslands.contains(id) == false) out.push(\"island \" + id + \" is in the document and not in the payload\");",
+        "    };",
+        "    for (payloadHoles) { id ->",
+        "        if (domHoles.contains(id) == false) out.push(\"hole \" + id + \" is in the payload and not in the document\");",
+        "    };",
+        "    return out;",
+        "}",
+    ].join("\n");
+}
+
+// The generated twin of `isEmiliaClass` / `classNamesIn` / `unknownClasses`
+// — the entry imports nothing of onze; the entry suite asserts the two agree.
+pub fn classCheckSource() -> string {
+    return [
+        "fn isEmiliaClass(name: string) -> bool {",
+        "    if (name.startsWith(\"e_\") == false || name.length() < 3) return false;",
+        "    var hex = true;",
+        "    for (name.slice(2).split(\"\")) { c ->",
+        "        if (\"0123456789abcdef\".contains(c) == false) hex = false;",
+        "    };",
+        "    return hex;",
+        "}",
+        "",
+        "fn classNamesIn(html: string) -> string[] {",
+        "    var out: string[] = [];",
+        "    var first = true;",
+        "    for (html.split(\"class=\\\"\")) { piece ->",
+        "        if (first) {",
+        "            first = false;",
+        "        } else {",
+        "            val value = piece.split(\"\\\"\").at(0) ?? \"\";",
+        "            for (value.split(\" \")) { name ->",
+        "                if (isEmiliaClass(name) && out.contains(name) == false) out.push(name);",
+        "            };",
+        "        };",
+        "    };",
+        "    return out;",
+        "}",
+        "",
+        "fn unknownClasses(computed: string[], known: string[]) -> string[] {",
+        "    var out: string[] = [];",
+        "    for (computed) { name ->",
+        "        if (known.contains(name) == false) out.push(\"class \" + name + \" is not in the payload's s key - the server's stylesheet has no rule for it\");",
+        "    };",
+        "    return out;",
+        "}",
+    ].join("\n");
+}
+
+// The entry module's source.
+pub fn generateEntry(
+    components: Array<ClientComponent>,
+    config: EntryConfig,
+) -> string {
+    val redirects = "["
+        + config.allowedRedirects.map({ r -> quote(r) }).join(", ")
+        + "]";
+    val attr = islandAttrOf("")._0;
+    var lines: string[] = [
+        "// GENERATED by onze build — do not edit.",
+        "",
+        "import {globals, registerFill, registerSignal, registerStarter, hydrate, propsOf, clientRender, renderNode, Element} from \"jhonstart\";",
+        "import {linkMount} from \"jhonstart-link\";",
+        "import {formMount} from \"jhonstart-forms\";",
+        "import {setMessageSource, builtInOnly} from \"validation\";",
+    ];
+    for (importsOfComponents(components)) { l ->
+        lines.push(l);
+    }
+    lines = lines.append(
+        [
+            "",
+            "#[@External.Node(\"\"\"(globalThis.document ? Array.from(globalThis.document.querySelectorAll(\"[\" + $0 + \"]\")).map(function (onzeNode) { return onzeNode.getAttribute($0); }) : [])\"\"\")]",
+            "declare fn domIds(attr: string) -> string[];",
+            "",
+            "#[@External.Node(\"\"\"(function (onzeName) { var onzeValue = globalThis[onzeName]; return onzeValue && Array.isArray(onzeValue[$1]) ? onzeValue[$1].map(function (onzeRow) { return String(Array.isArray(onzeRow) ? onzeRow[0] : onzeRow); }) : []; })($0)\"\"\")]",
+            "declare fn payloadIds(payload: string, key: string) -> string[];",
+            "",
+            "#[@External.Node(\"\"\"(function (onzeSrc, onzeOnLoad) { if (!globalThis.document) return 0; var onzeTag = globalThis.document.createElement(\"script\"); onzeTag.src = onzeSrc; if (onzeOnLoad) onzeTag.onload = function () { if (typeof globalThis[onzeOnLoad] === \"function\") globalThis[onzeOnLoad](); }; globalThis.document.body.appendChild(onzeTag); return 0; })($0, $1)\"\"\")]",
+            "declare fn scheduleNow(src: string, onLoad: string) -> i32;",
+            "",
+            "#[@External.Node(\"\"\"(function (onzeSrc, onzeOnLoad) { if (!globalThis.document) return 0; var onzeGo = function () { var onzeTag = globalThis.document.createElement(\"script\"); onzeTag.src = onzeSrc; if (onzeOnLoad) onzeTag.onload = function () { if (typeof globalThis[onzeOnLoad] === \"function\") globalThis[onzeOnLoad](); }; globalThis.document.body.appendChild(onzeTag); }; if (globalThis.document.readyState === \"complete\") onzeGo(); else globalThis.addEventListener(\"load\", onzeGo); return 0; })($0, $1)\"\"\")]",
+            "declare fn scheduleLazy(src: string, onLoad: string) -> i32;",
+            "",
+            "#[@External.Node(\"\"\"(typeof globalThis.Worker === \"function\" ? (new globalThis.Worker($0), 0) : 0)\"\"\")]",
+            "declare fn startWorker(src: string) -> i32;",
+            "",
+            "#[@External.Node(\"\"\"(function (onzeProblems) { if (onzeProblems.length > 0) throw new Error(onzeProblems[0]); return 0; })($0)\"\"\")]",
+            "declare fn raiseFirst(problems: string[]) -> i32;",
+            "",
+            "#[@External.Node(\"\"\"(parseInt($0, 10) || 0)\"\"\")]",
+            "declare fn toI32(s: string) -> i32;",
+            "",
+            "#[@External.Node(\"\"\"(parseFloat($0) || 0)\"\"\")]",
+            "declare fn toF64(s: string) -> f64;",
+            "",
+            "fn prop(p: Array<#(string, string)>, name: string) -> string {",
+            "    val hit = p.filter({ kv -> kv._0 == name });",
+            "    if (hit.length == 0) return \"\";",
+            "    val first = hit.at(0) ?? #(\"\", \"\");",
+            "    return first._1;",
+            "}",
+            "",
+            "fn commitTree(commit: fn(html: string) -> i32, tree: Element) {",
+            "    val html = renderNode(tree);",
+            "    raiseFirst(unknownClasses(classNamesIn(html), payloadIds(globals.payload, \"s\")));",
+            "    val done = commit(html);",
+            "}",
+            "",
+            islandMismatchesSource(),
+            "",
+            classCheckSource(),
+        ],
+    );
+    for (components) { c ->
+        lines.push("");
+        lines.push(starterOf(c));
+    }
+    lines = lines.append(
+        [
+            "",
+            "pub fn onzeEntryMain() {",
+            "    setMessageSource(builtInOnly());",
+            "    registerFill(globals.fill, payloadIds(globals.payload, \"h\"));",
+            "    registerSignal(globals.signal, " + redirects + ");",
+        ],
+    );
+    for (components) { c ->
+        lines.push(
+            "    registerStarter("
+                + quote(c.name)
+                + ", { raw, commit -> start"
+                + c.name
+                + "(raw, commit) });",
+        );
+    }
+    lines = lines.append(
+        [
+            "    raiseFirst(islandMismatches(domIds("
+                + quote(attr)
+                + "), payloadIds(globals.payload, \"i\"), domIds(\"data-jh-h\"), payloadIds(globals.payload, \"h\")));",
+            "    hydrate();",
+            "    linkMount();",
+            "    formMount(" + quote(config.actionHeader) + ");",
+        ],
+    );
+    for (config.scripts.filter({ s -> s._1 == "afterInteractive" })) { s ->
+        lines.push(scheduleLine(s));
+    }
+    for (config.scripts.filter({ s -> s._1 == "lazyOnload" })) { s ->
+        lines.push(scheduleLine(s));
+    }
+    for (config.scripts.filter({ s -> s._1 == "worker" })) { s ->
+        lines.push("    startWorker(" + quote(s._0) + ");");
+    }
+    lines.push("}");
+    return lines.join("\n") + "\n";
+}

@@ -1,0 +1,151 @@
+//// onze core — the project-level vocabulary (front 49 steps 3 and 6).
+////
+//// What is left once jhonstart front 30 and rakun fronts 22 and 23 own the
+//// render and routing vocabulary: the project (`OnzeProject`), the
+//// classification table over `routing`'s conventions (`describeAppFiles`), and
+//// the import alias map. Nothing here duplicates a rakun or jhonstart type.
+////
+//// The alias map is textual and build-time: front 50's scan rewrites an
+//// alias prefix to its mapped path before the compiler sees the import. The
+//// compiler does not know aliases exist — an alias is visible through
+//// `onze dev` / `onze build` only, never to a bare `botopink check`.
+
+import {json.Json, json.decode} from "std";
+import {conventions.classify} from "routing";
+import {config.OnzeConfig, config.isString, config.widest};
+
+// ── the alias map (step 6) ──────────────────────────────────────────────────
+
+pub type AliasMap(entries: Array<#(string, string)>)
+
+pub fn emptyAliases() -> AliasMap {
+    return AliasMap(entries: []);
+}
+
+// A target escapes the package root when a `..` segment climbs above it or
+// when it is absolute.
+fn escapesRoot(target: string) -> bool {
+    if (target.startsWith("/")) return true;
+    var depth = 0;
+    var escaped = false;
+    for (target.split("/")) { seg ->
+        if (seg == "..")
+            depth = depth - 1
+        else if (seg != "" && seg != ".")
+            depth = depth + 1;
+        if (depth < 0) escaped = true;
+    }
+    return escaped;
+}
+
+// The `alias` object of a project's `botopink.json`, validated: every target
+// a string that stays inside the package root. A `botopink.json` with no
+// `alias` key has an empty map.
+pub fn loadAliases(botopinkJson: string) -> @Result<AliasMap, string> {
+    val doc = try decode(botopinkJson);
+    if (doc.isObject() == false)
+        throw "botopink.json: the document must be an object, not "
+            + doc.kindName();
+    val found = doc.field("alias");
+    if (found == null) return emptyAliases();
+    val v = found;
+    if (v.isObject() == false)
+        throw "botopink.json: \"alias\" must be an object, not " + v.kindName();
+    var entries: Array<#(string, string)> = [];
+    for (v.members()) { m ->
+        if (isString(m._1) == false)
+            throw [
+                "alias \"",
+                m._0,
+                "\" must map to a string, not ",
+                m._1.kindName(),
+            ].join("");
+        if (escapesRoot(m._1.str()))
+            throw [
+                "alias \"",
+                m._0,
+                "\" -> \"",
+                m._1.str(),
+                "\" escapes the package root",
+            ].join("");
+        entries.push(#(m._0, m._1.str()));
+    }
+    return AliasMap(entries: entries);
+}
+
+// `spec` with its longest matching alias prefix replaced by the mapped path;
+// unchanged when no prefix matches. A prefix matches at a module boundary
+// only: the whole spec, or the prefix followed by `.` or `/`.
+pub fn resolveAlias(map: AliasMap, spec: string) -> string {
+    var best = "";
+    var target = "";
+    for (map.entries) { e ->
+        val whole = spec == e._0;
+        val dotted = spec.startsWith(e._0 + ".");
+        val slashed = spec.startsWith(e._0 + "/");
+        val hits = whole || dotted || slashed;
+        if (hits && e._0.length() > best.length()) {
+            best = e._0;
+            target = e._1;
+        }
+    }
+    if (best == "") return spec;
+    return target + spec.slice(best.length());
+}
+
+// The alias table the `alias` snapshots record: each spec and what it
+// resolves to, aligned.
+pub fn describeAliases(map: AliasMap, specs: string[]) -> string {
+    val width = widest(specs, 0);
+    return specs
+        .map({ s -> s.padEnd(width + 2, " ") + "->  " + resolveAlias(map, s) })
+        .join("\n");
+}
+
+// ── the project (step 3) ────────────────────────────────────────────────────
+
+pub type OnzeProject(
+    root: string,
+    config: OnzeConfig,
+    aliases: AliasMap,
+)
+
+// ── the routing-file table (step 3) ─────────────────────────────────────────
+
+// What an app file is — its kinds, its segment, the private-folder rule — is
+// the `routing` library's `conventions` (decision 323): `fileKinds()`,
+// `classify(appDir, path)` and `ConventionFile(authoredPath, segment, kind)`.
+// What stays here is the table the `types` snapshots record over it.
+
+// The classification table the `types` snapshots record.
+pub fn describeAppFiles(appDir: string, paths: string[]) -> string {
+    val w0 = widest(paths, 12);
+    val segs = paths.map({ p -> segmentCell(appDir, p) });
+    val w1 = widest(segs, 7);
+    var rows: string[] = [
+        ("authoredPath".padEnd(w0 + 2, " ")
+            + "segment".padEnd(w1 + 2, " ")
+            + "kind"),
+    ];
+    for (paths) { p ->
+        val kindCell = kindCellOf(appDir, p);
+        rows.push(
+            (p.padEnd(w0 + 2, " ")
+                + segmentCell(appDir, p).padEnd(w1 + 2, " ")
+                + kindCell).trimEnd(),
+        );
+    }
+    return rows.join("\n");
+}
+
+fn segmentCell(appDir: string, path: string) -> string {
+    val f = classify(appDir, path);
+    if (f == null) return "-";
+    return f.segment;
+}
+
+fn kindCellOf(appDir: string, path: string) -> string {
+    val f = classify(appDir, path);
+    if (f == null) return "(not an app file)";
+    return f.kind;
+}

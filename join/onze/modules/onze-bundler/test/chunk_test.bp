@@ -1,0 +1,159 @@
+// `botopink test` suite for `src/chunk.bp` (front 68 step 4), over the frozen
+// fixture app and stand-in compiled sources (one line per module), so the
+// hashes are reproducible without the compiler.
+
+import {scan.parseFixture, scan.ImportRef, scan.SourceFile};
+import {graph.AppModule, graph.ClientGraph, graph.GraphNode, graph.loadModules, graph.clientGraph};
+import {chunk.ChunkPlan, chunk.planChunks, chunk.routeReach, chunk.linkChunk, chunk.chunkFileName, chunk.describePlan, chunk.manifestOf, chunk.prelude};
+import {segment.parsePath, segment.patternOf} from "routing";
+import {manifest.ClientBundleManifest, manifest.ChunkRef, manifest.formatManifest};
+import {fixture.fixtureApp};
+import {AliasMap} from "onze";
+import {assertAs} from "snap";
+
+fn aliases() -> AliasMap {
+    return AliasMap(
+        entries: [#("@/components", "components"), #("@/lib", "lib")],
+    );
+}
+
+fn runtime() -> string[] {
+    return ["jhonstart.client_runtime"];
+}
+
+fn entryId() -> string {
+    return "onze_entry";
+}
+
+// Stand-in compiled JavaScript: one line naming the module and its source's
+// length, so an edit to a module changes its compiled text.
+fn compiledOf(modules: Array<AppModule>) -> Array<#(string, string)> {
+    var out: Array<#(string, string)> = modules.map(
+        { m -> #(m.id, "exports.src = " + m.source.length().toString() + "; // " + m.id) },
+    );
+    out.push(#("jhonstart.client_runtime", "exports.runtime = true;"));
+    out.push(#(entryId(), "require(\"./components/nav.js\");"));
+    return out;
+}
+
+fn linkAll(
+    plans: Array<ChunkPlan>,
+    compiled: Array<#(string, string)>,
+) -> string[] {
+    return plans.map({ p -> linkChunk(p, compiled).unwrapOr("") });
+}
+
+fn build(
+    tree: string,
+) -> @Result<#(Array<ChunkPlan>, string[], Array<#(string, string[])>), string> {
+    val modules = try loadModules(parseFixture(tree));
+    val graph = clientGraph(modules, aliases(), "app");
+    val reach = routeReach(modules, aliases(), "app");
+    val plans = planChunks(graph, reach, runtime(), entryId());
+    return #(plans, linkAll(plans, compiledOf(modules)), reach);
+}
+
+#[@External.Node("""(function (__t) { try { (0, eval)(__t); return String(globalThis.__onze_require("app/b.js").value); } catch (__e) { return "error: " + __e.message; } })($0)""")]
+#[@External.Erlang("""(fun(_) -> <<"no-js-engine">> end)($0)""")]
+declare fn evalChunk(text: string) -> string;
+
+test "chunks: plan ---- shared, one route chunk, entry" {
+    val first = try build(fixtureApp());
+    val edited = try build(
+        fixtureApp().replace(
+            "pub fn plural(n: i32, word: string) -> string { return word; }",
+            "pub fn plural(n: i32, word: string) -> string { return word + \"s\"; }",
+        ),
+    );
+    val before = first._0.map(
+        { p -> chunkFileName(p, first._1.at(first._0.indexOf(p)) ?? "") },
+    );
+    var changed: string[] = [];
+    var unchanged: string[] = [];
+    var i = 0;
+    for (first._0) { p ->
+        val a = chunkFileName(p, first._1.at(i) ?? "");
+        val b = chunkFileName(p, edited._1.at(i) ?? "");
+        if (a == b) unchanged.push(a) else changed.push(a + " -> " + b);
+        i = i + 1;
+    }
+    assert changed.length == 1;
+    try assertAs(
+        @src(),
+        "chunks",
+        [
+            describePlan(first._0, first._1, first._2),
+            "== rebuild after editing lib/format.bp",
+            "changed: " + changed.join(", "),
+            "unchanged: " + unchanged.join(", "),
+        ].join("\n"),
+    );
+}
+
+test "chunks: a module reached by two routes is shared and in no route chunk" {
+    val b = try build(fixtureApp());
+    val plans = b._0;
+    assert (plans.at(0) ?? ChunkPlan(
+        id: "",
+        base: "",
+        modules: [],
+    )).modules.contains("lib.format");
+    assert plans
+        .filter({ p -> p.id.startsWith("route:") })
+        .all({ p -> p.modules.contains("lib.format") == false });
+    assert (plans
+        .filter({ p -> p.id == "route:/blog/[slug]" })
+        .at(0) ?? ChunkPlan(id: "", base: "", modules: [])).modules.join(",")
+        == "components.like_button";
+}
+
+test "chunks: two builds of an unchanged tree give the same names" {
+    val a = try build(fixtureApp());
+    val b = try build(fixtureApp());
+    assert a._1.join("") == b._1.join("");
+}
+
+test "chunks: the prelude resolves a require between two concatenated modules" {
+    val plan = ChunkPlan(id: "t", base: "t", modules: ["app.a", "app.b"]);
+    val text = try linkChunk(
+        plan,
+        [
+            #("app.a", "exports.value = \"ok\";"),
+            #("app.b", "exports.value = require(\"./a.js\").value;"),
+        ],
+    );
+    val got = evalChunk(text);
+    assert got == "ok" || got == "no-js-engine";
+    assert text.startsWith(prelude());
+}
+
+test "chunks: a module missing from the compiled set is named" {
+    val r = linkChunk(
+        ChunkPlan(id: "shared", base: "shared", modules: ["lib.x"]),
+        [],
+    );
+    val msg = case r {
+        Ok(t) -> "ok";
+        Error(e) -> e;
+    };
+    assert msg == "chunk shared: module lib.x was not compiled";
+}
+
+test "chunks: route patterns drop groups and slots (routing's patternOf)" {
+    assert patternOf(parsePath("")) == "/";
+    assert patternOf(parsePath("(marketing)/about")) == "/about";
+    assert patternOf(parsePath("blog/[slug]")) == "/blog/[slug]";
+    assert patternOf(parsePath("dashboard/@feed")) == "/dashboard";
+}
+
+test "manifest: text ---- the fixture app's bundle" {
+    val b = try build(fixtureApp());
+    val m = manifestOf(
+        "b7f2a1",
+        b._0,
+        b._1,
+        b._2,
+        [#("ONZE_PUBLIC_API_URL", "https://api.example.com")],
+    );
+    try assertAs(@src(), "manifest", formatManifest(m).trimEnd());
+}

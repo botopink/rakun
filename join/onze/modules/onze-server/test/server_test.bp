@@ -1,0 +1,184 @@
+// `botopink test` suite for `src/server.bp` (front 49 step 4, 69 step 3):
+// onze's boot handing rakun its keys, jhonstart's pages and the static
+// roots, then `Onze.run` listening. The pages are this file's own, registered
+// from `@TypeInfo.all` (decision 216); the build `Onze.run` reads is a
+// manifest and an id written under the run's `BOTOPINK_TEST_TMPDIR`. rakun's
+// registries are process-wide, so the boot happens once (`running()`), and
+// every later test reads what it left.
+
+import {io.env, io.fs, io.process, path} from "std";
+import {rkDispatchHttp, rkProp, rkSetProp, Response as RakunResponse} from "rakun";
+import {rkAppTable} from "rakun-app";
+import {staticRootCount} from "rakun-web";
+import {page, layout, jhRegisterRoutes, ctxParam, ctxRest, PageContext, LayoutProps, Element, ElementBase, main, p, text, redirect} from "jhonstart";
+import {OnzeConfig, defaultConfig} from "onze";
+import {formatManifest, emptyManifest} from "onze-bundler";
+import {server.Onze, server.paramPairs, server.cookiePairs, server.uiRecords, server.staticRootOf, server.servedRoots, server.readBuild, server.rakunApp};
+import {AssetRoot} from "onze-assets";
+
+// ── the app ─────────────────────────────────────────────────────────────────
+
+#[layout("")]
+pub fn shell(props: LayoutProps) -> @Component<Element> {
+    return main([props.children], attrs: [#("class", "shell")]);
+}
+
+#[page("")]
+pub fn home(route: PageContext) -> @Component<Element> {
+    return p([text("home page", attrs: [])], attrs: []);
+}
+
+#[page("dashboard")]
+pub fn dashboard(route: PageContext) -> @Component<Element> {
+    redirect("/login");
+    return p([text("never", attrs: [])], attrs: []);
+}
+
+#[page("login")]
+pub fn login(route: PageContext) -> @Component<Element> {
+    return p([text("sign in", attrs: [])], attrs: []);
+}
+
+val __routes = jhRegisterRoutes(@TypeInfo.all(with: page), @TypeInfo.all(with: layout), [], []);
+
+// ── the build and the boot ──────────────────────────────────────────────────
+
+fn scratch() -> string {
+    val root = env.read("BOTOPINK_TEST_TMPDIR") ?? "";
+    assert root
+        != "", "BOTOPINK_TEST_TMPDIR is not set: run this suite under `botopink test`";
+    return path.join([root, "onze-server"]);
+}
+
+fn config() -> OnzeConfig {
+    val d = defaultConfig();
+    return OnzeConfig(..d, name: "fixture", publicDir: path.join([scratch(), "public"]), outDir: path.join([scratch(), ".onze"]));
+}
+
+fn writeBuild() -> @Result<void, string> {
+    val out = config().outDir;
+    val made = try process.run("mkdir", ["-p", path.join([out, "static", "b1"]), path.join([scratch(), "public"]), path.join([scratch(), "content"])]);
+    val a = try fs.writeText(path.join([out, "build-id"]), "b1\n");
+    val b = try fs.writeText(path.join([out, "client-manifest.txt"]), formatManifest(emptyManifest("b1")));
+    val c = try fs.writeText(path.join([out, "static", "b1", "shared.js"]), "shared();\n");
+    val d = try fs.writeText(path.join([scratch(), "content", "post.md"]), "# draft\n");
+    return;
+}
+
+// `Onze.run` once per process: rakun's tables and the listener outlive a test.
+// `rakun.main.keep-alive = false` makes `Rakun.run` return once it listens,
+// instead of holding the process (rakun front 04).
+fn running() -> @Result<void, string> {
+    if (rkProp("onze.test.running") == "") {
+        try writeBuild();
+        val _k = rkSetProp("rakun.main.keep-alive", "false");
+        Onze.run(config());
+        val _f = rkSetProp("onze.test.running", "1");
+    }
+    return;
+}
+
+fn get(pathname: string) -> RakunResponse {
+    return rkDispatchHttp("GET", pathname, "{}", "{}", "");
+}
+
+#[@External.Erlang("""(fun(__Port, __Path) -> case gen_tcp:connect("127.0.0.1", __Port, [binary, {active, false}], 3000) of {ok, __S} -> ok = gen_tcp:send(__S, [<<"GET ">>, __Path, <<" HTTP/1.1", 13, 10, "Host: localhost", 13, 10, 13, 10>>]), __Loop = fun __Loop(__Acc) -> case binary:match(__Acc, <<"0", 13, 10, 13, 10>>) of nomatch -> case gen_tcp:recv(__S, 0, 3000) of {ok, __M} -> __Loop(<<__Acc/binary, __M/binary>>); _ -> __Acc end; _ -> __Acc end end, __All = __Loop(<<>>), gen_tcp:close(__S), __All; {error, __E} -> iolist_to_binary(io_lib:format("connect failed: ~p", [__E])) end end)($0, $1)""")]
+declare fn rawGet(port: i32, pathname: string) -> string;
+
+// ── the pieces ──────────────────────────────────────────────────────────────
+
+test "server: rakun's parameter wire and the cookie header, as pairs" {
+    assert paramPairs("slug\thello-world\nid\t7")
+        .map({ kv -> kv._0 + "=" + kv._1 })
+        .join(",")
+        == "slug=hello-world,id=7";
+    assert paramPairs("").length == 0;
+    assert cookiePairs("session=abc; theme=dark")
+        .map({ kv -> kv._0 + "=" + kv._1 })
+        .join(",")
+        == "session=abc,theme=dark";
+}
+
+test "server: jhonstart's records by kind and pattern" {
+    val rows = uiRecords("L|/||\nP|/||\nP|/blog/[slug]||");
+    assert rows.map({ r -> r._0 + " " + r._1 }).join(",")
+        == "L /,P /,P /blog/[slug]";
+}
+
+test "server: an asset root is front 82's record, field for field" {
+    val r = staticRootOf(AssetRoot(pattern: "/_onze/static/b1/**", directory: ".onze/static/b1/", immutable: true, cacheSeconds: 31536000));
+    assert r.pattern == "/_onze/static/b1/**";
+    assert r.directory == ".onze/static/b1/";
+    assert r.immutable;
+    assert r.cacheSeconds == 31536000;
+    assert r.indexFile == "";
+}
+
+test "server: basePath reaches rakun's App unchanged" {
+    val d = defaultConfig();
+    val docs = OnzeConfig(..d, port: 4000, basePath: "/docs");
+    val app = rakunApp(docs);
+    assert app.basePath == "/docs";
+    assert app.port == 4000;
+}
+
+test "server: a missing build is an error naming the file" {
+    val r = readBuild(path.join([scratch(), "nowhere"]));
+    assert r.isError();
+    val message = case r {
+        Ok(b) -> "";
+        Error(e) -> e;
+    };
+    assert message.contains("nowhere/build-id does not exist");
+}
+
+// ── the boot ────────────────────────────────────────────────────────────────
+
+test "server: Onze.run listens on 3000 and answers / from #[page(\"\")]" {
+    try running();
+    assert config().port == 3000;
+    val raw = rawGet(3000, "/");
+    assert raw.startsWith("HTTP/1.1 200");
+    assert raw.contains("home page");
+    assert raw.contains("class=\"shell\"");
+}
+
+test "server: the boot writes the rakun keys" {
+    try running();
+    assert rkProp("rakun.appDir") == "app";
+    assert rkProp("rakun.actions.field") == "__bp_action";
+    assert rkProp("rakun.actions.header") == "X-Bp-Action";
+    assert rkProp("rakun.actions.bodyLimit") == "1048576";
+    assert rkProp("rakun.i18n.exclude") == "/_onze";
+}
+
+test "server: jhonstart's table is rakun's, one renderer per page" {
+    try running();
+    val table = rkAppTable();
+    assert table.contains("L|/");
+    assert table.contains("P|/dashboard");
+    assert table.contains("P|/login");
+}
+
+test "server: a page's redirect answers 307 through the writer, no onze code on the path" {
+    try running();
+    val r = get("/dashboard");
+    assert r.status == 307;
+    val raw = rawGet(3000, "/dashboard");
+    assert raw.startsWith("HTTP/1.1 307");
+    assert raw.contains("location: /login");
+    assert get("/login").body.contains("sign in");
+    assert get("/nowhere").status == 404;
+}
+
+test "server: the fingerprinted root serves the chunk; content/ is unreachable" {
+    try running();
+    assert servedRoots(config(), "b1").length == 1;
+    assert staticRootCount() == 1;
+    assert get("/_onze/static/b1/shared.js").status == 200;
+    val raw = rawGet(3000, "/_onze/static/b1/shared.js");
+    assert raw.startsWith("HTTP/1.1 200");
+    assert raw.contains("public, max-age=31536000, immutable");
+    assert raw.contains("shared();");
+    assert get("/content/post.md").status == 404;
+}

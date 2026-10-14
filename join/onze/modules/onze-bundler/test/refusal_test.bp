@@ -1,0 +1,128 @@
+// `botopink test` suite for `src/refusal.bp` (front 68 step 3), over fixture
+// source strings.
+
+import {scan.parseFixture, scan.ImportRef};
+import {graph.AppModule, graph.ClientGraph, graph.GraphNode, graph.loadModules, graph.clientGraph};
+import {refusal.BuildReport, refusal.BuildRefusal, refusal.checkBuild, refusal.describeReport, refusal.refusalMessage, refusal.emiliaCallsOf, refusal.StyleProbe, refusal.styleProbeSource, refusal.parseStyleProbe, refusal.styleParity};
+import {AliasMap, OnzeConfig, defaultConfig, loadConfig} from "onze";
+import {assertAs} from "snap";
+
+fn aliases() -> AliasMap {
+    return AliasMap(entries: [#("@/components", "components"), #("@/lib", "lib")]);
+}
+
+fn fakeEnv(name: string) -> string {
+    return if (name == "ONZE_PUBLIC_API_URL") "https://api.example.com" else "";
+}
+
+fn reportWith(tree: string, cfg: OnzeConfig) -> @Result<BuildReport, string> {
+    val modules = try loadModules(parseFixture(tree));
+    val graph = clientGraph(modules, aliases(), "app");
+    return checkBuild(graph, modules, cfg, { n -> fakeEnv(n) });
+}
+
+fn report(tree: string) -> @Result<BuildReport, string> {
+    return try reportWith(tree, defaultConfig());
+}
+
+fn page(component: string) -> string {
+    return ["== app/page.bp", "import { "
+        + component
+        + " } from \"@/components.w\";", "#[page(\"\")] pub fn home(route: PageContext) -> @Component<Element> { return p([]); }", "== components/w.bp", "#[client]"].join("\n");
+}
+
+test "refusal: server-only ---- the chain from the root" {
+    val r = try report(["== app/page.bp", "import { Status } from \"@/components.status\";", "#[page(\"\")] pub fn home(route: PageContext) -> @Component<Element> { return p([]); }", "== components/status.bp", "#[client]", "import { fmt } from \"@/lib.format\";", "pub fn Status(props: P) -> Element { return p([]); }", "== lib/format.bp", "import { listPosts } from \"@/lib.db\";", "pub fn fmt() -> string { return \"\"; }", "== lib/db.bp", "import { serverOnly } from \"jhonstart\";", "pub fn listPosts() -> Post[] { return []; }"].join("\n"));
+    val text = describeReport(r);
+    assert text.contains("components.status > lib.format > lib.db");
+    try assertAs(@src(), "refusals", text);
+}
+
+test "refusal: request scope ---- cookies from a client module" {
+    val r = try report(page("W")
+        + "\nimport { cookies } from \"jhonstart\";\npub fn W(props: P) -> Element { return p([]); }");
+    try assertAs(@src(), "refusals", describeReport(r));
+}
+
+test "refusal: env ---- every row of the environment table" {
+    val r = try report(page("Widget")
+        + "\n"
+        + [
+            "import { io.env } from \"std\";",
+            "val a = env.read(\"ONZE_PUBLIC_API_URL\");",
+            "val b = env.read(\"DATABASE_URL\");",
+            "val c = env.read(\"onze_public_x\");",
+            "val d = env.read(someName());",
+            "val e = env.vars();",
+            "val f = env.write(\"X\", \"1\");",
+            "val g = env.clear(\"X\");",
+            "pub fn Widget(props: P) -> Element { return p([]); }",
+        ].join("\n"));
+    assert r.refusals.length == 6;
+    assert r.inlined.length == 1;
+    val text = describeReport(r);
+    assert text.contains("DATABASE_URL");
+    assert text.contains("components.w");
+    try assertAs(@src(), "refusals", text);
+}
+
+test "refusal: adversarial config ---- no setting relaxes anything" {
+    val tree = page("Widget")
+        + "\nimport { io.env } from \"std\";\nval b = env.read(\"DATABASE_URL\");\npub fn Widget(props: P) -> Element { return p([]); }";
+    val plain = try report(tree);
+    val loose = try loadConfig("{ \"name\": \"x\" }", "{ \"dev\": true, \"port\": 1, \"basePath\": \"/x\", \"appDir\": \"app\", \"publicDir\": \"\", \"outDir\": \"\", \"actionsBodyLimit\": 2147483647, \"allowedRedirects\": [\"*\"] }");
+    val adversarial = try reportWith(tree, loose);
+    assert describeReport(adversarial) == describeReport(plain);
+    val keys = ["allowEnv", "publicEnvPrefix", "strict", "bundler"].map({ k -> k + ": " + loadError(k) });
+    try assertAs(@src(), "refusals", keys.join("\n")
+        + "\n"
+        + describeReport(adversarial));
+}
+
+fn loadError(key: string) -> string {
+    return case loadConfig("{ \"name\": \"x\" }", "{ \"" + key + "\": true }") {
+        Ok(c) -> "accepted";
+        Error(message) -> "refused at config load";
+    };
+}
+
+test "refusal: emilia ---- non-literal tokens, a client flush, a hash split" {
+    val r = try report(page("Badge")
+        + "\n"
+        + [
+            "import { emilia, flush, Token } from \"emilia\";",
+            "val ok = emilia([.Text.Size.Sm, .Color.Gray.700]);",
+            "val named = [.Gap.All.4];",
+            "val viaVal = emilia(named);",
+            "val astral = emilia([.Content.Text(\"\u{1F600}\")]);",
+            "pub fn Badge(props: P) -> Element {",
+            "    val cls = emilia(props.tokens);",
+            "    val sheet = await flush();",
+            "    return span([text(\"x\", attrs: [])], attrs: [#(\"class\", cls)]);",
+            "}",
+        ].join("\n"));
+    try assertAs(@src(), "refusals", describeReport(r));
+}
+
+test "refusal: the styleMap probe ---- its source, and the two backends compared" {
+    val map = [#("components.card#1", "[.Bg.White, .Pad.All.__4, .Text.Bold, Token.Hover([.Bg.Color.Gray.__100])]"), #("components.w#2", "[.Gap.All.4]"), #("components.x#1", "[.Gap.All.2]")];
+    val src = styleProbeSource(map);
+    assert src.contains("import {styleRule, defaultTheme, Token} from \"emilia\";");
+    assert src.contains("val rule = styleRule(tokens, defaultTheme());");
+    assert src.contains("hash.contentHash(rule._1)");
+    assert src.contains("        probe(\"components.card#1\", [.Bg.White, .Pad.All.__4, .Text.Bold, Token.Hover([.Bg.Color.Gray.__100])]),");
+    val js = parseStyleProbe("components.card#1|e_f51c2501|9f00aa11\ncomponents.w#2|e_0000abcd|12345678\nnoise");
+    val beam = parseStyleProbe("components.card#1|e_f51c2501|9f00aa11\ncomponents.w#2|e_0000abcd|87654321");
+    assert js.length == 2;
+    val parity = styleParity(map, js, beam);
+    assert parity._0.map({ c -> c._0 + " " + c._1 }).join(",")
+        == "components.card#1 e_f51c2501";
+    assert parity._1.map({ r -> r.kind + " " + r.moduleId }).join(",")
+        == "emilia-hash-split components.w#2,emilia-unevaluated components.x#1";
+    assert refusalMessage(parity._1.at(0) ?? BuildRefusal(kind: "", subject: "", moduleId: "", chain: [])).contains("emilia([.Gap.All.4])");
+}
+
+test "refusal: a module outside the client graph is never checked" {
+    val r = try report(["== app/page.bp", "import { io.env } from \"std\";", "import { serverOnly } from \"jhonstart\";", "val secret = env.read(\"DATABASE_URL\");", "#[page(\"\")] pub fn home(route: PageContext) -> @Component<Element> { return p([]); }"].join("\n"));
+    assert r.refusals.length == 0;
+}

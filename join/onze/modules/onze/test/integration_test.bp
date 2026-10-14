@@ -1,0 +1,155 @@
+// `botopink test` suite for `src/integration.bp` (front 49 step 4): the boot
+// over jhonstart's render with the emilia bridge registered, against a
+// RECORDING chunk writer (the jhonstart suites' recorder, per row). The one
+// suite of the core that imports a sibling library — the boot is the seam.
+
+import {Element, ElementBase, div, p, text, redirect, RequestData, Response, RenderHooks, defaultHooks, setHooks, LayoutProps, PageContext} from "jhonstart";
+import {emilia, flush, Token} from "emilia";
+import {config.defaultConfig, config.OnzeConfig};
+import {integration.rakunEntries, integration.bootSite, integration.bundleHooks, integration.responseOver, integration.pageInput, integration.chainFor, integration.boot};
+
+// ── the recorder: a chunk writer's four calls, as events ────────────────────
+
+#[@External.Node("""(globalThis.__onzeRec = [], 0)""")]
+#[@External.Erlang("""(fun() -> put(onze_rec, []), 0 end)()""")]
+declare fn recReset() -> i32;
+
+#[@External.Node("""((globalThis.__onzeRec = (globalThis.__onzeRec || []).concat([$0])), 0)""")]
+#[@External.Erlang("""(fun(__E) -> put(onze_rec, (case get(onze_rec) of undefined -> []; __L -> __L end) ++ [__E]), 0 end)($0)""")]
+declare fn recPush(event: string) -> i32;
+
+#[@External.Node("""(globalThis.__onzeRec || [])""")]
+#[@External.Erlang("""(fun() -> case get(onze_rec) of undefined -> []; __L -> __L end end)()""")]
+declare fn recEvents() -> Array<string>;
+
+fn setStatus(code: i32) -> void {
+    recPush("setStatus " + code.toString());
+}
+
+fn setHeader(name: string, value: string) -> void {
+    recPush("setHeader " + name + " " + value);
+}
+
+fn write(chunk: string) -> @Task<void> {
+    recPush("write " + chunk);
+}
+
+fn close() -> @Task<void> {
+    recPush("close");
+}
+
+fn writer() -> Response {
+    recReset();
+    return responseOver({ c -> setStatus(c) }, { n, v -> setHeader(n, v) }, { chunk -> write(chunk) }, { -> close() });
+}
+
+fn document() -> string {
+    return recEvents()
+        .filter({ e -> e.startsWith("write ") })
+        .map({ e -> e.slice(6) })
+        .join("");
+}
+
+fn req() -> RequestData {
+    return RequestData(method: "GET", path: "/", params: [], query: [], headers: [], cookies: []);
+}
+
+fn outcomeText(r: @Result<void, string>) -> string {
+    return case r {
+        Ok(v) -> "ok";
+        Error(message) -> message;
+    };
+}
+
+fn headTag(route: string) -> string {
+    return "<link rel=\"modulepreload\" href=\"/_onze/static/b1/chunks/shared.js\">";
+}
+
+fn bodyTag(route: string) -> string {
+    return "<script type=\"module\" src=\"/_onze/static/b1/chunks/entry.js\"></script>";
+}
+
+fn StyledHome() -> @Component<Element> {
+    val cls = emilia([.Gap.All.4]);
+    return div([text("home", attrs: [])], attrs: [#("class", cls)]);
+}
+
+fn LoginRedirect() -> @Component<Element> {
+    redirect("/login");
+    return p([text("never", attrs: [])], attrs: []);
+}
+
+// ── the rakun keys ──────────────────────────────────────────────────────────
+
+test "boot: the rakun keys carry the config, the wire names and the asset prefix" {
+    val entries = rakunEntries(defaultConfig(), ["/api"]);
+    assert entries.map({ e -> e._0 + "=" + e._1 }).join("\n")
+        == "rakun.appDir=app\nrakun.actions.field=__bp_action\nrakun.actions.header=X-Bp-Action\nrakun.actions.bodyLimit=1048576\nrakun.i18n.exclude=/api,/_onze";
+}
+
+test "boot: /_onze is appended once, never twice" {
+    val entries = rakunEntries(defaultConfig(), ["/_onze"]);
+    assert (entries.at(4) ?? #("", ""))._1 == "/_onze";
+}
+
+// ── the response adapter ────────────────────────────────────────────────────
+
+test "boot: the Response maps status, header, write and close one to one" {
+    val res = writer();
+    val status = res.status;
+    status(307);
+    val header = res.header;
+    header("location", "/login");
+    val w = res.write;
+    await w("x");
+    val c = res.close;
+    await c();
+    assert recEvents().join("|")
+        == "setStatus 307|setHeader location /login|write x|close";
+}
+
+// ── the render through the boot ─────────────────────────────────────────────
+
+test "boot: a styled page renders through the bridge, with one <style> and the bundle tags" {
+    val site = bootSite(defaultConfig(), bundleHooks({ r -> headTag(r) }, { r -> bodyTag(r) }));
+    val input = pageInput("b1", "/", "/", "", "", "P|/", [], ["/"], { -> StyledHome() }, [], []);
+    val out = await site.renderStream(input, req(), writer());
+    setHooks(defaultHooks());
+    assert outcomeText(out) == "ok";
+    val cls = emilia([.Gap.All.4]);
+    val drained = await flush();
+    val doc = document();
+    val head = doc.split("</head>").at(0) ?? "";
+    assert head.split("<style>").length == 2;
+    assert head.contains("." + cls);
+    assert doc.contains("class=\"" + cls + "\"");
+    assert doc.contains("\"s\":[\"" + cls + "\"]");
+    assert doc.contains(bodyTag("/"));
+    assert recEvents().at(0) ?? "" == "setStatus 200";
+    assert recEvents().filter({ e -> e == "close" }).length == 1;
+}
+
+test "boot: a redirect answers 307 through the writer with no onze code on the path" {
+    val site = bootSite(defaultConfig(), defaultHooks());
+    val input = pageInput("b1", "/", "/", "", "", "P|/\nP|/login", [], ["/"], { -> LoginRedirect() }, [], []);
+    val out = await site.renderStream(input, req(), writer());
+    assert outcomeText(out) == "ok";
+    assert recEvents().contains("setStatus 307");
+    assert recEvents().contains("setHeader location /login");
+}
+
+test "boot: the document's lang is onze.json's, through jhonstart's app(…, lang:)" {
+    val d = defaultConfig();
+    val site = bootSite(OnzeConfig(..d, lang: "pt-BR"), defaultHooks());
+    val input = pageInput("b1", "/", "/", "", "", "P|/", [], ["/"], { -> StyledHome() }, [], []);
+    val out = await site.renderStream(input, req(), writer());
+    assert outcomeText(out) == "ok";
+    assert document().contains("<html lang=\"pt-BR\">");
+    val drained = await flush();
+}
+
+test "boot: boot returns the app and the rakun entries together" {
+    val b = boot(defaultConfig(), defaultHooks(), []);
+    assert b.rakun.length == 5;
+    assert chainFor(["/", "/blog"]).length == 2;
+}

@@ -1,0 +1,154 @@
+// `botopink test` suite for the blog's read path (front 53 step 2), rendered
+// IN PROCESS through onze's boot: `bootSite` registers the jhonstart-emilia
+// bridge, the chain comes from jhonstart's UI registry — filled below from
+// the #[page] / #[layout] functions `@TypeInfo.all` answers (decision 216)
+// — and the writer is a recorder. `/blog/[slug]`
+// and `/about` sit in directories no `mod` path reaches; `onze build`
+// compiles them (onze-cli's build test).
+
+import {Element, ElementBase, RequestData, Response, RenderHooks, defaultHooks, PageContext, LayoutProps, page, layout, template, defaultView, jhRegisterRoutes} from "jhonstart";
+import {defaultConfig} from "onze";
+import {bootSite, pageInput, responseOver} from "onze";
+import {app.layout.rootLayout};
+import {app.page.home};
+import {app.blog.layout.blogLayout};
+import {app.blog.page.blogIndex};
+import {lib.db.listPosts};
+import {app.dashboard.layout.dashboardLayout};
+import {app.dashboard.posts.new.page.newPostPage, app.dashboard.posts.new.page.newPostRenders};
+
+val __routes = jhRegisterRoutes(
+    @TypeInfo.all(with: page),
+    @TypeInfo.all(with: layout),
+    @TypeInfo.all(with: template),
+    @TypeInfo.all(with: defaultView),
+);
+
+#[@External.Node("""(globalThis.__blogRec = [], 0)""")]
+#[@External.Erlang("""(fun() -> put(blog_rec, []), 0 end)()""")]
+declare fn recReset() -> i32;
+
+#[@External.Node("""((globalThis.__blogRec = (globalThis.__blogRec || []).concat([$0])), 0)""")]
+#[@External.Erlang("""(fun(__E) -> put(blog_rec, (case get(blog_rec) of undefined -> []; __L -> __L end) ++ [__E]), 0 end)($0)""")]
+declare fn recPush(event: string) -> i32;
+
+#[@External.Node("""(globalThis.__blogRec || [])""")]
+#[@External.Erlang("""(fun() -> case get(blog_rec) of undefined -> []; __L -> __L end end)()""")]
+declare fn recEvents() -> Array<string>;
+
+fn setStatus(c: i32) -> void {
+    recPush("status " + c.toString());
+}
+
+fn setHeader(n: string, v: string) -> void {
+    recPush("header " + n);
+}
+
+fn write(chunk: string) -> @Task<void> {
+    recPush("write " + chunk);
+}
+
+fn close() -> @Task<void> {
+    recPush("close");
+}
+
+fn writer() -> Response {
+    recReset();
+    return responseOver({ c -> setStatus(c) }, { n, v -> setHeader(n, v) }, { chunk -> write(chunk) }, { -> close() });
+}
+
+fn document() -> string {
+    return recEvents()
+        .filter({ e -> e.startsWith("write ") })
+        .map({ e -> e.slice(6) })
+        .join("");
+}
+
+fn req(path: string) -> RequestData {
+    return RequestData(method: "GET", path: path, params: [], query: [], headers: [], cookies: []);
+}
+
+fn reqWith(path: string, cookies: Array<#(string, string)>) -> RequestData {
+    return RequestData(method: "GET", path: path, params: [], query: [], headers: [], cookies: cookies);
+}
+
+fn ctx(path: string, pattern: string) -> PageContext {
+    return PageContext(pathname: path, pattern: pattern, params: [], rest: []);
+}
+
+val table = "L|/\nL|/blog\nL|/dashboard\nP|/\nP|/blog\nP|/blog/[slug]\nP|/about\nP|/login\nP|/dashboard\nP|/dashboard/posts/new";
+
+fn styleCount(doc: string) -> i32 {
+    return doc.split("<style>").length - 1;
+}
+
+fn renderHome() -> @Task<string> {
+    val site = bootSite(defaultConfig(), defaultHooks());
+    val out = await site.renderStream(pageInput("b1", "/", "/", "", "", table, [], ["/"], { -> home(ctx("/", "/")) }, [], []), req("/"), writer());
+    return document();
+}
+
+fn renderBlog() -> @Task<string> {
+    val site = bootSite(defaultConfig(), defaultHooks());
+    val out = await site.renderStream(pageInput("b1", "/blog", "/blog", "", "", table, [], ["/", "/blog"], { -> blogIndex(ctx("/blog", "/blog")) }, [], []), req("/blog"), writer());
+    return document();
+}
+
+test "read path: / renders with the hero image, the nav and one <style>" {
+    val doc = await renderHome();
+    assert doc.contains("<nav>");
+    assert doc.contains("href=\"/blog\"");
+    assert doc.contains("<img alt=\"A notebook on a desk\"");
+    assert doc.contains("fetchpriority=\"high\"");
+    assert doc.contains("Notes on building onze");
+    assert styleCount(doc) == 1;
+    assert recEvents().at(0) ?? "" == "status 200";
+}
+
+test "read path: /blog lists three posts, each in a PostCard with one emilia class" {
+    val doc = await renderBlog();
+    assert doc.split("<article class=\"e_").length - 1 == 3;
+    assert doc.contains("class=\"blog-shell\"");
+    for (listPosts()) { post ->
+        assert doc.contains(post.title);
+    }
+    assert styleCount(doc) == 1;
+}
+
+test "read path: two consecutive requests both carry a non-empty <style>" {
+    val first = await renderBlog();
+    val second = await renderBlog();
+    val sheet1 = (first.split("<style>").at(1) ?? "")
+        .split("</style>")
+        .at(0) ?? "";
+    val sheet2 = (second.split("<style>").at(1) ?? "")
+        .split("</style>")
+        .at(0) ?? "";
+    assert sheet1.contains(".e_");
+    assert sheet2.contains(".e_");
+}
+
+fn renderNewPost(jar: Array<#(string, string)>) -> @Task<string> {
+    val site = bootSite(defaultConfig(), defaultHooks());
+    val out = await site.renderStream(pageInput("b1", "/dashboard/posts/new", "/dashboard/posts/new", "", "", table, [], ["/", "/dashboard", "/dashboard/posts/new"], { -> newPostPage(ctx("/dashboard/posts/new", "/dashboard/posts/new")) }, [], []), reqWith("/dashboard/posts/new", jar), writer());
+    return document();
+}
+
+test "write path: the dashboard layout is the gate ---- no session, 307 to /login, no chunk, the page never runs" {
+    val before = newPostRenders();
+    val doc = await renderNewPost([]);
+    assert doc == "";
+    assert recEvents().contains("status 307");
+    assert recEvents().contains("header location");
+    assert recEvents().filter({ e -> e.startsWith("write ") }).length == 0;
+    assert newPostRenders() == before;
+}
+
+test "write path: with a session cookie the dashboard renders the page" {
+    val before = newPostRenders();
+    val doc = await renderNewPost([#("session", "s1")]);
+    assert doc.contains("<h1>New post</h1>");
+    assert doc.contains("class=\"dashboard\"");
+    assert recEvents().at(0) ?? "" == "status 200";
+    assert newPostRenders() == before + 1;
+}
