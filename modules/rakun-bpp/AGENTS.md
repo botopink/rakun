@@ -286,7 +286,7 @@ rakun-bpp is a *consumer*. What it relies on:
 - **Landed** (markup front-end): `expr-custom` (`@ExprCustom<T>` + `CustomNode` +
   `q.custom`) now backs `html` — its body lexes/parses the markup into a token
   stream and lowers it twice (builder code + a `CustomNode` reference overlay the
-  LSP reads), the sibling of erika's `erika "…"` SQL front-end. The comptime
+  LSP reads), the sibling of query's `query "…"` SQL front-end. The comptime
   template body still sees only a native-JS prelude (no Option/`unwrapOr`), so the
   walk uses a stack + `indexOf` span recovery rather than a recursive descent —
   see `html.bp`'s header.

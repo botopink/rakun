@@ -39,13 +39,13 @@ value types + the `Request` behavior are real emitted code (`http.bp`);
 package's name the directory's name, each with its own `botopink.json`, `src/`, tests and `AGENTS.md` — the cells under
 `conformance/<package>/`, the examples under `examples/<package>/<example>/`, the refusals under
 `refusals/<package>/<case>/`. One version, one tag, one release; one gate (`scripts/gate.sh`), one hook, one CI. The
-repositories erika, dbcontext, emilia, styled, jhonstart and onze joined this one by `git subtree add`, history kept
+repositories erika (now `query`, since moved out), dbcontext, emilia, styled, jhonstart and onze joined this one by `git subtree add`, history kept
 (front 165 s1); s2 renamed them to the layers below (a folded package is a sub-folder module of its new package:
 `rakun-bpp/src/html/` was `jhonstart-html`, `rakun-ssr/src/cli/` was `onze-cli`, `rakun-service/src/actuator/` was
 `rakun-actuator`; its tests sit in the same sub-folder of `test/`, its sidecars and `.mjs` runtimes beside the
 package's others in `src/sidecars/`, its names are imported by their path from the package root —
-`import {html.html.html};` — or from another package by `from "rakun-bpp"`). erika stays erika until s6 renames it
-`query`; `dbcontext` is s3's.
+`import {html.html.html};` — or from another package by `from "rakun-bpp"`). `query` (formerly erika) is a repository outside this one (s6);
+`dbcontext` was folded into `rakun-data` (s3: `modules/rakun-data/AGENTS.md` holds its plan).
 
 **The per-package rule.** A package owns its directory: its manifest, sources, tests, cells, examples, refusals and
 `AGENTS.md` (the package's own notes, never the workspace's). A package depends on packages of lower layers only (the
@@ -75,11 +75,11 @@ compiler refuses a cycle), a sibling by `{ "workspace": true }` — never by a `
 | `rakun-app` | `rakun-app` | `rakun-service`, `rakun-cache`, `actions`, `routing` |
 | `rakun-ssr` | `rakun-ssr`, `rakun-ssr`, `rakun-ssr`, `rakun-ssr`, `rakun-ssr`, `rakun-ssr`, `rakun-ssr`, `rakun-ssr`, `rakun-ssr` | `rakun-app`, `rakun-bpp`, `rakun-stylesheet`, `markdown`, `snap` |
 
-`erika` (to become `query`) and its `erika-test` stay packages here for now; `jhonstart-dom-test` — the commonJS-only
+`query` (formerly erika, with its `query-test`) is an external library, a repository of its own that `rakun-data` declares as a git dependency; `jhonstart-dom-test` — the commonJS-only
 half of the bpp render tests, which cannot join a package that builds for erlang — and `onze-server` — the
 erlang-only half of `rakun-ssr`'s boot, which cannot join a package that builds for commonJS — keep their names beside them;
-`rakun-cli` (the `rakun` command line, `release/`) keeps its own package; `modules/dbcontext/` holds only its
-`AGENTS.md` (the repository was a scaffold, no manifest). The `*-test` packages became each package's `testing/`
+`rakun-cli` (the `rakun` command line, `release/`) keeps its own package; dbcontext was a scaffold with no manifest and
+no source, folded into `rakun-data`'s `AGENTS.md`. The `*-test` packages became each package's `testing/`
 module (`rakun/src/testing/` was `rakun-test`, `rakun-bpp/src/testing/` was `jhonstart-test`, …); the
 `rakun-starter-*` packages are gone — `examples/` shows the combinations. The workspace's root `botopink.json` lists
 `modules/*`, `examples/*` and one `examples/<package>/*` per package that has examples. The gate
@@ -100,7 +100,7 @@ rakun/
 ├── AGENTS.md          ← you are here
 ├── conformance/       ← the reference and its examples (decision 463): `docs.md` (what this lib
 │                        provides + Spring mapping + loading notes) and `<package>/<cell>/` cells
-│                        (`conformance/rakun/` is this package's; erika, emilia, rakun-bpp each have theirs)
+│                        (`conformance/rakun/` is this package's; emilia, rakun-bpp each have theirs)
 │                        in the language suite's shape — `botopink.json` (the members it adds
 │                        beside rakun as path dependencies, through the symlinks of the cell's
 │                        `deps/`; rakun itself, the targets [erlang, beam] and the version are the
@@ -318,7 +318,7 @@ rakun/
 │   │                    through `from "rakun-app"` — pages registered through `page(pattern, render)`,
 │   │                    renderers writing plain text through the ChunkWriter, the page path as the
 │   │                    router fallback. `botopink run` prints the document
-│   └── <package>/<example>/ ← the joined packages' examples: `erika/`, `rakun-bpp/` (blog-ssr,
+│   └── <package>/<example>/ ← the joined packages' examples: `rakun-bpp/` (blog-ssr,
 │                        forms, islands, …), `rakun-ssr/` (blog, scaffold), `rakun-style/`,
 │                        `rakun-stylesheet/` (the emilia-* ones); `refusals/<package>/<case>/`
 │                        the same way
@@ -2132,7 +2132,7 @@ too (`test/module_resolution_test.bp`; front 165 s2 removed the starters). `modu
 ### The version set — `modules/rakun/src/version_set.bp` (front 73)
 
 `rakunVersion()`, `moduleVersions()` (one row per `modules/*`
-package, `rakun-*` or not yet — erika, erika-test and jhonstart-dom-test), `versionOf(name)` (`""` when unpinned) and
+package, `rakun-*` or not yet — jhonstart-dom-test and onze-server), `versionOf(name)` (`""` when unpinned) and
 `versionSetProblems(manifests)`. `test/version_set_test.bp` reads every manifest
 and fails on a disagreeing version, a directory with no row, or a row with no
 directory — a new member adds its row in the same commit. The actuator's `info`
@@ -5102,7 +5102,7 @@ read a queue of 51 against the cap of 50 (26/1) — a `rakun-websocket` row
 `--no-verify`; fix the red instead.
 
 `scripts/git-hooks/pre-commit` and `scripts/git-hooks/lib/runner-standalone.sh`
-are one text in the five library repositories (emilia, erika, rakun-bpp, rakun-ssr,
+are one text in the five library repositories (emilia, rakun-bpp, rakun-ssr,
 rakun): the meta repository's `hook-integrity` workflow compares the bytes
 (its check 4), so a change to either lands in all five together. What only
 rakun checks — stage 3 — lives in `scripts/git-hooks/repository-stages.sh`,

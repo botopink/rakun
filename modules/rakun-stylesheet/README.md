@@ -5,9 +5,9 @@
 > registered on a per-render `<style>` host cell, and flushed alongside
 > `renderToString`.
 
-The CSS sibling of `rakun-bpp`'s `html` and `erika`'s `erika "…"` — same
+The CSS sibling of `rakun-bpp`'s `html` and `query`'s `query "…"` — same
 mechanism (a typed sub-language consumed at the call site), different
-sub-language. Where `html` parses *string markup* and `erika` parses
+sub-language. Where `html` parses *string markup* and `query` parses
 *string SQL*, emilia consumes an **array literal of typed enum
 variants**. Unknown utilities are type errors at the call site, not
 runtime fall-throughs.

@@ -6,7 +6,7 @@
 > surface** at v0 — the core is unaware of emilia (memory:
 > `feedback_no_lib_specific_in_core`,
 > `feedback_compiler_unaware_of_jhonstart`). Sibling of `rakun-bpp/html`
-> and `erika/erika`: a typed sub-language consumed at the call site, but
+> and `query/query`: a typed sub-language consumed at the call site, but
 > the sub-language is an **array literal of typed enum variants**, not a
 > string.
 

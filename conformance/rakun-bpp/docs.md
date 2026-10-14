@@ -224,7 +224,7 @@ is doubly unavailable: the tag would resolve to the DSL's own `html`.
 `html` captures markup **unevaluated** (`@Expr<string>` — the `"""…"""`
 triple-quoted literal) and expands it, at compile time, into the `Element` builder
 pipeline — at zero runtime cost. Its body is a real markup front-end (a lexer →
-token stream → stack parser, the sibling of erika's `erika "…"` SQL form), so it
+token stream → stack parser, the sibling of query's `query "…"` SQL form), so it
 returns `@ExprCustom<Element>`: the executable builder code PLUS a generic
 `CustomNode` reference tree the language server reads to highlight and navigate
 the markup (tags, attributes, text), with each `<div>` tied to the builder it
