@@ -1,0 +1,202 @@
+//// rakun-ssr — the optimizer and the `/_onze/image` handler (front 51
+//// steps 4 and 5).
+////
+//// The pixels never enter the VM: one external encoder (`vips` by default,
+//// `magick` accepted), spawned with an argument vector — never a shell
+//// string — under a deadline the VM keeps (`runWithin`), so a slow encoder is
+//// killed and one request fails, not a scheduler. No NIF, anywhere. A missing
+//// encoder is found once, remembered, and turns the optimizer into
+//// pass-through (the original file, logged once): an image encoder is an
+//// operational dependency, and a missing one does not make an app
+//// unservable — the one place in track E where degrading beats failing.
+////
+//// The handler takes `src`, `w`, `q`, `f` (no `h`: the height follows the
+//// source's aspect ratio), re-validates the source against the same rules
+//// as the component, refuses a width outside `deviceWidths` or a quality
+//// outside 1..100 with 400, and serves the encoded file keyed by the hash of
+//// `#(src, w, q, f, encoderVersion)` with `Cache-Control: public,
+//// max-age=31536000, immutable` and that hash as `ETag`.
+
+import {io.fs, io.process, io.process.Exit, path, hash, encoding} from "std";
+import {assets.image.ImageConfig, assets.image.validateSource};
+
+pub type EncodeRequest(inputPath: string, outputPath: string, width: i32, quality: i32, format: string)
+
+pub type ImageOutcome(status: i32, headers: Array<#(string, string)>, file: string, message: string)
+
+// The argument vector for `encoder`.
+pub fn encoderArgs(encoder: string, req: EncodeRequest) -> Array<string> {
+    if (encoder == "magick")
+        return [req.inputPath, "-resize", req.width.toString(), "-quality", req.quality.toString(), req.outputPath];
+    return ["thumbnail", req.inputPath, req.outputPath
+        + "[Q="
+        + req.quality.toString()
+        + "]", req.width.toString()];
+}
+
+#[@External.Node("""(((globalThis.__onzeEncoderState || {})[$0]) || '')""")]
+#[@External.Erlang("""persistent_term:get({onze_encoder, $0}, <<"">>)""")]
+declare fn encoderState(name: string) -> string;
+
+#[@External.Node("""(((globalThis.__onzeEncoderState = globalThis.__onzeEncoderState || {})[$0] = $1), 0)""")]
+#[@External.Erlang("""(fun() -> persistent_term:put({onze_encoder, $0}, $1), 0 end)()""")]
+declare fn setEncoderState(name: string, state: string) -> i32;
+
+// Whether the encoder can run — probed once per name, then remembered.
+pub fn encoderAvailable(encoder: string) -> bool {
+    val known = encoderState(encoder);
+    if (known != "") return known == "ok";
+    val probe = process.run("sh", ["-c", "command -v \"$1\" >/dev/null 2>&1", "probe", encoder]);
+    val status = probe.unwrapOr(Exit(status: 1, stdout: "", stderr: "")).status;
+    setEncoderState(encoder, if (status == 0) "ok" else "missing");
+    return status == 0;
+}
+
+// `process.run` with a deadline: `cmd` (looked up on `PATH` when it has no
+// `/`) with `args`, no shell, killed with SIGKILL once `ms` have passed. A
+// process that ran is `Ok` whatever its status; one killed by a signal is
+// `128 + signal` — the deadline's kill is 137. `Error` means it could not be
+// started. The deadline is the VM's own, not an external `timeout`: GNU
+// coreutils' `timeout` is not on macOS (nor on every Linux image), and an
+// optimizer that silently loses its bound there is not bounded.
+// Node: synchronous, through a supervisor `node` run by `spawnSync`: it
+// `spawn`s the encoder `detached` (so it leads its own process group), and at
+// the deadline — and once the encoder has exited, for what it left behind —
+// kills the whole group with `process.kill(-pid, 'SIGKILL')`; a bare
+// `spawnSync` timeout kills only the direct child and leaks its children.
+// Erlang: `open_port({spawn_executable, Path}, …)` gathered until
+// `exit_status` or the deadline; at the deadline (and after the exit, for
+// what the encoder left behind) the port's OS process group is killed
+// (`erl_child_setup` makes the child a group leader, so what the encoder
+// spawned goes with it) and the port is closed.
+#[@External.Node("""(() => { const __r = require('child_process').spawnSync(globalThis.process.execPath, ['-e', `const [c, a, ms] = JSON.parse(process.argv[1]); const cp = require("child_process"); let out = "", err = "", timed = false, sent = false; const send = (v) => { if (!sent) { sent = true; process.stdout.write(JSON.stringify(v)); } }; const ch = cp.spawn(c, a, { detached: true, stdio: ["ignore", "pipe", "pipe"] }); const kill = () => { try { process.kill(-ch.pid, "SIGKILL"); } catch (e) {} }; ch.on("error", (e) => send({ error: String(e.message ?? e) })); ch.stdout.on("data", (d) => { out += d; }); ch.stderr.on("data", (d) => { err += d; }); const t = setTimeout(() => { timed = true; kill(); }, ms); ch.on("close", (code, sig) => { clearTimeout(t); kill(); send({ ok: { status: timed ? 137 : (code ?? (128 + (require("os").constants.signals[sig] ?? 0))), stdout: out, stderr: err } }); });`, JSON.stringify([$0, $1, $2])], { encoding: 'utf8', timeout: $2 + 10000, killSignal: 'SIGKILL' }); try { return JSON.parse(__r.stdout); } catch (e) { return { error: 'the deadline supervisor failed: ' + String(__r.error?.message ?? __r.stderr ?? '') }; } })()""")]
+#[@External.Erlang("""(fun(__C, __A, __Ms) -> __X = case string:find(__C, <<"/">>) of nomatch -> os:find_executable(binary_to_list(__C)); _ -> binary_to_list(__C) end, case __X of false -> {error, iolist_to_binary([<<"not found: ">>, __C])}; _ -> try open_port({spawn_executable, __X}, [binary, exit_status, stderr_to_stdout, {args, [binary_to_list(__Y) || __Y <- __A]}]) of __P -> __OsPid = case erlang:port_info(__P, os_pid) of {os_pid, __Op} -> integer_to_list(__Op); _ -> undefined end, __KillGroup = fun() -> case __OsPid of undefined -> ok; _ -> os:cmd("kill -9 -" ++ __OsPid ++ " 2>/dev/null; kill -9 " ++ __OsPid ++ " 2>/dev/null") end end, __Deadline = erlang:monotonic_time(millisecond) + __Ms, __L = fun __F(__Acc) -> __Left = erlang:max(0, __Deadline - erlang:monotonic_time(millisecond)), receive {__Q, {data, __D}} when __Q =:= __P -> __F([__D | __Acc]); {__Q, {exit_status, __S}} when __Q =:= __P -> __KillGroup(), {__S, iolist_to_binary(lists:reverse(__Acc))} after __Left -> __KillGroup(), catch port_close(__P), __Drain = fun __G() -> receive {__R, _} when __R =:= __P -> __G() after 0 -> ok end end, __Drain(), {137, iolist_to_binary(lists:reverse(__Acc))} end end, {__St, __Out} = __L([]), {ok, #{status => __St, stdout => __Out, stderr => <<>>}} catch _:__E -> {error, iolist_to_binary(io_lib:format("~p", [__E]))} end end end)($0, $1, $2)""")]
+declare fn runWithin(cmd: string, args: Array<string>, ms: i32) -> @Result<Exit, string>;
+
+// Runs the encoder under a `cfg.encoderTimeoutMs` deadline. `Ok(0)` when it
+// wrote the output.
+pub fn encode(cfg: ImageConfig, req: EncodeRequest) -> @Result<i32, string> {
+    if (encoderAvailable(cfg.encoder) == false)
+        throw "images: encoder \""
+            + cfg.encoder
+            + "\" is not installed - optimization is off, originals are served";
+    val ran = runWithin(cfg.encoder, encoderArgs(cfg.encoder, req), cfg.encoderTimeoutMs);
+    val exit = case ran {
+        Ok(e) -> e;
+        Error(message) -> Exit(status: 0 - 1, stdout: "", stderr: message);
+    };
+    if (exit.status == 0 - 1)
+        throw "images: " + cfg.encoder + " could not run: " + exit.stderr;
+    if (exit.status == 137)
+        throw "images: "
+            + cfg.encoder
+            + " exceeded "
+            + cfg.encoderTimeoutMs.toString()
+            + " ms and was killed";
+    if (exit.status != 0)
+        throw "images: "
+            + cfg.encoder
+            + " exited "
+            + exit.status.toString()
+            + ": "
+            + (exit.stderr + exit.stdout).trim().slice(0, 300);
+    return 0;
+}
+
+fn pairValue(pairs: Array<#(string, string)>, name: string) -> string {
+    val hit = pairs.filter({ p -> p._0 == name });
+    if (hit.length == 0) return "";
+    val pair = hit.at(0) ?? #("", "");
+    return pair._1;
+}
+
+#[@External.Node("""(/^[0-9]+$/.test($0) ? Number($0) : -1)""")]
+#[@External.Erlang("""(fun(__S) -> try binary_to_integer(__S) catch _:_ -> -1 end end)($0)""")]
+declare fn digits(s: string) -> i32;
+
+pub fn extensionOf(format: string) -> string {
+    if (format == "image/avif") return "avif";
+    if (format == "image/webp") return "webp";
+    return "";
+}
+
+// The format answered: the requested one when configured and accepted, else
+// the first configured one the browser accepts, else the original.
+pub fn negotiate(cfg: ImageConfig, requested: string, accept: string) -> string {
+    val wanted = cfg.formats.contains(requested) && accept.contains(requested);
+    if (wanted) return requested;
+    val first = cfg.formats.filter({ f -> accept.contains(f) });
+    return first.at(0) ?? "";
+}
+
+pub fn cacheKey(src: string, w: i32, q: i32, format: string, encoderVersion: string) -> string {
+    return hash
+        .contentHash([src, w.toString(), q.toString(), format, encoderVersion].join("|"))
+        .padStart(8, "0");
+}
+
+fn contentTypeOfOriginal(file: string) -> string {
+    val ext = path.extname(file).toLower();
+    if (ext == ".png") return "image/png";
+    if (ext == ".gif") return "image/gif";
+    if (ext == ".webp") return "image/webp";
+    if (ext == ".svg") return "image/svg+xml";
+    return "image/jpeg";
+}
+
+fn bad(message: string) -> ImageOutcome {
+    return ImageOutcome(status: 400, headers: [], file: "", message: message);
+}
+
+// The response to one `/_onze/image` query (`src`, `w`, `q`, `f`). `root` is
+// the project root; encoded files are written under `<outDir>/images/`.
+pub fn imageResponse(cfg: ImageConfig, query: Array<#(string, string)>, accept: string, root: string, publicDir: string, outDir: string, encoderVersion: string) -> ImageOutcome {
+    val src = pairValue(query, "src");
+    val w = digits(pairValue(query, "w"));
+    val q = digits(pairValue(query, "q"));
+    val checked = validateSource(cfg, publicDir, src);
+    if (checked.isError())
+        return ImageOutcome(status: 403, headers: [], file: "", message: "refused: "
+            + src);
+    if (cfg.deviceWidths.contains(w) == false)
+        return bad("w="
+            + pairValue(query, "w")
+            + " is not a configured device width");
+    if (q < 1 || q > 100)
+        return bad("q=" + pairValue(query, "q") + " is outside 1..100");
+    val clean = checked.unwrapOr(src);
+    if (clean.startsWith("/") == false)
+        return ImageOutcome(status: 501, headers: [], file: "", message: "remote sources are fetched by the build's download seam, not in this handler yet");
+    val input = path.join([root, publicDir, clean.slice(1)]);
+    if (fs.exists(input) == false)
+        return ImageOutcome(status: 404, headers: [], file: "", message: "no such image "
+            + clean);
+    val format = negotiate(cfg, pairValue(query, "f"), accept);
+    val immutable = #("cache-control", "public, max-age=31536000, immutable");
+    val available = encoderAvailable(cfg.encoder);
+    val passThrough = format == "" || available == false;
+    if (passThrough)
+        return ImageOutcome(status: 200, headers: [#("content-type", contentTypeOfOriginal(input)), immutable], file: input, message: if (available)
+            ""
+        else
+            "optimization is off: " + cfg.encoder + " is not installed");
+    val key = cacheKey(clean, w, q, format, encoderVersion);
+    val output = path.join([outDir, "images", key + "." + extensionOf(format)]);
+    val headers = [#("content-type", format), immutable, #("etag", "\""
+        + key
+        + "\"")];
+    if (fs.exists(output))
+        return ImageOutcome(status: 200, headers: headers, file: output, message: "hit");
+    val made = process.run("mkdir", ["-p", path.dirname(output)]);
+    val encoded = encode(cfg, EncodeRequest(inputPath: input, outputPath: output, width: w, quality: q, format: format));
+    if (encoded.isError())
+        return ImageOutcome(status: 502, headers: [], file: "", message: encodeError(encoded));
+    return ImageOutcome(status: 200, headers: headers, file: output, message: "miss");
+}
+
+fn encodeError(r: @Result<i32, string>) -> string {
+    return case r {
+        Ok(v) -> "";
+        Error(e) -> e;
+    };
+}

@@ -1,0 +1,222 @@
+// `botopink test` suite for the `rakun-bpp` helpers: every `<subject>Text`
+// twin against `test-snap.md`'s literal for the same case, both rows, and one
+// snapshot per helper family through `assert<Subject>` itself.
+
+import {element.Element, element.ElementBase, element.div, element.p, element.h1, elements.h2, element.ul, element.li, elements.a, elements.nav, element.span, elements.section, elements.header, elements.button, element.text};
+import {router.RouterState, client.Island, client.clientMount, suspense.Boundary, suspense.Suspense, suspense.holeId, error_boundary.ErrorInfo, error_boundary.catchError, error_boundary.notFound, error_boundary.redirect};
+import {metadata.emptyMetadata, streaming.app, streaming.PageInput};
+import {envelope.parseActionState} from "actions";
+import {testing.harness.fixtureRouter, testing.harness.fixtureRequest, testing.harness.fixturePageOver, testing.harness.stubEnvelope, testing.harness.renderToStream, testing.harness.simulateNavigation, testing.harness.renderRecorded, testing.harness.renderStreamCollect};
+import {testing.assert_html.htmlText, testing.assert_html.htmlLinesText, testing.assert_html.tagPerLine, testing.assert_html.assertHtml};
+import {testing.assert_route.routeText, testing.assert_route.activeLinkText, testing.assert_route.assertRoute};
+import {testing.assert_link.navigationText, testing.assert_link.assertNavigation};
+import {testing.assert_server.requestText, testing.assert_server.assertRequest};
+import {testing.assert_island.clientBundleEntryText};
+import {testing.assert_stream.streamText, testing.assert_stream.assertStream};
+import {testing.assert_render.jsonMembers, testing.assert_render.documentText, testing.assert_render.responseText, testing.assert_render.assertResponse};
+import {testing.assert_error_boundary.errorBoundaryText, testing.assert_error_boundary.assertErrorBoundary};
+import {testing.assert_metadata.metadataText};
+import {testing.assert_form.actionStateText, testing.assert_form.optimisticText, testing.assert_form.assertOptimistic};
+
+// ── fixtures the cases share ────────────────────────────────────────────────
+
+fn navItem(href: string, label: string, active: bool) -> Element {
+    val cls = if (active) "row active" else "row";
+    return li([a([text(label)], attrs: [#("href", href), #("class", cls)])]);
+}
+
+fn sidebarFor(segment: string) -> Element {
+    return nav([ul([
+        navItem("/docs/api", "API", segment == "api"),
+        navItem("/docs/guides", "Guides", segment == "guides"),
+        navItem("/docs/faq", "FAQ", segment == "faq"),
+    ])], attrs: [#("class", "sidebar")]);
+}
+
+fn postList() -> @Component<Element> {
+    return ul([li([text("one")]), li([text("two")])], attrs: [#("class", "posts")]);
+}
+
+fn skeleton(label: string) -> Element {
+    return div([text(label)], attrs: [#("class", "skeleton")]);
+}
+
+fn postsBoundary(ordinal: i32) -> Boundary {
+    return Boundary(id: holeId(ordinal), fallback: skeleton("Loading posts…"), child: { -> postList() });
+}
+
+fn page(b: Boundary) -> Element {
+    return div([header([text("botopink")]), h1([text("Blog")]), section([Suspense(b)], attrs: [#("class", "main")])], attrs: [#("class", "page")]);
+}
+
+fn fallback(info: ErrorInfo) -> Element {
+    return div([p([text("Something went wrong"
+        + info.message)]), button([text("Try again")], attrs: [#("data-jh-reset", "metrics")])], attrs: [#("class", "error")]);
+}
+
+fn healthyPanel() -> @Result<Element, string> {
+    return section([h2([text("Metrics")]), p([text("99.9%")])]);
+}
+
+fn failingPanel() -> @Result<Element, string> {
+    throw "metrics service down: postgres://user:secret@db/metrics";
+}
+
+fn signallingPanel() -> @Result<Element, string> {
+    throw notFound();
+}
+
+fn LoginRedirectPage() -> @Component<Element> {
+    val gone = redirect("/login");
+    return p([text("never")]);
+}
+
+fn postsChild() -> @Component<Element> {
+    return ul([li([text("one")])]);
+}
+
+// ── the text twins, against test-snap.md's literals ─────────────────────────
+
+test "helpers: routeText is test-snap's route snapshot" {
+    val r = RouterState(path: "/blog/hi", params: [#("slug", "hi")], search: [], pattern: "/blog/[slug]", selected: 0);
+    assert routeText(r)
+        == "path: /blog/hi\npattern: /blog/[slug]\nparams: slug=hi\nsearch: \nselected: 0\nsegments: blog [slug]\nsegment: blog";
+    val root = RouterState(path: "/", params: [], search: [], pattern: "/", selected: 3);
+    assert routeText(root)
+        == "path: /\npattern: /\nparams: \nsearch: \nselected: 3\nsegments: \nsegment: ";
+    assert routeText(fixtureRouter("/products", "/products", "", "sort=price&page=2")).contains("search: sort=price&page=2");
+}
+
+test "helpers: activeLinkText marks the active anchor, in tree order" {
+    val r = RouterState(path: "/docs/api", params: [], search: [], pattern: "/docs/api", selected: 1);
+    assert activeLinkText(sidebarFor(r.segment()), r.path)
+        == "path: /docs/api\n[*] /docs/api row active\n[ ] /docs/guides row\n[ ] /docs/faq row";
+}
+
+test "helpers: simulateNavigation keeps the shared layouts and remounts the rest" {
+    val api = fixtureRouter("/docs/api", "/docs/api", "", "");
+    val guides = fixtureRouter("/docs/guides", "/docs/guides", "", "");
+    assert navigationText(simulateNavigation(api, guides))
+        == "from: / /docs /docs/api\nto: / /docs /docs/guides\nshared: 2\nkeep: / /docs\nremount: /docs/guides";
+    val here = fixtureRouter("/blog/hi", "/blog/[slug]", "slug=hi", "");
+    assert navigationText(simulateNavigation(here, here))
+        == "from: / /blog /blog/[slug]\nto: / /blog /blog/[slug]\nshared: 3\nkeep: / /blog /blog/[slug]\nremount: ";
+}
+
+test "helpers: requestText is six querystring lines, and the short fixture is a bare GET" {
+    val r = fixtureRequest("GET", "/blog/hi", "slug=hi", "ref=home", "authorization=Bearer%20x", "locale=pt-BR");
+    assert requestText(r)
+        == "method: GET\npath: /blog/hi\nparams: slug=hi\nquery: ref=home\nheaders: authorization=Bearer%20x\ncookies: locale=pt-BR";
+    assert requestText(fixtureRequest("GET", "/"))
+        == "method: GET\npath: /\nparams: \nquery: \nheaders: \ncookies: ";
+}
+
+test "helpers: clientBundleEntryText is the i rows, then the placeholders" {
+    val islands = [
+        Island(id: "i0", component: "LikeButton", props: [#("postId", "p1"), #("likes", "3")]),
+        Island(id: "i1", component: "Footer", props: []),
+    ];
+    assert clientBundleEntryText(islands)
+        == "--- payload i\ni0 LikeButton postId=p1&likes=3\ni1 Footer \n--- markup\n<div data-jh-i=\"i0\"></div>\n<div data-jh-i=\"i1\"></div>";
+}
+
+test "helpers: renderToStream is the shell then each fill in declaration order" {
+    val b = postsBoundary(1);
+    val chunks = await renderToStream(page(b), [b]);
+    assert streamText(chunks)
+        == "--- chunk 0 (shell)\n<div class=\"page\"><header>botopink</header><h1>Blog</h1><section class=\"main\"><div data-jh-h=\"h1\"><div class=\"skeleton\">Loading posts…</div></div></section></div>\n--- chunk 1\n<template data-jh-f=\"h1\"><ul class=\"posts\"><li>one</li><li>two</li></ul></template><script>__bp1(\"h1\")</script>";
+}
+
+test "helpers: errorBoundaryText tags the outcome and leaks no message" {
+    assert errorBoundaryText(catchError("metrics", { info -> fallback(info) }, { -> healthyPanel() }))
+        == "outcome: ok\n<div data-jh-e=\"metrics\"><section><h2>Metrics</h2><p>99.9%</p></section></div>";
+    val failed = errorBoundaryText(catchError("metrics", { info -> fallback(info) }, { -> failingPanel() }));
+    assert failed
+        == "outcome: ok\n<div data-jh-e=\"metrics\"><div class=\"error\"><p>Something went wrong</p><button data-jh-reset=\"metrics\">Try again</button></div></div>";
+    assert failed.contains("secret") == false;
+    assert errorBoundaryText(catchError("post", { info -> fallback(info) }, { -> signallingPanel() }))
+        == "outcome: error nav:not-found";
+}
+
+test "helpers: metadataText of the empty metadata is the empty text" {
+    assert metadataText(emptyMetadata()) == "";
+    assert tagPerLine("<a></a><b></b>") == "<a>\n</a>\n<b>\n</b>";
+}
+
+test "helpers: stubEnvelope reads back through actions' parseActionState" {
+    val failed = parseActionState(stubEnvelope(false, "message=Check%20the%20form&f.title=Too%20short", ""));
+    assert actionStateText(failed)
+        == "ok: false\nmessage: Check the form\nredirectTo: \nf.title: Too short";
+    val moved = parseActionState(stubEnvelope(true, "", "/blog/hi"));
+    assert moved.redirectTo == "/blog/hi";
+}
+
+test "helpers: optimisticText folds the actions over the base" {
+    assert optimisticText(0, [1, 1, 1]) == "base: 0\nactions: 1 1 1\nvalue: 3";
+    assert optimisticText(41, []) == "base: 41\nactions: \nvalue: 41";
+}
+
+test "helpers: jsonMembers splits a payload's top level, strings and nesting kept" {
+    val members = jsonMembers("{\"v\":1,\"q\":\"a,b}\",\"i\":[[\"i0\",\"X\",\"\"]],\"d\":false}");
+    assert members.join("|")
+        == "\"v\":1|\"q\":\"a,b}\"|\"i\":[[\"i0\",\"X\",\"\"]]|\"d\":false";
+}
+
+test "helpers: renderRecorded records a pre-first-chunk redirect" {
+    val input = fixturePageOver("/blog", div([]), { -> postsChild() });
+    val r = await renderRecorded(app([]), input, fixtureRequest("GET", "/blog"), true);
+    assert responseText(r)
+        == "status 200\nheader content-type: text/html; charset=utf-8\nchunks 3\nclosed 1";
+    val login = await renderRecorded(app([]), fixtureRedirectInput(), fixtureRequest("GET", "/blog"), true);
+    assert responseText(login)
+        == "status 307\nheader location: /login\nchunks 0\nclosed 1";
+}
+
+// The page itself redirects (not a boundary under it), so the signal is met
+// before the first chunk.
+fn fixtureRedirectInput() -> PageInput {
+    return PageInput(build: "build-0001", pathname: "/blog", pattern: "/blog", params: "", query: "", table: "P|/blog\nP|/login", actions: [], chain: [], page: { -> LoginRedirectPage() }, metadata: [], viewports: []);
+}
+
+test "helpers: renderStreamCollect hands over the shell, the fill and the end" {
+    val chunks = await renderStreamCollect(app([]), fixturePageOver("/blog", div([], attrs: [#("class", "shell")]), { -> postsChild() }), fixtureRequest("GET", "/blog"));
+    assert chunks.length == 3;
+    assert (chunks.at(0) ?? "").endsWith("<div class=\"shell\"><div data-jh-h=\"h1\"><p>Loading…</p></div></div></div>");
+    assert chunks.at(1) ?? ""
+        == "<template data-jh-f=\"h1\"><ul><li>one</li></ul></template><script>__bp1(\"h1\")</script>";
+    val doc = documentText(chunks.join(""));
+    assert doc.contains("\n--- payload\n\"v\":1\n\"b\":\"build-0001\"\n");
+}
+
+// ── one snapshot per helper family, through `assert<Subject>` ───────────────
+
+test "route: snapshot ---- blog slug" {
+    val r = RouterState(path: "/blog/hi", params: [#("slug", "hi")], search: [], pattern: "/blog/[slug]", selected: 0);
+    try assertRoute(@src(), r);
+}
+
+test "reconcile: docs to blog keeps only the root" {
+    try assertNavigation(@src(), simulateNavigation(fixtureRouter("/docs", "/docs", "", ""), fixtureRouter("/blog", "/blog", "", "")));
+}
+
+test "request: fixture with a locale cookie and an auth header" {
+    try assertRequest(@src(), fixtureRequest("GET", "/blog/hi", "slug=hi", "ref=home", "authorization=Bearer%20x", "locale=pt-BR"));
+}
+
+test "stream: shell then one fill" {
+    val b = postsBoundary(1);
+    val chunks = await renderToStream(page(b), [b]);
+    try assertStream(@src(), chunks);
+}
+
+test "boundary: a signal passes through uncaught" {
+    try assertErrorBoundary(@src(), catchError("post", { info -> fallback(info) }, { -> signallingPanel() }));
+}
+
+test "form: optimistic fold ---- three likes" {
+    try assertOptimistic(@src(), 0, [1, 1, 1]);
+}
+
+test "island: children of a placeholder render unmodified" {
+    try assertHtml(@src(), clientMount(Island(id: "i2", component: "Tabs", props: []), [span([text("first")])]));
+}

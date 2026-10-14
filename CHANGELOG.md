@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### The rename (front 165 s2)
+
+- Every package is a `rakun-*` package of this workspace: `rakun-client` → `rakun-restclient`, `styled` →
+  `rakun-style`, `jhonstart` → `rakun-bpp` (absorbing `jhonstart-html`, `-link`, `-forms`, `-test` as `html/`,
+  `link/`, `forms/`, `testing/`), `emilia` → `rakun-stylesheet` (absorbing `emilia-test` and `jhonstart-emilia` as
+  `testing/` and `bridge/`), `rakun-web` → `rakun-service` (absorbing `rakun-actuator` as `actuator/`), `onze` →
+  `rakun-ssr` (absorbing `onze-cli`, `-server`, `-bundler`, `-assets`, `-content`, `-og`, `-release`, `-test`) and
+  `rakun-test` → `rakun/src/testing/`. Import the names from the new package (`from "rakun-bpp"`); the tests of a
+  folded package sit in the same sub-folder of `test/`.
+- The `rakun-ssr` command is `rakun-ssr create|build|start|info|create-key`, its configuration `rakun-ssr.json` and
+  its key `RAKUN_SSR_KEY`; `rakun-ssr create` writes the `botopink/rakun` git source (or, with `--libs <a rakun
+  checkout>`, paths into its `modules/`).
+- The `rakun-starter-*` packages are removed (`examples/` shows the combinations); `rakun/version_set.bp` has one row
+  per package and `test/version_set_test.bp` reads every manifest under `modules/`.
+
 ### The tag epoch (decision 185, front 04 step 1)
 
 - `rkTagEpoch(tag)` / `rkBumpTag(tag)` (core, `runtime.bp`, both `i64`): a per-tag epoch, `0` until

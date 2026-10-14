@@ -40,7 +40,12 @@ package's name the directory's name, each with its own `botopink.json`, `src/`, 
 `conformance/<package>/`, the examples under `examples/<package>/<example>/`, the refusals under
 `refusals/<package>/<case>/`. One version, one tag, one release; one gate (`scripts/gate.sh`), one hook, one CI. The
 repositories erika, dbcontext, emilia, styled, jhonstart and onze joined this one by `git subtree add`, history kept
-(front 165 s1), and still carry their old names; s2 renames them to the layers below.
+(front 165 s1); s2 renamed them to the layers below (a folded package is a sub-folder module of its new package:
+`rakun-bpp/src/html/` was `jhonstart-html`, `rakun-ssr/src/cli/` was `onze-cli`, `rakun-service/src/actuator/` was
+`rakun-actuator`; its tests sit in the same sub-folder of `test/`, its sidecars and `.mjs` runtimes beside the
+package's others in `src/sidecars/`, its names are imported by their path from the package root —
+`import {html.html.html};` — or from another package by `from "rakun-bpp"`). erika stays erika until s6 renames it
+`query`; `dbcontext` is s3's.
 
 **The per-package rule.** A package owns its directory: its manifest, sources, tests, cells, examples, refusals and
 `AGENTS.md` (the package's own notes, never the workspace's). A package depends on packages of lower layers only (the
@@ -48,17 +53,17 @@ compiler refuses a cycle), a sibling by `{ "workspace": true }` — never by a `
 `git` source. `src/internal/` is private. A joined package's old repository-level files (root manifest, `scripts/`,
 `.github/`, `.gitignore`, `decisions-taken.md`) are gone: rakun's are the only ones.
 
-**The layers — the target** (front 165's table; until s2 lands the packages carry today's names in the second column):
+**The layers** (front 165's table; the second column is where each package's code came from):
 
 | Package | Absorbs (today's modules) | Depends on |
 |---|---|---|
 | `rakun` | `rakun` | `validation` |
 | `rakun-data` | `dbcontext`, `rakun-data` | `rakun`, `query` |
-| `rakun-restclient` | `rakun-client` | `rakun`, `http` |
+| `rakun-restclient` | `rakun-restclient` | `rakun`, `http` |
 | `rakun-style` | `styled` | `css` |
-| `rakun-bpp` | `jhonstart`, `jhonstart-html`, `jhonstart-link`, `jhonstart-forms`, `jhonstart-test`, `jhonstart-dom-test` | `rakun-style`, `actions`, `routing` |
-| `rakun-stylesheet` | `emilia`, `emilia-test`, `jhonstart-emilia` | `rakun-bpp` |
-| `rakun-service` | `rakun-web`, `rakun-actuator` | `rakun`, `routing` |
+| `rakun-bpp` | `rakun-bpp`, `rakun-bpp`, `rakun-bpp`, `rakun-bpp`, `rakun-bpp`, `jhonstart-dom-test` | `rakun-style`, `actions`, `routing` |
+| `rakun-stylesheet` | `emilia`, `rakun-stylesheet`, `rakun-stylesheet` | `rakun-bpp` |
+| `rakun-service` | `rakun-service`, `rakun-service` | `rakun`, `routing` |
 | `rakun-scheduling` | `rakun-scheduling` | `rakun-service`, `rakun-data` |
 | `rakun-session` | `rakun-session` | `rakun-service`, `rakun-data`, `rakun-scheduling` |
 | `rakun-cache` | `rakun-cache` | `rakun-service`, `rakun-session` |
@@ -68,13 +73,19 @@ compiler refuses a cycle), a sibling by `{ "workspace": true }` — never by a `
 | `rakun-messaging` | `rakun-messaging` | `rakun-service`, `rakun-metrics`, `rakun-restclient`, `rakun-data` |
 | `rakun-mail` | `rakun-mail` | `rakun-service`, `rakun-data` |
 | `rakun-app` | `rakun-app` | `rakun-service`, `rakun-cache`, `actions`, `routing` |
-| `rakun-ssr` | `onze`, `onze-cli`, `onze-server`, `onze-bundler`, `onze-assets`, `onze-content`, `onze-og`, `onze-release`, `onze-test` | `rakun-app`, `rakun-bpp`, `rakun-stylesheet`, `markdown`, `snap` |
+| `rakun-ssr` | `rakun-ssr`, `rakun-ssr`, `rakun-ssr`, `rakun-ssr`, `rakun-ssr`, `rakun-ssr`, `rakun-ssr`, `rakun-ssr`, `rakun-ssr` | `rakun-app`, `rakun-bpp`, `rakun-stylesheet`, `markdown`, `snap` |
 
-`erika` (to become `query`) stays a package here for now; `modules/dbcontext/` holds only its `AGENTS.md` (the repository
-was a scaffold, no manifest). The workspace's root `botopink.json` lists every member pattern: `modules/*`, `starters/*`,
-`examples/*` and one `examples/<package>/*` per package that has examples. The gate (`scripts/git-hooks/lib/runner-standalone.sh`)
-walks `examples/*/` and `examples/*/*/` (and `refusals/` the same), and `botopink cell check conformance/` finds
-`conformance/<package>/` workspaces by itself.
+`erika` (to become `query`) and its `erika-test` stay packages here for now; `jhonstart-dom-test` — the commonJS-only
+half of the bpp render tests, which cannot join a package that builds for erlang — and `onze-server` — the
+erlang-only half of `rakun-ssr`'s boot, which cannot join a package that builds for commonJS — keep their names beside them;
+`rakun-cli` (the `rakun` command line, `release/`) keeps its own package; `modules/dbcontext/` holds only its
+`AGENTS.md` (the repository was a scaffold, no manifest). The `*-test` packages became each package's `testing/`
+module (`rakun/src/testing/` was `rakun-test`, `rakun-bpp/src/testing/` was `jhonstart-test`, …); the
+`rakun-starter-*` packages are gone — `examples/` shows the combinations. The workspace's root `botopink.json` lists
+`modules/*`, `examples/*` and one `examples/<package>/*` per package that has examples. The gate
+(`scripts/git-hooks/lib/runner-standalone.sh`) walks `examples/*/` and `examples/*/*/` (and `refusals/` the same), and
+`botopink cell check conformance/` finds `conformance/<package>/` workspaces by itself. `rakun-ssr`'s command line is
+`rakun-ssr create|build|start|info|create-key`, its configuration `rakun-ssr.json`, its key `RAKUN_SSR_KEY`.
 
 ## Tree
 
@@ -82,15 +93,14 @@ The repository is a **workspace** (decision 75 of 1.0.10-beta): the root `botopi
 members and is never a package — no `src`, `files`, `entry` or `dependencies`; `botopink build/test`
 there is the located refusal `botopink.json is a workspace, not a package — run this command inside
 one of its members: …`. Every `modules/*/` and `examples/*/` holding a `botopink.json` is a member,
-named by its own manifest, and so is every `starters/*/` (front 73: a manifest and a docblock-only
-root, no code). The **core is the member `modules/rakun/`**; `from "rakun"` resolves to it.
+named by its own manifest. The **core is the member `modules/rakun/`**; `from "rakun"` resolves to it.
 
 ```text
 rakun/
 ├── AGENTS.md          ← you are here
 ├── conformance/       ← the reference and its examples (decision 463): `docs.md` (what this lib
 │                        provides + Spring mapping + loading notes) and `<package>/<cell>/` cells
-│                        (`conformance/rakun/` is this package's; erika, emilia, jhonstart each have theirs)
+│                        (`conformance/rakun/` is this package's; erika, emilia, rakun-bpp each have theirs)
 │                        in the language suite's shape — `botopink.json` (the members it adds
 │                        beside rakun as path dependencies, through the symlinks of the cell's
 │                        `deps/`; rakun itself, the targets [erlang, beam] and the version are the
@@ -101,9 +111,9 @@ rakun/
 │                        `botopink cell check conformance/` is green
 ├── botopink.json      ← WORKSPACE: name rakun · version · targets [commonJS, erlang] (the joined
 │                        packages build on both; the rakun packages declare [erlang] themselves) · workspaces
-│                        ["modules/*", "starters/*", "examples/*", "examples/<package>/*" …]. Nothing importable from it.
+│                        ["modules/*", "examples/*", "examples/<package>/*" …]. Nothing importable from it.
 ├── modules/
-│   ├── README.md      ← the member table (16 since front 128's nine merges), the
+│   ├── README.md      ← the member table (front 165 s2: the layered packages), the
 │   │                    module ↔ Spring starter map, how to add a member
 │   ├── rakun/         ← THE CORE — what `from "rakun"` gives a consumer
 │   │   ├── botopink.json  name rakun · entry root.bp · target erlang · targets [erlang]
@@ -232,7 +242,7 @@ rakun/
 │   │                             refusals, the phase, a `nav:` raise as a 500, params
 │   │                             and the dynamic mark, and over a socket the chunked
 │   │                             bytes and the first chunk arriving before the last
-│   ├── rakun-web/     ← THE FILTER CHAIN (§ The filter chain): the one ordered chain
+│   ├── rakun-service/     ← THE FILTER CHAIN (§ The filter chain): the one ordered chain
 │   │   │                between the socket and the route handler, its two entry
 │   │   │                points, CORS and RFC 9457 problem details. target/targets
 │   │   │                erlang; depends on `rakun` by `{ "workspace": true }`
@@ -266,8 +276,8 @@ rakun/
 │   │       │                     that reaches the body and the reason that does not
 │   │       └── decorators_test.bp ← the five markers and what they emit; NOTHING
 │   │                             here resets a table
-│   ├── rakun-test/    ← the `<lib>-test` member (front 95, `specs/1.0.10-beta/02-packaging/README.md`
-│   │                    § 5; front 19): `fake_request.bp` (FakeRequest + toRequest), `assertions.bp`
+│   ├── rakun/src/testing/ ← the core's `testing/` module (was the `rakun-test` member, front 95 and
+│   │                    front 19; folded by front 165 s2): `fake_request.bp` (FakeRequest + toRequest), `assertions.bp`
 │   │                    (expectStatus/BodyEquals/BodyContains/JsonField), `mockmvc.bp` (MockMvc over
 │   │                    rkDispatchHttp), `context.bp` (resetSingletons/resetContext/contextSnapshot);
 │   │                    test/ holds one file per piece plus the std-mocks + #[bean] pairing.
@@ -289,29 +299,29 @@ rakun/
 │   ├── rakun-websocket/ ← WEBSOCKET (§ WebSocket, front 20): the upgrade hook, the
 │   │                    connection loop, `pg` topics and the test client
 │   │                    (`sidecars/rakun_websocket.erl`), `#[wsEndpoint]`, health
-│   └── rakun-<area>/  ← the other members (actuator · cache · cli · client · data · mail ·
-│                        metrics · scheduling · security · session — `modules/README.md`).
+│   └── rakun-<area>/  ← the other members (app · bpp · cache · cli · data · mail · messaging · metrics ·
+│                        restclient · scheduling · security · service · session · ssr · style · stylesheet ·
+│                        websocket — `modules/README.md`).
 │                        Front 128 (decision 187) merged nine members into the one that
 │                        needs them, each in a same-named sub-directory of the absorber's
 │                        `src/` and `test/`: the core's `actuator_api/` and `logging/`,
-│                        rakun-web's `hateoas/`, rakun-client's `ws/` (SOAP), rakun-data's
+│                        rakun-service's `hateoas/`, rakun-restclient's `ws/` (SOAP), rakun-data's
 │                        `tx/` and `devtools/`, rakun-cli's `release/`, rakun-messaging's
 │                        `rsocket/` and `stream/`; a sidecar keeps its name and atom
-├── starters/          ← front 73: eight `rakun-starter*` members — a curated dependency set
-│                        each (in-repo `{ "workspace": true }`, `onze` by `path`), `files`
-│                        [root.bp], a docblock-only root; README.md is the table, the
-│                        third-party `<project>-rakun-starter` rule and the subdirectory
-│                        limitation. Linted by `modules/rakun/test/starter_manifest_test.bp`
 ├── examples/
 │   ├── rakun/         ← member `rakun-example` (an application: entry main.bp, target erlang,
 │   │                    depends on `rakun` via { "workspace": true }); the sixty-second app
 │   ├── rakun-container/ ← member `rakun-container-example`: front 06's surface reached
 │   │                    through `from "rakun"`, which is the CONSUMER proof that
 │   │                    `Context` resolves to one declaration and not two
-│   └── rakun-ssr/     ← member `rakun-ssr-example`: front 23's surface reached
-│                        through `from "rakun"` — the element adapter, a layout
-│                        and a page, one render inside a request scope, and the
-│                        escaping assertion. `botopink run` prints the document
+│   ├── rakun-app/page-path/ ← member `rakun-ssr-example`: front 23's surface reached
+│   │                    through `from "rakun-app"` — pages registered through `page(pattern, render)`,
+│   │                    renderers writing plain text through the ChunkWriter, the page path as the
+│   │                    router fallback. `botopink run` prints the document
+│   └── <package>/<example>/ ← the joined packages' examples: `erika/`, `rakun-bpp/` (blog-ssr,
+│                        forms, islands, …), `rakun-ssr/` (blog, scaffold), `rakun-style/`,
+│                        `rakun-stylesheet/` (the emilia-* ones); `refusals/<package>/<case>/`
+│                        the same way
 └── scripts/git-hooks/ ← the pre-commit gate (§ Local gate): `lib/runner-standalone.sh` (one
                          text in the five library repositories — refuses a staged
                          `*.snap.new` and a missing compiler, `botopink test` in every
@@ -358,7 +368,7 @@ Front 74 appended `pub mod ssl_bundle;` and the matching `files` entry, last and
 reordering nothing: it imports `runtime` (the property table) and `config` (the
 typed readers and `rkValue`), and nothing inside rakun imports it — fronts 04,
 08, 09, 13, 15, 76, 79, 85 and 90 do, from outside, and
-`modules/rakun-web/src/tls.bp` is the first of them. Its host file
+`modules/rakun-service/src/tls.bp` is the first of them. Its host file
 (`src/sidecars/rakun_ssl.erl`) is NOT a `files` entry, for the reason
 `rakun_runtime.erl` is not.
 
@@ -369,12 +379,12 @@ no repository — `botopink check` failed with `LibNotFound` before reading raku
 source.)
 
 **rakun is erlang-only (decision 113; decision 117 rule 9; front 04 Step 10).** The
-workspace root and every member — the core, `rakun-app`, `rakun-web`, `rakun-test`, the
+workspace root and every member — the core, `rakun-app`, `rakun-service`, `rakun`, the
 ten scaffolds and the three examples — declare `"targets": ["erlang"]`, and each package
 `"target": "erlang"` (the build target the CLI reads, `config.zig`; `targets` is the
 per-member whitelist `botopink-lib-test` reads). `botopink test` / `build` / `run` default
 to erlang here. The node host halves (`runtime.mjs`, `context.mjs`, `request_context.mjs`,
-`autoconfig.mjs`, `ssl_bundle.mjs`, `rakun-app`'s `file_router.mjs` / `ssr.mjs`, `rakun-web`'s
+`autoconfig.mjs`, `ssl_bundle.mjs`, `rakun-app`'s `file_router.mjs` / `ssr.mjs`, `rakun-service`'s
 `chain.mjs`) are deleted and no `#[@External.Node]` form remains in any member: every host
 cell is one `@External.Erlang` form. What both a browser and the server run is not a rakun
 member — the matcher and the navigation vocabulary are the library `routing`, the action
@@ -384,7 +394,7 @@ shaped as it is while the core still ran on commonJS; the `runtime.mjs:N` citati
 the node code `rakun_runtime.erl` was ported from, term for term.
 
 **Measured 2026-09-26 (compiler `f011850c`), after the move:** `modules/rakun` **310 / 0**,
-`modules/rakun-app` **59 / 0**, `modules/rakun-web` **104 / 0**, `modules/rakun-test`
+`modules/rakun-app` **59 / 0**, `modules/rakun-service` **104 / 0**, `modules/rakun`
 **1 / 0** — erlang, the only row. The two erlang reds every front since 04 carried
 (`server_test.bp:74,80`, `{badkey,param}` / `{badfun,…}`) were front 04's own `request/6`:
 the erlang backend dispatches a method a `behavior` declares without a body through the
@@ -484,9 +494,9 @@ on the warm path.
   run. Never under the member's directory (`process.cwd()`, `.botopinkbuild/tmp/`):
   the gate runs a member's commonJS and erlang cells side by side with that
   directory as cwd. The fixture builds (`rakun-data`, `rakun-security`,
-  `rakun-client`, `rakun-scheduling`), the pid/port files of
+  `rakun-restclient`, `rakun-scheduling`), the pid/port files of
   `erlang_runtime_server_test.bp`, `ssl_bundle_test.bp`'s PEM files and
-  `rakun-web`'s static roots all live there; with them under the member,
+  `rakun-service`'s static roots all live there; with them under the member,
   `rakun-data·commonJS` measured 6, `build`, 1 failed on three consecutive gates.
   Outside `botopink test` the variable is unset and those cells fail.
 
@@ -549,7 +559,7 @@ either `runtime.mjs` unfreezes or a test file can declare its target.
 `rkTagEpoch(tag) -> i64` and `rkBumpTag(tag) -> i64` (`src/runtime.bp`, public
 through `src/root.bp`'s `pub mod runtime`, imported `from "rakun"`) are
 `tag_epoch/1` and `bump_tag/1` over the `rakun_tag_epochs` table. They exist so
-`rakun-cache` and `rakun-client` share a tag without an edge between them
+`rakun-cache` and `rakun-restclient` share a tag without an edge between them
 (decision 185): the cache's revalidation verbs bump (front 12 step 3), the
 client stores the epochs of a response's tags beside it and reads a changed
 one as a miss (front 13 step 1).
@@ -663,7 +673,7 @@ the parameter accessors this member used to carry left for the HTML library
 (front 30); the markers' test file left with them.
 
 **The scan** (`scanAppDir`, botopink over std's `fs`) reads `rakun.appDir`
-(`app` when unset; the orchestrator writes it — rakun reads no `onze.` key,
+(`app` when unset; the orchestrator writes it — rakun reads no `rakun-ssr.` key,
 decision 115 rule 4), walks the tree and refuses: a segment holding both
 `page.bp` and `route.bp`, two root layouts meeting at one URL, a registered
 segment with no directory (naming the function), a directory holding a
@@ -1770,10 +1780,10 @@ raise, a `nav:` signal re-thrown), and the body hook.
   `hash.hmacSha256(secret, module + "." + name + ":" + buildId)`, the secret
   `rakun.actions.secret` read at the call (front 103, decision 324: rakun-app
   keeps no `actionId` wrapper; the read becomes the `#[config("rakun.actions")]`
-  record's field with rakun 04 step 7, decision 299); `actionIdOf(name)` is what onze hands a form;
+  record's field with rakun 04 step 7, decision 299); `actionIdOf(name)` is what rakun-ssr hands a form;
   `resolveAction(id)` compares every registered id with
   `hash.equalsConstantTime`. The name alone never resolves.
-- **Configuration** — `rakun.actions.field`, `rakun.actions.header` (onze's
+- **Configuration** — `rakun.actions.field`, `rakun.actions.header` (rakun-ssr's
   wire names; no default, no spelling here), `rakun.actions.secret` (≥ 32
   characters), `rakun.actions.bodyLimit` (1048576, not below 4096).
   `serveActions()` refuses a bad configuration naming the key, puts the action
@@ -1800,7 +1810,7 @@ raise, a `nav:` signal re-thrown), and the body hook.
   `invalid(field, msg)` — an array of pairs, not a `Dict` (a `Dict` built in
   another module does not dispatch its methods on erlang).
 - **Not here**: the file-level `pub val useServer = true;` is attached by
-  `onze build` (onze front 50); the markup is jhonstart front 67's.
+  `rakun-ssr build` (rakun-ssr front 50); the markup is rakun-bpp front 67's.
 
 ## Static generation — `modules/rakun-app/src/static_gen.bp`, `segment_config.bp` (front 60)
 
@@ -1874,7 +1884,7 @@ removed); a slot belongs to the NEAREST layout above its shortest entry.
 
 ## Locale routing — `modules/rakun-app/src/i18n.bp` (front 64)
 
-In rakun-app (the cut's home for i18n negotiation), over rakun-web's chain and
+In rakun-app (the cut's home for i18n negotiation), over rakun-service's chain and
 rakun-cache. The locale set and the dictionary loader are two `persistent_term`
 cells written inline; the route table is unchanged (`[locale]` is an ordinary
 dynamic segment).
@@ -2114,15 +2124,15 @@ walks the manifest's dependencies breadth first, following `{ "path": … }`
 (relative to the declaring manifest) and `{ "workspace": true }` (a member of the
 nearest ancestor whose manifest declares `"workspaces"`); a `git` entry or a bare
 name counts and is not followed. `moduleList()` is that set for the working
-directory's manifest, so declaring `rakun-starter-data-sql` makes
-`#[conditionalOnModule("rakun-data")]` true and the starter's own name counts
-too. `moduleVerdict(rec, resolved)` is the `M` branch; a refusal observes
+directory's manifest, so declaring `rakun-data` makes
+`#[conditionalOnModule("rakun-data")]` true and a package it brings (`rakun-service`) counts
+too (`test/module_resolution_test.bp`; front 165 s2 removed the starters). `moduleVerdict(rec, resolved)` is the `M` branch; a refusal observes
 `resolved dependencies: a,b,…`.
 
 ### The version set — `modules/rakun/src/version_set.bp` (front 73)
 
-`rakunVersion()`, `moduleVersions()` (one row per `modules/*` and `starters/*`
-member), `versionOf(name)` (`""` when unpinned) and
+`rakunVersion()`, `moduleVersions()` (one row per `modules/*`
+package, `rakun-*` or not yet — erika, erika-test and jhonstart-dom-test), `versionOf(name)` (`""` when unpinned) and
 `versionSetProblems(manifests)`. `test/version_set_test.bp` reads every manifest
 and fails on a disagreeing version, a directory with no row, or a row with no
 directory — a new member adds its row in the same commit. The actuator's `info`
@@ -2192,9 +2202,9 @@ rows.
 `reportStateOf(name)` / `reportReasonOf(name)` / `reportNames()` when it wants
 the same decision as structured members rather than as a block. There is one
 producer; a second renderer would be a second answer.
-## The filter chain — `modules/rakun-web/`
+## The filter chain — `modules/rakun-service/`
 
-`modules/rakun-web/` is the member front 07 fills, and it is the first member
+`modules/rakun-service/` is the member front 07 fills, and it is the first member
 besides the core with real code and its own tests. One ordered chain sits
 between the socket and the route handler; everything cross-cutting in track B
 enters through it and through nothing else.
@@ -2208,7 +2218,7 @@ was written against the pre-72 core, where the same two cells were the only
 reds at 302/300; neither count is this front's and neither moved because of
 it.) Before this front the member had no `test/` directory at all, so
 `botopink-lang/scripts/restricted-targets.txt`'s line
-`rakun-web commonJS 0 03-rakun/F07` keeps its pinned `0` and loses its reason:
+`rakun-service commonJS 0 03-rakun/F07` keeps its pinned `0` and loses its reason:
 "no tests yet" is now "83 tests, all green".
 
 ### Why there is ONE chain and two entry points
@@ -2255,7 +2265,7 @@ error handler produced.
 Front 04's `dispatch_http/5` calls `rakun_chain:run/6` when the module is loaded
 and the handler directly when it is not. `run/6` looks for a RUNNER — botopink's
 `runChain/5`, handed over by `bootWeb()` — and falls back to calling the handler
-itself when none is registered, so a build carrying rakun-web but never booting
+itself when none is registered, so a build carrying rakun-service but never booting
 its web layer behaves exactly as front 04 does. **Neither branch is reachable
 from a `.bp` cell**: `run/6` needs a socket and a live route table, and the
 suite has neither. What the cells drive is `runChain/5` directly, which is the
@@ -2317,7 +2327,7 @@ between its own entries.
 **The BEAM half mirrors every write into `rakun_runtime:set_reply_header/2`** so
 the line reaches the socket, guarded by `function_exported/3`. The node half does
 not: `runtime.mjs` is frozen, carries no `setReplyHeader`, and this front does
-not unfreeze it — so on the node row the accumulator is rakun-web's alone and the
+not unfreeze it — so on the node row the accumulator is rakun-service's alone and the
 node server writes no reply header, exactly as before front 07.
 
 ### CORS: the three restrictive defaults
@@ -2350,7 +2360,7 @@ fields the decorator cannot spell come from the bean.
 botopink has no exception hierarchy: `throw` is legal only under a `@Result`
 return and yields an `Error(e)` VALUE, and `try … catch` works over `@Result` alone. So
 `#[exceptionHandler("NotFoundException")]` has nothing to catch. What exists on
-the BEAM is a raise, and rakun-web gives it one shape — `raiseProblem(tag,
+the BEAM is a raise, and rakun-service gives it one shape — `raiseProblem(tag,
 detail)` raises `{rakun_problem, Tag, Detail}` in the host, and the error entry
 at −100 runs the rest of the chain inside a host `try`/`catch`. **The tag is a
 string, not a type name.**
@@ -2428,7 +2438,7 @@ no string table holds one. That is front 22's test, so `src/chain.mjs` and
 `src/sidecars/rakun_chain.erl` are both this front's own files — `runtime.mjs`
 stays frozen and untouched. The atom is `rakun_chain`, never `chain`:
 `shipErlSidecars` skips a qualifier matching a module the build emitted,
-rakun-web emits `chain`, and the skip is SILENT.
+rakun-service emits `chain`, and the skip is SILENT.
 
 What the hosts hold: the ordered entry table (`{Order, Seq}` on an
 `ordered_set`, so ties break by registration order and the table is WALKED per
@@ -2446,7 +2456,7 @@ process loaded the module).
 
 ### Front 74's `tls.bp` in this member
 
-`modules/rakun-web/src/tls.bp` is appended to the member's `root.bp` and `files`
+`modules/rakun-service/src/tls.bp` is appended to the member's `root.bp` and `files`
 last, reordering nothing: it imports `filter` (the chain entry, the per-request
 signal table and `withHeader`) and the core's bundle registry, and nothing in
 this member imports it. It holds the web layer's side of TLS — which bundle the
@@ -2573,7 +2583,7 @@ Every step of the front's spec is now in. What is still open is recorded in the
 front README (the Definition of done's q-value box names `br` refusal and both
 headers, which hold; the shutdown box waits on front 76 for the readiness half).
 
-## The actuator — `modules/rakun/src/actuator_api/` and `modules/rakun-actuator/` (front 11)
+## The actuator — `modules/rakun/src/actuator_api/` and `modules/rakun-service/` (front 11)
 
 Two halves, one rule: **a registration is API, a decision is host.**
 
@@ -2617,9 +2627,9 @@ Decisions:
   so with no subscriber an emission is two lookups (a million emissions plus the bare loop measured at 38 ms).
   Ids are `rand:bytes`, not `crypto` (a correlation handle, not a secret).
 
-### `rakun-actuator` — the host (Steps 1–6, 8)
+### `rakun-service` — the host (Steps 1–6, 8)
 
-Depends on `rakun` (the contract is the core's `actuator_api/`), `rakun-web` (problem details, CORS mapping,
+Depends on `rakun` (the contract is the core's `actuator_api/`), `rakun-service` (problem details, CORS mapping,
 the chain). `rakun-security`/`rakun-data` in `modules.md`'s row are fronts 76/87's.
 
 | File | Holds |
@@ -2656,7 +2666,7 @@ Decisions:
   object (`isJsonObject`: std's `json.decode` reads an `Obj`) → replaced by an error object; all indicators concurrent. The health body is
   `{"status":"<aggregate>"}` — detail visibility and groups are front 76's, which
   renders them from `healthReport()`.
-- **Endpoint CORS** is a rakun-web CORS mapping keyed by the base path, from
+- **Endpoint CORS** is a rakun-service CORS mapping keyed by the base path, from
   `rakun.management.endpoints.web.cors.allowed-origins`/`allowed-methods` (default `GET`), so
   front 07's `corsEntry` answers the preflight before the route and the endpoint never
   runs for one.
@@ -2672,7 +2682,7 @@ Decisions:
   `currentTraceparent()`).
 
 Measured: the contract's 10 passed / 0 failed / 0 compile failures
-(`modules/rakun/test/actuator_api/{registration,span}_test.bp`, in the core's run); `rakun-actuator` 38 / 0 / 0
+(`modules/rakun/test/actuator_api/{registration,span}_test.bp`, in the core's run); `rakun-service` 38 / 0 / 0
 (`endpoint_test.bp`, `health_test.bp`, `info_test.bp`, `registry_endpoints_test.bp`,
 `instrumentation_test.bp`). Compiler findings met here: `Array.sort()` type-checks but
 is not lowered on erlang (`function sort/1 undefined`); a `return` inside an `if`
@@ -2691,7 +2701,7 @@ The former member `rakun-release`, merged into `rakun-cli` by front 128 (decisio
 `modules/rakun-cli/src/release/{release,sbom}.bp`, its test `modules/rakun-cli/test/release/release_test.bp`,
 its sidecar keeps its name and atom (`modules/rakun-cli/src/sidecars/rakun_release.erl`), its names are
 reached `from "rakun-cli"` (`rakun-cli/release/release` for the module path). `rakun-cli` took its
-`rakun-web` dependency, so the member depends on `rakun`, `rakun-actuator` and `rakun-web`.
+`rakun-service` dependency, so the member depends on `rakun`, `rakun-service` and `rakun-service`.
 
 Generates files; changes no running code. Sidecar `rakun_release.erl` (term
 rendering, a deterministic ustar writer, `deterministic` beam compiles, tree
@@ -2723,12 +2733,12 @@ hashes, module facts).
   path dependencies with a SHA-256 of their tree; `registerSbomEndpoint(file)`
   serves it at `sbom`.
 
-## SOAP web services — `modules/rakun-client/src/ws/` (front 93)
+## SOAP web services — `modules/rakun-restclient/src/ws/` (front 93)
 
-The former member `rakun-ws`, merged into `rakun-client` by front 128 (decision 187 —
-merged, not renamed): `modules/rakun-client/src/ws/ws.bp`, its tests
-`modules/rakun-client/test/ws/{client,envelope}_test.bp`, its sidecar keeps its name and atom
-(`modules/rakun-client/src/sidecars/rakun_ws.erl`), its names are reached `from "rakun-client"`.
+The former member `rakun-ws`, merged into `rakun-restclient` by front 128 (decision 187 —
+merged, not renamed): `modules/rakun-restclient/src/ws/ws.bp`, its tests
+`modules/rakun-restclient/test/ws/{client,envelope}_test.bp`, its sidecar keeps its name and atom
+(`modules/rakun-restclient/src/sidecars/rakun_ws.erl`), its names are reached `from "rakun-restclient"`.
 The one template that names a compiled record spells the absorber's module atom:
 `rakun_client@ws@ws@@SoapFault` (a record's atom is `<package>@<module path>@@<Type>`).
 
@@ -2777,7 +2787,7 @@ The former member `rakun-stream`, merged into `rakun-messaging` by front 128 (de
 `modules/rakun-messaging/src/stream/{pipeline,state,runtime}.bp`, its tests
 `modules/rakun-messaging/test/stream/{runtime,stages,state}_test.bp`, its sidecar keeps its name and
 atom (`modules/rakun-messaging/src/sidecars/rakun_stream.erl`), its names are reached
-`from "rakun-messaging"`. `rakun-messaging` took its two dependencies, `rakun-actuator` and
+`from "rakun-messaging"`. `rakun-messaging` took its two dependencies, `rakun-service` and
 `rakun-data` (the SQL state arm and the leased cursor), so every messaging consumer loads the data
 member. The texts it raises keep their `rakun-stream:` prefix.
 
@@ -2812,12 +2822,12 @@ filter, splitter, aggregator, router) over string payloads.
 `runCli(args) -> i32` is the whole CLI (an escript's `main` calls it). Exit
 codes: 0 done · 1 the work failed · 2 usage · 3 the project did not compile.
 The table (`builtinCommands()` + plugin rows) is data; `rakun help` renders it
-and names onze as the CLI of a full-stack project.
+and names rakun-ssr as the CLI of a full-stack project.
 
 - `new <name> [--template plain|full-stack|library]` copies
   `templates/<variant>/` substituting `@@name@@` and `@@rakun@@` (the path of
   `modules/rakun` the project depends on); refuses a non-empty directory;
-  `full-stack` needs onze (`rakun.cli.onze`, else `onze` on PATH).
+  `full-stack` needs rakun-ssr (`rakun.cli.onze`, else `rakun-ssr` on PATH).
 - `test` / `build` are front ends: `botopink test --target erlang
   [--filter]`, and `botopink build` then the member's own `release/`'s `buildTarball`
   (`.rakun/release/<name>-<vsn>.tar`). Every invocation is recorded
@@ -2834,7 +2844,7 @@ and names onze as the CLI of a full-stack project.
 - Plugin commands: `#[cliCommand(name, summary)]` on a method of a
   `#[cliCommands]` type (with a stereotype) — emits `rkCliRegister`; a name
   registered twice is refused naming both.
-- Settings: `rakun.cli.{botopink, templates, rakun, onze}` or the
+- Settings: `rakun.cli.{botopink, templates, rakun, rakun-ssr}` or the
   `RAKUN_CLI_*` variables.
 
 ## Mail — `modules/rakun-mail/` (front 85)
@@ -2963,7 +2973,7 @@ Dev-profile only (`dev` or `development` resolved). Sidecar
   The attached shell is a REPL inside the node: `dbg`, `recon_trace` (when
   present) and `rakun_metrics:snapshot()` run there.
 
-## Audit and HTTP exchanges — `modules/rakun-actuator/src/{audit,exchanges}/` (front 87)
+## Audit and HTTP exchanges — `modules/rakun-service/src/actuator/{audit,exchanges}/` (front 87)
 
 **Audit.** `AuditEvent(atMs, principal, kind, data: pairs)`; kinds keep
 Spring's names. `AuditRepository` has two arms. `memoryAuditRepository(capacity)`
@@ -2998,7 +3008,7 @@ taken into a ring of `…httpexchanges.capacity` (100; 0 refuses), a raise as
 `mountExchanges()` registers `httpexchanges` (newest first, with the capacity,
 through `sanitizeEntries`).
 
-## Actuator access and probes — `modules/rakun-actuator/src/management.bp` (front 76)
+## Actuator access and probes — `modules/rakun-service/src/actuator/management.bp` (front 76)
 
 `installManagement()` — after `mountActuator()` and after every module has
 registered its endpoints and indicators — installs the exposure decision, the
@@ -3061,7 +3071,7 @@ test directory) through `src/ldap_host.bp`.
   `/oauth2/authorization/:id` (state, nonce, 43-char verifier, S256; the
   return path server-side, `safeReturnTo`) and `/login/oauth2/code/:id`
   (state taken before anything, `error=` → 403, code exchange through
-  rakun-client, ID token RS256 + `iss`/`aud`/`nonce`/`exp` within
+  rakun-restclient, ID token RS256 + `iss`/`aud`/`nonce`/`exp` within
   `rakun.security.oauth2.clock-skew`, one JWKS re-fetch per
   `jwks-refetch-window` for an unknown kid, front 18's `authenticateSession`,
   302 to the return path). `accessToken(provider)` refreshes within
@@ -3193,7 +3203,7 @@ process diagnostics, the OTLP pusher) and `rakun_telemetry.erl` (the bus).
   `+Inf`, label values escaped), `processes?sort=reductions|memory|message_queue_len&limit=N`
   (asks each process for seven keys, never the whole info), `vm`. Front 11
   registrations, default-denied until front 76 exposes them.
-- **Export** (`export.bp`) — OTLP/HTTP-JSON through rakun-client
+- **Export** (`export.bp`) — OTLP/HTTP-JSON through rakun-restclient
   (`rakun.metrics.export.otlp.endpoint`, `.step` ms — 0 stops the pusher,
   `.ssl-bundle` for `https`): one metrics body and one traces body per push,
   one logged failure per failed push, the span buffer capped at 2048. The
@@ -3224,8 +3234,8 @@ manifest's `files`) in front-number order and reorder nothing.
 **Measured 2026-09-26 against compiler `f011850c`:** `botopink test` in
 `modules/rakun-data/` (erlang, the member's only target) is **77 passed / 0 failed /
 0 compile failures**, with no database: every cell runs against the ETS arm. The
-member depends on `rakun` and `rakun-actuator` (`{ "workspace": true }`), never
-on `rakun-web`. `modules/rakun` is untouched by this front.
+member depends on `rakun` and `rakun-service` (`{ "workspace": true }`), never
+on `rakun-service`. `modules/rakun` is untouched by this front.
 
 | File | What |
 |---|---|
@@ -3413,8 +3423,8 @@ application calls it beside `dataSourceBoot()`.
 - Tests live flat in `test/sql_*_test.bp`, not `test/sql/`: a test file in a
   subdirectory of `test/` compiles and every call it makes into the project is
   `{error, undef}` on erlang.
-- `raiseProblem` (rakun-web) in the spec's shared source is `@panic`: rakun-data does
-  not depend on rakun-web. `OrderRepository.count()` is `orderCount()`.
+- `raiseProblem` (rakun-service) in the spec's shared source is `@panic`: rakun-data does
+  not depend on rakun-service. `OrderRepository.count()` is `orderCount()`.
 - The pool timeout is a `SqlOutcome` error like any driver error, so `tryQuery`
   answers it as `Error` and `query` raises it.
 - `bootstrap-mode=lazy` does not reach the repositories (above).
@@ -3449,9 +3459,9 @@ application calls it beside `dataSourceBoot()`.
    `-> @Task` helper.
 7. A record method named `length` hijacks `xs.length` in its module (above).
 
-## HTTP clients — `rakun-client` (front 13)
+## HTTP clients — `rakun-restclient` (front 13)
 
-The member `modules/rakun-client` (erlang only) is rakun's one outbound HTTP
+The member `modules/rakun-restclient` (erlang only) is rakun's one outbound HTTP
 client: `RestClient` over one builder with two terminal operations, global and
 per-client settings, the SSRF address filter every connect goes through,
 response caching over front 12's store (a soft seam), `#[httpExchange]` service
@@ -3520,7 +3530,7 @@ depends on this member (its Redis transport), so the cache edge is a runtime slo
   and `load` performs the request, answering `status\nheadersJson\nbody`. Nothing
   installed ⇒ direct call. `rakun.cache.type=none` is honoured here too (the slot is
   never called). `.cached`/`.revalidate` on anything but GET/HEAD raises naming the
-  method. `revalidate(n)` = `cached("rakun-client.revalidate", cacheLifeOf(0, n, n), [])`.
+  method. `revalidate(n)` = `cached("rakun-restclient.revalidate", cacheLifeOf(0, n, n), [])`.
   `CacheLife` is defined HERE because 12 depends on 13: front 12 imports it.
 - **`#[httpExchange(group)]`** reflects a behavior and emits `Http<Name>(client:
   RestClient) implement <Name>` + `pub fn http<Name>() -> <Name>` (client from
@@ -3530,7 +3540,7 @@ depends on this member (its Redis transport), so the cache edge is a runtime slo
   non-`string` parameters or return (no JSON value model), zero or two exchange
   annotations, placement. Path values are percent-encoded (a `/` cannot add a segment).
 - **Health** is opt-in per group: `forGroup` registers `httpClient.<group>` (owner
-  `rakun-client`) when `.health-check=true`; the check is a HEAD against the base URL
+  `rakun-restclient`) when `.health-check=true`; the check is a HEAD against the base URL
   with the connect timeout as its whole budget — UP on any response, DOWN with
   `{"group", "error"}`.
 
@@ -3540,7 +3550,7 @@ depends on this member (its Redis transport), so the cache edge is a runtime slo
   `ClientResponse` — or the build reds with `unknown type` (the known "importing a
   type re-checks its declaration" defect).
 - List `rakun` in the consumer's own `dependencies`, before
-  `rakun-client` (transitive dependencies are not loaded — front 08 finding 2).
+  `rakun-restclient` (transitive dependencies are not loaded — front 08 finding 2).
 - IPv6: the filter judges v6 addresses, but std `net.connect` cannot dial one
   (`gen_tcp` without `inet6` answers `nxdomain`), so the transport dials the first IPv4
   address; a v6-only host fails to connect.
@@ -3556,7 +3566,7 @@ with `rakun.http.clients.allow=127.0.0.0/8`); no external network. The mixed-DNS
 writes two answers into OTP's host table (`inet_db`, lookup `[file, native]`) and
 restores it.
 
-## URL rules — `modules/rakun-web/src/rules.bp` (front 65)
+## URL rules — `modules/rakun-service/src/rules.bp` (front 65)
 
 One chain entry, `url-rules`, at order −250 (`installUrlRules(compiled)`), with
 a fixed order: canonicalize (`routing`'s `url_rules`: basePath strip,
@@ -3578,7 +3588,7 @@ substituted segment. `compileRules` refuses, naming the rule and leaving
 nothing registered: a pattern that does not compile, a destination capture the
 source lacks, a `|`, a redirect onto itself, an internal rewrite no route
 answers (the core's `rkRoutePaths` and, when `rakun-app` is in the build, its
-table through `rakun_file_router:table/0` — rakun-web does not depend on
+table through `rakun_file_router:table/0` — rakun-service does not depend on
 rakun-app), and an external rewrite whose host is not on
 `rakun.rules.allowedOrigins` (empty by default). Not yet: the relay is
 buffered, not streamed (the 50 MB heap box is open). The file is flat
@@ -3591,11 +3601,10 @@ The former member `rakun-logging`, merged into the core by front 128 (decision 1
 files are `modules/rakun/src/logging/**` (the paths below are relative to it), its tests
 `modules/rakun/test/logging/**`, its sidecar keeps its name and atom
 (`modules/rakun/src/sidecars/rakun_logging.erl`), and its names are reached `from "rakun"`.
-No starter names it any more: `rakun-starter` brings `rakun` only.
 
 One `Logger` type, five levels, over OTP `logger`
 (the `loggers`/`logfile` endpoints register through the core's `actuator_api`,
-never the host; `rakun-actuator` is not a dependency). erlang only; the registration
+never the host; `rakun-service` is not a dependency). erlang only; the registration
 owner string stays `"rakun-logging"`.
 
 | File | Holds |
@@ -3664,7 +3673,7 @@ Decisions:
   front 62's request frame answers the frame's `requestId()`. The id comes from a
   valid `traceparent` (front 11's `validTraceparent`), else `x-request-id`, else 16
   hex from `rand` (a correlation handle, not a secret). The member does not register a
-  rakun-web filter (no `rakun-web` dependency): the application wraps its chain with
+  rakun-service filter (no `rakun-service` dependency): the application wraps its chain with
   `correlated(req.header("traceparent"), req.header("x-request-id"), { -> chain.next(req) })`.
 - **Digest hash**: `hash.strongHash` (SHA-256, 32 hex) truncated to 16 — std's
   `contentHash` is a 32-bit djb2 fold (≤ 8 hex) and cannot supply 16 characters.
@@ -3708,11 +3717,11 @@ Measured: the logging suites 54 passed / 0 failed / 0 compile failures, in the c
 (`test/logging/`: `format_test.bp` 13, `level_test.bp` 5, `group_test.bp` 6, `correlation_test.bp` 6,
 `digest_test.bp` 5, `file_test.bp` 11, `endpoint_test.bp` 8).
 
-## HAL — `modules/rakun-web/src/hateoas/` (front 21)
+## HAL — `modules/rakun-service/src/hateoas/` (front 21)
 
-The former member `rakun-hateoas`, merged into `rakun-web` by front 128 (decision 187):
-`modules/rakun-web/src/hateoas/hal.bp`, its test `modules/rakun-web/test/hateoas/hal_test.bp`,
-its names reached `from "rakun-web"`; the texts it raises keep their `rakun-hateoas:` prefix.
+The former member `rakun-hateoas`, merged into `rakun-service` by front 128 (decision 187):
+`modules/rakun-service/src/hateoas/hal.bp`, its test `modules/rakun-service/test/hateoas/hal_test.bp`,
+its names reached `from "rakun-service"`; the texts it raises keep their `rakun-hateoas:` prefix.
 
 `src/hateoas/hal.bp`, no host cell. `Link(rel, href, mediaType, title, templated)`
 (`mediaType`, not `type`), `link(rel, href)`, `linksObject` (one key per `rel`
@@ -3730,7 +3739,7 @@ params)` validates the pattern against the core router's paths and, when
 `segment.toColonPattern`), naming the
 nearest registered path on a miss; every `:param` needs an entry and every
 entry a `:param`; values are `encoding.percentEncode`d. `halResponse` /
-`halResponseFor(accept, body)` set the content type through rakun-web's
+`halResponseFor(accept, body)` set the content type through rakun-service's
 `withHeader`: `application/hal+json`, or `application/json` when
 `rakun.hateoas.use-hal-as-default-json-media-type=false` and the client did not
 ask for HAL. Uses the core and its own member's `withHeader`.
@@ -3739,8 +3748,8 @@ ask for HAL. Uses the core and its own member's `withHeader`.
 
 In-VM scheduling: three trigger markers, one registry, a supervised executor, the
 `scheduledtasks` endpoint and the `scheduling` health indicator. Depends on `rakun`,
-`rakun-web` (listed directly: `shutdownTimeout()` here, and a transitive of the host),
-and `rakun-actuator` (the host: the POST route is gated by its
+`rakun-service` (listed directly: `shutdownTimeout()` here, and a transitive of the host),
+and `rakun-service` (the host: the POST route is gated by its
 `exposed()` decision and answers its `notFoundProblem`). `rakun-data` is front 84's
 dependency (the durable job store, `src/jobstore/**`).
 A task here lives in ONE node's memory; every node of a cluster runs its own copy —
@@ -3764,7 +3773,7 @@ front 83's outbox.
 Wiring an application: the application module carries the `#[scheduler]` types (their
 registrations run when it loads), then at boot, after configuration is loaded:
 `mountActuator()` → `mountScheduling()` → `startScheduling()`; on the way down,
-`stopScheduling()` before rakun-web's `gracefulShutdown()` (or from a `#[preDestroy]`).
+`stopScheduling()` before rakun-service's `gracefulShutdown()` (or from a `#[preDestroy]`).
 The consumer imports the seams its markers use beside the markers
 (`rkScheduleCron`, `rkScheduleFixedRate`, `rkScheduleFixedDelay`) and the stereotype's
 `rkScan, rkSingleton, rkEnter, rkDone`.
@@ -3824,7 +3833,7 @@ Decisions:
   (`skip`|`allow`), `rakun.scheduling.timezone` (`UTC`/`Z`/`GMT` or a fixed
   `±HH:MM`; named zones refused — the BEAM ships no zone database). All are checked
   before any timer starts; a bad value refuses the boot naming the key. Shutdown
-  reuses rakun-web's `rakun.lifecycle.timeout-per-shutdown-phase`.
+  reuses rakun-service's `rakun.lifecycle.timeout-per-shutdown-phase`.
 - **The endpoint**: GET is an ordinary registration (`scheduledtasks`, ops
   `read,write`) served by the host's one route; the POST is a write the host's
   `GET <base>/:endpoint` cannot carry, so `mountScheduling()` registers
@@ -3893,8 +3902,8 @@ template (a sidecar called only from a folder is not shipped).
 manifest, `src/root.bp`, every `src/*.bp` and `src/sidecars/rakun_security.erl`;
 front 79 appends `pub mod oauth2;` / `oidc` / `saml2` / `ldap` (and their files to
 the manifest's `files`) and reorders nothing. The member depends on `rakun`,
-`rakun-web` and `rakun-data` (all `{ "workspace": true }`; the core carries the
-actuator contract rakun-data needs, and a transitive dependency is not loaded). `modules/rakun` and `modules/rakun-web` are untouched.
+`rakun-service` and `rakun-data` (all `{ "workspace": true }`; the core carries the
+actuator contract rakun-data needs, and a transitive dependency is not loaded). `modules/rakun` and `modules/rakun-service` are untouched.
 
 **Measured 2026-09-26:** `botopink test` in `modules/rakun-security/` (erlang, the
 only target) is **73 passed / 0 failed / 0 compile failures**; the run includes a
@@ -3919,7 +3928,7 @@ consumer fixture that builds the front's example against the package and runs it
 ### Installing it
 
 A library module's body never runs on erlang, so nothing self-registers. The
-application calls, after rakun-web's `bootWeb()`:
+application calls, after rakun-service's `bootWeb()`:
 
 ```bp
 val _s = installSecurity();   // boot checks, policy compiled once, advices, entry at -300
@@ -3927,7 +3936,7 @@ val _s = installSecurity();   // boot checks, policy compiled once, advices, ent
 
 `installSecurity()` runs `securityBoot()` (encoder, in-memory users, JWT
 configuration — every refusal raises naming the key), compiles the `#[provides]`d
-`SecurityPolicy` (or the default) through rakun-web's `matcher`, registers the two
+`SecurityPolicy` (or the default) through rakun-service's `matcher`, registers the two
 advices (`rakun.security.unauthorized` → 401, `rakun.security.forbidden` → 403) with
 front 07's error entry, and registers the entry at `orderSecurity()` (−300): after
 the request id, before URL rules, CORS, API versioning, the problem boundary and
@@ -4058,7 +4067,7 @@ shapes below still build; `UserStore` and the flat imports stay as the seam.
    consumer fixture a property set with `rkSetProp` in one test cell was not visible
    in the next, so each cell sets what it reads.
 
-## Test utilities — `modules/rakun-test/` (front 19)
+## Test utilities — `modules/rakun/` (front 19)
 
 The surface a handler test is written with; it depends on `rakun` and std only,
 and ships no runner (tests are `test` blocks under `botopink test`).
@@ -4108,8 +4117,8 @@ and ships no runner (tests are `test` blocks under `botopink test`).
 
 ## Sessions — `modules/rakun-session/` (front 18)
 
-Depends on `rakun`, `rakun-web` (the chain), `rakun-data` (the SQL arm),
-`rakun-actuator` (endpoint, health; the contract is the core's) and
+Depends on `rakun`, `rakun-service` (the chain), `rakun-data` (the SQL arm),
+`rakun-service` (endpoint, health; the contract is the core's) and
 `rakun-scheduling` (the sweeper). Sidecar `rakun_session.erl`: per-request
 slots in the process dictionary, the installed repository in a
 `persistent_term`, the ETS arm's table owned by the dedicated
@@ -4131,7 +4140,7 @@ one connection per command).
   (`test/store_test.bp`) runs on ETS and SQL. The Redis arm has no cell: a
   cell that needs a service outside the process is not a gate cell (decision
   gate-h), and the RESP double that would stand in for the server is
-  `rakun-test`'s to write (`03-rakun/19`); `saveCommand` is asserted on its
+  `rakun`'s to write (`03-rakun/19`); `saveCommand` is asserted on its
   own, and no environment variable gates a test.
 - **Ids and signing** (`signing.bp`, the verification path) — 32 bytes from
   `random.secureToken`, base64url; cookie value `<id>.<hmacSha256Base64Url>`;
@@ -4151,7 +4160,7 @@ one connection per command).
   settings, installs the repository and registers `session` at −350 (before
   security's −300). Per request: clear the slots, verify and load, touch
   `lastAccessedAt` once, run the chain, then queue `Set-Cookie` (through
-  rakun-web's cookie list) when the request created or rotated a session.
+  rakun-service's cookie list) when the request created or rotated a session.
   Handlers: `currentSession()` (creates lazily), `optionalSession()`,
   `saveSession`, `rotate(repo, s)`, `rotateSession()`,
   `authenticateSession(principal)` (the fixation defence — call it on login and
@@ -4166,8 +4175,8 @@ one connection per command).
 ## Caching — `modules/rakun-cache/` (front 12)
 
 Depends on `rakun`, `rakun-session` (the private scope's session id and the
-Redis wire, `rkSessRedis`, reused rather than copied — no `rakun-client` edge),
-`rakun-actuator` and `rakun-web` (a test resets the chain);
+Redis wire, `rkSessRedis`, reused rather than copied — no `rakun-restclient` edge),
+`rakun-service` and `rakun-service` (a test resets the chain);
 their own dependencies follow transitively (decision 143). Sidecar
 `rakun_cache.erl`: ONE ETS table for every cache keyed by `{name, key}` (no atom
 per cache name), owned by `rakun_cache_owner`; the names table (resolved
@@ -4250,8 +4259,8 @@ resurrected a stale prerendered entry and started a second regeneration);
 
 ## Messaging — `modules/rakun-messaging/` (front 15)
 
-Depends on `rakun` (the actuator contract is the core's), `rakun-metrics`, `rakun-client`,
-`rakun-actuator` and `rakun-data` (the last two since front 128 moved `stream/` in). Sidecar `rakun_messaging.erl`: the
+Depends on `rakun` (the actuator contract is the core's), `rakun-metrics`, `rakun-restclient`,
+`rakun-service` and `rakun-data` (the last two since front 128 moved `stream/` in). Sidecar `rakun_messaging.erl`: the
 listener registry, the IN-PROCESS broker (an append-only log per
 `{broker, destination}`; per consumer group a cursor, a redelivery list and the
 in-flight set, kept by `rakun_messaging_owner`, which monitors every worker), the
@@ -4392,8 +4401,8 @@ a transaction refuses: AMQP channel transactions are not offered, and front
 
 ## WebSocket — `modules/rakun-websocket/` (front 20)
 
-Depends on `rakun`, `rakun-web`, `rakun-security` (and, for it, `rakun-data`). A member of its own (`03-rakun/modules.md` splits it out of
-`rakun-web`), with flat test files. **Not one line of JavaScript**: the browser
+Depends on `rakun`, `rakun-service`, `rakun-security` (and, for it, `rakun-data`). A member of its own (`03-rakun/modules.md` splits it out of
+`rakun-service`), with flat test files. **Not one line of JavaScript**: the browser
 half is the browser's own `WebSocket` against the wire contract below.
 
 **The wire contract.**
@@ -4448,7 +4457,7 @@ half is the browser's own `WebSocket` against the wire contract below.
 - **Tests** use the sidecar's own client (`rkWsClientConnect` / `Send` / `Recv` /
   `Pause` / `Autopong` / `Close`) against a listener on an ephemeral port.
 
-## Static files — `modules/rakun-web/src/static.bp` (front 82)
+## Static files — `modules/rakun-service/src/static.bp` (front 82)
 
 One chain entry, `static` at +150 (after metrics, before compression), installed
 by an explicit `installStatic()`; roots by `registerStaticRoot(StaticRoot(pattern,
@@ -4718,15 +4727,15 @@ error shape and not a second one for validation.
 `modules/rakun/src/ssl_bundle.bp` names TLS material ONCE and lets five
 subsystems refer to it by name, which is Spring 3.1's answer to "the HTTP
 client, the SQL driver, the Redis connection and the broker each invent three
-properties for a certificate". `modules/rakun-web/src/tls.bp` is the seam
+properties for a certificate". `modules/rakun-service/src/tls.bp` is the seam
 between that registry and the request path.
 
 **Measured 2026-09-21 against compiler `2e6bb4ac`, with fronts 04–07, 14, 22,
 23, 62 and 72 in the tree.** `modules/rakun`: **387/387** on commonJS (was
 346/346) and **385 passing / 2 failing** on erlang (was 344/2) — the two still
-front 04's `server_test.bp:74,80`. `modules/rakun-web`: **104/104** on BOTH rows
+front 04's `server_test.bp:74,80`. `modules/rakun-service`: **104/104** on BOTH rows
 (was 83/83). Neither pinned row in
-`botopink-lang/scripts/restricted-targets.txt` moves: `rakun-web commonJS 0`
+`botopink-lang/scripts/restricted-targets.txt` moves: `rakun-service commonJS 0`
 stays `0`, core rakun's `2` stays `2`.
 
 
@@ -4754,7 +4763,7 @@ delays nobody, and a failed handshake is logged once with the peer and the
 bundle (`rakun.ssl.last-handshake-failure`) and ends that process only. After a
 successful handshake — which is after verification — the peer's subject is the
 process's `rakun_peer_subject`, read by the core cell `rkPeerSubject()` and
-carried into the chain's signal table by rakun-web's `tlsEntry`. Every socket
+carried into the chain's signal table by rakun-service's `tlsEntry`. Every socket
 call on the connection path goes through `t_recv` / `t_send` / `t_setopts` /
 `t_close`. `sslReload` clears OTP's PEM cache on success (`rakun_ssl:clear_cache/0`),
 so the next handshake presents the rotated files while an established
@@ -4984,20 +4993,18 @@ runs `erlc`), pinned on the runner — the release the root `botopink.json`'s `"
 
 Each row runs one `botopink-lib-test --bin "$BOTOPINK_BIN" --target erlang
 --strict` from a scratch directory with `BOTOPINK_LIB_ROOTS` naming this
-repository: the runner discovers this workspace's members — the 25 modules,
-the 8 starters and the 3 examples, one row each (the umbrella has no row) —
-and nothing else. onze, jhonstart and emilia are checked out under
-`botopink-lang/repository/` because `starters/rakun-starter-test` depends on
-`onze` and `onze-test` by `path` (and `onze` on the other two), and
-`actions`, `routing` and `validation` at `feat` because the members declare
-them as `git` dependencies, transitively (rakun's, onze's and jhonstart's;
+repository: the runner discovers this workspace's members — the modules
+and the examples, one row each (the umbrella has no row) —
+and nothing else. No sibling library is checked out any more (front 165 s2: every
+package is a member of this workspace), and `actions`, `routing` and `validation` at `feat` because the members declare
+them as `git` dependencies, transitively (rakun's, rakun-ssr's and rakun-bpp's;
 `actions` itself declares `routing`), resolved by name through that root
 (decision 326); they are dependencies, not rows — run from inside the checkout they would be, and an
-onze red would be rakun's. Then the hook's other stages run from the hook's
+rakun-ssr red would be rakun's. Then the hook's other stages run from the hook's
 own runner on every row: `runRepositoryStagesGate` (the front 22/23 greps of
 `scripts/git-hooks/repository-stages.sh`), `runExamplesGate "$bin" erlang`,
 `runRefusalsGate` (no `refusals/` here). `BOTOPINK_BIN` is exported to every
-step from the binary the job built, for `rakun-client`'s fixture-build tests.
+step from the binary the job built, for `rakun-restclient`'s fixture-build tests.
 `BOTOPINK_LANG_REF` repo variable pins a specific botopink-lang ref (default
 `feat`).
 
@@ -5054,23 +5061,23 @@ none with a flag, variable or list that turns it off:
    botopink-lang checkout's own `zig-out`, else `$PATH` — **none resolving
    fails the gate** (the message says how to provide one; a gate that skips
    its `.bp` stage gates nothing). The path is exported as `BOTOPINK_BIN`, for
-   `rakun-client`'s fixture-build tests;
+   `rakun-restclient`'s fixture-build tests;
 3. **repository stages** — `scripts/git-hooks/repository-stages.sh`: the front
    22/23 greps over `modules/rakun/src/` and `modules/rakun-app/src/`, on
    **code** (`codeLines` drops `//` comments first) and on **whole
-   identifiers**: no `from "jhonstart"` / `from "onze"`, no `onze` as a word,
+   identifiers**: no `from "rakun-bpp"` / `from "rakun-ssr"`, no `rakun-ssr` as a word,
    and in `rakun-app/src/` none of the UI types decision 114 forbids by name
    (`Element`, `ElementView`, `Children`, `LayoutProps`, `PageProps`) nor
-   `jhonstart` — never the substring `Element` (`xmlElement` is rakun's);
+   `rakun-bpp` — never the substring `Element` (`xmlElement` is rakun's);
    `ssr.bp` calls no `renderToString` and spells no void tag. A comment may
    say "the orchestrator" or "the UI library"; it does not name them. The
    stage fails when `modules/rakun-app/src/ssr.bp` is missing (the greps would
    read nothing);
 4. **tests** — `botopink test --target <t>` **inside every workspace member**
    (every directory the root manifest's `workspaces` patterns expand to: the
-   25 `modules/*`, the 8 `starters/*` and the 3 `examples/*`) on every target
-   its manifest declares — `erlang` for all 36 (`erl` on `PATH`). A member
-   with no `test` block (the starters) is still compiled;
+   `modules/*` and the `examples/*`) on every target
+   its manifest declares (`erl` on `PATH`). A member
+   with no `test` block is still compiled;
    the cells run side by side on the runner's pool (`gatePool`: one per CPU,
    bounded by `MemAvailable / 768 MiB`, a cell started only while the runnable
    threads are at most the CPUs), and the report is printed in plan order once
@@ -5087,8 +5094,7 @@ none with a flag, variable or list that turns it off:
 Stages 1–3 stop the gate at the first red. Stages 4–6 all run: every red cell
 is listed with the tail of its output and a re-run line, and the gate fails at
 the end — one run tells every red. Measured 2026-10-01 with the compiler
-built from botopink-lang `29cfffc8`: 36 cells — the 25 modules (1,817 tests),
-the 8 starters and the 3 examples (no `test` block: compiled) — and 3/3
+built from botopink-lang `29cfffc8` (before front 165): 36 cells and 3/3
 builds. `rakun-websocket` is the one cell that depends on the machine: alone
 on an idle machine it is 27/0, and under load `test/limits_test.bp:48` can
 read a queue of 51 against the cap of 50 (26/1) — a `rakun-websocket` row
@@ -5096,7 +5102,7 @@ read a queue of 51 against the cap of 50 (26/1) — a `rakun-websocket` row
 `--no-verify`; fix the red instead.
 
 `scripts/git-hooks/pre-commit` and `scripts/git-hooks/lib/runner-standalone.sh`
-are one text in the five library repositories (emilia, erika, jhonstart, onze,
+are one text in the five library repositories (emilia, erika, rakun-bpp, rakun-ssr,
 rakun): the meta repository's `hook-integrity` workflow compares the bytes
 (its check 4), so a change to either lands in all five together. What only
 rakun checks — stage 3 — lives in `scripts/git-hooks/repository-stages.sh`,

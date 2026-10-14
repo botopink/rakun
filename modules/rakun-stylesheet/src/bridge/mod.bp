@@ -1,0 +1,99 @@
+//// rakun-stylesheet — the bridge between rakun-bpp's render and emilia's
+//// stylesheet (front 30 Step 9, decisions 113 and 114).
+////
+//// The one member of this workspace that names both packages: rakun-bpp core
+//// knows only `RenderPlugin`, and emilia imports nobody and does not change.
+//// rakun-ssr registers the bridge at boot — `app(plugins: [plugin()])` — and that
+//// is rakun-ssr's whole part in the CSS moment.
+////
+////   head()      await flush(): the page's first sheet, into `<head>`
+////   chunk(id)   await flush(): what a streamed boundary registered, first
+////               inside its fill — `""` when it registered no class
+////   close()     `Error` when a class was registered after the last chunk
+////   payload()   #("s", the class names this render flushed, a JSON array)
+////
+//// `flush()` answers a whole document every time (the theme and base layers
+//// even when nothing was registered), so "nothing flushed" is read off the
+//// document: a flush that names no `.e_<hex>` class contributes nothing to a
+//// fill and nothing to `s`. The names flushed for the current render are kept
+//// in a host cell (the render's process dictionary on the BEAM, a
+//// `globalThis` array on node), reset by `head()`, which the render calls
+//// once, first.
+
+import {RenderPlugin} from "rakun-bpp";
+import {emilia.flush};
+import {json} from "std";
+
+#[@External.Node("""(globalThis.__jhEmiliaSeen = [], 0)""")]
+#[@External.Erlang("""(fun() -> put(jh_emilia_seen, []), 0 end)()""")]
+declare fn seenReset() -> i32;
+
+#[@External.Node("""((globalThis.__jhEmiliaSeen = (globalThis.__jhEmiliaSeen || []).concat($0)), 0)""")]
+#[@External.Erlang("""(fun(__N) -> put(jh_emilia_seen, (case get(jh_emilia_seen) of undefined -> []; __L -> __L end) ++ __N), 0 end)($0)""")]
+declare fn seenAdd(names: string[]) -> i32;
+
+#[@External.Node("""(globalThis.__jhEmiliaSeen || [])""")]
+#[@External.Erlang("""(fun() -> case get(jh_emilia_seen) of undefined -> []; __L -> __L end end)()""")]
+declare fn seen() -> Array<string>;
+
+fn isHex(c: string) -> bool {
+    return "0123456789abcdef".contains(c) && c != "";
+}
+
+// The `e_<hex>` class names a flushed document defines, in document order,
+// each once.
+pub fn classesIn(css: string) -> string[] {
+    var out: string[] = [];
+    var first = true;
+    for (css.split(".e_")) { piece ->
+        if (first) first = false else {
+            var hex = "";
+            var open = true;
+            for (piece.split("")) { c ->
+                if (open && isHex(c)) hex = hex + c else open = false;
+            }
+            val name = "e_" + hex;
+            if (hex != "" && out.contains(name) == false) out.push(name);
+        }
+    }
+    return out;
+}
+
+fn bridgeHead() -> @Task<string> {
+    seenReset();
+    val css = await flush();
+    seenAdd(classesIn(css));
+    return css;
+}
+
+fn bridgeChunk(holeId: string) -> @Task<string> {
+    val css = await flush();
+    val names = classesIn(css);
+    if (names.length == 0) return "";
+    seenAdd(names);
+    return css;
+}
+
+fn bridgeClose() -> @Task<@Result<void, string>> {
+    val css = await flush();
+    val names = classesIn(css);
+    if (names.length > 0)
+        throw "emilia classes registered after the last chunk: "
+            + names.join(", ");
+    return;
+}
+
+fn bridgePayload() -> @Task<Array<#(string, string)>> {
+    val names = seen().map({ n -> json.quote(n) });
+    return [#("s", json.array(names))];
+}
+
+pub fn plugin() -> RenderPlugin {
+    return RenderPlugin(
+        name: "rakun-stylesheet",
+        head: { -> bridgeHead() },
+        chunk: { id -> bridgeChunk(id) },
+        close: { -> bridgeClose() },
+        payload: { -> bridgePayload() },
+    );
+}

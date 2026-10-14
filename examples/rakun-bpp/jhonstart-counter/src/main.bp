@@ -1,0 +1,80 @@
+// jhonstart-counter — the React-core showcase, as a pure SSR client.
+//
+// `counterView` is a PURE view: given a count it builds the markup, so it renders
+// synchronously with `renderToString` and is directly testable. `Counter` is the
+// stateful, idiomatic form — a `fn … -> @Component<Element>` component whose
+// body activates `state` with `use` (decisions 88, 118 and 128 of 1.0.10-beta — the
+// return is the effect). `use state(0)`
+// lowers to `state(0)` on every backend: called here it is the server pass (the
+// initial cell); in the browser the client build resolves `rakun-bpp/hooks` to
+// `rakun-bpp/client_runtime`, whose `state` re-renders on `set` (see rakun-bpp's
+// `client_runtime.bp`). Interactivity (buttons / event handlers) is host-bound
+// and lives outside this pure core.
+
+import {Element, ElementBase, div, p, span, text, state, renderToString} from "rakun-bpp";
+
+// Pure view: the counter markup for a given count.
+fn counterView(count: i32) -> Element {
+    val sign = if (count >= 0) "non-negative" else "negative";
+    return div([
+        p([text("count: " + count.toString(), [])], []),
+        span([text(sign, [])], []),
+    ], []);
+}
+
+// Stateful component (idiomatic hooks): the `@Component<Element>`
+// return lets the body activate a hook; every `use` sits in the static prefix. Rendered below as the server pass.
+pub fn Counter() -> @Component<Element> {
+    val c = use state(0);
+    return counterView(c.value);
+}
+
+// A component reading a hook WITHOUT `use`: an ordinary call, which answers the
+// hook's `@Component` — a Promise on commonJS (decisions 104/128 of botopink
+// 1.0.10-beta: every `@Component` body is async there), so the body `await`s it
+// and returns `@Task<Element>`. Its value is the first-render value.
+fn StatefulBadge() -> @Task<Element> {
+    val c = await state(7);
+    val doubled = c.value + c.value;
+    return div([
+        p([text("count: " + c.value.toString(), [])], []),
+        span([text("x2=" + doubled.toString(), [])], []),
+    ], []);
+}
+
+fn main() {
+    @print(renderToString(counterView(0)));
+}
+
+test "the counter view renders its count and sign" {
+    assert renderToString(counterView(0))
+        == "<div><p>count: 0</p><span>non-negative</span></div>";
+    assert renderToString(counterView(-2))
+        == "<div><p>count: -2</p><span>negative</span></div>";
+}
+
+test "the state hook seeds the initial count and exposes a setter" {
+    val c = await state(0);
+    assert c.value == 0;
+    c.set(5);
+}
+
+test "renderToString of a component consuming a hook produces the SSR string" {
+    assert renderToString(await StatefulBadge())
+        == "<div><p>count: 7</p><span>x2=14</span></div>";
+}
+
+test "a @Component component activating `use state` renders the server pass" {
+    assert renderToString(await Counter())
+        == "<div><p>count: 0</p><span>non-negative</span></div>";
+}
+
+// LIMITATION (recorded, not a forced test): a builder called with a LONE child
+// (`div(text("x"))`) or a BARE string (`div("x")`) type-checks via the `Children`
+// coercion (G4) but does NOT render — `renderToString` walks `children` as an
+// array (`for (e.children)`), and a single Element / string is not iterable, so
+// rendering throws `e.children is not iterable`. Normalizing a lone child / bare
+// string to a one-element list needs a runtime type tag the value doesn't carry
+// (there is nothing to branch single-vs-list on). Closing it is a renderer/
+// normalization-intrinsic change outside this test-audit's scope; the list form
+// (`div([…])`) is the rendering contract and is covered throughout.

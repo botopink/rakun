@@ -1,0 +1,111 @@
+// `botopink test` suite for `src/scan.bp` and `src/graph.bp` (front 68 steps
+// 1 and 2), over fixture source strings — no project on disk.
+
+import {bundler.scan.SourceFile, bundler.scan.ImportRef, bundler.scan.parseFixture, bundler.scan.importsOf, bundler.scan.moduleIdOf, bundler.scan.stagedSegment, bundler.scan.isClientModule};
+import {bundler.graph.AppModule, bundler.graph.ClientGraph, bundler.graph.loadModules, bundler.graph.clientGraph, bundler.graph.chainOf, bundler.graph.describeGraph};
+import {types.AliasMap};
+import {bundler.fixture.fixtureApp};
+import {assertAs} from "snap";
+
+fn aliases() -> AliasMap {
+    return AliasMap(entries: [#("@/components", "components"), #("@/lib", "lib")]);
+}
+
+fn graphOf(tree: string) -> @Result<ClientGraph, string> {
+    val modules = try loadModules(parseFixture(tree));
+    return clientGraph(modules, aliases(), "app");
+}
+
+fn refsOf(source: string) -> Array<ImportRef> {
+    return importsOf("x.bp", source).unwrapOr([]);
+}
+
+fn scanError(source: string) -> string {
+    return case importsOf("app/page.bp", source) {
+        Ok(refs) -> "ok";
+        Error(message) -> message;
+    };
+}
+
+// ── step 1: the scanner ─────────────────────────────────────────────────────
+
+test "scan: a named import is one ref with its names" {
+    val refs = refsOf("import { div, text } from \"rakun-bpp\";");
+    assert refs.length == 1;
+    assert (refs.at(0) ?? ImportRef(spec: "", names: [], isModDecl: false, line: 0)).spec
+        == "rakun-bpp";
+    assert (refs.at(0) ?? ImportRef(spec: "", names: [], isModDecl: false, line: 0)).names.join(",")
+        == "div,text";
+}
+
+test "scan: the sibling shorthand, a mod line, a comment and a multi-line import" {
+    val refs = refsOf("import { perimeter };\npub mod tokens;\n// import { gone } from \"x\";\nimport {\n    a,\n    b: {c, d},\n} from \"lib.x\";");
+    assert refs.length == 3;
+    val short = refs.at(0) ?? ImportRef(spec: "?", names: [], isModDecl: true, line: 0);
+    assert short.spec == "";
+    assert short.isModDecl == false;
+    assert (refs.at(1) ?? ImportRef(spec: "", names: [], isModDecl: false, line: 0)).isModDecl;
+    val multi = refs.at(2) ?? ImportRef(spec: "", names: [], isModDecl: false, line: 0);
+    assert multi.spec == "lib.x";
+    assert multi.names.join("|") == "a|b: {c, d}";
+    assert multi.line == 4;
+}
+
+test "scan: an import the scanner cannot read fails, naming the file and the line" {
+    assert scanError("pub fn a() -> i32 { return 1; }\nimport { x } from y;")
+        == "app/page.bp:2: an import the scanner cannot read: import { x } from y;";
+    assert scanError("import { x } from \"y\"")
+        == "app/page.bp:1: an import with no closing `;`";
+}
+
+test "scan: moduleIdOf is the staged id, the same for both separators" {
+    assert moduleIdOf("", "app/blog/[slug]/page.bp") == "app.blog.d_slug.page";
+    assert moduleIdOf("proj", "proj\\app\\blog\\[slug]\\page.bp")
+        == moduleIdOf("proj", "proj/app/blog/[slug]/page.bp");
+    assert moduleIdOf("", "lib/mod.bp") == "lib";
+    assert moduleIdOf("", "app/blog/[slug]/not-found.bp")
+        == "app.blog.d_slug.not_found";
+    assert moduleIdOf("", "app/default.bp") == "app.default_view";
+    assert stagedSegment("(marketing)") == "g_marketing";
+    assert stagedSegment("[...rest]") == "c_rest";
+    assert stagedSegment("[[...rest]]") == "o_rest";
+    assert stagedSegment("@analytics") == "s_analytics";
+    assert isClientModule("#[client]\npub fn A() -> Element { return p([]); }");
+    assert isClientModule("// #[client]\npub fn A() -> i32 { return 1; }")
+        == false;
+}
+
+// ── step 2: the graph ───────────────────────────────────────────────────────
+
+test "graph: roots ---- one client island below a server page" {
+    val g = try graphOf(["== app/page.bp", "import { Card } from \"@/components.card\";", "#[page(\"\")] pub fn home(route: PageContext) -> @Component<Element> { return p([]); }", "== components/card.bp", "#[client]", "import { plural } from \"@/lib.format\";", "pub fn Card(props: CardProps) -> Element { return p([]); }", "== lib/format.bp", "pub fn plural(n: i32, word: string) -> string { return word; }", "== lib/db.bp", "pub fn listPosts() -> Post[] { return []; }"].join("\n"));
+    assert chainOf(g, "lib.db").length == 0;
+    try assertAs(@src(), "graph", describeGraph(g));
+}
+
+test "graph: a module of the app imported by its path inside the braces is an edge" {
+    // Decision 206 — `import {components.card.Card};` names `components.card`,
+    // and `lib.format.plural as plural2` names `lib.format`.
+    val g = try graphOf(["== app/page.bp", "import {components.card.Card};", "#[page(\"\")] pub fn home(route: PageContext) -> @Component<Element> { return p([]); }", "== components/card.bp", "#[client]", "import {lib.format.plural as plural2};", "pub fn Card(props: CardProps) -> Element { return p([]); }", "== lib/format.bp", "pub fn plural(n: i32, word: string) -> string { return word; }"].join("\n"));
+    assert g.roots.join(",") == "components.card";
+    assert chainOf(g, "lib.format").join(" > ")
+        == "components.card > lib.format";
+}
+
+test "graph: shared ---- a module reached by two roots appears once" {
+    val g = try graphOf(fixtureApp());
+    assert chainOf(g, "lib.format").join(" > ")
+        == "components.nav > lib.format";
+    try assertAs(@src(), "graph", describeGraph(g));
+}
+
+test "graph: cycle ---- terminates and lists each module once" {
+    val g = try graphOf(["== app/page.bp", "import { A } from \"@/components.a\";", "#[page(\"\")] pub fn home(route: PageContext) -> @Component<Element> { return p([]); }", "== components/a.bp", "#[client]", "import { b } from \"@/components.b\";", "pub fn A(props: P) -> Element { return p([]); }", "== components/b.bp", "import { A } from \"@/components.a\";", "pub fn b() -> i32 { return 1; }"].join("\n"));
+    assert g.nodes.length == 2;
+    try assertAs(@src(), "graph", describeGraph(g));
+}
+
+test "graph: chainOf three levels below a root is four ids, root first" {
+    val g = try graphOf(["== app/page.bp", "import { A } from \"@/components.a\";", "#[page(\"\")] pub fn home(route: PageContext) -> @Component<Element> { return p([]); }", "== components/a.bp", "#[client]", "import { b } from \"@/lib.b\";", "pub fn A(props: P) -> Element { return p([]); }", "== lib/b.bp", "import { c } from \"@/lib.c\";", "pub fn b() -> i32 { return 1; }", "== lib/c.bp", "import { d };", "pub fn c() -> i32 { return 1; }", "== lib/d.bp", "pub fn d() -> i32 { return 1; }"].join("\n"));
+    assert chainOf(g, "lib.d").join(",") == "components.a,lib.b,lib.c,lib.d";
+}

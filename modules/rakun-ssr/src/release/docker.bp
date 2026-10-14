@@ -1,0 +1,48 @@
+//// rakun-ssr — the container image (front 71 step 4): `NEXTJS-DOCS.md §
+//// 24`'s Dockerfile, ported. Two stages; the runner copies only the build
+//// stage's release directory, runs as a non-root user, reads `PORT` at boot.
+//// With `includeErts` the release carries its own runtime and the runner is
+//// plain `alpine`; without it the runner is an `erlang:` image.
+
+import {release.spec.ReleaseSpec};
+
+pub fn generateDockerfile(spec: ReleaseSpec) -> string {
+    val runner = if (spec.includeErts)
+        "alpine:3.20"
+    else
+        "erlang:" + spec.otpRelease + "-alpine";
+    return [
+        "FROM erlang:" + spec.otpRelease + "-alpine AS build",
+        "WORKDIR /src",
+        "COPY . .",
+        "RUN rakun-ssr build",
+        "",
+        "FROM " + runner + " AS runner",
+        "RUN addgroup -S rakun-ssr && adduser -S -G rakun-ssr rakun-ssr",
+        "WORKDIR /app",
+        "COPY --from=build --chown=rakun-ssr:rakun-ssr /src/"
+            + spec.outDir
+            + "/release ./",
+        "USER rakun-ssr",
+        "ENV PORT=3000",
+        "EXPOSE 3000",
+        "CMD [\"bin/rakun-ssr\", \"start\"]",
+    ].join("\n")
+        + "\n";
+}
+
+pub fn generateDockerignore() -> string {
+    return [".git", ".onze", ".botopinkbuild", "test/"].join("\n") + "\n";
+}
+
+// The runner stage's lines (everything after the second `FROM`).
+pub fn runnerStage(dockerfile: string) -> string[] {
+    val lines = dockerfile.split("\n");
+    var seen = 0;
+    var out: string[] = [];
+    for (lines) { l ->
+        if (l.startsWith("FROM ")) seen = seen + 1;
+        if (seen == 2) out.push(l);
+    }
+    return out;
+}

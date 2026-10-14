@@ -177,7 +177,7 @@ start(S = #{status := Status, headers := Hs}, Framing) ->
     end,
     S#{started := true}.
 
-%% Response headers another entry queued for this request (rakun-web's
+%% Response headers another entry queued for this request (rakun-service's
 %% `withHeader` mirrors into front 04's accumulator), minus any the renderer set.
 queued_headers(Own) ->
     case get(rakun_reply_headers) of

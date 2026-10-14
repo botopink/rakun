@@ -1,0 +1,48 @@
+//// rakun-ssr — the global stylesheet and its manifest records (front 69
+//// step 2).
+////
+//// One file: the global CSS (`app/globals.css` by default) first — the
+//// cascade depends on it — then every CSS module's rewritten CSS, emitted as
+//// `/_onze/static/<buildId>/app.<hash>.css`, a `<link>` in the head (it does
+//// not change per request, so it is cached, never inlined). Its fingerprint,
+//// URL and size are handed to front 68's manifest as `Y` records; this front
+//// never edits `manifest.bp` — it builds the `ChunkRef` and front 68's
+//// `formatManifest` writes it.
+
+import {escape} from "std";
+import {bundler.manifest.ChunkRef, bundler.manifest.staticUrl, bundler.manifest.escapeField};
+import {assets.style_module.StyleModule, assets.style_module.shortHash};
+
+pub fn buildStylesheet(globalCss: string, modules: Array<StyleModule>) -> @Result<#(string, string), string> {
+    if (globalCss.toLower().contains("</style"))
+        throw "the global stylesheet contains \"</style\"";
+    val parts = [globalCss.trimEnd()]
+        .append(modules.map({ m -> m.css.trimEnd() }))
+        .filter({ p -> p != "" });
+    val text = parts.join("\n") + "\n";
+    return #(text, shortHash(text));
+}
+
+pub fn stylesheetFile(sheetHash: string) -> string {
+    return "app." + sheetHash + ".css";
+}
+
+// The stylesheet as a manifest chunk — what `ClientBundleManifest.styles`
+// carries.
+pub fn styleChunk(buildId: string, sheetHash: string, bytes: i32) -> ChunkRef {
+    return ChunkRef(id: "styles", url: staticUrl(buildId, stylesheetFile(sheetHash)), hash: sheetHash, bytes: bytes);
+}
+
+// The `Y` lines of the stylesheet, as front 68's writer spells a record.
+pub fn styleRecords(buildId: string, sheetHash: string, bytes: i32) -> Array<string> {
+    val c = styleChunk(buildId, sheetHash, bytes);
+    return [["Y", escapeField(c.id), escapeField(c.url), escapeField(c.hash), c.bytes.toString()].join("|")];
+}
+
+// The head fragment for the manifest's stylesheets: one `<link>` each, the
+// `href` through std's `escape.attribute`.
+pub fn stylesheetLinks(styles: Array<ChunkRef>) -> string {
+    return styles
+        .map({ s -> "<link rel=\"stylesheet\" href=\"" + escape.attribute(s.url) + "\">" })
+        .join("\n");
+}

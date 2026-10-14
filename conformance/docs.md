@@ -72,7 +72,7 @@ sidecar naming rule and what is still blocked.
 - **Bootstrap** — `Rakun.run(App(port: 8080, basePath: "/api"))` reads the host
   router and starts the node `http` server (`rkServe`), dispatching every live
   request to the handler.
-- **The filter chain** — a separate member, `from "rakun-web"`: one ordered list
+- **The filter chain** — a separate member, `from "rakun-service"`: one ordered list
   of entries between the socket and the route handler, with `#[filter]` and
   `#[middleware]` as its two entry points, `Next` for redirect/rewrite, CORS with
   deny-all defaults, and RFC 9457 problem details. See § The filter chain below.
@@ -330,7 +330,7 @@ library, so the six things a walker needs are handed to it as a record:
 
 ```text
 import {ElementView, renderNode} from "rakun-app";
-import {Element, isVoidTag, isRawTextTag} from "jhonstart";
+import {Element, isVoidTag, isRawTextTag} from "rakun-bpp";
 
 pub fn jhonstartView() -> ElementView<Element> {
     return ElementView(
@@ -784,10 +784,10 @@ Because the stereotypes' `__rkMake_<Type>()` is frozen for this milestone, a
 profile-gated component is reached through the emitted `__rkAutoGated_<Type>()`
 when you want the refusal rather than the value.
 
-## The filter chain (`from "rakun-web"`)
+## The filter chain (`from "rakun-service"`)
 
-`modules/rakun-web/` is a separate member. Depend on it with
-`{ "rakun-web": { "workspace": true } }` inside the workspace, and call
+`modules/rakun-service/` is a separate member. Depend on it with
+`{ "rakun-service": { "workspace": true } }` inside the workspace, and call
 `bootWeb()` once at startup — that installs the built-in entries, validates the
 CORS policy and hands the runner to the host, so front 04's dispatcher finds it.
 
@@ -1041,7 +1041,7 @@ on. `sslInfo()` adds the issuer and the two instants. Neither carries key
 material, a password, or a fingerprint of the private key — the whole
 contribution is what the certificate already tells anyone who connects.
 
-### The web layer's side (`from "rakun-web"`)
+### The web layer's side (`from "rakun-service"`)
 
 <!-- example: web_tls -->
 

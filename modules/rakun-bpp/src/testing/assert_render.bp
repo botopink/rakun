@@ -1,0 +1,95 @@
+//// rakun-bpp/assert_render — a rendered document, a recorded response and
+//// the payload (front 30).
+
+import {render.Payload, render.writePayload, globals.globals};
+import {testing.harness.RecordedResponse};
+import {testing.assert_html.tagPerLine};
+import {assertAs} from "snap";
+
+// The top-level members of a JSON object's text, one per line, in order —
+// split at the commas outside every string and every nested value.
+pub fn jsonMembers(objectText: string) -> Array<string> {
+    val chars = objectText.split("");
+    var out: string[] = [];
+    var current = "";
+    var depth = 0;
+    var inString = false;
+    var escaped = false;
+    for (chars) { c ->
+        if (inString) {
+            current = current + c;
+            if (escaped) escaped = false else {
+                if (c == "\\") escaped = true;
+                if (c == "\"") inString = false;
+            }
+        } else if (c == "\"") {
+            inString = true;
+            current = current + c;
+        } else if (c == "{" || c == "[") {
+            if (depth > 0) current = current + c;
+            depth = depth + 1;
+        } else if (c == "}" || c == "]") {
+            depth = depth - 1;
+            if (depth > 0) current = current + c;
+        } else if (c == "," && depth == 1) {
+            out.push(current);
+            current = "";
+        } else current = current + c;
+    }
+    if (current != "") out.push(current);
+    return out;
+}
+
+// The document one tag per line after `<body>`, with the payload script's JSON
+// one member per line under `--- payload`.
+pub fn documentText(doc: string) -> string {
+    val marker = "<script>window." + globals.payload + " = ";
+    val parts = doc.split(marker);
+    val before = parts.at(0) ?? doc;
+    val after = parts.at(1) ?? "";
+    val json = after.split("</script>").at(0) ?? "";
+    val rest = after.split("</script>").drop(1).join("</script>");
+    val headAndBody = before.split("<body>");
+    val head = headAndBody.at(0) ?? before;
+    val body = headAndBody.drop(1).join("<body>");
+    var lines: string[] = [];
+    if (headAndBody.length > 1) {
+        lines.push(head + "<body>");
+        lines.push(tagPerLine(body));
+    } else lines.push(tagPerLine(before));
+    if (parts.length > 1) {
+        lines.push("--- payload");
+        lines = lines.append(jsonMembers(json));
+        lines.push("--- after the payload");
+        lines.push(tagPerLine(rest));
+    }
+    return lines.join("\n");
+}
+
+// `status <n>`, one `header <name>: <value>` line each, `chunks <n>`,
+// `closed <n>`.
+pub fn responseText(r: RecordedResponse) -> string {
+    var lines: string[] = ["status " + r.status.toString()];
+    for (r.headers) { h ->
+        lines.push("header " + h);
+    }
+    lines.push("chunks " + r.chunks.length.toString());
+    lines.push("closed " + r.closed.toString());
+    return lines.join("\n");
+}
+
+pub fn assertDocument(loc: SourceLocation, doc: string) -> @Result<void, string> {
+    try assertAs(loc, "document", documentText(doc));
+    return;
+}
+
+pub fn assertResponse(loc: SourceLocation, r: RecordedResponse) -> @Result<void, string> {
+    try assertAs(loc, "response", responseText(r));
+    return;
+}
+
+// `writePayload(p)`.
+pub fn assertPayload(loc: SourceLocation, p: Payload) -> @Result<void, string> {
+    try assertAs(loc, "payload", writePayload(p));
+    return;
+}

@@ -1,0 +1,164 @@
+//// rakun-service — the `middleware.bp` convention and `Next`.
+////
+//// Next's `middleware.ts` is a file at the project root exporting `middleware`
+//// and an optional `config`. rakun's is `middleware.bp` exporting a
+//// `#[middleware]`-decorated function. The DECORATOR does the registration; the
+//// FILE NAME is a discovery rule front 22's scanner already honours (it
+//// compiles a root `middleware.bp` whether or not a `pub mod` line names it —
+//// `modules/rakun-app/test/fixtures/middleware/middleware.bp` is that fixture). So
+//// there is one mechanism and the convention sits on top of it, which is the
+//// whole difference from the 1.0.7 draft's separate invocation inside the SSR
+//// pipeline.
+////
+//// `#[middleware]` registers ONE entry at order −50: after the built-ins,
+//// before an application `#[filter]` at the default 0. Two `#[middleware]`
+//// functions in one build fail naming both — there is one middleware entry
+//// point, and picking one of two silently is exactly the failure mode the chain
+//// is designed to make impossible.
+////
+//// WHY `Next.pass()` AND NOT `Next.next()`. `Chain` already has `next`, and two
+//// `next`s a line apart would be a reading hazard. Calling `chain.next(req)`
+//// and calling `Next.pass()` are the same outcome — the first from inside a
+//// filter that wants the response back, the second from a middleware that does
+//// not.
+
+import {Response} from "rakun";
+import {sub} from "rakun";
+import {filter.WebRequest, filter.Chain, filter.withHeader, filter.segments, filter.registerFilter, filter.orderMiddleware};
+import {filter.rkChainPutSignal, filter.sentinelStatus, filter.rkChainNames};
+import {filter.rkMetaGet, filter.rkMetaPut};
+import {pattern.parsePattern, pattern.matchPattern} from "routing";
+
+// ── `Next` ──────────────────────────────────────────────────────────────────
+//
+// `pass()` and `rewrite()` return `Response(status: 0, body: "")`. Zero is not a
+// valid HTTP status, so it is a safe in-band sentinel: `chainNext` interprets it
+// and it never reaches the wire. `rewrite` records the new path through the
+// process-local `rewrite` signal rather than smuggling it in a header, so
+// nothing leaks to the client. `redirect` sets `Location` through the reply
+// accumulator and returns a real 307.
+
+pub type Next() {
+    pub fn pass() -> Response {
+        return Response(status: 0, body: "");
+    }
+
+    pub fn redirect(url: string) -> Response {
+        return withHeader(Response(status: 307, body: ""), "Location", url);
+    }
+
+    pub fn permanentRedirect(url: string) -> Response {
+        return withHeader(Response(status: 308, body: ""), "Location", url);
+    }
+
+    pub fn rewrite(path: string) -> Response {
+        val _s = rkChainPutSignal("rewrite", path);
+        return Response(status: 0, body: "");
+    }
+}
+
+// ── the matcher ─────────────────────────────────────────────────────────────
+//
+// The `:param` grammar is the shared library `routing`'s (`pattern`, decision
+// 116 rule 9): a literal segment, `:param` and a trailing `:param*`; every other
+// form (a glob, a character class, a group, `?`, `{`) is refused by name with
+// `patternProblem`, so a matcher front 65 has not compiled is a located boot
+// failure, not a pattern that quietly matches nothing. The one rule that stays
+// here is the Next default: an EMPTY matcher runs the entry on every request.
+
+// Halts, with `routing`'s refusal, when `matcher` is not a pattern the grammar
+// admits. `""` is admitted (the Next default).
+pub fn validateMatcher(matcher: string) -> i32 {
+    if (matcher == "") return 0;
+    val problem = case parsePattern(matcher) {
+        Ok(_) -> "";
+        Error(e) -> e;
+    };
+    if (problem != "") @panic(problem);
+    return 0;
+}
+
+// True when `path` runs the entry: every path for the empty matcher, otherwise
+// exactly the paths `routing`'s `matchPattern` accepts.
+pub fn matcherAdmits(matcher: string, path: string) -> bool {
+    if (matcher == "") return true;
+    val _v = validateMatcher(matcher);
+    val parsed = case parsePattern(matcher) {
+        Ok(p) -> p;
+        Error(_) -> [];
+    };
+    var hit = false;
+    if (matchPattern(parsed, path)) {
+        _ ->
+        hit = true;
+    }
+    return hit;
+}
+
+// ── registration ────────────────────────────────────────────────────────────
+
+pub fn middlewareEntryName() -> string {
+    return "middleware";
+}
+
+pub fn twoMiddlewaresProblem(first: string, second: string) -> string {
+    return "rakun-service: `"
+        + first
+        + "` is already the build's #[middleware] and `"
+        + second
+        + "` would be a second one - there is ONE middleware entry "
+        + "point, and two of them would have no answer to which runs first";
+}
+
+// The registered middleware's OWNER is kept in the chain's boot-time META
+// table, not in the per-request signal store: registration runs at module load,
+// in whatever process loaded the module, and a per-request slot would be gone
+// by the time the first request arrived. The entry is always called
+// `middleware`, so `registerFilter`'s duplicate-name rule would catch a second
+// one anyway — but that message would name the ENTRY rather than the two
+// functions, and a refusal that cannot name what to delete is half a refusal.
+pub fn registerMiddleware<Rq, Ch>(
+    owner: string,
+    matcher: string,
+    entry: fn(req: Rq, chain: Ch) -> Response,
+) -> i32 {
+    val first: string = rkMetaGet("middleware-owner");
+    if (first != "") @panic(twoMiddlewaresProblem(first, owner));
+    val _c = validateMatcher(matcher);
+    val _o = rkMetaPut("middleware-owner", owner);
+    val _m = rkMetaPut("middleware-matcher", matcher);
+    return registerFilter(middlewareEntryName(), orderMiddleware(), entry);
+}
+
+pub fn middlewareOwner() -> string {
+    return rkMetaGet("middleware-owner");
+}
+
+pub fn middlewareMatcher() -> string {
+    return rkMetaGet("middleware-matcher");
+}
+
+// A non-matching path SKIPS the entry entirely: the wrapper answers the
+// sentinel, which `chainNext` reads as "continue", so the middleware body never
+// runs and the chain behaves as if the entry were not registered.
+pub fn gateByMatcher(req: WebRequest, matcher: string) -> bool {
+    return matcherAdmits(matcher, req.target);
+}
+
+pub fn skip() -> Response {
+    return Response(status: sentinelStatus(), body: "");
+}
+
+// The registration the chain carries is always named `middleware`; this reads
+// it back so a test can assert the entry is present without knowing the owner.
+pub fn middlewareRegistered() -> bool {
+    return rkChainNames().contains(middlewareEntryName());
+}
+
+// `sub` is imported for the one place a redirect target has to be trimmed of a
+// trailing slash before it is compared; front 05 owns the helper.
+pub fn normalizePath(path: string) -> string {
+    if (path == "/") return path;
+    if (path.endsWith("/")) return sub(path, 0, path.length() - 1);
+    return path;
+}

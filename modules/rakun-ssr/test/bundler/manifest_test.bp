@@ -1,0 +1,74 @@
+// `botopink test` suite for `src/manifest.bp` (front 68 step 5) — both rows,
+// the same literals: the build host writes the manifest and the BEAM server
+// reads it back.
+
+import {bundler.manifest.ChunkRef, bundler.manifest.ClientBundleManifest, bundler.manifest.formatManifest, bundler.manifest.parseManifest, bundler.manifest.chunkFor, bundler.manifest.headScriptTags, bundler.manifest.scriptTags, bundler.manifest.sameManifest, bundler.manifest.staticUrl, bundler.manifest.emptyChunk};
+import {assertAs} from "snap";
+import {bundler.hooks.bundleRenderHooks};
+import {RenderHooks} from "rakun-bpp";
+
+fn ref(id: string, file: string, hash: string, bytes: i32) -> ChunkRef {
+    return ChunkRef(id: id, url: staticUrl("b7f2a1", file), hash: hash, bytes: bytes);
+}
+
+fn full() -> ClientBundleManifest {
+    return ClientBundleManifest(
+        version: "1",
+        buildId: "b7f2a1",
+        entry: ref("entry", "entry.9c1d40.js", "9c1d40", 2480),
+        shared: [ref("shared", "shared.41ab08.js", "41ab08", 18320)],
+        chunks: [ref("route:/blog/[slug]", "r1.7e0055.js", "7e0055", 5120), ChunkRef(id: "script:analytics", url: "/a.js", hash: "0f0f0f", bytes: 10)],
+        routes: [#("/blog/[slug]", "route:/blog/[slug]")],
+        styles: [ref("styles", "app.2b91cc.css", "2b91cc", 940)],
+        publicEnv: [#("ONZE_PUBLIC_API_URL", "https://api.example.com"), #("ONZE_PUBLIC_MOTTO", "a|b\nc")],
+    );
+}
+
+fn errorOf(r: @Result<ClientBundleManifest, string>) -> string {
+    return case r {
+        Ok(m) -> "ok";
+        Error(message) -> "error: " + message;
+    };
+}
+
+test "manifest: round trip ---- both targets, same literal, pipe escaped" {
+    val text = formatManifest(full());
+    val back = try parseManifest(text);
+    assert sameManifest(back, full());
+    assert (back.publicEnv.at(1) ?? #("", ""))._1 == "a|b\nc";
+    val withUnknown = try parseManifest(text + "Z|x|y\n");
+    assert sameManifest(withUnknown, full());
+    val v2 = errorOf(parseManifest("V|2|b7f2a1\n"));
+    try assertAs(@src(), "manifest", [text.trimEnd(), "== parseManifest(formatManifest(m)) == m", "true", "== unknown kind \"Z|x|y\" appended", "ignored", "== \"V|2|b7f2a1\"", v2].join("\n"));
+}
+
+test "manifest: a malformed record is an error naming it" {
+    assert errorOf(parseManifest("E|entry|x|y|1\n")).contains("the first record must be V");
+    assert errorOf(parseManifest("V|1|b\nE|entry|x|y|many\n")).contains("bytes is not a count");
+    assert errorOf(parseManifest("V|1|b\nR|/only\n")).contains("3 fields");
+    assert errorOf(parseManifest("")) == "error: client-manifest: no V record";
+}
+
+test "script tags: order ---- shared, route, entry after the payload" {
+    val m = full();
+    val head = headScriptTags(m);
+    val slug = scriptTags(m, "/blog/[slug]");
+    val home = scriptTags(m, "/");
+    assert head.contains("defer") == false;
+    assert slug.contains("window.__bp") == false;
+    assert (slug + head).contains("__bp0") == false;
+    try assertAs(@src(), "script tags", ["== headScriptTags", head, "== scriptTags(\"/blog/[slug]\")", slug, "== scriptTags(\"/\")", home].join("\n"));
+}
+
+test "manifest: chunkFor a route with no chunk is empty" {
+    assert chunkFor(full(), "/").url == "";
+    assert chunkFor(full(), "/blog/[slug]").hash == "7e0055";
+}
+
+test "hooks: the bundle's tags reach rakun-bpp's RenderHooks for the route" {
+    val h = bundleRenderHooks(full());
+    val body = h.bodyExtra;
+    val head = h.headExtra;
+    assert body("/blog/[slug]") == scriptTags(full(), "/blog/[slug]");
+    assert head("/") == headScriptTags(full());
+}

@@ -1,0 +1,56 @@
+//// rakun — the resolved module set (front 73 step 4, kept by front 165 s2 when the
+//// starters went). An application declares packages of this workspace; the
+//// resolved dependency list is what `conditionalOnModule` reads, and a package a
+//// declared package brings counts as resolved too.
+
+import {testing.asserts} from "std";
+import {io.fs, io.env} from "std";
+import {autoconfig_registry.resolvedModuleListIn};
+import {conditions.moduleVerdict};
+
+fn tmp() -> string {
+    val dir: string = env.read("BOTOPINK_TEST_TMPDIR") ?? "";
+    if (dir == "")
+        @panic("BOTOPINK_TEST_TMPDIR is not set - botopink test sets it");
+    return dir + "/rakun-modules";
+}
+
+#[@External.Erlang("""(fun(__P) -> ok = filelib:ensure_dir(__P), {ok, __D} = file:get_cwd(), unicode:characters_to_binary(__D) end)($0)""")]
+declare fn ensureDirCwd(file: string) -> string;
+
+// An application whose manifest declares exactly `package`, by path.
+fn appDeclaring(package: string) -> string {
+    val file = tmp() + "/" + package + "-app/botopink.json";
+    val cwd = ensureDirCwd(file);
+    val _w = fs.writeText(
+        file,
+        "{\"name\": \"app\", \"dependencies\": {\""
+            + package
+            + "\": {\"path\": \""
+            + cwd
+            + "/../../modules/"
+            + package
+            + "\"}}}",
+    );
+    return file;
+}
+
+test "modules: rakun-data alone makes conditionalOnModule(rakun-data) true" {
+    val resolved = resolvedModuleListIn(appDeclaring("rakun-data"));
+    assert moduleVerdict("M|rakun-data", resolved).ok, resolved.join(",");
+}
+
+test "modules: rakun-service alone leaves it false, and the report names the resolved list" {
+    val resolved = resolvedModuleListIn(appDeclaring("rakun-service"));
+    val v = moduleVerdict("M|rakun-data", resolved);
+    assert v.ok == false;
+    assert v.observed
+        == "resolved dependencies: " + resolved.join(","), v.observed;
+    assert v.observed.contains("rakun-service,rakun");
+}
+
+test "modules: a transitive module counts, and so does the declared package itself" {
+    val resolved = resolvedModuleListIn(appDeclaring("rakun-service"));
+    assert moduleVerdict("M|rakun", resolved).ok;
+    assert moduleVerdict("M|rakun-service", resolved).ok;
+}

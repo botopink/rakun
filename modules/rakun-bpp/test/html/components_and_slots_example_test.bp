@@ -1,0 +1,112 @@
+// specs/1.0.12-beta/08-bpp/118-bpp-components/examples/components-and-slots-example.bp,
+// landed: step 4 — a component tag is a call with its attributes as labelled
+// arguments, its content the `children` argument, `<slot />` reads it and a
+// `<slot>` body is its fallback. Rendered through `renderNode`; `small` is
+// declared here (no core builder).
+//
+// Not here, and why:
+//   - named slots (`<slot name="…">`, `slot="…"` on a child, a slot handed
+//     through two layouts) wait on decision props-e; `html` refuses both
+//     spellings (refusals/html_slot_attribute);
+//   - the props written as one inline record, `props: type(…)` (192, 207):
+//     template-built code cannot build an inline props type, so the
+//     components take their props as parameters (language-gaps.md).
+
+import {html.html.html, html.html.hasContent};
+import {element.Element, node.Node, elements.article, elements.aside, element.div, elements.footer, element.h1, elements.h2, elements.header, element.li, element.p, element.ul, elements.el, render.renderNode};
+
+fn small(children: Children, attrs: Array<#(string, string)> = []) -> Element {
+    return el("small", children, attrs);
+}
+
+// A component's props are an inline type (207): each attribute a field.
+pub fn GreetingHeadline(props: type(name: string, greeting: string = "Hello")) -> Element {
+    return html "<h2>{props.greeting}, {props.name}!</h2>";
+}
+
+pub fn ButtonGroup() -> Element {
+    return html """
+      <div>
+        <GreetingHeadline name="Partner" />
+        <GreetingHeadline greeting="Howdy" name="Partner" />
+      </div>
+    """;
+}
+
+pub fn Wrapper(heading: string, children: Node = []) -> Element {
+    return html """
+      <div id="content-wrapper">
+        <header><h1>{heading}</h1></header>
+        <slot />
+        {if (hasContent(children)) { <aside>this page has content</aside> }}
+      </div>
+    """;
+}
+
+// A slot's fallback is what the `<slot>` tag wraps.
+pub fn Footer(children: Node = []) -> Element {
+    return html "<footer><slot><small>no footer given</small></slot></footer>";
+}
+
+pub fn Page() -> Element {
+    return html """
+      <Wrapper heading="Fred's Page">
+        <h2>All about Fred</h2>
+        <p>Here is some stuff about Fred.</p>
+      </Wrapper>
+    """;
+}
+
+type Tree(label: string, kids: Array<Tree>)
+
+pub fn NestedList(items: Array<Tree>) -> Element {
+    return html """
+      <ul class="nested-list">
+        {items.map({ item ->
+          <li>
+            {item.label}
+            {if (item.kids.length > 0) { <NestedList items={item.kids} /> }}
+          </li>
+        })}
+      </ul>
+    """;
+}
+
+test "a prop left out takes the parameter's default" {
+    val markup = renderNode(ButtonGroup());
+    assert markup
+        == "<div><h2>Hello, Partner!</h2><h2>Howdy, Partner!</h2></div>";
+}
+
+test "the content of a component tag goes to its default slot" {
+    val markup = renderNode(Page());
+    assert markup.contains(
+        "<header><h1>Fred's Page</h1></header><h2>All about Fred</h2><p>Here is some stuff about Fred.</p>",
+    );
+    assert markup.contains("<aside>this page has content</aside>");
+}
+
+test "an empty slot renders its fallback" {
+    assert renderNode(html "<Footer />")
+        == "<footer><small>no footer given</small></footer>";
+    assert renderNode(html "<Footer><p>given</p></Footer>")
+        == "<footer><p>given</p></footer>";
+    assert renderNode(html """<Wrapper heading="Empty" />""").contains(
+        "<aside>",
+    )
+        == false;
+}
+
+test "a component renders itself to any depth" {
+    val tree = [
+        Tree(label: "A", kids: []),
+        Tree(
+            label: "B",
+            kids: [Tree(label: "B1", kids: []), Tree(label: "B2", kids: [])],
+        ),
+    ];
+    val markup = renderNode(NestedList(tree));
+    assert markup.contains(
+        "<li>B<ul class=\"nested-list\"><li>B1</li><li>B2</li></ul></li>",
+    );
+}

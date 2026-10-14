@@ -1,0 +1,68 @@
+//// rakun-ssr — `resolve` (front 50 step 2): the project root, its resolved
+//// `OnzeConfig` and its alias map.
+////
+//// The root is the first directory, walking up from the start, that holds a
+//// `botopink.json`. A missing `rakun-ssr.json` is not an error — `defaultConfig()`
+//// covers it, named after `botopink.json`; a malformed one is, and the error
+//// names the file. Everything downstream takes the resolved project as a
+//// value; no command reads a file twice.
+
+import {io.fs, path} from "std";
+import {config.OnzeConfig, types.AliasMap, config.loadConfig, types.loadAliases};
+
+pub type Project(root: string, config: OnzeConfig, aliases: AliasMap)
+
+// The first directory at or above `startDir` holding a `botopink.json`.
+pub fn findRoot(startDir: string) -> @Result<string, string> {
+    var dir = path.normalize(startDir);
+    var found = "";
+    var guard = 0;
+    while (found == "" && guard < 64) {
+        if (fs.exists(path.join([dir, "botopink.json"]))) found = dir;
+        val parent = path.dirname(dir);
+        if (parent == dir) guard = 64 else dir = parent;
+        guard = guard + 1;
+    }
+    if (found == "")
+        throw "no botopink.json in "
+            + startDir
+            + " or any directory above it - run rakun-ssr inside a project, or `rakun-ssr create`";
+    return found;
+}
+
+fn configError(r: @Result<OnzeConfig, string>) -> string {
+    return case r {
+        Ok(v) -> "";
+        Error(e) -> e;
+    };
+}
+
+fn aliasError(r: @Result<AliasMap, string>) -> string {
+    return case r {
+        Ok(v) -> "";
+        Error(e) -> e;
+    };
+}
+
+pub fn resolveProject(startDir: string) -> @Result<Project, string> {
+    val root = try findRoot(startDir);
+    val manifestPath = path.join([root, "botopink.json"]);
+    val manifest = try fs.readText(manifestPath);
+    val onzePath = path.join([root, "rakun-ssr.json"]);
+    val onzeText = if (fs.exists(onzePath))
+        fs.readText(onzePath).unwrapOr("{}")
+    else
+        "{}";
+    val configResult = loadConfig(manifest, onzeText);
+    if (configResult.isError()) {
+        val e = configError(configResult);
+        val at = if (e.startsWith("botopink.json")) manifestPath else onzePath;
+        throw e + " (" + at + ")";
+    }
+    val aliasResult = loadAliases(manifest);
+    if (aliasResult.isError())
+        throw aliasError(aliasResult) + " (" + manifestPath + ")";
+    val config = try configResult;
+    val aliases = try aliasResult;
+    return Project(root: root, config: config, aliases: aliases);
+}

@@ -1,0 +1,443 @@
+// rakun-bpp/router — the route snapshot a component reads.
+//
+// Promoted from `router.d.bp` (front 26 of 1.0.10-beta). The declaration file
+// gave two reasons nothing in it was promotable: `Element` had no attribute
+// slot, and client navigation lives in a host runtime. The first closed
+// (`element.bp`'s `attrs`); the second was never a reason to keep the RECORD
+// host-bound — only the navigation verbs are host calls, and they are six
+// lines at the bottom of this file.
+//
+// `RouterState` is a plain five-field record, not a behavior. A behavior with
+// `val` members has no verified implementor anywhere in this tree, and the
+// concrete record is what the `use` capability has to yield anyway.
+//
+// Field names and method names are kept DISJOINT — `params` the field,
+// `param(name)` the method — so a field read never shadows a method.
+//
+// `segments` is DERIVED from `pattern`, never transported: one value, one
+// source. A transported segment list could disagree with the pattern it came
+// from, and the disagreement would only show on the routes nobody tested.
+
+import {element.Element, element.ElementBase};
+import {encoding} from "std";
+import {table.parseTable, table.RouteEntry, match.matchPath, match.attempt, match.RouteMatch, navigation.NavKind, navigation.NavOutcome, navigation.signalFromWire} from "routing";
+import {refresh.refreshValue} from "actions";
+
+pub type RouterState(
+    path: string,
+    params: Array<#(string, string)>,
+    search: Array<#(string, string)>,
+    pattern: string,
+    selected: i32,
+) {
+    pub fn param(self: Self, name: string) -> string {
+        return pairValue(self.params, name);
+    }
+
+    pub fn searchParam(self: Self, name: string) -> string {
+        return pairValue(self.search, name);
+    }
+
+    pub fn segments(self: Self) -> Array<string> {
+        return patternSegments(self.pattern);
+    }
+
+    pub fn segment(self: Self) -> string {
+        return segmentAt(patternSegments(self.pattern), self.selected);
+    }
+}
+
+// The package's ONE pair-list decoder. Fronts 28 and 32 import it from here
+// rather than each growing a copy: three implementations of "the value of
+// `slug`, or the empty string" is three chances to disagree about a duplicate
+// key. This one answers with the FIRST match, and `router_test.bp` asserts it.
+//
+// Written as a `loop` over a typed parameter rather than
+// `pairs.find({…}).unwrapOr(#("", ""))._1`: a tuple read off a value that came
+// back through the optional binder loses its type on the erlang row — the same
+// measurement that made front 22 spell `paramOf(m, name)` and front 23
+// `chunkAt(page, i)`. `headerOfPage` in rakun's `ssr.bp` is the shape.
+pub fn pairValue(pairs: Array<#(string, string)>, name: string) -> string {
+    var found = "";
+    var seen = false;
+    for (pairs) { p ->
+        if (seen == false)
+            if (p._0 == name) {
+                found = p._1;
+                seen = true;
+            }
+    }
+    return found;
+}
+
+// The pattern's segments, root-first, with the empty parts dropped — so
+// `"/blog/[slug]"` is `["blog", "[slug]"]`. The bracket spelling is KEPT: the
+// pattern is what front 22 matched against, and rewriting it here would make
+// the two disagree about what a dynamic segment is called.
+pub fn patternSegments(pattern: string) -> Array<string> {
+    return pattern
+        .split("/")
+        .filter({ part ->
+            part != "";
+        });
+}
+
+// Read one segment by index, out of range answering `""`. A typed parameter
+// for the same reason `pairValue` is a loop: `xs.at(i).unwrapOr("")` written
+// at a call site over an array that arrived from a record field or a method
+// reads the element back UNWRAPPED on the erlang row.
+pub fn segmentAt(segments: Array<string>, index: i32) -> string {
+    var found = "";
+    var i = 0;
+    for (segments) { part ->
+        if (i == index) found = part;
+        i = i + 1;
+    }
+    return found;
+}
+
+// ── the pair codec: std's `encoding`, not a copy (decision 116 rule 4) ──────
+//
+// The two querystring-encoded snapshot values (`m`, `q`) are decoded with
+// std's `encoding.formParse` and a URL the router rewrites is written with
+// `encoding.formStringify` — the percent-aware codec rakun uses on the server,
+// so a space written as `a%20b` reads back as `a b` on both rows. The package
+// used to carry a stand-in pair codec here because `std/querystring` did not
+// run on erlang; the stand-in did not percent-decode, and decision 116 deletes
+// it. `encoding.formParse("")` is `[]`, never `[#("", "")]`.
+
+// ── step 2: the host cells and the snapshot builder ─────────────────────────
+//
+// Five reads and one write. Each read maps ONE-TO-ONE onto a key of front 23's
+// payload envelope, so the record the server builds and the record the client
+// rebuilds are built from the same five values:
+//
+//   | `RouterState` field | cell                | payload key (front 23)     |
+//   |---------------------|---------------------|----------------------------|
+//   | `path`              | `__jhRoutePath()`   | `p` — the pathname         |
+//   | `params`            | `__jhRouteParams()` | `m` — querystring-encoded  |
+//   | `search`            | `__jhRouteSearch()` | `q` — querystring-encoded  |
+//   | `pattern`           | `__jhRoutePattern()`| `r` — the matched pattern  |
+//   | `selected`          | `__jhRouteSelected()`| — per-layout, not in the payload |
+//
+// The two pair-shaped values travel querystring-encoded. No JSON, no record
+// serialization, nothing that has to agree between an Erlang term and a JS
+// object.
+//
+// EVERY cell carries BOTH targets, and the front's README says the five reads
+// are `#[@External.Erlang]` only. That is not writable: this module is compiled
+// on both rows of the core member, and an erlang-only cell reds the commonJS
+// row AT ITS CALL SITE — `` `__jhRoutePath` has no `#[@External.<Target>(…)]`
+// for the node backend `` — the moment `snapshot()` calls it. (A declared and
+// never-called cell is fine, which is why `client_runtime.bp`'s node-only
+// `clientRender` does not red the erlang row.) Measured 2026-09-21. The dual
+// form is also what the front's own mechanism needs: § *What crosses* has the
+// client rebuilding the snapshot from the payload on every transition, and it
+// cannot do that through a cell that exists only on the server.
+
+#[@External.Node("./router_runtime.mjs", "path")]
+#[@External.Erlang("jhonstart_router", "path")]
+pub declare fn __jhRoutePath() -> string;
+
+#[@External.Node("./router_runtime.mjs", "params")]
+#[@External.Erlang("jhonstart_router", "params")]
+pub declare fn __jhRouteParams() -> string;
+
+#[@External.Node("./router_runtime.mjs", "search")]
+#[@External.Erlang("jhonstart_router", "search")]
+pub declare fn __jhRouteSearch() -> string;
+
+#[@External.Node("./router_runtime.mjs", "pattern")]
+#[@External.Erlang("jhonstart_router", "pattern")]
+pub declare fn __jhRoutePattern() -> string;
+
+#[@External.Node("./router_runtime.mjs", "selected")]
+#[@External.Erlang("jhonstart_router", "selected")]
+pub declare fn __jhRouteSelected() -> i32;
+
+// The one writer. The five values go in TOGETHER because a half-updated
+// snapshot is a component reading the previous route's params against the next
+// route's pattern.
+//
+// The README has no filler: it has front 22 writing the request's process
+// dictionary before dispatch. That cannot be how it works. rakun-bpp declares
+// no dependency on rakun, rakun's member is `targets: ["commonJS"]` so it has
+// no BEAM row at all, and a server that reached into another library's process
+// dictionary keys would be coupled to them forever. So the seam is HERE and it
+// is `pub`: front 28's server adapter calls it once per request, and fronts 27
+// and 29 call it with the values the payload (`globals.payload`) carried on every client
+// transition. It is also what makes `snapshot()` assertable — the front's own
+// test plan asks for "`snapshot()` over a stubbed host module", and a stub you
+// cannot seed is a stub you cannot assert.
+#[@External.Node("./router_runtime.mjs", "fill")]
+#[@External.Erlang("jhonstart_router", "fill")]
+pub declare fn __jhRouteFill(
+    path: string,
+    params: string,
+    search: string,
+    pattern: string,
+    selected: i32,
+) -> i32;
+
+// The render's DYNAMIC mark. `searchParams()` below and front 28's `request()`
+// are the only two readers of per-request input a component has, and each sets
+// it; front 30's payload writer reads it as `d`; the render clears it when it
+// starts. A render that read neither is static, and a cache may keep it.
+#[@External.Node("./router_runtime.mjs", "markDynamic")]
+#[@External.Erlang("jhonstart_router", "mark_dynamic")]
+declare fn __jhRouteMarkDynamic() -> i32;
+
+#[@External.Node("./router_runtime.mjs", "dynamic")]
+#[@External.Erlang("jhonstart_router", "dynamic")]
+declare fn __jhRouteDynamic() -> bool;
+
+#[@External.Node("./router_runtime.mjs", "resetDynamic")]
+#[@External.Erlang("jhonstart_router", "reset_dynamic")]
+declare fn __jhRouteResetDynamic() -> i32;
+
+pub fn markDynamic() -> i32 {
+    return __jhRouteMarkDynamic();
+}
+
+pub fn renderIsDynamic() -> bool {
+    return __jhRouteDynamic();
+}
+
+pub fn resetDynamic() -> i32 {
+    return __jhRouteResetDynamic();
+}
+
+// Install a route snapshot for the render that follows. `params` and `search`
+// are querystring-encoded exactly as the payload's `m` and `q` carry them.
+// The `-> i32` is the ecosystem's shape for a host cell whose value is not
+// used; it is not a status code and callers ignore it.
+pub fn fill(
+    path: string,
+    params: string,
+    search: string,
+    pattern: string,
+    selected: i32,
+) -> i32 {
+    return __jhRouteFill(path, params, search, pattern, selected);
+}
+
+// The snapshot the render reads. No `?T` unwrap that can fail:
+// `encoding.formParse` answers `[]` for an empty string, and every cell
+// answers a total value.
+pub fn snapshot() -> RouterState {
+    return RouterState(
+        path: __jhRoutePath(),
+        params: encoding.formParse(__jhRouteParams()),
+        search: encoding.formParse(__jhRouteSearch()),
+        pattern: __jhRoutePattern(),
+        selected: __jhRouteSelected(),
+    );
+}
+
+// ── step 3: the five views, as hooks ────────────────────────────────────────
+//
+// Next.js splits route state into five hooks over one internal record
+// (`useRouter`, `usePathname`, `useParams`, `useSearchParams`,
+// `useSelectedLayoutSegment(s)`). rakun-bpp spells them as NOUNS — the keyword
+// `use` is the activation and the name is the noun (decision 88 of
+// 1.0.10-beta) — so they are `router`, `pathname`, `params`, `searchParams`,
+// `selectedLayoutSegment` and `selectedLayoutSegments`. Never `useRouter`, and
+// never the doubled `use usePathname()`.
+//
+// Each returns `@Component<T>`, which is what makes `use` legal on it
+// inside a `@Component<_>` body — the same capability
+// `hooks.bp` uses for `state`/`memo`. `use f(x)` lowers to `f(x)` on every
+// backend, so each is ALSO an ordinary call: the server render calls them
+// directly, and `test/router_test.bp` exercises the bodies that way, exactly as
+// `hooks.bp`'s own tests call `state` and `memo` without `use`.
+//
+// They are thin on purpose. Each is one read of `snapshot()` and nothing else;
+// a hook that did work of its own would be a second place for the route to be
+// interpreted.
+
+pub fn router() -> @Component<RouterState> {
+    return snapshot();
+}
+
+pub fn pathname() -> @Component<string> {
+    return snapshot().path;
+}
+
+pub fn params() -> @Component<Array<#(string, string)>> {
+    return snapshot().params;
+}
+
+// Reading the search params marks a render DYNAMIC on the server — a route
+// whose output depends on the query cannot be cached as static. This hook is
+// the ONLY way a page reaches the query: `PageContext` carries no `query`
+// field, so there is no read the mark can miss (`AGENTS.md` § *The `query`
+// hole, closed*).
+pub fn searchParams() -> @Component<Array<#(string, string)>> {
+    markDynamic();
+    return snapshot().search;
+}
+
+pub fn selectedLayoutSegment() -> @Component<string> {
+    return snapshot().segment();
+}
+
+// Root-first, because `pattern` is root-first and `segments` is derived from it
+// by dropping the empty parts — there is no reordering anywhere on the path.
+pub fn selectedLayoutSegments() -> @Component<Array<string>> {
+    return snapshot().segments();
+}
+
+// ── step 4: the navigation verbs ────────────────────────────────────────────
+//
+// botopink records are immutable and there is no assignment to a `self` field
+// anywhere in this tree, so navigation cannot be a method on `RouterState` the
+// way the 1.0.7 draft had it. It is a call against HOST state, and the record
+// is a read-only snapshot of that state. These are free functions.
+//
+// One cell carries all six, because they mean different things on each side
+// rather than the same thing twice:
+//
+//   | verb                  | erlang (during a server render) | js (in the browser)           |
+//   |-----------------------|---------------------------------|-------------------------------|
+//   | `push(href)`          | records a 307 redirect          | `history.pushState` + re-render |
+//   | `replace(href)`       | records a 307 redirect          | `history.replaceState` + re-render |
+//   | `back()` / `forward()`| no-op — no history on a server  | `history.back()` / `.forward()` |
+//   | `refresh()`           | no-op                           | re-requests the payload and re-reconciles |
+//   | `prefetch(href)`      | no-op                           | warms the client route cache (front 27) |
+//
+// `refresh()` is shared with the server-actions front: a mutation calls the
+// same re-request path, so the payload endpoint and its revalidation semantics
+// belong there and this front only names the verb.
+//
+// The `-> i32` return is the ecosystem's shape for a host cell whose value is
+// not used (`rakun/src/runtime.bp` does the same for `rkScan`/`rkEnter`/
+// `rkDone`). It is not a status code and callers ignore it.
+//
+// The front's README says `__jhNavigate` is the ONLY dual-target cell in this
+// file. It is not, and the reason is step 2's measurement, not a preference:
+// every cell here carries both targets because an erlang-only cell reds the
+// commonJS row at its call site.
+
+#[@External.Node("./router_runtime.mjs", "navigate")]
+#[@External.Erlang("jhonstart_router", "navigate")]
+declare fn __jhNavigate(kind: string, href: string) -> i32;
+
+// What the last `push`/`replace`/… recorded, as `"<kind> <href>"`, and `""`
+// when nothing has. On the server this is the redirect the dispatcher turns
+// into a 307 response; in the browser it is the last href the History API was
+// handed. It is `pub` because front 28's dispatcher has to read it — a verb
+// that records where nobody can look is a verb that does nothing.
+#[@External.Node("./router_runtime.mjs", "lastNavigation")]
+#[@External.Erlang("jhonstart_router", "last_navigation")]
+pub declare fn __jhLastNavigation() -> string;
+
+pub fn lastNavigation() -> string {
+    return __jhLastNavigation();
+}
+
+pub fn push(href: string) -> i32 {
+    return __jhNavigate("push", href);
+}
+
+pub fn replace(href: string) -> i32 {
+    return __jhNavigate("replace", href);
+}
+
+pub fn back() -> i32 {
+    return __jhNavigate("back", "");
+}
+
+pub fn forward() -> i32 {
+    return __jhNavigate("forward", "");
+}
+
+// The re-request carries the action header rakun-ssr names, with the value the
+// shared library `actions` spells (decision 116 rule 2) — the router writes
+// no `refresh` literal of its own. On the server `refresh` stays a no-op; in
+// the browser the cell hands the value to the re-request.
+pub fn refresh() -> i32 {
+    return __jhNavigate("refresh", refreshValue());
+}
+
+pub fn prefetch(href: string) -> i32 {
+    return __jhNavigate("prefetch", href);
+}
+
+// ── the envelope's navigation signal (decision 116 rule 1) ─────────────────
+//
+// An action envelope (front 67 hands it the parsed result) or the envelope a
+// `refresh()` answers carries a navigation signal in its `n` field. It is read
+// with `routing`'s `navigation.signalFromWire` — never a second copy of the
+// grammar: `""` nothing, `"N"` the nearest not-found, `"R|307|/login"` a
+// `replace` to `/login`. A malformed `n` reads as `None`, so a bad field from
+// the network cannot crash a render. A server action's `redirect` is rakun's
+// and a page's is rakun-bpp's (decision 117 rule 4); the router reads both
+// through the same codec without importing rakun.
+//
+// `navigationFor` is the pure decision — `""`, `"not-found"` or
+// `"replace <location>"` — and `applySignal` performs it through the one
+// navigation cell.
+pub fn navigationFor(wire: string) -> string {
+    val out = signalFromWire(wire);
+    return case out.kind {
+        None -> "";
+        NotFound -> "not-found";
+        Redirect -> "replace " + out.location;
+    };
+}
+
+pub fn applySignal(wire: string) -> i32 {
+    val out = signalFromWire(wire);
+    return case out.kind {
+        None -> 0;
+        NotFound -> __jhNavigate("not-found", "");
+        Redirect -> __jhNavigate("replace", out.location);
+    };
+}
+
+// ── the route a URL is, through `routing`'s matcher (decision 115) ─────────
+//
+// The client rebuilds `RouterState` after a navigation — a `popstate`, a bare
+// `pushState` the application performed, a `clientApp` start — by matching
+// the pathname against the table the payload's `t` carries. The table is read
+// with `routing`'s `parseTable` and matched with `matchPath`, the function
+// rakun's server matches with: the router has no matcher and no table parser
+// of its own, so it cannot disagree with the server about precedence.
+//
+// An unmatched pathname answers a record whose `pattern` is `""` and whose
+// params are `[]` — the caller renders the not-found boundary. The params are
+// read in pattern order through `routing`'s `attempt`, a catch-all's value
+// being its segments joined with `/`.
+pub fn resolveRoute(
+    tableWire: string,
+    path: string,
+    search: string,
+) -> RouterState {
+    var pattern = "";
+    if (matchPath(parseTable(tableWire), path)) {
+        m ->
+        pattern = matchedPattern(m);
+    }
+    var pairs: Array<#(string, string)> = [];
+    if (pattern != "") {
+        val a = attempt(pattern, path);
+        var i = 0;
+        for (a.names) { n ->
+            pairs = pairs.append([#(n, segmentAt(a.values, i))]);
+            i = i + 1;
+        }
+    }
+    return RouterState(
+        path: path,
+        params: pairs,
+        search: encoding.formParse(search),
+        pattern: pattern,
+        selected: 0,
+    );
+}
+
+// A typed parameter: a match read back through the optional binder loses its
+// type on the erlang row (`routing`'s `paramOf` carries the same note).
+fn matchedPattern(m: RouteMatch) -> string {
+    return m.entry.pattern;
+}

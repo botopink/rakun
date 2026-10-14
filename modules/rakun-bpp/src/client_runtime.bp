@@ -1,0 +1,36 @@
+//// rakun-bpp/client_runtime — the client build's hook runtime (decision 88 of
+//// 1.0.10-beta).
+////
+//// `use f(x)` lowers to `f(x)` on every backend, so a component's `state(0)`
+//// binds to whatever module `hooks` resolves to. On the server pass that is
+//// `hooks.bp` — the pure first-render bodies. In the browser the client build
+//// resolves `rakun-bpp/hooks` to `rakun-bpp/client_runtime.mjs`: the same five
+//// nouns (`state`, `effect`, `memo`, `ref`, `reducer`), the same signatures and
+//// shapes as `hooks.bp`, over rakun-bpp's own minimal render loop — cursor-
+//// indexed cells, `set`/`dispatch` schedule a re-render, effects run after
+//// commit when their `deps` change. The substitution is the client bundler's
+//// step (front 68); under node it is a `require.cache` seed before the built
+//// program loads — `examples/jhonstart-counter/client.mjs` runs `Counter` that
+//// way. Outside a render every cell yields the first-render value, so the
+//// module is a drop-in for `hooks` even when called plainly.
+////
+//// The five nouns are NOT re-declared here: a package's import surface is
+//// flat, and a second `state` in the tree shadows `hooks.state` for every
+//// `import { state } from "rakun-bpp"` (last module wins, silently — even from
+//// a non-`pub` `mod`). The one cell below is the driver, and its
+//// `./client_runtime.mjs` require is what makes the CLI ship the sidecar next
+//// to every emitted module (G2). It is `#[@External.Node]` only and never
+//// called from erlang, so the erlang emit carries it as an unresolved external
+//// it never reaches.
+
+import {element.Element};
+
+// Runs `component` under the loop and hands every committed tree to `commit`;
+// a `set`/`dispatch` re-runs the component and commits again. The handle the
+// host returns (`cells`, `flush`, `dispose`) is the runtime's own — a driver's
+// seam, read from JavaScript.
+#[@External.Node("./client_runtime.mjs", "render")]
+pub declare fn clientRender(
+    component: fn() -> Element,
+    commit: fn(tree: Element),
+) -> i32;

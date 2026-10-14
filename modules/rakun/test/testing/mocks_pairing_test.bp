@@ -1,0 +1,82 @@
+//// The `@MockBean` pairing (front 19 step 7): a mocked `behavior` is the
+//// injected implementation of a controller's dependency, and `verify` sees the
+//// call the dispatched request made.
+////
+//// `#[mock]` fires only inside std's `mocks.bp` (its emitted body writes bare
+//// names that do not resolve in a consumer — `libs/std/src/testing/mocks.bp`),
+//// so the double is written by hand over the qualified runtime; `#[bean]`
+//// makes it the injected `UserRepo`. rakun ships no mocking code.
+
+import {testing.mocks} from "std";
+import {decorators.service, decorators.restController, decorators.route, decorators.getMapping, decorators.configuration, decorators.bean};
+import {runtime.rkScan, runtime.rkSingleton, runtime.rkEnter, runtime.rkDone, runtime.rkRegisterRoute};
+import {http.Request, http.Response, http.HttpMethod};
+import {testing.fake_request.FakeRequest, testing.fake_request.fakeGet};
+import {testing.mockmvc.MockMvc};
+import {testing.assertions.expectStatus, testing.assertions.expectBodyEquals};
+import {collections.Dict} from "std";
+import {context.rkResolve, context.rkAddBean, context.rkInstallBeans, context.rkRegisterBean};
+
+fn beans() -> Dict<string, unknown> {
+    return comptime {
+        var d: Dict<string, unknown> = Dict.empty();
+        for (@TypeInfo.all(with: [service, restController, configuration], member: "make")) { b ->
+            d = rkAddBean(d, b.name, b.value);
+        }
+        d
+    };
+}
+
+pub behavior UserRepo {
+    fn find(self: Self, id: string) -> string;
+}
+
+type MockUserRepo(mockId: string) implement UserRepo {
+    fn find(self: Self, id: string) -> string {
+        return mocks.invoke(self.mockId, "find", [mocks.key(id)], "");
+    }
+}
+
+#[configuration]
+pub type TestWiring() {
+    #[bean]
+    pub fn userRepo(self: Self) -> UserRepo {
+        return MockUserRepo(mockId: mocks.newMock());
+    }
+}
+
+#[service]
+pub type UserService(repo: UserRepo) {
+    pub fn describe(self: Self, id: string) -> string {
+        return self.repo.find(id);
+    }
+}
+
+#[restController]
+#[route("/pair/users")]
+pub type UserController(users: UserService) {
+    #[getMapping("/:id")]
+    pub fn show(self: Self, req: Request) -> Response {
+        val found = self.users.describe(req.param("id"));
+        return if (found == "") Response.notFound() else Response.ok(found);
+    }
+}
+
+test "rakun: a mocked behavior injected by #[bean] answers the dispatched request" {
+    val _beans = rkInstallBeans(beans());
+    val repo: UserRepo = rkResolve("UserRepo");
+    val _s = mocks.when(repo.find(mocks.eq("7"))).thenReturn("ana");
+    val res = MockMvc.standalone().perform(fakeGet("/pair/users/7"));
+    assert expectStatus(res, 200);
+    assert expectBodyEquals(res, "ana");
+    val _v = mocks.verify(repo, mocks.times(1)).find(mocks.eq("7"));
+}
+
+test "rakun: the injected mock is the one the test stubs, and an unstubbed id is a 404" {
+    val _beans = rkInstallBeans(beans());
+    val repo: UserRepo = rkResolve("UserRepo");
+    val res = MockMvc.standalone().perform(fakeGet("/pair/users/99"));
+    assert expectStatus(res, 404);
+    val _v = mocks.verify(repo, mocks.times(1)).find(mocks.eq("99"));
+    val _n = mocks.verify(repo, mocks.never()).find(mocks.eq("100"));
+}

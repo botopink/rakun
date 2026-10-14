@@ -1,6 +1,6 @@
 # web_tls
 
-The reference text this cell shows (from `conformance/docs.md`, § The web layer's side (`from "rakun-web"`)):
+The reference text this cell shows (from `conformance/docs.md`, § The web layer's side (`from "rakun-service"`)):
 
 > - `rakun.server.ssl.bundle` names the listener's bundle and
 >   `rakun.management.ssl.bundle` front 76's. A key naming a bundle nobody

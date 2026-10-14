@@ -1,37 +1,37 @@
-//// onze-server — the rakun half of the boot (front 49 step 4, decisions
+//// rakun-ssr — the rakun half of the boot (front 49 step 4, decisions
 //// 113–117; the member split is decision pending 49-e).
 ////
-//// The core's `integration.bp` builds jhonstart's app (the emilia bridge,
+//// The core's `integration.bp` builds rakun-bpp's app (the emilia bridge,
 //// the redirect allow-list, the wire names, the bundle tags) and the
 //// `rakun.*` entries on both rows; this module hands them to rakun, which
 //// is erlang-only (decision 117):
 ////
 ////   rakun.*        every entry of `rakunEntries` into rakun's property table
-////   pages          jhonstart's UI table copied into rakun's: every record
+////   pages          rakun-bpp's UI table copied into rakun's: every record
 ////                  but a page stored as written, every page through rakun's
 ////                  `page(pattern, render)` — one opaque `PageRenderer` each
 ////   the renderer   `RequestData` from rakun's `Request`, the segment chain
 ////                  over the ancestor patterns rakun's layout chain names plus
-////                  the page's own, and jhonstart's `Response` over rakun's
+////                  the page's own, and rakun-bpp's `Response` over rakun's
 ////                  `ChunkWriter`, `status` / `header` / `write` / `close`
 ////                  onto `setStatus` / `setHeader` / `write` / `close`
-////   static roots   onze-assets' roots through rakun-web front 82's
+////   static roots   rakun-ssr' roots through rakun-service front 82's
 ////                  `registerStaticRoot` (the fingerprinted one; the public
 ////                  one waits on 69-b)
 ////   the listener   `Rakun.run(App(port, basePath))`, basePath unchanged
 ////
-//// Navigation signals never reach this module: jhonstart's render answers
+//// Navigation signals never reach this module: rakun-bpp's render answers
 //// them through the `Response` (decision 117). Nothing here imports
 //// `routing`, spells an action wire name or calls emilia.
 
 import {io.fs, path, encoding} from "std";
 import {Rakun, App, Request, HttpMethod, rkSetProp, rkProp, cookieNames, cookieLookup} from "rakun";
 import {ChunkWriter, PageRenderer, page as rakunPage, writeTo, setStatusOn, setHeaderOn, closeOut, servePages, matchPage, PageMatch, appLayoutChain, rkAppStoreEntry} from "rakun-app";
-import {StaticRoot, registerStaticRoot, installStatic, bootWeb} from "rakun-web";
-import {Response, RequestData, PageContext, PageInput, Element, ElementBase, uiTable, pageFor} from "jhonstart";
-import {OnzeConfig, SiteRender, bootSite, siteRender, rakunEntries, responseOver, pageInput} from "onze";
-import {ClientBundleManifest, parseManifest} from "onze-bundler";
-import {AssetRoot, staticRoots, pageRenderHooks} from "onze-assets";
+import {StaticRoot, registerStaticRoot, installStatic, bootWeb} from "rakun-service";
+import {Response, RequestData, PageContext, PageInput, Element, ElementBase, uiTable, pageFor} from "rakun-bpp";
+import {OnzeConfig, SiteRender, bootSite, siteRender, rakunEntries, responseOver, pageInput} from "rakun-ssr";
+import {ClientBundleManifest, parseManifest} from "rakun-ssr";
+import {AssetRoot, staticRoots, pageRenderHooks} from "rakun-ssr";
 
 // ── the request ─────────────────────────────────────────────────────────────
 
@@ -62,7 +62,7 @@ pub fn cookiePairs(header: string) -> Array<#(string, string)> {
     return cookieNames(header).map({ n -> #(n, cookieLookup(header, n)) });
 }
 
-// jhonstart's `RequestData` from rakun's `Request`. rakun's page `Request`
+// rakun-bpp's `RequestData` from rakun's `Request`. rakun's page `Request`
 // exposes its path parameters (through `matchPage`) and one header by name;
 // it enumerates neither its query nor its headers, so `query` and `headers`
 // are empty and `cookies` are read from the `cookie` header (status row
@@ -89,7 +89,7 @@ fn headerOn(out: ChunkWriter, name: string, value: string) -> void {
     val _h = setHeaderOn(out, name, value);
 }
 
-// jhonstart's `Response` over rakun's `ChunkWriter`, one door to one door.
+// rakun-bpp's `Response` over rakun's `ChunkWriter`, one door to one door.
 pub fn responseFor(out: ChunkWriter) -> Response {
     return responseOver({ code -> statusOn(out, code) }, { name, value -> headerOn(out, name, value) }, { chunk -> writeTo(out, chunk) }, { -> closeOut(out) });
 }
@@ -106,7 +106,9 @@ pub fn chainPatterns(pattern: string) -> string[] {
 }
 
 fn missingPage(route: PageContext) -> @Component<Element> {
-    @panic("onze: no jhonstart page is registered at `" + route.pattern + "`");
+    @panic("rakun-ssr: no rakun-bpp page is registered at `"
+        + route.pattern
+        + "`");
 }
 
 fn renderPage(render: SiteRender, build: string, table: string, pattern: string, req: Request, out: ChunkWriter) -> @Task<@Result<void, string>> {
@@ -118,13 +120,13 @@ fn renderPage(render: SiteRender, build: string, table: string, pattern: string,
     return outcome;
 }
 
-// The renderer rakun holds for `pattern`: opaque to rakun, jhonstart's render
+// The renderer rakun holds for `pattern`: opaque to rakun, rakun-bpp's render
 // inside.
 pub fn rendererFor(render: SiteRender, build: string, table: string, pattern: string) -> PageRenderer {
     return { req, out -> renderPage(render, build, table, pattern, req, out) };
 }
 
-// jhonstart's UI records, as `#(kind, pattern, line)` — the kind and the
+// rakun-bpp's UI records, as `#(kind, pattern, line)` — the kind and the
 // pattern are the first two fields of a contract-1 line.
 pub fn uiRecords(table: string) -> Array<#(string, string, string)> {
     var out: Array<#(string, string, string)> = [];
@@ -136,7 +138,7 @@ pub fn uiRecords(table: string) -> Array<#(string, string, string)> {
     return out;
 }
 
-// Copies jhonstart's UI table into rakun's and registers one renderer per
+// Copies rakun-bpp's UI table into rakun's and registers one renderer per
 // page; answers the number of pages.
 pub fn registerPages(render: SiteRender, build: string) -> i32 {
     val table = uiTable();
@@ -160,7 +162,7 @@ pub fn applyEntries(entries: Array<#(string, string)>) -> i32 {
     return entries.length;
 }
 
-// onze-assets' record as rakun-web front 82's, field for field; a root
+// rakun-ssr' record as rakun-service front 82's, field for field; a root
 // serves no directory index, validates no `Last-Modified` and has no
 // precompressed variants.
 pub fn staticRootOf(r: AssetRoot) -> StaticRoot {
@@ -193,11 +195,13 @@ pub fn readBuild(outDir: string) -> @Result<BuildOutput, string> {
     val idFile = path.join([outDir, "build-id"]);
     val manifestFile = path.join([outDir, "client-manifest.txt"]);
     if (fs.exists(idFile) == false)
-        throw "onze: " + idFile + " does not exist - run `onze build` first";
+        throw "rakun-ssr: "
+            + idFile
+            + " does not exist - run `rakun-ssr build` first";
     if (fs.exists(manifestFile) == false)
-        throw "onze: "
+        throw "rakun-ssr: "
             + manifestFile
-            + " does not exist - run `onze build` first";
+            + " does not exist - run `rakun-ssr build` first";
     val id = try fs.readText(idFile);
     val text = try fs.readText(manifestFile);
     val m = try parseManifest(text);
@@ -211,7 +215,7 @@ fn configuredExclude() -> string[] {
 }
 
 // Everything but the listener: the entries, the app, the pages, the roots
-// (rakun-web's static entry in its chain, and the chain handed to the
+// (rakun-service's static entry in its chain, and the chain handed to the
 // listener by `bootWeb`), the page path. Answers the number of pages
 // registered.
 pub fn bootServer(config: OnzeConfig, build: BuildOutput) -> i32 {
@@ -226,13 +230,13 @@ pub fn bootServer(config: OnzeConfig, build: BuildOutput) -> i32 {
 }
 
 // rakun's `App` for the project: the port, and `basePath` exactly as
-// configured — prefixing is rakun's, onze does not reimplement it.
+// configured — prefixing is rakun's, rakun-ssr does not reimplement it.
 pub fn rakunApp(config: OnzeConfig) -> App {
     return App(port: config.port, basePath: config.basePath);
 }
 
 pub type Onze() {
-    // Boots the project `onze build` wrote into `config.outDir` and listens on
+    // Boots the project `rakun-ssr build` wrote into `config.outDir` and listens on
     // `config.port`. A missing build is a failure naming the file.
     pub fn run(config: OnzeConfig) {
         val build = case readBuild(config.outDir) {

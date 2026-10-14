@@ -1,0 +1,134 @@
+//// blog/lib/db — the post store (front 53 step 1).
+////
+//// Posts are text files under `content/posts/<slug>.md`: line 1 is the
+//// title, line 2 the publication date (ISO, so text order is date order),
+//// the rest is the body. No database on purpose — front 08 is not on this
+//// milestone's critical path, and a file is a mutation target with the same
+//// cache-invalidation problem a row has. Blocking, not `@Task`: on the BEAM a
+//// render is a process, so a loader need not return a future to be
+//// concurrent.
+////
+//// front 12 — every read is meant to go through rakun-cache's `"posts"` tag;
+//// `modules/rakun-cache` holds no cache surface yet, so the reads are direct
+//// and `readCount()` is the seam step 3's "a prerendered post is served
+//// without invoking the page fn" counts.
+////
+//// Server-only: front 68 fails the build if a `#[client]` module imports it.
+
+import {path, io.fs} from "std";
+import {serverOnly} from "rakun-bpp";
+
+pub type Post(
+    slug: string,
+    title: string,
+    published: string,
+    excerpt: string,
+    body: string,
+)
+
+// The directory the app's posts live in, relative to the project root.
+pub fn postsDir() -> string {
+    return path.join(["content", "posts"]);
+}
+
+#[@External.Node("""((globalThis.__blogReads = (globalThis.__blogReads || 0) + 1), 0)""")]
+#[@External.Erlang("""(fun() -> persistent_term:put(blog_reads, persistent_term:get(blog_reads, 0) + 1), 0 end)()""")]
+declare fn countRead() -> i32;
+
+#[@External.Node("""(globalThis.__blogReads || 0)""")]
+#[@External.Erlang("""persistent_term:get(blog_reads, 0)""")]
+declare fn reads() -> i32;
+
+// How many post files the store has read since the process started.
+pub fn readCount() -> i32 {
+    return reads();
+}
+
+fn slugOf(fileName: string) -> string {
+    return fileName.slice(0, fileName.length() - 3);
+}
+
+// `.at(i)` / `.drop(n)`, never `xs[i]` (`language-gaps.md`: the index is
+// dropped on the beam backend).
+pub fn parsePost(slug: string, raw: string) -> Post {
+    val lines = raw.split("\n");
+    val title = lines.at(0) ?? "(untitled)";
+    val published = lines.at(1) ?? "";
+    val body = lines.drop(2).join("\n").trimEnd();
+    val firstLine = body.split("\n").at(0) ?? "";
+    return Post(slug: slug, title: title, published: published, excerpt: firstLine, body: body);
+}
+
+fn newestFirst(posts: Post[]) -> Post[] {
+    var out: Post[] = [];
+    for (posts) { p ->
+        var placed = false;
+        var next: Post[] = [];
+        for (out) { q ->
+            val before = placed == false && p.published > q.published;
+            if (before) {
+                next.push(p);
+                placed = true;
+            }
+            next.push(q);
+        }
+        if (placed == false) next.push(p);
+        out = next;
+    }
+    return out;
+}
+
+fn readOne(dir: string, name: string) -> @Result<Post, string> {
+    countRead();
+    val raw = try fs.readText(path.join([dir, name]));
+    return parsePost(slugOf(name), raw);
+}
+
+// Every post under `dir`, newest first.
+pub fn listPostsIn(dir: string) -> @Result<Post[], string> {
+    val names = try fs.list(dir);
+    var posts: Post[] = [];
+    for (names.filter({ n -> n.endsWith(".md") })) { n ->
+        posts.push(try readOne(dir, n));
+    }
+    return newestFirst(posts);
+}
+
+pub fn listPosts() -> Post[] {
+    return listPostsIn(postsDir()).unwrapOr([]);
+}
+
+// The post `slug` under `dir`; an `Error` naming the slug when there is none.
+pub fn readPostIn(dir: string, slug: string) -> @Result<Post, string> {
+    val file = slug + ".md";
+    if (fs.exists(path.join([dir, file])) == false)
+        throw "no post \"" + slug + "\" under " + dir;
+    return try readOne(dir, file);
+}
+
+pub fn readPost(slug: string) -> @Result<Post, string> {
+    return try readPostIn(postsDir(), slug);
+}
+
+// The file text of a post: the inverse of `parsePost`.
+pub fn postText(p: Post) -> string {
+    return [p.title, p.published, p.body].join("\n") + "\n";
+}
+
+// Write `p` under `dir` as `<slug>.md`; a slug that is not `[a-z0-9-]+` is
+// refused, so a write never leaves the directory.
+pub fn writePostIn(dir: string, p: Post) -> @Result<void, string> {
+    val bad = p.slug == ""
+        || p.slug
+            .split("")
+            .any({ c -> "abcdefghijklmnopqrstuvwxyz0123456789-".contains(c) == false });
+    if (bad) throw "a post slug is [a-z0-9-]+, not \"" + p.slug + "\"";
+    val written = try fs.writeText(path.join([dir, p.slug
+        + ".md"]), postText(p));
+    return;
+}
+
+pub fn writePost(p: Post) -> @Result<void, string> {
+    try writePostIn(postsDir(), p);
+    return;
+}

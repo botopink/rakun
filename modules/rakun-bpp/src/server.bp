@@ -1,0 +1,325 @@
+// rakun-bpp/server — the request as a record, and the server-component
+// convention.
+//
+// Promoted from `server.d.bp` (front 28 of 1.0.10-beta). The declaration file
+// listed three blockers and all three are answered rather than carried:
+//
+//   - "the async SSR data layer … is gated on the effect-await surface" is
+//     CLOSED. `fn … -> @Task<T>` with a statement-level `await` compiles and
+//     RUNS on both rows, `test` blocks included — measured here, not assumed,
+//     and every `@Task` assertion in `test/server_test.bp` executes on the
+//     erlang row.
+//   - "`request()` is host-bound" stays true, and the host half ships WITH the
+//     module, cell for cell on both rows, exactly as front 26's router does.
+//   - "`Http` is a phantom `@Context` base (no members)" is DROPPED, along with
+//     the `Request` behavior. `request()` is a hook anchored at `ElementBase`
+//     (decisions 104/128 of 1.0.10-beta), so one base serves the whole render
+//     tree; a second, memberless base would be a base nothing implements. `AGENTS.md` § *The `Http` base, and why it is gone*
+//     carries the reasoning.
+//
+// ── Two things about this file that are NOT the front's README ──────────────
+//
+// 1. The six cells carry BOTH targets and name `jhonstart_server`, not
+//    `rakun_request_context`.
+//
+//    The README binds them to front 62's erlang module. That is not writable,
+//    and the reason is a measurement in each direction:
+//
+//      - An erlang-only cell reds the **commonJS compile** at its call site the
+//        moment `request()` calls it — `` `__jhReqMethod` has no
+//        `#[@External.<Target>(…)]` for the node backend `` — and this module is
+//        compiled on both rows of the core member, so the whole member (51
+//        landed assertions) stops compiling. Front 26 measured the same thing
+//        for the router's five reads and carries the same note.
+//      - `rakun_request_context` has no BEAM existence to bind to. rakun's
+//        member is `targets: ["commonJS"]`, so on the erlang row — this front's
+//        assigned target — every cell would answer `{error,undef}` at runtime
+//        and no assertion that reads the request could RUN. Measured 2026-09-21
+//        against compiler `2e6bb4ac`.
+//
+//    So the seam is HERE and it is `pub`, which is the conclusion front 26
+//    already reached for the route snapshot and wrote down: a server that
+//    reached into another library's process dictionary keys would be coupled to
+//    them forever. `enterRequest(req)` is the one writer and `leaveRequest()`
+//    its pair; front 30's render calls both, once per render, with the
+//    `RequestData` rakun-ssr handed it (decision 114 item 8).
+//
+// 2. The four pair-shaped values are stored `encoding.formStringify`-encoded
+//    and read back with `encoding.formParse` — std's percent-aware codec, the
+//    one rakun uses on the server (decision 116 rule 4). A cookie or query
+//    value carrying `%20` reads as a space here exactly as it does in rakun.
+
+// ── `@Task` is EAGER on erlang, and that changes how a page is written ───────
+//
+// `libs/std/src/http.bp:16-18` states it: Erlang is eager, a `@Task<T>`
+// resolves to `T`, so the caller's `await` is identity on that
+// backend (botopink decision 120). Two `@Task` loaders do NOT run in parallel
+// because they are Tasks — they run in the order the body reaches them, and the
+// page costs the SUM of its loaders.
+//
+// So a page with INDEPENDENT loaders does not await them one after another and
+// hope. Parallel loading on the BEAM is a spawned process per unit of work,
+// gathered by index, it takes **unstarted tasks** (`Array<fn() -> @Task<T>>`,
+// i.e. `[{ -> loadPost(slug) }, { -> loadSidebar() }]`) rather than Tasks that
+// have already run, and it is **front 02's**. This file ships no `awaitAll`,
+// no `race` and no `allSettled`, and `conformance/docs.md` § *Server components* says who
+// owns them.
+//
+// ── Where an `await` may stand ──────────────────────────────────────────────
+//
+// At statement level in a `@Task` / `@Component` body, and nowhere else. Never as the
+// last statement of a lambda: `§2.38` makes a lambda's last statement an
+// implicit-return expression and no file in this tree awaits inside one. A
+// component that needs N rows awaits ONE loader returning `Array<T>` and maps
+// synchronously afterwards — not N awaits inside a `map`.
+//
+// ── Escaping is not this file's ─────────────────────────────────────────────
+//
+// `renderToString` writes `e.value` and every attribute value straight into the
+// output (`element.bp:56`, `:63-65`) and neither escapes. A server component
+// renders attacker-influenced text, so every such value goes through std's
+// `escape.html` / `escape.attribute` — front 30's `renderNode` calls them for
+// every text node and attribute, and a component that builds a string for
+// markup by hand calls them at the point the value enters the tree. This file
+// hand-rolls no escaping and re-exports none.
+
+import {element.Element, element.ElementBase, element.renderToString};
+import {router.pairValue, router.markDynamic};
+import {encoding} from "std";
+
+// ── step 1: the request as a record ─────────────────────────────────────────
+//
+// Six fields, every plural one an `Array<#(string, string)>` — the shape front
+// 26's snapshot uses, the shape `encoding.formParse` produces and the shape
+// `Element.attrs` takes, so a value read off the request is handed straight to
+// an attribute with no conversion. No `Dict`: naming `dict.Dict<string, string>`
+// as a type across a module boundary is unexercised anywhere in this tree, and
+// the pair list is what actually crosses the wire.
+//
+// There is no `body` field, and its absence is a decision rather than an
+// omission: a render never reads one. Form bodies are front 24's and
+// route-handler bodies are front 25's.
+//
+// Field names and method names are kept DISJOINT, the same rule `RouterState`
+// follows — `params` the field, `param(name)` the method, `query` the field,
+// `queryParam(name)` the method — so a field read never shadows a method.
+pub type RequestData(
+    method: string,
+    path: string,
+    params: Array<#(string, string)>,
+    query: Array<#(string, string)>,
+    headers: Array<#(string, string)>,
+    cookies: Array<#(string, string)>,
+) {
+    // Every accessor answers a plain `string`, `""` when absent, and never
+    // raises. That is the ecosystem's decided shape and not laziness: rakun's
+    // `Request` does exactly this (`repository/rakun/src/http.bp:30-34`). An
+    // optional would force `.unwrapOr` at every call site in every page, and
+    // `?T` handling is where the old drafts of this front went wrong.
+    pub fn param(self: Self, name: string) -> string {
+        return pairValue(self.params, name);
+    }
+
+    pub fn queryParam(self: Self, name: string) -> string {
+        return pairValue(self.query, name);
+    }
+
+    pub fn header(self: Self, name: string) -> string {
+        return pairValue(self.headers, name);
+    }
+
+    pub fn cookie(self: Self, name: string) -> string {
+        return pairValue(self.cookies, name);
+    }
+}
+
+// ── step 2: the host cells and the request builder ──────────────────────────
+//
+// Six reads and one write, dual-target for the reason at the top of this file.
+// `src/sidecars/jhonstart_server.erl` and `src/server_runtime.mjs` are the two
+// halves, cell for cell, so `test/server_test.bp` is ONE set of assertions run
+// on both rows.
+//
+// The four pair-shaped values travel querystring-encoded (`k=v&k=v`), the same
+// encoding front 26's `m`/`q` use and the same encoding front 23's payload
+// carries. No JSON, no record serialization, nothing that has to agree between
+// an Erlang term and a JS object.
+
+#[@External.Node("./server_runtime.mjs", "method")]
+#[@External.Erlang("jhonstart_server", "method")]
+declare fn __jhReqMethod() -> string;
+
+#[@External.Node("./server_runtime.mjs", "path")]
+#[@External.Erlang("jhonstart_server", "path")]
+declare fn __jhReqPath() -> string;
+
+#[@External.Node("./server_runtime.mjs", "params")]
+#[@External.Erlang("jhonstart_server", "params")]
+declare fn __jhReqParams() -> string;
+
+#[@External.Node("./server_runtime.mjs", "query")]
+#[@External.Erlang("jhonstart_server", "query")]
+declare fn __jhReqQuery() -> string;
+
+#[@External.Node("./server_runtime.mjs", "headers")]
+#[@External.Erlang("jhonstart_server", "headers")]
+declare fn __jhReqHeaders() -> string;
+
+#[@External.Node("./server_runtime.mjs", "cookies")]
+#[@External.Erlang("jhonstart_server", "cookies")]
+declare fn __jhReqCookies() -> string;
+
+// The writer pair, and the seam front 30's render calls once per render with
+// the `RequestData` rakun-ssr handed it (decision 114 item 8). Outside `server.bp`
+// and front 30's `render.bp` nothing in `src/` calls either.
+//
+// Six values in TOGETHER, never one at a time, for the reason front 26's `fill`
+// gives about the route: a half-updated request is a component reading the
+// previous reader's cookie against this reader's path.
+//
+// Note that this is NOT front 26's `fill` under another name and the two stores
+// stay separate on purpose. A route snapshot is re-filled DURING a render — its
+// `selected` is the layout depth and changes per layout — while a request is
+// entered once and is constant for the whole render. Folding them together
+// would make "the request" mutate mid-page.
+//
+// The `-> i32` is the ecosystem's shape for a host cell whose value is not used
+// (`router.bp`'s `__jhRouteFill`, `rakun/src/runtime.bp`'s `rkScan`). It is not
+// a status code and callers ignore it.
+#[@External.Node("./server_runtime.mjs", "enter")]
+#[@External.Erlang("jhonstart_server", "enter")]
+declare fn __jhReqEnter(
+    method: string,
+    path: string,
+    params: string,
+    query: string,
+    headers: string,
+    cookies: string,
+) -> i32;
+
+#[@External.Node("./server_runtime.mjs", "leave")]
+#[@External.Erlang("jhonstart_server", "leave")]
+declare fn __jhReqLeave() -> i32;
+
+// `1` between an `enterRequest` and its `leaveRequest`, `0` otherwise.
+#[@External.Node("./server_runtime.mjs", "entered")]
+#[@External.Erlang("jhonstart_server", "entered")]
+declare fn __jhReqEntered() -> i32;
+
+// Enter the request for the render that follows: the four pair lists go in
+// `encoding.formStringify`-encoded, the form the cells store.
+pub fn enterRequest(req: RequestData) -> i32 {
+    return __jhReqEnter(
+        req.method,
+        req.path,
+        encoding.formStringify(req.params),
+        encoding.formStringify(req.query),
+        encoding.formStringify(req.headers),
+        encoding.formStringify(req.cookies),
+    );
+}
+
+// Leave it: the store is emptied, and a `request()` / `cookies()` /
+// `headers()` read afterwards raises — a component that reads the request
+// outside a render is a component reading the previous reader's cookie.
+pub fn leaveRequest() -> i32 {
+    return __jhReqLeave();
+}
+
+fn requireEntered(reader: string) -> i32 {
+    assert __jhReqEntered() == 1, "rakun-bpp: "
+        + reader
+        + " read outside a render — the request is entered by the render (enterRequest) and left when it ends";
+    return 1;
+}
+
+// The request the render reads. No `?T` unwrap that can fail:
+// `encoding.formParse` answers `[]` for an empty string and every cell answers
+// a total value. Read OUTSIDE a render — before `enterRequest` or after
+// `leaveRequest` — it raises: there is no request to read, and an empty one
+// would be a silent wrong answer. A component that must render with no host
+// takes a `RequestData` as a parameter instead.
+//
+// A hook (decisions 104/128 of 1.0.10-beta): `val r = use request()` in a
+// server component — `fn … -> @Component<Element>`, which may
+// also `await` because `@Component` extends `@Task`. Called without `use` it
+// answers the same `@Component` (a Promise on commonJS), so a `@Task` body or a
+// test `await`s it. It cannot fail, so its `T` is not a `@Result`.
+//
+// Reading the request marks the render DYNAMIC (router.bp's `markDynamic`):
+// its output depends on this reader's headers, cookies or query, so a cache
+// may not keep it as static.
+pub fn request() -> @Component<RequestData> {
+    requireEntered("request()");
+    markDynamic();
+    return RequestData(
+        method: __jhReqMethod(),
+        path: __jhReqPath(),
+        params: encoding.formParse(__jhReqParams()),
+        query: encoding.formParse(__jhReqQuery()),
+        headers: encoding.formParse(__jhReqHeaders()),
+        cookies: encoding.formParse(__jhReqCookies()),
+    );
+}
+
+// The only two re-exported shortcuts, because they are the two Next.js names a
+// page reaches for without wanting the whole request. `after`, `connection`,
+// `draftMode` and per-request memoization are front 62's and are called from
+// there directly — re-declaring them here would be a second place for request
+// scope to be defined.
+pub fn cookies() -> Array<#(string, string)> {
+    requireEntered("cookies()");
+    return encoding.formParse(__jhReqCookies());
+}
+
+pub fn headers() -> Array<#(string, string)> {
+    requireEntered("headers()");
+    return encoding.formParse(__jhReqHeaders());
+}
+
+// ── step 3: the server-component convention ─────────────────────────────────
+//
+// A server component is a `pub fn` taking its route params and returning
+// `@Task<Element>`. There is no decorator for it and there will not be one: the
+// marker is the return type itself (botopink decision 118 — the return is the
+// annotation), and the language ENFORCES it: a body that `await`s under a
+// return that is not a `@Task` (or above) is `effect-await-without-task`, and a
+// second marker would be a second thing to get wrong. A server component that
+// also activates a hook is `fn … -> @Component<Element>` (decision
+// 128: `@Task` grants no `use`, and `@Component` extends `@Task`, so that one
+// return grants `use` and `await` both); `renderComponent` renders its thunk.
+//
+// Neither return is a `@Result`, so a component cannot propagate a failed load
+// with `try` (decision 121): it handles the error in its own body — `try … catch`,
+// `case`, or an error screen. A loader that can fail returns
+// `@Task<@Result<T, E>>` and the component writes `try await load(…) catch …`.
+//
+// The parameter is `fn() -> @Task<Element>` — an UNSTARTED thunk, not an
+// already-running `@Task<Element>`. That is the same shape front 02's
+// spawn-and-gather takes, so a page that grows a second loader moves from
+// `renderServerComponent({ -> Page(params) })` to front 02 without changing what
+// it hands anybody.
+//
+// **Call it with a lambda, never with a bare function name.** `{ -> Page(ps) }`
+// is green on both rows; `renderServerComponent(Page)` compiles on commonJS and
+// fails `variable 'Page' is unbound` on erlang — a compiler defect measured
+// against `2e6bb4ac` and reported, not worked around. It is the same rule
+// rakun's front 23 records for the fields of its `ElementView`.
+pub fn renderServerComponent(
+    component: fn() -> @Task<Element>,
+) -> @Task<string> {
+    val tree = await component();
+    return renderToString(tree);
+}
+
+// A server component that activates a hook is `fn … ->
+// @Component<Element>` (decision 128 of botopink 1.0.10-beta: only a
+// `@Component` return grants `use`, and `@Component` extends `@Task`, so the same
+// body may `await` too). Its thunk is rendered here, as `renderServerComponent`
+// renders a `@Task` one.
+pub fn renderComponent(
+    component: fn() -> @Component<Element>,
+) -> @Task<string> {
+    val tree = await component();
+    return renderToString(tree);
+}

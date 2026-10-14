@@ -1,0 +1,177 @@
+// `botopink test` suite for rakun-ssr (front 70) — erlang, the member's row.
+
+import {og.card_style.Style, og.card_style.parseStyle, og.card_style.unsupportedProperties, og.card_style.malformedDeclarations, og.card_style.describeStyle, og.card_style.supportedProperties, og.card_style.refusedProperties};
+import {og.metrics.FontMetrics, og.metrics.parseMetrics, og.metrics.advanceOf, og.metrics.measure};
+import {og.layout.LayoutBox, og.layout.ImageSize, og.layout.layout, og.layout.wrapText, og.layout.describeLayout};
+import {og.svg.FontRef, og.svg.toSvg, og.svg.gradientOf};
+import {og.raster.Rasterizer, og.raster.requireRasterizer, og.raster.rasterize, og.raster.noRasterizer, og.raster.detectRasterizer};
+import {og.response.ImageResponse, og.response.defaultSize, og.response.defaultContentType, og.response.imageResponse, og.response.withFonts, og.response.checkResponse, og.response.cardKey};
+import {Element, div, span, text} from "rakun-bpp";
+import {io.fs, io.process, io.env, path} from "std";
+import {assertAs} from "snap";
+
+// The run's own scratch directory — `botopink test` names it in
+// `BOTOPINK_TEST_TMPDIR`, and it is the one place a test writes.
+fn testTmp() -> string {
+    val root = env.read("BOTOPINK_TEST_TMPDIR") ?? "";
+    assert root
+        != "", "BOTOPINK_TEST_TMPDIR is not set: run this suite under `botopink test`";
+    return root;
+}
+
+fn inter() -> FontMetrics {
+    return parseMetrics("Inter", 700, "unitsPerEm 2816\nascent 2728\ndescent 680\nlineGap 0\navgCharWidth 1330\n");
+}
+
+fn card() -> Element {
+    val frame = "display:flex;flexDirection:row;justifyContent:space-between;alignItems:center;width:1200px;height:630px;padding:64px;background:#111827;color:#ffffff";
+    return div([
+        span([text("Left", attrs: [])], attrs: [#("style", "fontSize:48px;fontFamily:Inter;fontWeight:700")]),
+        span([text("Right", attrs: [])], attrs: [#("style", "fontSize:48px;fontFamily:Inter;fontWeight:700")]),
+    ], attrs: [#("style", frame)]);
+}
+
+test "og: style ---- supported parse and unsupported report" {
+    val v = "display:flex;flexDirection:column;gap:16;padding:48px;background:linear-gradient(90deg,#4f46e5,#7c3aed);fontSize:64px;maxLines:3;boxShadow:0 0 4px #000;transform:rotate(3deg);padding:";
+    val s = parseStyle(v);
+    assert s.gap == 16;
+    assert s.fontSize == 64;
+    assert s.padding == "48px";
+    assert unsupportedProperties(v).join(",") == "boxShadow,transform";
+    assert malformedDeclarations(v).join(",") == "padding:";
+    assert parseStyle("gap:8;fontSize:20px").fontSize
+        == parseStyle("fontSize:20px;gap:8").fontSize;
+    assert refusedProperties().all({ p -> unsupportedProperties(p + ":1").length == 1 });
+    try assertAs(@src(), "style", describeStyle(v));
+}
+
+test "og: metrics ---- the sidecar, .notdef, monotonic measure" {
+    val m = parseMetrics("X", 400, "unitsPerEm 1000\navgCharWidth 500\n65|700\n");
+    assert m.unitsPerEm == 1000;
+    assert advanceOf(m, 65) == 700;
+    assert advanceOf(m, 66) == 500;
+    assert measure(m, "", 10) == 0;
+    assert measure(m, "AB", 10) == 12;
+    assert measure(m, "ABB", 10) > measure(m, "AB", 10);
+}
+
+test "og: layout ---- row space-between inside 64px padding" {
+    val box = layout(card(), ImageSize(width: 1200, height: 630), [inter()]);
+    val first = box.children.at(0) ?? box;
+    val second = box.children.at(1) ?? box;
+    assert first.x == 64;
+    assert second.x + second.width == 1200 - 64;
+    assert first.y == second.y;
+    val again = layout(card(), ImageSize(width: 1200, height: 630), [inter()]);
+    assert describeLayout(again, 0) == describeLayout(box, 0);
+    try assertAs(@src(), "layout", [
+        describeLayout(box, 0),
+        "== wrapText(\"Hydration is a contract, not a hope\", 400, Inter/700, 48, 2)",
+        wrapText("Hydration is a contract, not a hope", 400, inter(), 48, 2).join("\n"),
+        "== wrapText(\"Supercalifragilistic\", 100, Inter/700, 48, 1)",
+        wrapText("Supercalifragilistic", 100, inter(), 48, 1).join("\n"),
+    ].join("\n"));
+}
+
+test "og: layout ---- a column's gap, padding and an absolute child" {
+    val tree = div([
+        span([text("a", attrs: [])], attrs: [#("style", "fontSize:20px")]),
+        span([text("b", attrs: [])], attrs: [#("style", "fontSize:20px")]),
+        span([text("pin", attrs: [])], attrs: [#("style", "position:absolute;top:10px;left:20px;fontSize:20px")]),
+    ], attrs: [#("style", "display:flex;flexDirection:column;gap:16;padding:10px")]);
+    val box = layout(tree, ImageSize(width: 400, height: 300), [inter()]);
+    val a = box.children.at(0) ?? box;
+    val b = box.children.at(1) ?? box;
+    val pin = box.children.at(2) ?? box;
+    assert a.x == 10;
+    assert a.y == 10;
+    assert b.y == a.y + a.height + 16;
+    assert pin.x == 20;
+    assert pin.y == 10;
+}
+
+test "og: wrap ---- spaces only, an overflowing word, the ellipsis fits" {
+    val lines = wrapText("Hydration is a contract, not a hope", 400, inter(), 48, 2);
+    assert lines.length == 2;
+    assert (lines.at(1) ?? "").endsWith("…");
+    assert measure(inter(), lines.at(1) ?? "", 48) <= 400;
+    assert wrapText("Supercalifragilistic", 100, inter(), 48, 0).join("|")
+        == "Supercalifragilistic";
+}
+
+test "og: svg ---- the card, with a hostile title escaped" {
+    val tree = div([
+        span([text("<script>alert(1)</script>", attrs: [])], attrs: [#("style", "fontSize:64px;fontFamily:Inter;fontWeight:700;color:#ffffff")]),
+    ], attrs: [#("style", "display:flex;width:1200px;height:630px;padding:64px;background:linear-gradient(90deg,#4f46e5,#7c3aed)")]);
+    val size = ImageSize(width: 1200, height: 630);
+    val svg = toSvg(layout(tree, size, [inter()]), size, [inter()]);
+    assert svg.startsWith("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1200\" height=\"630\"");
+    assert svg.contains("<script>") == false;
+    assert svg.split("<linearGradient").length == 2;
+    assert svg.split("url(#g0)").length == 2;
+    assert svg.contains("font-family=\"Inter\"");
+    assert toSvg(layout(tree, size, [inter()]), size, [inter()]) == svg;
+    try assertAs(@src(), "svg", svg);
+}
+
+test "og: rasterizer ---- png with no tool fails at the route, svg needs none" {
+    val route = "app/blog/[slug]/opengraph-image.bp";
+    assert requireRasterizer(route, "image/svg+xml", noRasterizer()).length
+        == 0;
+    val nif = rasterize(Rasterizer(kind: "nif", command: ""), "<svg/>", defaultSize(), path.join([testTmp(), "x.png"]));
+    assert nif.isError();
+    val none = rasterize(noRasterizer(), "<svg/>", defaultSize(), path.join([testTmp(), "x.png"]));
+    assert none.isError();
+    val svgVerdict = if (requireRasterizer(route, "image/svg+xml", noRasterizer()).length
+        == 0)
+        "ok"
+    else
+        "error";
+    try assertAs(@src(), "rasterizer", [
+        "image/svg+xml  kind=none   " + svgVerdict,
+        "image/png      kind=none   error: "
+            + requireRasterizer(route, "image/png", noRasterizer()).join("; "),
+        "image/png      kind=nif    error: "
+            + requireRasterizer(route, "image/png", Rasterizer(kind: "nif", command: "")).join("; "),
+    ].join("\n"));
+}
+
+test "og: response ---- defaults, no bytes, text needs a face" {
+    val r = imageResponse(card(), defaultSize());
+    assert r.size.width == 1200 && r.size.height == 630;
+    assert r.contentType == defaultContentType();
+    assert checkResponse("app/og.bp", r).length == 1;
+    val withFace = withFonts(r, [FontRef(family: "Inter", weight: 700, path: "x.woff2", metricsPath: "/nonexistent/x.metrics.txt")]);
+    assert (checkResponse("app/og.bp", withFace).at(0) ?? "").contains("no metrics sidecar");
+}
+
+test "og: cache key ---- template, fonts and params each change it" {
+    val size = defaultSize();
+    val f = [FontRef(family: "Inter", weight: 700, path: "a.woff2", metricsPath: "a.txt")];
+    val base = cardKey("/blog/[slug]", [#("slug", "a")], "<svg>1</svg>", f, size);
+    assert base
+        == cardKey("/blog/[slug]", [#("slug", "a")], "<svg>1</svg>", f, size);
+    assert base
+        != cardKey("/blog/[slug]", [#("slug", "a")], "<svg>2</svg>", f, size);
+    assert base
+        != cardKey("/blog/[slug]", [#("slug", "a")], "<svg>1</svg>", [], size);
+    assert base
+        != cardKey("/blog/[slug]", [#("slug", "b")], "<svg>1</svg>", f, size);
+}
+
+test "og: rasterize ---- a real PNG through the port, and a failure removes the partial file" {
+    val r = detectRasterizer();
+    if (r.kind == "none")
+        @print("skipped: no resvg or rsvg-convert on PATH")
+    else {
+        val out = path.join([testTmp(), "og.png"]);
+        val size = ImageSize(width: 120, height: 63);
+        val ok = try rasterize(r, "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"120\" height=\"63\"><rect width=\"120\" height=\"63\" fill=\"#111827\"/></svg>", size, out);
+        assert fs.exists(ok);
+        assert fs.readText(ok).unwrapOr("").contains("PNG");
+        val gone = fs.rm(ok);
+        val bad = rasterize(r, "this is not svg", size, out);
+        assert bad.isError();
+        assert fs.exists(out) == false;
+    }
+}

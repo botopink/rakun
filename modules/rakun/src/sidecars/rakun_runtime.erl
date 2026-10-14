@@ -214,7 +214,7 @@ scanned_count() ->
     ets:info(?SCAN, size).
 
 %% ═══ the test seam (front 19) ═══════════════════════════════════════════════
-%% `rakun-test`'s `FakeRequest` cannot stand where a `Request` is declared (an
+%% `rakun`'s `FakeRequest` cannot stand where a `Request` is declared (an
 %% implementer does not convert to its behavior type), so the double hands its
 %% fields here and receives the same map `request/6` builds for a socket
 %% request. Params, headers and query are JSON objects; header names are
@@ -410,7 +410,7 @@ config_check_reset() ->
 
 %% ═══ tag epoch (front 04 step 1, decision 185) ═══════════════════════════════
 %% What two optional members share lives in the core: `rakun-cache`'s
-%% revalidation verbs bump a tag's epoch, `rakun-client` stores the epochs of a
+%% revalidation verbs bump a tag's epoch, `rakun-restclient` stores the epochs of a
 %% response's tags beside it and reads a changed one as a miss — no edge
 %% between the two. A tag never bumped is at 0. The bump is
 %% `ets:update_counter/4`, atomic across request processes, so two bumps that
@@ -574,7 +574,7 @@ dispatch(Verb, Path) ->
 %% outside; front 07's filter chain, CORS, compression, error handling and API
 %% versioning all enter through `rakun_chain:run/6`, and front 10's security
 %% filter and front 11's request metrics enter through front 07's chain rather
-%% than through a second hook. With rakun-web out of the build the branch is
+%% than through a second hook. With rakun-service out of the build the branch is
 %% never taken and the cost is one `function_exported/3` per request.
 dispatch_http(Verb, Path, HeadersJson, QueryJson, Body) ->
     ensure_started(),

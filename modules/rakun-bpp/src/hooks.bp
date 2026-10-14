@@ -1,0 +1,148 @@
+// rakun-bpp/hooks — the hook surface, as *real* botopink (F1).
+//
+// Every hook is `pub fn <noun>(…) -> @Component<R>`: a NOUN, never
+// a `use` prefix in the name — the keyword is the activation
+// (`val c = use state(0)`), and it is legal only in a body whose return is
+// `@Component<_>` (the return is the effect): a component
+// (`-> @Component<Element>`) or a custom hook (`-> @Component<_>`). Enforced by
+// the language (decisions 88, 104, 118, 128 and 354 of botopink), not by
+// rakun-bpp. On commonJS every `@Component` body is an
+// `async function`, so a caller that is not a `use` awaits it; `use f(x)` is
+// `await f(x)` there and `f(x)` on erlang. Nothing is
+// renamed to React's `useState`, no dependency array is inferred — a hook that
+// takes one declares it (`memo(compute, deps)`).
+//
+// The bodies here are pure and synchronous: they model the FIRST render (the
+// server pass). `state` yields its initial value, `memo` computes eagerly,
+// `effect` is a no-op, `ref`/`reducer` seed their boxes. Client re-render
+// reactivity is the client runtime's job — `client_runtime.mjs` exports the same
+// five nouns with hook semantics, and the client build resolves `hooks` to it
+// (see `client_runtime.bp`); the bodies here carry no host runtime, so they are
+// exercised directly in `test {}` below.
+//
+// Promoted from `hooks.d.bp` once the gaps landed: G1 (a function-typed field —
+// `set: fn(next: T)`) and G2 (a labeled tuple type as the transient
+// `#(current)` / `#(state, dispatch)` shape — the labels live in the written
+// return type; the value is a plain tuple).
+
+import {element.Element, element.ElementBase};
+
+// The `{value, set}` cell a `state` hook yields (G1: a fn-typed field). A named
+// `type` (not a tuple) so `use state(0)` can be destructured *and* passed around
+// (`State<T>`) by callers and custom hooks.
+pub type State<T>(
+    value: T,
+    set: fn(next: T),
+)
+
+// `state` — a stateful cell. On the server (SSR / first render) it yields the
+// initial value; `set` is the updater the client runtime rebinds on mount.
+pub fn state<T>(initial: T) -> @Component<State<T>> {
+    return State(value: initial, set: { next -> });
+}
+
+// `effect` — a side effect run after render. Pure during SSR (a no-op); the
+// client runtime schedules `run` against `deps` on mount. Yields the empty
+// capability (`#()` — nothing to bind).
+pub fn effect(run: fn(), deps: unknown[]) -> @Component<#()> {
+    return #();
+}
+
+// `memo` — a value memoized across renders. Computed eagerly here (the first
+// render has no previous `deps` to compare against), yielding the computed `T`.
+pub fn memo<T>(compute: fn() -> T, deps: unknown[]) -> @Component<T> {
+    return compute();
+}
+
+// `ref` — a mutable box that persists across renders. Yields `#(current)` seeded
+// with `initial` (G2: a labeled tuple type).
+pub fn ref<T>(initial: T) -> @Component<#(current: T)> {
+    return #(initial);
+}
+
+// `reducer` — state threaded through a reducer. Yields `#(state, dispatch)`;
+// `state` is the initial state, `dispatch` the action sink the client rebinds.
+pub fn reducer<S, A>(
+    reduce: fn(s: S, a: A) -> S,
+    initial: S,
+) -> @Component<#(state: S, dispatch: fn(action: A))> {
+    return #(initial, { action -> });
+}
+
+// ── tests ──────────────────────────────────────────────────────────────────
+//
+// The hook BODIES are pure `.bp`, so they are exercised by calling them directly
+// — without `use` a hook is an ordinary call (awaited: a `test` body has an
+// await channel), the first-render value. `Counter`
+// below is the activating form (a `@Component` return + `use`), which lowers to the same
+// calls; it type-checks the capability and is rendered as the server pass.
+
+test "state yields its initial value and a callable setter" {
+    val c = await state(7);
+    assert c.value == 7;
+    c.set(9); // G1: the fn-typed `set` field is callable
+}
+
+// Positional access (`r.0`, `rd.1`): the labels of a generic labeled return
+// (`#(current: T)`) are lost when `T` is instantiated — a compiler gap, not
+// the intended spelling (`r.current`, `rd.state`).
+test "memo computes eagerly; ref/reducer seed their boxes" {
+    val m = await memo({ ->
+        3 + 4;
+    }, []);
+    assert m == 7;
+    val r = await ref(0);
+    assert r.0 == 0;
+    val rd = await reducer({ s, a -> s + a }, 10);
+    assert rd.0 == 10;
+    val dispatch = rd.1;
+    dispatch(1);
+}
+
+test "a custom hook composes State and stays the {value,set} shape" {
+    val c = await counter(5);
+    assert c.value == 5;
+    c.set(6);
+}
+
+test "a component activating hooks renders the server pass when called plainly" {
+    val e = await Counter();
+    assert e.tag == "div";
+}
+
+// A custom hook by the rule: a noun (`counter`, not `useCounter`), a return that
+// is another hook's `@Component<_>`, which is what lets its body
+// activate `state`. Here it just re-exposes `state`'s `State<i32>`.
+fn counter(start: i32) -> @Component<State<i32>> {
+    val s = use state(start);
+    return s;
+}
+
+// A component: `-> @Component<Element>` (the owner — the return is the effect), and
+// every `use` in the static prefix. Called without `use` from the test it
+// runs as the server pass — `use state(0)` is `state(0)`, the initial cell.
+fn Counter() -> @Component<Element> {
+    val c = use state(0);
+    val doubled = use memo({ ->
+        c.value + c.value;
+    }, []);
+    return Element(
+        tag: "div",
+        value: "",
+        children: [
+            Element(
+                tag: "#text",
+                value: "count: " + c.value.toString(),
+                children: [],
+                attrs: [],
+            ),
+            Element(
+                tag: "#text",
+                value: " x2=" + doubled.toString(),
+                children: [],
+                attrs: [],
+            ),
+        ],
+        attrs: [],
+    );
+}

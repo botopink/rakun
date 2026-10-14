@@ -1,0 +1,120 @@
+// `botopink test` suite for `src/entry.bp` and `src/script.bp` (front 68
+// steps 6 and 7).
+
+import {bundler.scan.parseFixture, bundler.scan.ImportRef};
+import {bundler.graph.AppModule, bundler.graph.ClientGraph, bundler.graph.GraphNode, bundler.graph.loadModules, bundler.graph.clientGraph};
+import {bundler.entry.ClientComponent, bundler.entry.EntryConfig, bundler.entry.clientComponents, bundler.entry.generateEntry, bundler.entry.islandMismatches, bundler.entry.parseIslands, bundler.entry.recordFieldsOf, bundler.entry.islandMismatchesSource, bundler.entry.classNamesIn, bundler.entry.unknownClasses, bundler.entry.classCheckSource};
+import {bundler.script.ScriptDecl, bundler.script.ScriptPlan, bundler.script.planScripts, bundler.script.describeScripts};
+import {bundler.manifest.ChunkRef};
+import {bundler.fixture.fixtureApp};
+import {types.AliasMap};
+import {islandAttr, globals, Island} from "rakun-bpp";
+import {assertAs} from "snap";
+
+fn aliases() -> AliasMap {
+    return AliasMap(entries: [#("@/components", "components"), #("@/lib", "lib")]);
+}
+
+fn componentsOf(tree: string) -> @Result<Array<ClientComponent>, string> {
+    val modules = try loadModules(parseFixture(tree));
+    return clientComponents(clientGraph(modules, aliases(), "app"), modules);
+}
+
+fn withProps() -> string {
+    return fixtureApp()
+        + "\n== components/props.bp\n#[clientProps]\npub type NavProps(title: string, count: i32)\n#[clientProps]\npub type LikeProps(\n    likes: i32,\n    ratio: f64,\n    open: bool,\n)";
+}
+
+fn config() -> EntryConfig {
+    return EntryConfig(allowedRedirects: [], actionHeader: "X-Bp-Action", scripts: [#("/c.js", "afterInteractive", "chatReady"), #("/ads.js", "lazyOnload", ""), #("/w.js", "worker", "")]);
+}
+
+test "entry: islandAttr is rakun-bpp's, and the globals are the registry's" {
+    val a = islandAttr(0);
+    assert a._0 == "data-jh-i";
+    assert a._1 == "i0";
+    assert globals.payload == "__bp0";
+    assert globals.fill == "__bp1";
+    assert globals.signal == "__bp2";
+    assert globals.starters == "__bp3";
+}
+
+test "entry: generated ---- islands, holes, mounts" {
+    val cs = try componentsOf(withProps());
+    assert cs.map({ c -> c.name + ":" + c.propsType }).join(",")
+        == "Nav:NavProps,LikeButton:LikeProps";
+    val src = generateEntry(cs, config());
+    val fill = src.indexOf("registerFill(");
+    val signal = src.indexOf("registerSignal(");
+    val hydrate = src.indexOf("    hydrate();");
+    val link = src.indexOf("    linkMount();");
+    val form = src.indexOf("    formMount(\"X-Bp-Action\");");
+    assert fill > 0
+        && signal > fill
+        && hydrate > signal
+        && link > hydrate
+        && form > link;
+    assert src.contains("from \"routing\"") == false;
+    assert src.contains("from \"rakun\"") == false;
+    assert src.contains("rakun-app") == false
+        && src.contains("rakun-service") == false;
+    assert src.contains("__") == false;
+    assert src.contains("registerStarter(\"Nav\"");
+    assert src.contains("import {globals, registerFill, registerSignal, registerStarter,");
+    assert src.contains("declare fn registerStarter") == false;
+    assert src.contains(islandMismatchesSource());
+    assert src.contains(classCheckSource());
+    val check = src.indexOf("raiseFirst(unknownClasses(classNamesIn(html), payloadIds(globals.payload, \"s\")));");
+    assert check > 0 && check < src.indexOf("    val done = commit(html);");
+    try assertAs(@src(), "entry", src);
+}
+
+test "entry: the runtime mismatches name their ids" {
+    val problems = islandMismatches(["i0", "i2"], ["i0", "i1"], [], ["h1"]);
+    assert problems.join("\n")
+        == "island i1 is in the payload and not in the document\nisland i2 is in the document and not in the payload\nhole h1 is in the payload and not in the document";
+    assert islandMismatches(["i0"], ["i0"], ["h1"], ["h1"]).length == 0;
+}
+
+test "entry: the runtime class check names every class the payload's s key lacks" {
+    val html = "<div class=\"e_f51c2501 card\"><p class=\"e_00ff\">x</p><i class=\"e_f51c2501\"></i><b class=\"e_zz\"></b></div>";
+    assert classNamesIn(html).join(",") == "e_f51c2501,e_00ff";
+    assert unknownClasses(classNamesIn(html), ["e_f51c2501", "e_00ff"]).length
+        == 0;
+    assert unknownClasses(classNamesIn(html), ["e_f51c2501"]).join("\n")
+        == "class e_00ff is not in the payload's s key - the server's stylesheet has no rule for it";
+}
+
+test "entry: parseIslands reads the payload's i triples" {
+    val rows = try parseIslands("[[\"i0\",\"Nav\",\"title=Hi&count=2\"],[\"i1\",\"LikeButton\",\"\"]]");
+    assert rows.length == 2;
+    val first = rows.at(0) ?? Island(id: "", component: "", props: []);
+    assert first.component == "Nav";
+    assert first.props.map({ kv -> kv._0 + "=" + kv._1 }).join(",")
+        == "title=Hi,count=2";
+    assert parseIslands("[[\"i0\",\"Nav\"]]").isError();
+}
+
+test "entry: a props record may span lines" {
+    assert recordFieldsOf("pub type P(\n    a: string,\n    b: i32,\n)", "P")
+        .map({ f -> f._0 + "=" + f._1 })
+        .join(",")
+        == "a=string,b=i32";
+}
+
+test "script: strategies ---- the four placements and two refusals" {
+    val decls = [
+        ScriptDecl(id: "analytics", src: "/a.js", strategy: "beforeInteractive", onLoad: ""),
+        ScriptDecl(id: "chat", src: "/c.js", strategy: "afterInteractive", onLoad: "chatReady"),
+        ScriptDecl(id: "ads", src: "/ads.js", strategy: "lazyOnload", onLoad: ""),
+        ScriptDecl(id: "crunch", src: "/w.js", strategy: "worker", onLoad: ""),
+        ScriptDecl(id: "bad", src: "/w2.js", strategy: "worker", onLoad: "never"),
+        ScriptDecl(id: "odd", src: "/o.js", strategy: "eventually", onLoad: ""),
+    ];
+    val plan = planScripts(decls);
+    assert plan.head.length == 1;
+    assert plan.workers.map({ w -> w.id }).join(",") == "worker:crunch";
+    assert plan.scheduled.length == 3;
+    assert plan.refusals.length == 2;
+    try assertAs(@src(), "scripts", describeScripts(decls));
+}

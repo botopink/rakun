@@ -1,0 +1,130 @@
+//// rakun-ssr — the dispatch (front 50 step 1).
+////
+//// `rakun-ssr <command> [args]`. No arguments prints the command list and exits
+//// non-zero; an unknown command names itself. Each command is a module with a
+//// pure option parser; `run` answers the exit code and the text to print, so
+//// the dispatch is testable without a process.
+
+import {io.env, io.process} from "std";
+import {cli.resolve.resolveProject, cli.resolve.Project};
+import {config.OnzeConfig, config.defaultConfig, types.AliasMap};
+import {cli.create.parseCreateOpts, cli.create.scaffoldFiles, cli.create.scaffoldFilesIn, cli.create.insideOnzeWorkspace, cli.create.writeScaffold, cli.create.describeCreate, cli.create.createHelp, cli.create.CreateOpts};
+import {cli.info.infoText, cli.info.tools, cli.info.dependencyVersions};
+import {cli.build.BuildResult, cli.build.buildProject};
+import {cli.start.startProject};
+import {io.fs, path} from "std";
+
+pub type Outcome(code: i32, text: string)
+
+pub fn commands() -> string {
+    return [
+        "usage: rakun-ssr <command> [options]",
+        "",
+        "  create <name>   scaffold an app (rakun-ssr create --help for the options)",
+        "  dev             serve the app, rebuilding on change",
+        "  build           stage, check, compile and bundle the app into its outDir",
+        "  start           serve what build produced",
+        "  info            print versions and the resolved configuration",
+    ].join("\n");
+}
+
+fn createCommand(cwd: string, args: string[]) -> Outcome {
+    if (args.contains("--help")) return Outcome(code: 0, text: createHelp());
+    val parsed = parseCreateOpts(args);
+    if (parsed.isError()) return Outcome(code: 1, text: errorOf(parsed));
+    val o = parsed.unwrapOr(CreateOpts(name: "", port: 0, srcDir: false, importAlias: "", emilia: false, example: "", lang: "", libs: "", yes: false));
+    val dir = cwd + "/" + o.name;
+    val written = writeScaffold(dir, scaffoldFilesIn(o, insideOnzeWorkspace(cwd)));
+    return case written {
+        Ok(files) -> Outcome(code: 0, text: describeCreate(o)
+            + "\n\ncreated "
+            + dir
+            + "\n"
+            + files.map({ f -> "  " + f }).join("\n"));
+        Error(e) -> Outcome(code: 1, text: e);
+    };
+}
+
+fn errorOf(r: @Result<CreateOpts, string>) -> string {
+    return case r {
+        Ok(v) -> "";
+        Error(e) -> e;
+    };
+}
+
+fn infoCommand(cwd: string, botopinkVersion: string) -> Outcome {
+    val resolved = resolveProject(cwd);
+    val port = env.read("PORT") ?? "";
+    return case resolved {
+        Ok(p) -> Outcome(code: 0, text: infoText(tools(botopinkVersion), p, dependencyVersions(p.root), port));
+        Error(e) -> Outcome(code: 0, text: infoText(tools(botopinkVersion), null, [], ""));
+    };
+}
+
+// The botopink binary: `BOTOPINK_BIN`, else the first `botopink` on `PATH`.
+fn botopinkBin() -> string {
+    return env.read("BOTOPINK_BIN") ?? "botopink";
+}
+
+fn buildCommand(cwd: string, args: string[]) -> Outcome {
+    if (args.length > 0)
+        return Outcome(code: 1, text: "rakun-ssr build: unexpected argument "
+            + args.at(0) ?? "");
+    val resolved = resolveProject(cwd);
+    if (resolved.isError())
+        return Outcome(code: 1, text: projectError(resolved));
+    val p = resolved.unwrapOr(Project(root: "", config: defaultConfig(), aliases: AliasMap(entries: [])));
+    return case buildProject(p, botopinkBin()) {
+        Ok(b) -> Outcome(code: 0, text: "built "
+            + p.config.name
+            + " — build id "
+            + b.buildId
+            + """
+"""
+            + b.chunks
+                .map({ c -> "  static/" + b.buildId + "/" + c })
+                .join("\n"));
+        Error(e) -> Outcome(code: 1, text: "rakun-ssr build failed:\n" + e);
+    };
+}
+
+fn startCommand(cwd: string, args: string[]) -> Outcome {
+    val resolved = resolveProject(cwd);
+    if (resolved.isError())
+        return Outcome(code: 1, text: projectError(resolved));
+    val p = resolved.unwrapOr(Project(root: "", config: defaultConfig(), aliases: AliasMap(entries: [])));
+    return case startProject(p, args) {
+        Ok(text) -> Outcome(code: 0, text: text);
+        Error(e) -> Outcome(code: 1, text: e);
+    };
+}
+
+fn projectError(r: @Result<Project, string>) -> string {
+    return case r {
+        Ok(p) -> "";
+        Error(e) -> e;
+    };
+}
+
+// The dispatch: `args` without the program name.
+pub fn run(cwd: string, args: string[], botopinkVersion: string) -> Outcome {
+    if (args.length == 0) return Outcome(code: 1, text: commands());
+    val cmd = args.at(0) ?? "";
+    val rest = args.drop(1);
+    if (cmd == "create") return createCommand(cwd, rest);
+    if (cmd == "info") return infoCommand(cwd, botopinkVersion);
+    if (cmd == "dev")
+        return Outcome(code: 2, text: "rakun-ssr dev: not available yet - it serves the build `rakun-ssr start` serves and reloads the changed modules into the running node, and the reload is not written (front 50 step 6)");
+    if (cmd == "start") return startCommand(cwd, rest);
+    if (cmd == "build") return buildCommand(cwd, rest);
+    return Outcome(code: 1, text: "rakun-ssr: unknown command \""
+        + cmd
+        + "\"\n\n"
+        + commands());
+}
+
+pub fn main() {
+    val out = run(process.cwd(), env.args(), "1.0.10-beta");
+    @print(out.text);
+    process.exit(out.code);
+}

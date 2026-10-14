@@ -1,0 +1,61 @@
+import {http.Request, http.Response, http.HttpMethod, runtime.rkRegisterRoute, runtime.rkSingleton, runtime.rkEnter, runtime.rkDone, runtime.rkBuildCount, runtime.rkScan};
+import {testing.fake_request.FakeRequest, testing.fake_request.fakeGet};
+import {testing.mockmvc.MockMvc};
+import {testing.context.resetSingletons, testing.context.resetContext, testing.context.contextSnapshot};
+
+pub type Counter(serial: i32)
+
+fn counter() -> Counter {
+    return rkSingleton("CtxCounter", { ->
+        val _e = rkEnter("CtxCounter");
+        val c = Counter(serial: rkBuildCount("CtxCounter"));
+        val _d = rkDone("CtxCounter");
+        c;
+    });
+}
+
+fn pong(req: Request) -> Response {
+    return Response.ok("pong");
+}
+
+test "rakun: resetSingletons makes the next resolution construct afresh" {
+    val _a = counter();
+    val _b = counter();
+    assert rkBuildCount("CtxCounter") == 1;
+    val _r = resetSingletons();
+    assert rkBuildCount("CtxCounter") == 0;
+    val _c = counter();
+    assert rkBuildCount("CtxCounter") == 1;
+}
+
+test "rakun: a second test calling resetSingletons first does not share the instance" {
+    val _r = resetSingletons();
+    assert counter().serial == 1;
+    assert rkBuildCount("CtxCounter") == 1;
+}
+
+test "rakun: resetSingletons keeps the routes" {
+    val _p = rkRegisterRoute("GET", "/ctx/ping", { r -> pong(r) });
+    val _r = resetSingletons();
+    assert MockMvc.standalone().perform(fakeGet("/ctx/ping")).body == "pong";
+}
+
+test "rakun: resetContext empties the scan registry and the route table" {
+    val _p = rkRegisterRoute("GET", "/ctx/ping", { r -> pong(r) });
+    val _s = rkScan("CtxComponent");
+    val _r = resetContext();
+    assert MockMvc.standalone().perform(fakeGet("/ctx/ping")).status == 404;
+    assert contextSnapshot()
+        == "{\"scanned\":[],\"routes\":[],\"listeners\":[]}";
+}
+
+test "rakun: contextSnapshot lists scanned names and routes in registration order" {
+    val _r = resetContext();
+    val _s1 = rkScan("Alpha");
+    val _s2 = rkScan("Beta");
+    val _p = rkRegisterRoute("GET", "/ctx/a", { r -> pong(r) });
+    val _q = rkRegisterRoute("POST", "/ctx/b", { r -> pong(r) });
+    val expected = "{\"scanned\":[\"Alpha\",\"Beta\"],\"routes\":[\"GET /ctx/a\",\"POST /ctx/b\"],\"listeners\":[]}";
+    assert contextSnapshot() == expected;
+    assert contextSnapshot() == expected;
+}

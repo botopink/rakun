@@ -6,44 +6,46 @@
 `repository/rakun/botopink.json` is a **workspace** (`"workspaces": ["modules/*", "examples/*"]`):
 it compiles nothing, ships nothing, and `botopink build/test` there is a refusal that names the
 members. Every directory here holding a `botopink.json` is a **member**; its manifest `name` is its
-import name (`from "rakun-web"`). The core is the member `modules/rakun/` — `from "rakun"` resolves to
+import name (`from "rakun-service"`). The core is the member `modules/rakun/` — `from "rakun"` resolves to
 it, never to the umbrella. A member depends on a sibling with `{ "workspace": true }` only; a `path`
 to a sibling or to the umbrella is a located error.
 
 ## Members today
 
-Sixteen members (decision 187). Front 128 merged nine members into the member that needs them:
-`rakun-actuator-api` and `rakun-logging` into the core (`actuator_api/`, `logging/`), `rakun-hateoas`
-into `rakun-web` (`hateoas/`), `rakun-ws` (SOAP — merged, not renamed) into `rakun-client` (`ws/`),
-`rakun-tx` and `rakun-devtools` into `rakun-data` (`tx/`, `devtools/`), `rakun-release` into `rakun-cli`
-(`release/`), `rakun-rsocket` and `rakun-stream` into `rakun-messaging` (`rsocket/`, `stream/`). A
-merged member's files sit in a same-named sub-directory of the absorber's `src/` and `test/`, its
-sidecar keeps its name and atom, and its names are imported from the absorber
-(`from "rakun-data"`, `from "rakun-data/tx/outbox"`). Every member holds real code; `rakun-test` holds
-front 19's request double, assertions, MockMvc and context control. Front 14's
-`rakun-validation` moved to the library `validation` (decision 116 rule 5; a repository of its own since decision 326); its boot
-refusal is the core's `config_check.bp`.
+Twenty-two members (front 165 s2): the 17 packages of the table in
+[`../AGENTS.md`](../AGENTS.md) § The workspace and its layers, `rakun-cli` (the `rakun` command line), and the three
+that wait on a later step or a question — `erika` and `erika-test` (s6 renames erika `query`), `jhonstart-dom-test` (the
+commonJS-only half of the bpp render tests, which cannot join a package that builds for erlang) and `onze-server` (the
+erlang-only half of `rakun-ssr`'s boot, which cannot join a package that builds for commonJS). Front 128 merged
+nine members into the member that needs them and front 165 folded the rest the same way: a folded package's files sit
+in a same-named sub-directory of the absorber's `src/` and `test/`, its sidecars and `.mjs` runtimes beside the
+absorber's in `src/sidecars/`, its names are imported by their path from the package root or by `from "<package>"`.
 
-| Member | `files` | `targets` | Spring Boot 4 | Front(s) | State |
-|---|---|---|---|---|---|
-| [rakun](./rakun/) (core) | root · http · runtime · decorators · bootstrap · rakun.d · … · actuator_api (contract · registration · span · audit_seam) · logging (cells · levels · formats · correlation · logging · digest · setup · endpoints) | erlang | `spring-boot-starter` + `spring-boot-actuator` (the API half) + `-logging` | 04 · 05 · 06 · 62 · 72 · 73 · 74 · 11 (Step 0, `actuator_api/`) · 87 (the audit seam) · 17 (`logging/`) | real code, 442 tests |
-| [rakun-app](./rakun-app/) | root · file_router · ssr · navigation · route_handler · actions · static_host · segment_config · static_gen · route_slots · route_intercept · i18n · metadata_routes | erlang | (Next.js `app/` router, server half) | 22 · 23 · 24 · 25 · 60 · 61 · 63 · 64 · 66 | real code, 204 tests |
-| [rakun-actuator](./rakun-actuator/) | root · endpoint_host · health · info · registry_endpoints · instrumentation · management · actuator | erlang | `-actuator` (host) | 11 · 76 · 87 | real code, 77 tests |
-| [rakun-cache](./rakun-cache/) | root · cache_host · cache · cached · cache_endpoint | erlang | `-cache` | 12 | real code, 55 tests |
-| [rakun-cli](./rakun-cli/) | root · args · plugins · cli · release (release · sbom) (+ `templates/`) | erlang | Spring Boot CLI, `spring-boot:run` / `bootRun` + packaging (`spring-boot-maven-plugin`, buildpacks) | 88 · 81 (`release/`) | real code, 37 tests |
-| [rakun-client](./rakun-client/) | root · address · settings · response · cache · transport · health · client · request · exchange · ws (SOAP) | erlang | `RestClient` / `WebClient` + `-web-services` (SOAP — not WebSocket) | 13 · 93 (`ws/`) | real code, 83 tests |
-| [rakun-data](./rakun-data/) | root · datasource · sql · migration_host · orm (host · entity · query · repository) · migration · tx (outbox · saga · twopc) · devtools (devtools · db_console) | erlang | `-data-jpa` / `-data-jdbc` / `-data-mongodb` / `-data-redis` + JTA (`spring-boot-starter-jta-*`), Kafka/Pulsar transactions + `spring-boot-devtools` | 08 · 09 · 77 · 78 · 83 (`tx/`) · 80 (`devtools/`) | real code, 181 tests |
-| [rakun-mail](./rakun-mail/) | root · mail · fixture | erlang | `-mail` | 85 | real code, 32 tests |
-| [rakun-metrics](./rakun-metrics/) | root · registry · bus · vm · tracing · export · endpoints · install | erlang | Micrometer + `-actuator` (prometheus) + tracing | 75 | real code, 41 tests |
-| [rakun-messaging](./rakun-messaging/) | root · messaging_host · message · registry · markers · messaging_health · container · templates · jms_host · pulsar_host · reliability (policy · dispatch · transaction) · jms · pulsar · rsocket (rsocket_host · rsocket) · stream (pipeline · state · runtime) | erlang | `-amqp` / `-kafka` / `-activemq` / `-artemis` + `-rsocket` + Spring Integration / Kafka Streams | 15 · 86 · 90 · 91 · 92 (`rsocket/`) · 89 (`stream/`) | real code (in-process broker; JMS over STOMP; Pulsar admin and codec; RSocket over TCP; stream pipelines), 131 tests |
-| [rakun-scheduling](./rakun-scheduling/) | root · cron · registry · markers · executor · endpoint · jobstore (store · scheduler · markers · endpoint) | erlang | `@Scheduled` / `-quartz` | 16 · 84 | real code, 100 tests |
-| [rakun-security](./rakun-security/) | root · principal · policy · jwt · password · users · users_sql · basic · csrf · method_security · security_filter · security · oauth2_host · oauth2 · saml2 · ldap_host · ldap | erlang | `-security`, `-oauth2-client`, `-saml2` | 10 · 79 · 87 (audit events) | real code, 100 tests |
-| [rakun-session](./rakun-session/) | root · host · session · signing · session_config · session_cookie · store_ets · store_sql · store_redis · session_filter · session_endpoint | erlang | `spring-session-jdbc` / `-data-redis` | 18 | real code, 36 tests |
-| [rakun-test](./rakun-test/) | root | erlang | `-test` | 19 | FakeRequest (implements Request) + toRequest, expect* assertions, MockMvc, resetSingletons/resetContext/contextSnapshot; 27 tests |
-| [rakun-websocket](./rakun-websocket/) | root · ws_host · ws · endpoint | erlang | `-websocket` | 20 | real code, 27 tests (no JavaScript) |
-| [rakun-web](./rakun-web/) | root · filter · negotiation · error · middleware · cors · compression · customizer · apiversion · shutdown · convention · tls · rules · static · hateoas (hal) | erlang | `-webmvc` + `-hateoas` (websocket is `rakun-websocket`) | 07 · 65 · 82 · 21 (`hateoas/`) | real code, 223 tests |
+| Package | Absorbs (sub-folder of `src/` and `test/`) | `targets` | State |
+|---|---|---|---|
+| [rakun](./rakun/) (core) | `rakun` · `testing/` (was `rakun-test`: FakeRequest, assertions, MockMvc, context control) · `actuator_api/` · `logging/` | erlang | real code |
+| [rakun-data](./rakun-data/) | `rakun-data` · `sql/` · `orm/` · `migration/` · `tx/` · `devtools/` (dbcontext joins at s3) | erlang | real code |
+| [rakun-restclient](./rakun-restclient/) | was `rakun-client` · `ws/` (SOAP) | erlang | real code |
+| [rakun-style](./rakun-style/) | was `styled` | erlang, commonJS | real code |
+| [rakun-bpp](./rakun-bpp/) | was `jhonstart` · `html/` · `link/` · `forms/` · `testing/` | commonJS, erlang | real code |
+| [rakun-stylesheet](./rakun-stylesheet/) | was `emilia` · `testing/` · `bridge/` (was `jhonstart-emilia`) | commonJS, erlang | real code |
+| [rakun-service](./rakun-service/) | was `rakun-web` (filter chain, CORS, problem details, TLS seam, `hateoas/`) · `actuator/` (was `rakun-actuator`) | erlang | real code |
+| [rakun-scheduling](./rakun-scheduling/) | `rakun-scheduling` · `jobstore/` | erlang | real code |
+| [rakun-session](./rakun-session/) | `rakun-session` | erlang | real code |
+| [rakun-cache](./rakun-cache/) | `rakun-cache` | erlang | real code |
+| [rakun-security](./rakun-security/) | `rakun-security` · `oauth2/` · `saml2/` · `ldap/` | erlang | real code |
+| [rakun-websocket](./rakun-websocket/) | `rakun-websocket` | erlang | real code |
+| [rakun-metrics](./rakun-metrics/) | `rakun-metrics` | erlang | real code |
+| [rakun-messaging](./rakun-messaging/) | `rakun-messaging` · `reliability/` · `jms/` · `pulsar/` · `rsocket/` · `stream/` | erlang | real code |
+| [rakun-mail](./rakun-mail/) | `rakun-mail` | erlang | real code |
+| [rakun-app](./rakun-app/) | `rakun-app` (the `app/` router, SSR, actions) | erlang | real code |
+| [rakun-ssr](./rakun-ssr/) | was `onze` · `cli/` · `server/` · `bundler/` · `assets/` · `content/` · `og/` · `release/` · `testing/` | commonJS, erlang | real code |
+| [rakun-cli](./rakun-cli/) | `rakun-cli` · `release/` | erlang | real code |
+| [erika](./erika/), [erika-test](./erika-test/) | outside rakun until s6 | commonJS, erlang | real code |
+| [jhonstart-dom-test](./jhonstart-dom-test/) | the bpp render's browser half, run on node | commonJS | real code |
+| [onze-server](./onze-server/) | the rakun half of `rakun-ssr`'s boot (`Onze.run`) — erlang-only, so it cannot join the commonJS-built `rakun-ssr` | erlang | real code |
 
-`modules/rakun-web/` stopped being a scaffold with front 07: it carries the filter chain, CORS and
+`modules/rakun-service/` stopped being a scaffold with front 07: it carries the filter chain, CORS and
 RFC 9457 problem details, its host file (`src/sidecars/rakun_chain.erl`) and its test files — see `repository/rakun/AGENTS.md` § The filter chain. Front 14's `modules/rakun-validation/` is now the `validation` library — see
 `repository/rakun/AGENTS.md` § Validation, and the section below.
 
@@ -77,8 +79,8 @@ only when the type is imported into the calling module. `repository/rakun/AGENTS
 § Validation carries the measurement and the rest of the contract.
 
 Every scaffold's `dependencies` is `{ "rakun": { "workspace": true } }` only. The sibling edges of
-`03-rakun/modules.md` § The cut (`rakun-session → rakun-web, rakun-data`, `rakun-security → rakun-web,
-rakun-data, rakun-client, rakun-session`, …) are added by the lowest-numbered front of each module,
+`03-rakun/modules.md` § The cut (`rakun-session → rakun-service, rakun-data`, `rakun-security → rakun-service,
+rakun-data, rakun-restclient, rakun-session`, …) are added by the lowest-numbered front of each module,
 which owns its `botopink.json` — several of them name members that do not exist yet.
 
 ## How the members came to be (the 1.0.10 cut, then decision 187)
@@ -86,25 +88,25 @@ which owns its `botopink.json` — several of them name members that do not exis
 | Member | Front | Origin in the cut |
 |---|---|---|
 | `rakun-actuator-api` | 11 (Step 0) | created, then merged into the core by front 128 (`modules/rakun/src/actuator_api/`, decision 187) |
-| `rakun-app` | 22 (+ 23 · 24 · 25 · 60 · 61 · 63 · 64 · 66) | split from core — the `app/` router, SSR, actions; depends on `jhonstart`, `emilia` |
-| `rakun-websocket` | 20 | split from `rakun-web` |
+| `rakun-app` | 22 (+ 23 · 24 · 25 · 60 · 61 · 63 · 64 · 66) | split from core — the `app/` router, SSR, actions; depends on `rakun-service`, `rakun-cache` |
+| `rakun-websocket` | 20 | split from `rakun-service` |
 | `rakun-tx` | 83 | created, then merged into `rakun-data` by front 128 (`modules/rakun-data/src/tx/`, decision 187) |
 | `rakun-cli` | 88 | keep, separate |
 | `rakun-stream` | 89 | created, then merged into `rakun-messaging` by front 128 (`modules/rakun-messaging/src/stream/`, decision 187) |
 | `rakun-pulsar` | 91 | never split: Pulsar stays in `rakun-messaging/src/pulsar/` (decision 274) |
 | `rakun-rsocket` | 92 | created, then merged into `rakun-messaging` by front 128 (`modules/rakun-messaging/src/rsocket/`, decision 187) |
 | `rakun-mail` | 85 | keep, separate |
-| `rakun-ws` (SOAP) | 93 | created as `rakun-ws`, then merged into `rakun-client` by front 128 (`modules/rakun-client/src/ws/`; merged, not renamed — decision 187) |
-| [`../starters/rakun-starter-*`](../starters/) | 73 | eight workspace members beside `modules/` — manifests and a docblock-only root, no code; the version set is `rakun/version_set` |
+| `rakun-ws` (SOAP) | 93 | created as `rakun-ws`, then merged into `rakun-restclient` by front 128 (`modules/rakun-restclient/src/ws/`; merged, not renamed — decision 187) |
 
-Sixteen members since front 128 (decision 187), plus `starters/`. `rakun-core` and
+The `rakun-starter-*` packages (front 73) went with front 165 s2: a starter was a combination of thin packages and
+`examples/` shows the combinations. `rakun-core` and
 `rakun-observability` are aliases the cut drops.
 
 ## Consuming a member
 
 ```json
 // inside this workspace (a member or an example):
-"dependencies": { "rakun": { "workspace": true }, "rakun-web": { "workspace": true } }
+"dependencies": { "rakun": { "workspace": true }, "rakun-service": { "workspace": true } }
 
 // outside the ecosystem, after a release:
 "dependencies": { "rakun": { "git": "https://github.com/botopink/rakun.git", "branch": "feat" } }
@@ -113,7 +115,7 @@ Sixteen members since front 128 (decision 187), plus `starters/`. `rakun-core` a
 ```bp
 import {service, restController, route, getMapping} from "rakun";
 import {Rakun, App, Request, Response} from "rakun";
-import {filter, order, Chain, WebRequest} from "rakun-web";
+import {filter, order, Chain, WebRequest} from "rakun-service";
 import {validated, notBlank, email} from "validation";
 // later, per front:
 import {cacheable} from "rakun-cache";
@@ -180,10 +182,10 @@ rakun-<name>/
 | `@Scheduled` | `#[scheduled]` (rakun-scheduling) |
 | `@RabbitListener` / `@KafkaListener` | `#[rabbitListener]` / `#[kafkaListener]` (rakun-messaging) |
 | `@PreAuthorize` | `#[preAuthorize]` (rakun-security) |
-| `@CrossOrigin` | `#[crossOrigin]` (rakun-web) |
+| `@CrossOrigin` | `#[crossOrigin]` (rakun-service) |
 | `@Valid` / `@NotBlank` / `@Size` / `@Email` … | `#[validated]` + the constraint markers (the library `validation`) — an explicit `validate<TypeName>(v)` call, not a parameter hook |
-| Actuator endpoints | `/actuator/*` (rakun-actuator) |
-| `RestClient` / `WebClient` | `RestClient` / `WebClient` (rakun-client) |
+| Actuator endpoints | `/actuator/*` (rakun-service) |
+| `RestClient` / `WebClient` | `RestClient` / `WebClient` (rakun-restclient) |
 
 ## Version
 

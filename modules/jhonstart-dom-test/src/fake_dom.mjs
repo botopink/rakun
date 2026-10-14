@@ -1,7 +1,7 @@
 // jhonstart-dom-test — a minimal document for the browser half of front 30.
 //
 // Enough of the DOM for `render.mjs`'s fill and signal functions and its
-// payload reader, and nothing more: a parser for the markup jhonstart's render
+// payload reader, and nothing more: a parser for the markup rakun-bpp's render
 // writes (well-formed tags, double-quoted attributes, `<template>` content,
 // raw `<script>` / `<style>` text, void elements), `querySelector(All)` over
 // `tag`, `[attr]` and `[attr="value"]`, `getElementsByTagName`,

@@ -1,0 +1,84 @@
+//// rakun-ssr — health, readiness and graceful shutdown (front 71 step
+//// 6).
+////
+//// Readiness is stricter than liveness: an instance with no route table
+//// answers 404 for everything, and routing traffic to it is worse than not
+//// starting it. Shutdown is ordered, and the order is data:
+////
+////   1 readiness=false        the load balancer stops sending requests
+////   2 stop-accepting         no new connections
+////   3 drain-renders          in-flight renders, up to the drain timeout
+////   4 drain-after-tasks      front 62's request-scoped `after()` work
+////   5 stop-supervision-tree  and exit
+////
+//// A drain that exceeds its timeout reports `timedOut` and the process exits
+//// non-zero with the counts of what was still running — never a clean exit
+//// that lost work. The server's four cells are handed in as a `Lifecycle`
+//// record, so the order is asserted over a recording double.
+
+pub type DrainReport(renders: i32, afterTasks: i32, timedOut: bool)
+
+pub type Lifecycle(
+    setReady: fn(ready: bool) -> i32,
+    stopAccepting: fn() -> i32,
+    inFlightRenders: fn() -> i32,
+    pendingAfterTasks: fn() -> i32,
+    stopTree: fn() -> i32,
+    elapsedMs: fn() -> i32,
+    pause: fn(ms: i32) -> i32,
+)
+
+pub fn shutdownOrder() -> Array<string> {
+    return ["readiness=false", "stop-accepting", "drain-renders", "drain-after-tasks", "stop-supervision-tree"];
+}
+
+// What readiness waits for: the route table, the client manifest and each
+// datasource answering once.
+pub fn readinessChecks(datasources: Array<string>) -> Array<string> {
+    return ["route-table", "client-manifest"].append(datasources.map({ d -> "datasource:" + d }));
+}
+
+pub fn isReady(checks: Array<string>, answered: Array<string>) -> bool {
+    return checks.all({ c -> answered.contains(c) });
+}
+
+fn waitFor(life: Lifecycle, count: fn() -> i32, deadlineMs: i32) -> i32 {
+    var left = count();
+    while (left > 0 && life.elapsedMs() < deadlineMs) {
+        val slept = life.pause(10);
+        left = count();
+    }
+    return left;
+}
+
+// Runs the five steps in order over `life`, draining renders before the
+// `after()` work, each within `drainTimeoutMs` of the start.
+pub fn shutdown(life: Lifecycle, drainTimeoutMs: i32) -> DrainReport {
+    val setReady = life.setReady;
+    val a = setReady(false);
+    val stopAccepting = life.stopAccepting;
+    val b = stopAccepting();
+    val renders = waitFor(life, life.inFlightRenders, drainTimeoutMs);
+    val leftover = waitFor(life, life.pendingAfterTasks, drainTimeoutMs);
+    val stopTree = life.stopTree;
+    val c = stopTree();
+    return DrainReport(renders: renders, afterTasks: leftover, timedOut: renders
+        > 0
+        || leftover > 0);
+}
+
+pub fn exitCodeOf(r: DrainReport) -> i32 {
+    return if (r.timedOut) 1 else 0;
+}
+
+pub fn describeDrain(r: DrainReport) -> string {
+    val timedOut = if (r.timedOut) "true" else "false";
+    return "renders="
+        + r.renders.toString()
+        + " afterTasks="
+        + r.afterTasks.toString()
+        + " timedOut="
+        + timedOut
+        + " exit="
+        + exitCodeOf(r).toString();
+}

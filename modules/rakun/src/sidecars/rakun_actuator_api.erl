@@ -8,7 +8,7 @@
 %%%
 %%% WHAT DOES *NOT* LIVE HERE. No status order, no timeout, no route, no
 %%% exposure, no HTTP mapping, no aggregation: a registration is API, a decision
-%%% is host (`modules/rakun-actuator/src/sidecars/rakun_actuator.erl`). The
+%%% is host (`modules/rakun-service/src/actuator/sidecars/rakun_actuator.erl`). The
 %%% duplicate-id refusal is botopink (`registration.bp`); this module only
 %%% answers who registered an id first.
 %%%

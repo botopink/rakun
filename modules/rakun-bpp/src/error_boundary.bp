@@ -1,0 +1,221 @@
+// rakun-bpp/error_boundary — the per-segment catch, the digest, and the two
+// navigation signals a page raises (front 31 of 1.0.10-beta).
+//
+// A render used to have one failure mode: the whole thing. A boundary is the
+// recovery point — its child is a THUNK returning `@Result<Element, string>`,
+// and the boundary is a `case` over what the thunk answered. A value passed in
+// has already run, and a boundary handed a value cannot catch anything that
+// happened while producing it.
+//
+// ── Digests — what makes a fallback safe to ship ────────────────────────────
+//
+// An error message from a server render is built from an exception and may
+// carry a stack or a connection string. The fallback that renders into HTML
+// never sees it: `infoFor(message)` answers `ErrorInfo(message: "", digest)`,
+// and only `serverInfoFor(message)` — the logger's, never a renderer's — keeps
+// the message. The digest is std's `hash.contentHash` (front 03), so
+// the reader reports `a3f19c2b`, the operator greps the log for it, and both
+// rows compute the same string.
+//
+// ── Navigation signals are not errors ───────────────────────────────────────
+//
+// `notFound()` and `redirect(url)` are rakun-bpp's own (decisions 113, 115 and
+// 117): they raise the `nav:not-found` / `nav:redirect:<url>` reasons of
+// `contracts.md § 5b`, spelled by the shared library `routing`'s
+// `navigation.signalReason` — this file writes no `nav:` literal. A signal
+// travels the same channel as a real error, so a boundary tells them apart
+// with `routing`'s `isSignalReason` and RE-RAISES a signal rather than
+// rendering a fallback for it: a redirect is not "something went wrong".
+//
+// A page, layout or template is a `-> @Component<Element>` body
+// and cannot `throw` (decision 121), so the signal is the CALL:
+// `notFound();` raises the reason (an abort, `@panic(reason)`) and never
+// returns. Inside a `-> @Result<…>` thunk `throw notFound();` reads naturally
+// and raises the same way. Both forms reach the boundary through `__jhCapture`, the one host
+// cell that turns a raise into an `Error(reason)` value — botopink's own
+// `try … catch` unwraps a `@Result` and nothing else, so no `.bp` construct
+// can swallow a signal (`contracts.md § 5b`).
+//
+// Front 30's render is what translates a signal that leaves every boundary:
+// a 404 or a 307 before the first chunk, `data-jh-g` markup after it.
+//
+// ── The js half is contract, not code in this file ──────────────────────────
+//
+//   1. A `[data-jh-e="ID"]` element is the catch target: a client component
+//      that throws during render is replaced by the nearest one's fallback,
+//      from the same `ErrorInfo` shape (front 29's hydrate, front 68's runtime).
+//   2. Event-handler errors are NOT caught: a handler is a `data-jh-on-click`
+//      attribute naming a handler, outside the boundary's `@Result` channel by
+//      construction.
+//   3. `startTransition` errors ARE caught: front 68's runtime routes a
+//      transition failure to the nearest `data-jh-e`, with a digest computed
+//      the same way.
+//
+// A failing server action is not a render error: an action envelope with
+// `ok: false` is DATA, handled by front 67's form state; a boundary sees an
+// action only when the POST itself raised.
+//
+// `data-jh-reset="ID"` is the fallback's reset control. On the server there is
+// nothing to re-render into, so it is inert in the first HTML and becomes live
+// at hydration, where front 29's `hydrate()` binds it to front 26's
+// `refresh()`.
+
+import {element.Element};
+import {hash} from "std";
+import {navigation.NavKind, navigation.NavOutcome, navigation.signalReason, navigation.isSignalReason} from "routing";
+
+pub type ErrorInfo(message: string, digest: string)
+
+pub type ErrorBoundary(
+    id: string,
+    fallback: fn(info: ErrorInfo) -> Element,
+    child: fn() -> @Result<Element, string>,
+)
+
+// ── step 1: the digest and the two infos ────────────────────────────────────
+
+pub fn digestOf(message: string) -> string {
+    return hash.contentHash(message);
+}
+
+// What a fallback that renders into HTML receives: NO message.
+pub fn infoFor(message: string) -> ErrorInfo {
+    return ErrorInfo(message: "", digest: digestOf(message));
+}
+
+// What the logger receives: the message and the SAME digest. Nothing that
+// renders calls this — which is exactly one grep away for a reviewer.
+pub fn serverInfoFor(message: string) -> ErrorInfo {
+    return ErrorInfo(message: message, digest: digestOf(message));
+}
+
+// ── step 2: the catch ───────────────────────────────────────────────────────
+
+// The boundary's wrapper: `data-jh-e` is the anchor front 68's runtime routes a
+// transition failure to, and where a client error is caught.
+pub fn wrap(id: string, tree: Element) -> Element {
+    return Element(
+        tag: "div",
+        value: "",
+        children: [tree],
+        attrs: [#("data-jh-e", id)],
+    );
+}
+
+// The reset control's attribute. A fallback that offers a retry puts it on its
+// button; the server renders it inert.
+pub fn resetAttr(id: string) -> #(string, string) {
+    return #("data-jh-reset", id);
+}
+
+// The one host cell that turns a raise into a value. It calls the thunk
+// EXACTLY ONCE: a normal answer passes through unchanged, a raised signal
+// reason becomes `Error(reason)`, and any other raise becomes `Error` of its
+// message — so a component that crashed is caught like one that returned
+// `Error`.
+#[@External.Node("./signal_runtime.mjs", "capture")]
+#[@External.Erlang("jhonstart_signal", "capture")]
+declare fn __jhCapture(
+    child: fn() -> @Result<Element, string>,
+) -> @Result<Element, string>;
+
+// Raise a reason; never returns. Typed `-> string` so that `throw
+// notFound();` type-checks inside a `@Result` thunk. An abort whose message is
+// the reason: `__jhCapture` and std's `failure.attempt` read it back as that
+// text on every target.
+fn raiseReason(reason: string) -> string {
+    @panic(reason);
+}
+
+// The child's outcome, through the capture cell. The function-valued field is
+// read into a local before it is handed on (the erlang row lowers `b.child()`
+// to a method call).
+pub fn outcomeOf(b: ErrorBoundary) -> @Result<Element, string> {
+    val child = b.child;
+    return __jhCapture(child);
+}
+
+fn fallbackFor(b: ErrorBoundary, message: string) -> Element {
+    val fallback = b.fallback;
+    return wrap(b.id, fallback(infoFor(message)));
+}
+
+// Calls the thunk once and branches. A signal is re-raised, never rendered: a
+// caller that needs it as a value calls `renderBoundaryChecked`.
+pub fn renderBoundary(b: ErrorBoundary) -> Element {
+    val outcome = outcomeOf(b);
+    return case outcome {
+        Ok(tree) -> wrap(b.id, tree);
+        Error(message) -> caughtOrRaised(b, message);
+    };
+}
+
+fn caughtOrRaised(b: ErrorBoundary, message: string) -> Element {
+    if (isSignal(message)) raiseReason(message);
+    return fallbackFor(b, message);
+}
+
+// ── step 3: signals pass through ────────────────────────────────────────────
+
+pub fn isSignal(message: string) -> bool {
+    return isSignalReason(message);
+}
+
+// `routing`'s reason for a not-found, without raising it.
+pub fn notFoundReason() -> string {
+    return signalReason(
+        NavOutcome(kind: NavKind.NotFound, location: "", status: 404),
+    );
+}
+
+// `routing`'s reason for a 307 redirect to `url`, without raising it. A target
+// holding `:` is kept whole: the location is everything after the verb.
+pub fn redirectReason(url: string) -> string {
+    return signalReason(
+        NavOutcome(kind: NavKind.Redirect, location: url, status: 307),
+    );
+}
+
+// The page signal: raises `nav:not-found`. The render answers it with a 404
+// and the nearest not-found boundary (front 30), `clientApp` with that boundary
+// in `mount` (front 26).
+pub fn notFound() -> string {
+    return raiseReason(notFoundReason());
+}
+
+// The page signal: raises `nav:redirect:<url>`. The render answers a 307 with
+// `location: <url>` before the first chunk and `data-jh-g` markup after it,
+// once the target passed the check (front 30).
+pub fn redirect(url: string) -> string {
+    return raiseReason(redirectReason(url));
+}
+
+// What front 30's `compose` calls around every segment: `Ok` of the wrapped
+// child, `Ok` of the wrapped fallback for an ordinary failure, and `Error` of
+// the reason, unchanged, for a signal — a boundary never swallows one.
+pub fn renderBoundaryChecked(b: ErrorBoundary) -> @Result<Element, string> {
+    val outcome = outcomeOf(b);
+    val failure = case outcome {
+        Ok(tree) -> "";
+        Error(message) -> message;
+    };
+    if (isSignal(failure)) throw failure;
+    return case outcome {
+        Ok(tree) -> wrap(b.id, tree);
+        Error(message) -> fallbackFor(b, message);
+    };
+}
+
+// ── step 4: `catchError`, the readable spelling of the constructor ──────────
+//
+// Upstream's `catchError(Fallback)` returns a component. The curried port does
+// not type in botopink (`adder(3)(4)` — `unbound variable ''`), so this returns
+// the boundary RECORD and the call site renders it. It is `ErrorBoundary(…)`
+// under another name, and does nothing more.
+pub fn catchError(
+    id: string,
+    fallback: fn(info: ErrorInfo) -> Element,
+    child: fn() -> @Result<Element, string>,
+) -> ErrorBoundary {
+    return ErrorBoundary(id: id, fallback: fallback, child: child);
+}

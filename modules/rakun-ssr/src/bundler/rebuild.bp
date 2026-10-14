@@ -1,0 +1,112 @@
+//// rakun-ssr — the dev rebuild (front 68 step 8).
+////
+//// `rakun-ssr dev` keeps the graph. On a change: a module whose IMPORT lines are
+//// unchanged keeps the graph's shape, so only the chunks containing it are
+//// relinked; an edit to an import line is the one edit that can change the
+//// shape, so the graph is re-walked. Either way every refusal is re-checked
+//// and a failure is the same message `build` gives — the rules are not
+//// relaxed in dev. The answer's `steps` are in the order the CLI performs
+//// them: the manifest is written BEFORE the websocket push, so a reload during
+//// a rebuild never serves a URL the manifest does not name.
+
+import {types.AliasMap, config.OnzeConfig};
+import {bundler.scan.ImportRef, bundler.scan.importsOf, bundler.scan.isClientModule};
+import {bundler.graph.AppModule, bundler.graph.ClientGraph, bundler.graph.GraphNode, bundler.graph.clientGraph};
+import {bundler.refusal.BuildRefusal, bundler.refusal.BuildReport, bundler.refusal.checkBuild, bundler.refusal.describeReport};
+import {bundler.chunk.ChunkPlan, bundler.chunk.planChunks, bundler.chunk.routeReach, bundler.chunk.linkChunk, bundler.chunk.chunkFileName};
+
+pub type BundleState(
+    modules: Array<AppModule>,
+    graph: ClientGraph,
+    reach: Array<#(string, string[])>,
+    plans: Array<ChunkPlan>,
+    compiled: Array<#(string, string)>,
+    linked: Array<string>,
+)
+
+pub type RebuildResult(state: BundleState, rewalked: bool, changed: Array<string>, steps: Array<string>)
+
+pub type BundleSetup(aliases: AliasMap, appDir: string, runtime: Array<string>, entryModule: string, config: OnzeConfig)
+
+fn linkAll(plans: Array<ChunkPlan>, compiled: Array<#(string, string)>) -> @Result<Array<string>, string> {
+    var out: string[] = [];
+    for (plans) { p ->
+        out.push(try linkChunk(p, compiled));
+    }
+    return out;
+}
+
+// The state of a fresh build: the graph, the reach, the plan and the linked
+// chunks. `compiled` holds every module's compiled JavaScript.
+pub fn initialState(setup: BundleSetup, modules: Array<AppModule>, compiled: Array<#(string, string)>) -> @Result<BundleState, string> {
+    val graph = clientGraph(modules, setup.aliases, setup.appDir);
+    val reach = routeReach(modules, setup.aliases, setup.appDir);
+    val plans = planChunks(graph, reach, setup.runtime, setup.entryModule);
+    val linked = try linkAll(plans, compiled);
+    return BundleState(modules: modules, graph: graph, reach: reach, plans: plans, compiled: compiled, linked: linked);
+}
+
+fn importShape(refs: Array<ImportRef>) -> string {
+    var parts: string[] = [];
+    for (refs) { r ->
+        val modMark = if (r.isModDecl) "mod" else "";
+        parts.push(r.spec + "{" + r.names.join(",") + "}" + modMark);
+    }
+    return parts.join(";");
+}
+
+// `state` after `path` changed to `source`, `compiledJs` being the compiler's
+// output for the changed module. A refusal fails the rebuild with the build's
+// own report.
+pub fn rebuild(setup: BundleSetup, state: BundleState, path: string, source: string, compiledJs: string, envOf: fn(name: string) -> string) -> @Result<RebuildResult, string> {
+    val old = state.modules.filter({ m -> m.path == path });
+    if (old.length == 0) throw "dev: " + path + " is not a module of this app";
+    val before = old.at(0) ?? AppModule(id: "", path: "", source: "", refs: [], client: false);
+    val refs = try importsOf(path, source);
+    val after = AppModule(id: before.id, path: path, source: source, refs: refs, client: isClientModule(source));
+    val modules = state.modules.map({ m -> if (m.path == path) after else m });
+    val compiled = state.compiled.map({ c -> if (c._0 == after.id) #(c._0, compiledJs) else c });
+    val rewalk = importShape(before.refs) != importShape(refs)
+        || before.client != after.client;
+    val graph = if (rewalk)
+        clientGraph(modules, setup.aliases, setup.appDir)
+    else
+        state.graph;
+    val report = checkBuild(graph, modules, setup.config, envOf);
+    if (report.refusals.length > 0) throw describeReport(report);
+    val reach = if (rewalk)
+        routeReach(modules, setup.aliases, setup.appDir)
+    else
+        state.reach;
+    val plans = if (rewalk)
+        planChunks(graph, reach, setup.runtime, setup.entryModule)
+    else
+        state.plans;
+    val linked = try linkAll(plans, compiled);
+    var changed: string[] = [];
+    var i = 0;
+    for (plans) { p ->
+        val now = chunkFileName(p, linked.at(i) ?? "");
+        val was = plansFile(state, p.id);
+        if (now != was) changed.push(p.id);
+        i = i + 1;
+    }
+    val steps = if (changed.length == 0)
+        []
+    else
+        changed
+            .map({ id -> "write chunk " + id })
+            .append(["write client-manifest.txt", "push "
+                + changed.join(", ")]);
+    return RebuildResult(state: BundleState(modules: modules, graph: graph, reach: reach, plans: plans, compiled: compiled, linked: linked), rewalked: rewalk, changed: changed, steps: steps);
+}
+
+fn plansFile(state: BundleState, id: string) -> string {
+    var found = "";
+    var i = 0;
+    for (state.plans) { p ->
+        if (p.id == id) found = chunkFileName(p, state.linked.at(i) ?? "");
+        i = i + 1;
+    }
+    return found;
+}

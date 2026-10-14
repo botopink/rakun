@@ -29,17 +29,18 @@ import {service, restController, getMapping, postMapping, value, bean, configura
 plain|full-stack|library]`, `rakun run [--profile] [--port] [--watch]`, `rakun build` (an OTP
 release), `rakun test`, and `rakun routes` / `rakun beans` / `rakun config`, which inspect a project
 without starting it; `rakun help` lists them and any `#[cliCommand]` a project adds. Exit codes: 0
-done, 1 failed, 2 usage, 3 does not compile. A full-stack project uses onze's CLI (`onze dev`).
+done, 1 failed, 2 usage, 3 does not compile. A full-stack project uses rakun-ssr's CLI (`rakun-ssr dev`).
 
 ## Layout
 
-`repository/rakun/botopink.json` is a **workspace** (`"workspaces": ["modules/*", "examples/*"]`,
-decision 75 of 1.0.10-beta): it compiles nothing and ships nothing. The core is the member
-[`modules/rakun/`](modules/rakun/) — `from "rakun"` resolves to it — beside one member per Spring
-Boot starter under [`modules/`](modules/README.md) (`rakun-web`, `rakun-data`, `rakun-security`, …,
-thirteen scaffolds today, thirteen more planned) and the runnable example
-[`examples/rakun/`](examples/rakun/) (member `rakun-example`). `botopink test` runs inside a member,
-never at the root.
+`botopink.json` at the root is a **workspace** (`"workspaces"`: `modules/*`, `examples/*` and one
+`examples/<package>/*` per package, decision 75 of 1.0.10-beta): it compiles nothing and ships nothing. The core is
+the member [`modules/rakun/`](modules/rakun/) — `from "rakun"` resolves to it — beside the other packages of
+[`modules/`](modules/README.md): `rakun-service`, `rakun-data`, `rakun-security`, … for the server side,
+`rakun-style`, `rakun-bpp` (the `.bpp` components, the render, the forms) and `rakun-stylesheet` for the UI side,
+and `rakun-ssr` (the `rakun-ssr create|build|start` command line and the Next-style orchestrator) on top. Adding a
+package to a program's `botopink.json` is all it takes; `examples/` shows the combinations. `botopink test` runs
+inside a member, never at the root.
 
 ## Quick example
 

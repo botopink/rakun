@@ -1,0 +1,123 @@
+// emilia-card — one card's three token lists, and the stylesheet they make.
+//
+// A card is three style sites: the container, the heading and the body. Each is
+// a `Token[]`, and `emilia(tokens)` answers the class NAME the site would carry
+// (a `string`, content-derived: `e_<hash>`). The rule itself is registered on
+// the per-render stylesheet, and `flush()` drains it into one layered
+// `<style>` document. This example prints both halves — the three class names
+// and the flushed document — and asserts them. It uses emilia only: putting the
+// class names on markup is the job of whichever library renders the markup.
+//
+// What it shows end to end, from a CONSUMER package (a consumer re-emits its
+// own copy of the enum classes, so a `case` that crossed the package boundary
+// used to fall through every arm — § Maintainer rules):
+//
+//   - a token list lowers to one rule of `;`-joined declarations, each one a
+//     theme reference (`var(--color-red-600)`, `var(--text-lg)`), never a
+//     resolved literal;
+//   - a modifier (`Token.Hover([…])`, `Token.Md([…])`) is a SIBLING rule,
+//     hoisted out of the class body with the selector and the at-rule its
+//     variant gives it, inside the `utilities` cascade layer;
+//   - identical token lists collapse to ONE class name;
+//   - `flush()` returns the document — `@layer theme, base, components,
+//     utilities;`, the theme's `:root` block, the rules — and clears the
+//     per-render registry, so a second `flush()` holds no rule.
+//
+// Upstream: https://tailwindcss.com/docs/styling-with-utility-classes ·
+// /hover-focus-and-other-states · /responsive-design
+
+import {emilia, flush, Token} from "rakun-stylesheet";
+
+// The container: padding from the `--spacing` multiplier, a white surface and
+// black text.
+val cardTokens: Token[] = [
+    .Pad.All.__4,
+    .Bg.White,
+    .Color.Black,
+];
+
+// The heading: the type scale's `3xl` (font-size and its paired line-height),
+// bold, and a shade of the palette.
+val titleTokens: Token[] = [
+    .Text.Size.X3xl,
+    .Text.Bold,
+    .Color.Red.600,
+];
+
+// The body: base size and a neutral shade, plus two modifiers — a hover colour
+// and a larger size from the `md` breakpoint up.
+val hoverInner: Token[] = [.Color.Red.600];
+
+val mdInner: Token[] = [.Text.Size.Lg];
+
+val bodyTokens: Token[] = [
+    .Text.Size.Base,
+    .Color.Gray.600,
+    Token.Hover(hoverInner),
+    Token.Md(mdInner),
+];
+
+val cardClass = emilia(cardTokens);
+
+val titleClass = emilia(titleTokens);
+
+val bodyClass = emilia(bodyTokens);
+
+// `botopink run` prints the three class names, one per line, then the
+// flushed `<style>` document.
+fn main() -> @Task<void> {
+    @print(cardClass);
+    @print(titleClass);
+    @print(bodyClass);
+    @print(await flush());
+}
+
+// ── tests ───────────────────────────────────────────────────────────────────
+//
+// The class names and the utilities layer are pinned as literals: the hash is
+// content-derived and target-independent, so commonJS and erlang answer the
+// same bytes.
+
+val utilitiesLayer = "@layer utilities{"
+    + ".e_13df5d57{padding:calc(var(--spacing) * 4);background:#ffffff;color:var(--color-black)}"
+    + ".e_41222bb0{font-size:var(--text-3xl);line-height:var(--text-3xl--line-height);font-weight:bold;color:var(--color-red-600)}"
+    + ".e_bcdc3f6a{font-size:var(--text-base);line-height:var(--text-base--line-height);color:var(--color-gray-600)}"
+    + "@media (hover: hover){.e_bcdc3f6a:hover{color:var(--color-red-600)}}"
+    + "@media (width >= 48rem){.e_bcdc3f6a{font-size:var(--text-lg);line-height:var(--text-lg--line-height)}}"
+    + "}";
+
+test "the three style sites answer their content-derived class names" {
+    assert cardClass == "e_13df5d57";
+    assert titleClass == "e_41222bb0";
+    assert bodyClass == "e_bcdc3f6a";
+}
+
+test "identical token lists collapse to the same class name" {
+    val cardTokens2: Token[] = [
+        .Pad.All.__4,
+        .Bg.White,
+        .Color.Black,
+    ];
+    assert emilia(cardTokens2) == cardClass;
+}
+
+test "flush returns the layered `<style>` document with the three rules" {
+    val styles = await flush();
+    assert styles.startsWith(
+        "<style>@layer theme, base, components, utilities;@layer theme{:root{--spacing:0.25rem;",
+    );
+    assert styles.indexOf(utilitiesLayer + "@keyframes spin{") != -1;
+    assert styles.endsWith("</style>");
+}
+
+test "a second flush holds no rule — the first one cleared the registry" {
+    val again = emilia(bodyTokens);
+    val first = await flush();
+    assert first.indexOf("@media (hover: hover){." + again + ":hover{") != -1;
+    val second = await flush();
+    assert second.indexOf("@layer utilities{") == -1;
+    assert second.indexOf("." + cardClass + "{") == -1;
+    assert second.indexOf("." + titleClass + "{") == -1;
+    assert second.indexOf("." + bodyClass + "{") == -1;
+    assert second.endsWith("</style>");
+}

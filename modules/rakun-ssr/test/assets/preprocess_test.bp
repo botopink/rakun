@@ -1,0 +1,61 @@
+// `botopink test` suite for `src/preprocess.bp` (front 69 step 4).
+
+import {assets.preprocess.preprocess};
+import {io.fs, io.process, io.clock, path, io.env} from "std";
+
+// The run's own scratch directory — `botopink test` names it in
+// `BOTOPINK_TEST_TMPDIR`, and it is the one place a test writes.
+fn testTmp() -> string {
+    val root = env.read("BOTOPINK_TEST_TMPDIR") ?? "";
+    assert root
+        != "", "BOTOPINK_TEST_TMPDIR is not set: run this suite under `botopink test`";
+    return root;
+}
+
+fn scratchFile(text: string) -> string {
+    val dir = path.join([testTmp(), "pre-" + clock.nowMillis().toString()]);
+    val made = process.run("mkdir", ["-p", dir]);
+    val file = path.join([dir, "a.scss"]);
+    val w = fs.writeText(file, text);
+    return file;
+}
+
+fn errorOf(r: @Result<string, string>) -> string {
+    return case r {
+        Ok(v) -> "ok: " + v;
+        Error(e) -> e;
+    };
+}
+
+test "preprocess: no command returns the file unchanged" {
+    val f = scratchFile("$c: red;\n.a { color: $c; }\n");
+    assert preprocess("", f).unwrapOr("") == "$c: red;\n.a { color: $c; }\n";
+}
+
+test "preprocess: a command's stdout is the result" {
+    val f = scratchFile("body{}\n");
+    assert preprocess("cat", f).unwrapOr("") == "body{}\n";
+}
+
+test "preprocess: a missing command fails naming it" {
+    val f = scratchFile("x");
+    assert errorOf(preprocess("no-such-sassc-onze", f)).startsWith("preprocessor \"no-such-sassc-onze\" could not run");
+}
+
+// The failing preprocessor is a script of the test's own, so the output it
+// asserts is the script's, not a host tool's: how `cat` names itself in a
+// diagnostic is the host's (coreutils 9.4 prints the full `argv[0]`, which a
+// port spawn makes `/usr/bin/cat`; later coreutils and BSD print `cat`).
+test "preprocess: a non-zero exit fails with the command's output attached" {
+    val f = scratchFile("x");
+    val failing = path.join([path.dirname(f), "failing-sass"]);
+    val w = fs.writeText(failing, "#!/bin/sh\necho \"Error: expected one selector in $1\" >&2\nexit 65\n");
+    val x = process.run("chmod", ["+x", failing]);
+    val msg = errorOf(preprocess(failing, f));
+    assert msg.startsWith("preprocessor \""
+        + failing
+        + "\" exited 65 on "
+        + f
+        + ": ");
+    assert msg.endsWith(": Error: expected one selector in " + f);
+}

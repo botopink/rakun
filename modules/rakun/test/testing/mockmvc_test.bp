@@ -1,0 +1,61 @@
+import {http.Request, http.Response, http.HttpMethod, runtime.rkRegisterRoute, runtime.rkPropInt};
+import {testing.fake_request.FakeRequest, testing.fake_request.fakeGet, testing.fake_request.fakePost};
+import {testing.mockmvc.MockMvc};
+import {testing.assertions.expectStatus, testing.assertions.expectBodyEquals};
+
+fn showUser(req: Request) -> Response {
+    return Response.ok("user " + req.param("id"));
+}
+
+fn echoWire(req: Request) -> Response {
+    return Response.ok(req.query("page")
+        + "|"
+        + req.header("x-trace")
+        + "|"
+        + req.header("cookie")
+        + "|"
+        + req.body());
+}
+
+test "rakun: perform on a registered route answers the handler's response" {
+    val _r = rkRegisterRoute("GET", "/mvc/users/:id", { r -> showUser(r) });
+    val res = MockMvc.standalone().perform(fakeGet("/mvc/users/7"));
+    assert expectStatus(res, 200);
+    assert expectBodyEquals(res, "user 7");
+}
+
+test "rakun: perform on an unregistered path answers the router's 404" {
+    val res = MockMvc.standalone().perform(fakeGet("/mvc/nowhere/at/all"));
+    assert res.status == 404;
+    assert res.body == "";
+}
+
+test "rakun: query, headers, cookies and body travel the real dispatch path" {
+    val _r = rkRegisterRoute("POST", "/mvc/echo", { r -> echoWire(r) });
+    val req = fakePost("/mvc/echo", "payload")
+        .withQuery("page", "2")
+        .withHeader("X-Trace", "t9")
+        .withCookie("SESSION", "s.1");
+    val res = MockMvc.standalone().perform(req);
+    assert expectBodyEquals(res, "2|t9|SESSION=s.1|payload");
+}
+
+test "rakun: a base path prefixes every performed path" {
+    val _r = rkRegisterRoute("GET", "/mvc/api/users/:id", { r -> showUser(r) });
+    val res = MockMvc.under("/mvc/api").perform(fakeGet("/users/3"));
+    assert expectBodyEquals(res, "user 3");
+}
+
+// The TCP sockets this VM holds — a listener or a connection is a `tcp_inet`
+// port.
+#[@External.Erlang("""length([P || P <- erlang:ports(), erlang:port_info(P, name) == {name, "tcp_inet"}])""")]
+declare fn tcpSockets() -> i32;
+
+test "rakun: perform opens no socket" {
+    val _r = rkRegisterRoute("GET", "/mvc/quiet", { r -> showUser(r) });
+    val before = tcpSockets();
+    val res = MockMvc.standalone().perform(fakeGet("/mvc/quiet"));
+    assert res.status == 200;
+    assert tcpSockets() == before;
+    assert rkPropInt("rakun.server.bound-port") == 0;
+}

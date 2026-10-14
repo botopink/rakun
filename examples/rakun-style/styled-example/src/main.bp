@@ -1,0 +1,71 @@
+// Front 119's `styled-example.bp` as an application: `styled "…"` and
+// `styledProperty "…"` from "rakun-style", the theme declared once, a layered
+// sheet. Built on erlang and commonJS by the pre-commit gate; the repository
+// stage reads its emitted module for `tab4`'s constant class and `code`'s
+// computed call.
+
+import styled, {styledProperty, StyledView, StyledPropertyView, StyledSheet, Styled, StyledProperty, Sheet, layer} from "rakun-style";
+import {context.createContext, context.provide} from "std";
+import {theme, extendTheme, baseTheme, entry, clear, Ns, ThemeValue} from "rakun-style";
+
+// LANGUAGE GAP: a library's template function cannot read the program's catalogue (`@TypeInfo.all(with: theme)` in an imported module), so the literals below read the base theme (md 48rem), not this one; and `comptime` cannot build it (an enum variant in a comptime block).
+#[theme]
+pub val appTheme = extendTheme(
+    baseTheme(),
+    [entry(.Breakpoint, "md", ThemeValue.Rem(52.0)), clear(.Breakpoint, "2xl")],
+);
+
+pub val tab4 = styledProperty "tab-size: 4;";
+
+// Every hole known at build — `tab4` is a `val` whose literal has none — so
+// computed at build like a literal with no hole (decision 355).
+pub val tabRed = styled "${tab4} color: red;";
+
+// Tailwind: @utility p-* { padding: --spacing(--value(integer)); }
+fn padAll(n: i32) -> StyledPropertyView {
+    return styledProperty "padding: --spacing(${n});";
+}
+
+// `${padAll(2)}` is a call, so `code` is computed at render (decision 355):
+// a function, run below the render's provider — a `val` is evaluated outside
+// every render.
+fn code() -> StyledView {
+    return styled """
+  ${tab4}
+  font-family: var(--font-mono);
+  &:hover { ${padAll(
+        2,
+    )} }
+  @variant md { max-width: --theme(--breakpoint-md); }
+""";
+}
+
+// The render's root: whoever renders provides `StyledSheet`'s context — rakun-bpp's
+// render, emilia's `flush()` (decision 354 (7)). This one keeps nothing: the
+// sheet below is built by hand.
+fn Render(view: fn() -> StyledView) -> @Component<Styled> {
+    use provide(createContext(StyledSheet(layer: "components", add: dropped)));
+    val out = await view();
+    return out;
+}
+
+fn RenderProperty(
+    view: fn() -> StyledPropertyView,
+) -> @Component<StyledProperty> {
+    use provide(createContext(StyledSheet(layer: "components", add: dropped)));
+    val out = await view();
+    return out;
+}
+
+fn dropped(layer: string, item: Styled) -> void {}
+
+pub fn main() -> @Task<void> {
+    val c = await Render({ -> code() });
+    val p = await RenderProperty({ -> padAll(2) });
+    val sheet = Sheet
+        .of([layer("base"), layer("components")])
+        .add("components", c)
+        .add("components", await tabRed)
+        .add("base", await p.toStyled());
+    @println(sheet.render());
+}

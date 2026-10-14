@@ -1,0 +1,319 @@
+// `botopink test` flat suite for `src/reconcile.bp` (front 27).
+//
+// The remount decision of a client transition is a function of two lists of
+// layout keys, and the driver that applies it reaches the DOM only through
+// the `DomOps` record the entry supplies — so the whole of it is asserted
+// here WITHOUT a DOM, over a RECORDING `DomOps`: each function appends one
+// event to a test-process list (`put`/`get` on erlang, a `globalThis` array
+// on node), and the islands of a fixed three-depth page count their mounts.
+//
+// Both rows run this file. Nothing in `reconcile.bp` is host-bound; the
+// recording cells are this file's own, bound on both targets.
+//
+// What this file does not assert: the browser's `replaceChildren`, the
+// starters and `data-jh-pending` on a real anchor are the entry's functions
+// (`07-onze/50` step 6), proved in rakun-ssr 53's browser.
+
+import {link.reconcile.layoutKeys, link.reconcile.sharedDepth, link.reconcile.Navigation, link.reconcile.navigationOf, link.reconcile.replaceDepth, link.reconcile.DomOps, link.reconcile.applyTransition};
+import {router.RouterState};
+import {link.link.layoutKey};
+
+test "reconcile: layoutKeys is root-first and includes the root" {
+    val keys = layoutKeys(["docs", "api"]);
+    assert keys.length == 3;
+    assert keys.join(" ") == "/ /docs /docs/api";
+}
+
+test "reconcile: the root route is the single root key" {
+    val keys = layoutKeys([]);
+    assert keys.length == 1;
+    assert keys.join(" ") == "/";
+}
+
+test "reconcile: layoutKeys is layoutKey applied at every depth" {
+    val segs = ["blog", "[slug]"];
+    val keys = layoutKeys(segs);
+    assert keys.length == 3;
+    assert keys[0] == layoutKey(segs, 0);
+    assert keys[1] == layoutKey(segs, 1);
+    assert keys[2] == layoutKey(segs, 2);
+}
+
+// ── the reuse cases ─────────────────────────────────────────────────────────
+
+test "reconcile: two routes under /docs reuse root AND the docs layout" {
+    val here = layoutKeys(["docs", "api"]);
+    val there = layoutKeys(["docs", "guides"]);
+    assert sharedDepth(here, there) == 2;
+}
+
+test "reconcile: routes under different sections keep only the root layout" {
+    assert sharedDepth(layoutKeys(["docs"]), layoutKeys(["blog"])) == 1;
+    assert sharedDepth(layoutKeys(["docs", "api"]), layoutKeys(["blog", "hi"]))
+        == 1;
+}
+
+test "reconcile: a navigation to the current route remounts nothing" {
+    val keys = layoutKeys(["docs", "api", "use-router"]);
+    assert sharedDepth(keys, keys) == keys.length;
+    assert sharedDepth(layoutKeys([]), layoutKeys([])) == 1;
+}
+
+test "reconcile: the root layout is never remounted — the answer is never 0" {
+    assert sharedDepth(layoutKeys(["a"]), layoutKeys(["b"])) == 1;
+    assert sharedDepth(layoutKeys([]), layoutKeys(["b", "c"])) == 1;
+    assert sharedDepth(layoutKeys(["a", "b"]), layoutKeys([])) == 1;
+}
+
+test "reconcile: going deeper under the same section keeps every shared layout" {
+    // /docs/api  →  /docs/api/use-router : both layouts above stay mounted.
+    val here = layoutKeys(["docs", "api"]);
+    val there = layoutKeys(["docs", "api", "use-router"]);
+    assert sharedDepth(here, there) == 3;
+    assert sharedDepth(there, here) == 3;
+}
+
+test "reconcile: a divergence high up is not repaired by a match below it" {
+    // ["a","x"] vs ["b","x"] — the second segment matches as a NAME but the
+    // key at depth 2 is "/a/x" against "/b/x", so nothing below the root is
+    // shared. Keying by segment PATH rather than by position is what makes
+    // this the answer.
+    assert sharedDepth(layoutKeys(["a", "x"]), layoutKeys(["b", "x"])) == 1;
+}
+
+test "reconcile: the decision splits the depths into kept and replaced" {
+    // The contract the driver consumes: [0, keep) stays mounted, [keep, n] is
+    // replaced. A shared layout is by construction never in the replaced
+    // range, which is the pure half of "its islands are not re-hydrated".
+    val here = layoutKeys(["shop", "cart"]);
+    val there = layoutKeys(["shop", "checkout"]);
+    val keep = sharedDepth(here, there);
+    assert keep == 2;
+    assert here[0] == there[0];
+    assert here[1] == there[1];
+    assert here[2] != there[2];
+    assert there.length - keep == 1;
+}
+
+// ── the driver (step 1) ─────────────────────────────────────────────────────
+
+#[@External.Node("""(globalThis.__jhLinkRec = [], 0)""")]
+#[@External.Erlang("""(fun() -> put(jh_link_rec, []), 0 end)()""")]
+declare fn recReset() -> i32;
+
+#[@External.Node("""((globalThis.__jhLinkRec = (globalThis.__jhLinkRec || []).concat([$0])), 0)""")]
+#[@External.Erlang("""(fun(__E) -> put(jh_link_rec, (case get(jh_link_rec) of undefined -> []; __L -> __L end) ++ [__E]), 0 end)($0)""")]
+declare fn recPush(event: string) -> i32;
+
+#[@External.Node("""(globalThis.__jhLinkRec || [])""")]
+#[@External.Erlang("""(fun() -> case get(jh_link_rec) of undefined -> []; __L -> __L end end)()""")]
+declare fn recEvents() -> Array<string>;
+
+// The fixed page: an island per layout depth — `Nav` in the root layout (0),
+// `Sidebar` in the section's layout (1), `Comments` in the leaf (2). An island
+// owned by depth `o` is inside the segment root at depth `d` when `o > d`.
+fn islandsOfPage() -> Array<#(string, i32)> {
+    return [#("Nav", 0), #("Sidebar", 1), #("Comments", 2)];
+}
+
+fn mountFrom(depth: i32) -> void {
+    islandsOfPage().forEach({ island ->
+        if (island.1 > depth) recPush("mount " + island.0);
+    });
+}
+
+// The first render's hydration: every island mounted once.
+fn hydrateAll() -> void {
+    recReset();
+    mountFrom(-1);
+    recPush("hydrated");
+}
+
+fn recMarkup(href: string) -> @Task<@Result<string, string>> {
+    recPush("markup " + href);
+    return "<main>" + href + "</main>";
+}
+
+fn recMarkupFails(href: string) -> @Task<@Result<string, string>> {
+    recPush("markup " + href);
+    throw "fetch " + href + " failed";
+}
+
+fn recReplace(depth: i32, html: string) -> void {
+    recPush("replace " + depth.toString() + " " + html);
+}
+
+fn recStart(depth: i32) -> void {
+    recPush("start " + depth.toString());
+    mountFrom(depth);
+}
+
+fn recMountCount(name: string) -> i32 {
+    return recEvents().filter({ e -> e == "mount " + name }).length;
+}
+
+fn recScroll(depth: i32) -> void {
+    recPush("scroll " + depth.toString());
+}
+
+fn recPending(href: string, pending: bool) -> void {
+    val state = if (pending) " on" else " off";
+    recPush("pending " + href + state);
+}
+
+fn recordingDom() -> DomOps {
+    return DomOps(
+        markup: { href -> recMarkup(href) },
+        replaceSubtree: { depth, html -> recReplace(depth, html) },
+        startIslands: { depth -> recStart(depth) },
+        mountCount: { name -> recMountCount(name) },
+        scrollTo: { depth -> recScroll(depth) },
+        markPending: { href, pending -> recPending(href, pending) },
+    );
+}
+
+fn failingDom() -> DomOps {
+    val base = recordingDom();
+    return DomOps(..base, markup: { href -> recMarkupFails(href) });
+}
+
+// The events after the first render's hydration.
+fn transitionEvents() -> Array<string> {
+    val all = recEvents();
+    var after: Array<string> = [];
+    var seen = false;
+    for (all) { e ->
+        if (seen) after = after.append([e]);
+        if (e == "hydrated") seen = true;
+    }
+    return after;
+}
+
+fn route(path: string, pattern: string) -> RouterState {
+    return RouterState(
+        path: path,
+        params: [],
+        search: [],
+        pattern: pattern,
+        selected: 0,
+    );
+}
+
+test "reconcile: navigationOf is the decision simulateNavigation snapshots" {
+    val n = navigationOf(["docs", "api"], ["docs", "guides"]);
+    assert n.fromKeys.join(" ") == "/ /docs /docs/api";
+    assert n.toKeys.join(" ") == "/ /docs /docs/guides";
+    assert n.shared == 2;
+    assert n.keep.join(" ") == "/ /docs";
+    assert n.remount.join(" ") == "/docs/guides";
+}
+
+test "reconcile: replaceDepth is the deepest shared segment, never below the root" {
+    assert replaceDepth(navigationOf(["blog"], ["blog", "[slug]"])) == 1;
+    assert replaceDepth(navigationOf(["docs", "api"], ["docs", "guides"])) == 1;
+    assert replaceDepth(navigationOf([], ["blog"])) == 0;
+    assert replaceDepth(navigationOf(["docs"], ["blog"])) == 0;
+    assert replaceDepth(navigationOf(["blog", "[slug]"], ["blog", "[slug]"]))
+        == 2;
+}
+
+test "reconcile: /blog to /blog/x replaces depth 1 once and starts only its islands" {
+    hydrateAll();
+    val dom = recordingDom();
+    val out = await applyTransition(
+        route("/blog", "/blog"),
+        route("/blog/x", "/blog/[slug]"),
+        dom,
+    );
+    val nav = try out;
+    assert nav.shared == 2;
+    val events = transitionEvents();
+    assert events.filter({ e -> e.startsWith("replace ") }).join("|")
+        == "replace 1 <main>/blog/x</main>";
+    assert events.filter({ e -> e.startsWith("start ") }).join("|")
+        == "start 1";
+    assert dom.mountCount("Nav") == 1;
+    assert dom.mountCount("Sidebar") == 1;
+    assert dom.mountCount("Comments") == 2;
+}
+
+test "reconcile: the driver's order — pending, markup, replace, start, scroll, clear" {
+    hydrateAll();
+    val out = await applyTransition(
+        route("/docs/api", "/docs/api"),
+        route("/docs/guides", "/docs/guides"),
+        recordingDom(),
+    );
+    val nav = try out;
+    assert nav.remount.join(" ") == "/docs/guides";
+    assert transitionEvents().join("|")
+        == "pending /docs/guides on|markup /docs/guides|replace 1 <main>/docs/guides</main>|start 1|mount Comments|scroll 1|pending /docs/guides off";
+}
+
+test "reconcile: a navigation to the current path touches nothing" {
+    hydrateAll();
+    val dom = recordingDom();
+    val out = await applyTransition(
+        route("/blog/x", "/blog/[slug]"),
+        route("/blog/x", "/blog/[slug]"),
+        dom,
+    );
+    val nav = try out;
+    assert nav.remount.length == 0;
+    assert transitionEvents().length == 0;
+    assert dom.mountCount("Nav") == 1;
+}
+
+test "reconcile: a new parameter under one pattern re-renders the leaf only" {
+    hydrateAll();
+    val dom = recordingDom();
+    val out = await applyTransition(
+        route("/blog/a", "/blog/[slug]"),
+        route("/blog/b", "/blog/[slug]"),
+        dom,
+    );
+    val nav = try out;
+    assert nav.remount.length == 0;
+    assert transitionEvents()
+        .filter({ e -> e.startsWith("replace ") })
+        .join("|")
+        == "replace 2 <main>/blog/b</main>";
+    assert dom.mountCount("Sidebar") == 1;
+    assert dom.mountCount("Comments") == 1;
+}
+
+// Step 2: the server-rendered `Link` reads no hook; its pending state is the
+// attribute the driver asks the entry to set and clear (decision 363 (4)).
+test "reconcile: data-jh-pending is set on the active link first and cleared last" {
+    hydrateAll();
+    val out = await applyTransition(
+        route("/", "/"),
+        route("/checkout", "/checkout"),
+        recordingDom(),
+    );
+    val nav = try out;
+    assert nav.shared == 1;
+    val events = transitionEvents();
+    val marks = events.filter({ e -> e.startsWith("pending ") });
+    assert marks.join("|") == "pending /checkout on|pending /checkout off";
+    assert events[0] == "pending /checkout on";
+    assert events[events.length - 1] == "pending /checkout off";
+}
+
+test "reconcile: a markup that cannot be read replaces nothing and clears the mark" {
+    hydrateAll();
+    val dom = failingDom();
+    val out = await applyTransition(
+        route("/blog", "/blog"),
+        route("/blog/x", "/blog/[slug]"),
+        dom,
+    );
+    val message = case out {
+        Ok(nav) -> "";
+        Error(m) -> m;
+    };
+    assert message == "fetch /blog/x failed";
+    assert transitionEvents().join("|")
+        == "pending /blog/x on|markup /blog/x|pending /blog/x off";
+    assert dom.mountCount("Comments") == 1;
+}
