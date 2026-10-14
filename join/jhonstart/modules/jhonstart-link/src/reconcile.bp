@@ -1,0 +1,193 @@
+// jhonstart/reconcile — the remount decision of a client transition and the
+// driver that applies it (front 27).
+//
+// A client transition must not remount a layout the two routes share, or the
+// sidebar's scroll position and every client component's state inside it are
+// lost. The decision is a function of two lists of layout keys
+// (`layoutKeys`, `sharedDepth`, `navigationOf`); the driver
+// (`applyTransition`) applies it through a record of functions the entry
+// supplies (`DomOps`), so the whole module is pure: no DOM, no host cell, both
+// rows.
+//
+// The steps of a navigation, all of them here:
+//
+//   1. compute `layoutKey(segments, depth)` for every depth of the CURRENT
+//      route and of the TARGET route                       ← `layoutKeys`
+//   2. find the deepest depth at which the two lists agree; everything
+//      strictly above it is shared and stays mounted, DOM and islands
+//      untouched                                           ← `sharedDepth`
+//   3. mark the active link pending, read the target's markup, replace the
+//      children of the deepest shared segment's root with it, start the
+//      islands of that subtree only, scroll, clear the mark
+//                                                          ← `applyTransition`
+//
+// Whether the target's markup had to be fetched is the entry's answer
+// (`DomOps.markup`: its route cache, front 22's route-kind flag), never
+// recomputed here. Adopting the driver is the entry's step
+// (`07-onze/50` step 6); this module only declares it.
+//
+// This module declares no host cell of any target.
+
+import {RouterState} from "jhonstart";
+import {link.layoutKey};
+
+// `layoutKey` applied at EVERY depth, root-first and root INCLUDED, so the
+// list is one entry longer than the segment list: `["docs", "api"]` is
+// `["/", "/docs", "/docs/api"]`. The root layout is depth 0 and is in every
+// list, which is why two routes that share nothing else still share it.
+//
+// Written as a `loop` over a counter rather than a `map` over an index range:
+// the index is the depth and the list being walked is the ANSWER, not the
+// input.
+pub fn layoutKeys(segments: Array<string>) -> Array<string> {
+    var keys: Array<string> = [layoutKey(segments, 0)];
+    var depth = 1;
+    for (segments) { part ->
+        keys = keys.append([layoutKey(segments, depth)]);
+        depth = depth + 1;
+    }
+    return keys;
+}
+
+// The length of the common prefix of two key lists: everything strictly above
+// it stays mounted, everything from it down is replaced.
+//
+// Two identical routes answer the full length, so a navigation to the current
+// route remounts nothing. Two routes that share only the root answer 1. The
+// answer is never 0 — both lists always start with `"/"` — which is the same
+// statement as "the root layout is never remounted by a client transition".
+//
+// A `loop` over a counter for the same reason `segmentAt` is one in
+// `router.bp`: an element read back through the optional binder loses its type
+// on the erlang row.
+pub fn sharedDepth(current: Array<string>, target: Array<string>) -> i32 {
+    var shared = 0;
+    var i = 0;
+    var diverged = false;
+    for (current) { key ->
+        if (diverged == false)
+            if (i < target.length) {
+                if (key == keyAt(target, i))
+                    shared = i + 1
+                else
+                    diverged = true;
+            } else diverged = true;
+        i = i + 1;
+    }
+    return shared;
+}
+
+// Read one key by index, out of range answering `""`. The same shape as
+// `router.bp`'s `segmentAt` and for the same measured reason — `xs.at(i)
+// .unwrapOr("")` over an array that arrived as a typed parameter reads the
+// element back unwrapped on the erlang row.
+fn keyAt(keys: Array<string>, index: i32) -> string {
+    var found = "";
+    var i = 0;
+    for (keys) { key ->
+        if (i == index) found = key;
+        i = i + 1;
+    }
+    return found;
+}
+
+// ── the driver (step 1) ─────────────────────────────────────────────────────
+
+// The decision for one transition, from the two routes' segment lists:
+// `fromKeys` / `toKeys` (`layoutKeys`), `shared` (`sharedDepth`), `keep` (the
+// target's keys that stay mounted) and `remount` (the target's keys mounted
+// from its markup).
+pub type Navigation(
+    fromKeys: Array<string>,
+    toKeys: Array<string>,
+    shared: i32,
+    keep: Array<string>,
+    remount: Array<string>,
+)
+
+pub fn navigationOf(
+    current: Array<string>,
+    target: Array<string>,
+) -> Navigation {
+    val fromKeys = layoutKeys(current);
+    val toKeys = layoutKeys(target);
+    val shared = sharedDepth(fromKeys, toKeys);
+    return Navigation(
+        fromKeys: fromKeys,
+        toKeys: toKeys,
+        shared: shared,
+        keep: toKeys.slice(0, shared),
+        remount: toKeys.slice(shared, toKeys.length),
+    );
+}
+
+// The depth whose segment root has its CHILDREN replaced: the deepest shared
+// segment, one above the first key that differs. The root is depth 0 and is
+// shared by every pair of routes, so the answer is never below 0 and the root
+// layout itself is never replaced — only what it wraps. `/blog` → `/blog/x`
+// shares `/` and `/blog` and answers 1: the `/blog` segment's content (the
+// index page) is replaced by the `[slug]` segment. `/blog/a` → `/blog/b`
+// shares every key and answers the leaf: the page is re-rendered, the layouts
+// above it kept.
+pub fn replaceDepth(nav: Navigation) -> i32 {
+    return nav.shared - 1;
+}
+
+// What the entry supplies (`07-onze/50` step 6), so the driver reaches no DOM:
+//
+//   | function         | does                                                   |
+//   |------------------|--------------------------------------------------------|
+//   | `markup`         | the target's markup — the prefetched payload or a fetch; an `Error` aborts the transition |
+//   | `replaceSubtree` | `replaceChildren` on the segment root the render marks at `depth`, with the target's `html` |
+//   | `startIslands`   | starts the islands inside the segment root at `depth` (front 29's starters, per route) |
+//   | `mountCount`     | how many times the island `name` was mounted — the observable that a kept island was not re-hydrated |
+//   | `scrollTo`       | scrolls to the segment root at `depth` (the entry honours the link's `data-jh-scroll="0"`) |
+//   | `markPending`    | sets (`true`) or removes (`false`) `data-jh-pending` on the links to `href` (decision 363 (4)) |
+pub type DomOps(
+    markup: fn(href: string) -> @Task<@Result<string, string>>,
+    replaceSubtree: fn(depth: i32, html: string),
+    startIslands: fn(depth: i32),
+    mountCount: fn(name: string) -> i32,
+    scrollTo: fn(depth: i32),
+    markPending: fn(href: string, pending: bool),
+)
+
+// Applies one client transition. A navigation to the current path touches
+// nothing. Otherwise, in this order: the links to the target are marked
+// pending, the target's markup is read, the children of the segment root at
+// `replaceDepth` are replaced and only that subtree's islands are started,
+// the view scrolls there, and the mark is cleared — also when the markup could
+// not be read, in which case nothing is replaced and the error is the answer.
+// Islands above that depth are never touched.
+pub fn applyTransition(
+    current: RouterState,
+    target: RouterState,
+    dom: DomOps,
+) -> @Task<@Result<Navigation, string>> {
+    val nav = navigationOf(current.segments(), target.segments());
+    if (current.path == target.path) return nav;
+    val href = target.path;
+    val depth = replaceDepth(nav);
+    dom.markPending(href, true);
+    val loaded = await dom.markup(href);
+    val failed = case loaded {
+        Ok(markup) -> false;
+        Error(message) -> true;
+    };
+    if (failed) {
+        dom.markPending(href, false);
+        throw case loaded {
+            Ok(markup) -> "";
+            Error(message) -> message;
+        };
+    }
+    val html = case loaded {
+        Ok(markup) -> markup;
+        Error(message) -> "";
+    };
+    dom.replaceSubtree(depth, html);
+    dom.startIslands(depth);
+    dom.scrollTo(depth);
+    dom.markPending(href, false);
+    return nav;
+}

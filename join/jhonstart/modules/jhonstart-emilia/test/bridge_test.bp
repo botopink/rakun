@@ -1,0 +1,227 @@
+// `botopink test` flat suite for the `jhonstart-emilia` bridge (front 30
+// Step 9): the one test that renders emilia classes with jhonstart. Both rows.
+
+import {Element, ElementBase, div, p, span, text} from "jhonstart";
+import {Boundary, Suspense, holeId} from "jhonstart";
+import {app, Response, PageInput, RequestData, RenderPlugin} from "jhonstart";
+import {UiSegment, Metadata, Viewport, ErrorInfo, LayoutProps, PageContext} from "jhonstart";
+import {emilia, flush, Token, defaultTheme, className, cls, clsWith, styled, styledWith, mergeClass} from "emilia";
+import {renderNode, withAttrs, attrValue, classAttr, bracketPair} from "jhonstart";
+import {html} from "jhonstart-html";
+import {io.fs.walk, io.fs.readText} from "std";
+import {root.plugin, root.classesIn};
+
+// ── the recorder (the core suite's, per row) ────────────────────────────────
+
+#[@External.Node("""(globalThis.__jhRec = [], 0)""")]
+#[@External.Erlang("""(fun() -> put(jh_rec, []), 0 end)()""")]
+declare fn recReset() -> i32;
+
+#[@External.Node("""((globalThis.__jhRec = (globalThis.__jhRec || []).concat([$0])), 0)""")]
+#[@External.Erlang("""(fun(__E) -> put(jh_rec, (case get(jh_rec) of undefined -> []; __L -> __L end) ++ [__E]), 0 end)($0)""")]
+declare fn recPush(event: string) -> i32;
+
+#[@External.Node("""(globalThis.__jhRec || [])""")]
+#[@External.Erlang("""(fun() -> case get(jh_rec) of undefined -> []; __L -> __L end end)()""")]
+declare fn recEvents() -> Array<string>;
+
+fn recStatus(code: i32) -> void {
+    recPush("status " + code.toString());
+}
+
+fn recHeader(name: string, value: string) -> void {
+    recPush("header " + name + " " + value);
+}
+
+fn recWrite(chunk: string) -> @Task<void> {
+    recPush(chunk);
+}
+
+fn recClose() -> @Task<void> {
+    recPush("close");
+}
+
+fn recorder() -> Response {
+    recReset();
+    return Response(status: { code -> recStatus(code) }, header: { name, value -> recHeader(name, value) }, write: { chunk -> recWrite(chunk) }, close: { -> recClose() });
+}
+
+fn document() -> string {
+    return recEvents().join("");
+}
+
+fn req() -> RequestData {
+    return RequestData(method: "GET", path: "/", params: [], query: [], headers: [], cookies: []);
+}
+
+fn inputOf(page: fn() -> @Component<Element>) -> PageInput {
+    return PageInput(build: "b", pathname: "/", pattern: "/", params: "", query: "", table: "P|/", actions: [], chain: [], page: page, metadata: [], viewports: []);
+}
+
+fn outcomeText(r: @Result<void, string>) -> string {
+    return case r {
+        Ok(v) -> "ok";
+        Error(message) -> message;
+    };
+}
+
+// ── pages ───────────────────────────────────────────────────────────────────
+
+fn StyledPage() -> @Component<Element> {
+    val card = emilia([.Gap.All.4]);
+    return div([text("card", attrs: [])], attrs: [#("class", card)]);
+}
+
+fn styledAside() -> @Component<Element> {
+    val cls = emilia([.Gap.All.2]);
+    return span([text("aside", attrs: [])], attrs: [#("class", cls)]);
+}
+
+fn StreamedStyledPage() -> @Component<Element> {
+    return div([Suspense(Boundary(id: holeId(1), fallback: div([], attrs: []), child: { -> styledAside() }))], attrs: []);
+}
+
+fn PlainPage() -> @Component<Element> {
+    return p([text("plain", attrs: [])], attrs: []);
+}
+
+fn styleCount(doc: string) -> i32 {
+    return doc.split("<style>").length - 1;
+}
+
+// ── the cells ───────────────────────────────────────────────────────────────
+
+test "bridge: a styled page has one <style> in <head>, carrying its class" {
+    val site = app([plugin()], []);
+    val out = await site.render(inputOf({ -> StyledPage() }), req(), recorder());
+    assert outcomeText(out) == "ok";
+    val doc = document();
+    val head = doc.split("</head>").at(0) ?? "";
+    assert styleCount(head) == 1;
+    val cls = emilia([.Gap.All.4]);
+    val drained = await flush();
+    assert head.contains("." + cls);
+    assert doc.contains("class=\"" + cls + "\"");
+}
+
+test "bridge: a streamed boundary's new class is its fill's style, before the markup" {
+    val site = app([plugin()], []);
+    val out = await site.renderStream(inputOf({ -> StreamedStyledPage() }), req(), recorder());
+    assert outcomeText(out) == "ok";
+    val cls = emilia([.Gap.All.2]);
+    val drained = await flush();
+    val doc = document();
+    assert doc.contains("<template data-jh-f=\"h1\"><style>");
+    val fill = doc.split("<template data-jh-f=\"h1\">").at(1) ?? "";
+    assert fill.indexOf("." + cls)
+        < fill.indexOf("<span class=\"" + cls + "\">aside</span>");
+    assert fill.contains("</template><script>__bp1(\"h1\")</script>");
+}
+
+test "bridge: the payload's s lists the flushed classes, and [] when there were none" {
+    val site = app([plugin()], []);
+    val out = await site.render(inputOf({ -> StyledPage() }), req(), recorder());
+    val cls = emilia([.Gap.All.4]);
+    val drained = await flush();
+    assert document().contains("\"s\":[\"" + cls + "\"]");
+    val plain = await site.render(inputOf({ -> PlainPage() }), req(), recorder());
+    assert document().contains("\"s\":[]");
+}
+
+test "bridge: close is Ok after the last chunk and Error for a class registered later" {
+    val bridge = plugin();
+    val head = bridge.head;
+    val first = await head();
+    val close = bridge.close;
+    val clean = await close();
+    assert outcomeText(clean) == "ok";
+    val late = emilia([.Gap.All.8]);
+    val dirty = await close();
+    assert outcomeText(dirty).contains("registered after the last chunk: "
+        + late);
+}
+
+test "bridge: classesIn reads the e_ classes of a flushed document, once each, in order" {
+    assert classesIn(".e_1a2b{gap:1rem}.e_1a2b:hover{}.e_ff{}").join(",")
+        == "e_1a2b,e_ff";
+    assert classesIn("@layer theme{:root{--x:1}}").length == 0;
+}
+
+// ── front 48's rendered cells — contract 4 on markup ────────────────────────
+//
+// The shared fixture (`contracts.md § 4`): emilia's front-48 suite pins the
+// class of `cardTokens()` under `defaultTheme()` as `e_f51c2501` without HTML;
+// the cells below assert the same literal on a rendered document, and the
+// builders, the `html` DSL, `withAttrs` / `attrValue` and the static-first
+// merge over it.
+
+fn cardTokens() -> Token[] {
+    val hovered: Token[] = [.Bg.Color.Gray.__100];
+    val card: Token[] = [.Bg.White, .Pad.All.__4, .Text.Bold, Token.Hover(hovered)];
+    return card;
+}
+
+fn CardPage() -> @Component<Element> {
+    return div([text("card")], attrs: [styled(cardTokens(), defaultTheme())]);
+}
+
+test "bridge: the contract-4 literal on a rendered document" {
+    val site = app([plugin()], []);
+    val out = await site.render(inputOf({ -> CardPage() }), req(), recorder());
+    assert outcomeText(out) == "ok";
+    val doc = document();
+    assert className(cardTokens(), defaultTheme()) == "e_f51c2501";
+    assert doc.contains("<div class=\"e_f51c2501\">card</div>");
+    val head = doc.split("</head>").at(0) ?? "";
+    assert head.contains(".e_f51c2501{");
+    assert head.contains(".e_f51c2501:hover{");
+    assert doc.contains("\"s\":[\"e_f51c2501\"]");
+}
+
+test "bridge: the builders and the html DSL render the class slot byte for byte the same" {
+    val c = cls(cardTokens(), defaultTheme());
+    val built = div([p([text("hi")])], attrs: [styled(cardTokens(), defaultTheme())]);
+    val dsl = html "<div class={c}><p>hi</p></div>";
+    val drained = await flush();
+    assert renderNode(built) == "<div class=\"e_f51c2501\"><p>hi</p></div>";
+    assert renderNode(dsl) == renderNode(built);
+    assert attrValue(built.attrs, "class") == "e_f51c2501";
+    assert attrValue(dsl.attrs, "class") == "e_f51c2501";
+    val tagged = withAttrs([#("id", "card")], [classAttr(c)]);
+    assert attrValue(tagged, "class") == "e_f51c2501";
+    assert renderNode(div([], attrs: tagged))
+        == "<div id=\"card\" class=\"e_f51c2501\"></div>";
+}
+
+test "bridge: a static and an emilia class render static first, one space, in array order" {
+    val pair = styledWith("card", cardTokens(), defaultTheme());
+    val drained = await flush();
+    assert pair._1 == mergeClass("card", "e_f51c2501");
+    val el = div([], attrs: [#("id", "x"), pair, #("role", "note")]);
+    assert renderNode(el)
+        == "<div id=\"x\" class=\"card e_f51c2501\" role=\"note\"></div>";
+    assert clsWith("card rounded", cardTokens(), defaultTheme())
+        == "card rounded e_f51c2501";
+}
+
+test "bridge: one token list is one class on both rows" {
+    val cls = emilia([.Gap.All.4]);
+    val again = emilia([.Gap.All.4]);
+    val drained = await flush();
+    assert cls == again;
+    assert cls.startsWith("e_");
+}
+
+// Decision 113: the core knows the plugin contract and no styling library.
+// Every file under the core's `src/` is read, and none names emilia.
+test "bridge: no file of the core's src names emilia" {
+    val root = "../jhonstart/src";
+    val files = walk(root).unwrapOr([]);
+    assert files.length > 10;
+    var naming: string[] = [];
+    for (files) { f ->
+        val body = readText(root + "/" + f).unwrapOr("");
+        if (body.toLower().contains("emilia")) naming.push(f);
+    }
+    assert naming.length == 0, "the core names emilia in: " + naming.join(", ");
+}

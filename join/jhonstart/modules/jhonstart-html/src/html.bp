@@ -1,0 +1,1371 @@
+// jhonstart/html — the `html """…"""` template language (front 118).
+//
+// `html` is a template function: it receives the caller's markup UNEVALUATED
+// (`@Expr<string>`, the `"""…"""` literal) and expands it, at compile time,
+// into builder calls, returned as `@ExprCustom<Element>` — the executable code
+// plus a `CustomNode` reference overlay the language server reads (the sibling
+// of erika's `erika "…"` front-end).
+//
+// GRAMMAR.
+//
+//   template  := node*
+//   node      := element | component | fragment | text | comment | hole | slot
+//   element   := '<' name attr* '>' node* '</' name '>'  |  '<' name attr* '/>'
+//   component := the same, with a name that starts with an upper-case letter
+//   fragment  := '<>' node* '</>'  |  '<Fragment>' node* '</Fragment>'
+//   attr      := name | name '=' '"' text '"' | name '=' '{' expr '}'
+//              | '{...' expr '}' | '#[' item (',' item)* ','? ']'
+//   hole      := '{' expr '}'  |  '${' expr '}'
+//   expr      := botopink, in which markup may begin a lambda body (after
+//                `->`), an `if` / `else` block, or a `case` arm (after `->`)
+//
+// LOWERING (names written by the expansion are this module's — decision 112's
+// hygiene resolves them here, so a page imports only the tags it writes):
+//
+//   <p a="x" b={v}>t</p>    p([htmlText("t")], attrs: htmlAttrs([[#("a", "x")], htmlAttr("b", v)]))
+//   <p ariaLabel="x">       p([], attrs: [#("aria-label", "x")])   (decision 351's names, HTML's spelling)
+//   <p data-k={s}>          p([], attrs: htmlAttrs([htmlDataAttr("data-k", s)]))
+//   <br/>, <br>             br([], attrs: [])               (in place, void tags need no `/`)
+//   <Card t="x">kid</Card>  Card(t: "x", children: kid)     (labelled arguments; one kid bare, several a list)
+//   {expr}                  htmlNode(expr)                  (191's set: `Node`)
+//   ${expr}                 htmlText(expr)                  (a string hole stays text)
+//   <!-- c -->, <!doctype>  htmlRaw("<!-- c -->")           (rendered verbatim)
+//   <script>…</script>      script([htmlText("…")], …)     (raw-text bodies are not parsed)
+//   <style>…</style>        refused at the tag (decision 338: the style section or `use styled`)
+//   <slot/>                 htmlNode(children)
+//   <slot>fb</slot>         htmlSlot(children, htmlFragment([fb]))
+//
+// A component's attributes are labelled arguments, its content the `children`
+// argument: decision 192's one props record, `props: type(…)` (207), cannot be
+// built by template code yet (a `language-gaps.md` row), so a component takes
+// its props as parameters and `<slot />` reads the `children` parameter. An
+// unbound tag — a component or a builder — fails at the tag; a builder the core
+// lacks is declared beside the template or written `{el("figure", …)}`.
+//
+// An attribute takes a string, a `bool` (bare when true, absent when false) or
+// a `?string` (absent when null) — `htmlAttr`'s `AttrValue`; a `data-*` one a
+// `string` (`htmlDataAttr`). Its name follows decision 351: a one-word name as
+// HTML writes it, a multi-word one camelCase (`tabIndex`, `httpEquiv`,
+// `ariaLabel`) rendered in HTML's spelling (`htmlName`), `data-*` the one
+// kebab-case family; any other kebab-case name, an event attribute (`onClick`)
+// and a spread `{...expr}` on an element are refused at the attribute. What
+// 351 rests on — each builder taking its element's props record, so an unknown
+// attribute and a value of the wrong type are refused — waits on the props
+// record a template cannot fill (a `language-gaps.md` row). A hole takes a
+// `Node` (core `node.bp`); a `?T`, a record, a function are the checker's
+// type mismatch at the template call (decision 190's interim: `{expr}` is read
+// from the literal's raw text and re-emitted through `build`).
+//
+// HOW THE BODY WORKS. What a template body may write is measured by
+// `../test/platform_test.bp` on both comptime runtimes (BEAM for erlang, wat for
+// commonJS); `AGENTS.md` § Comptime constraints lists it. Three rules shape it:
+//
+//   - the body calls this module's functions (the helpers above it, which run
+//     in the template module beside it, decision 331), but the parser's state
+//     is the body's own `var`s, which only the body's lambdas write, so the
+//     nested grammar is one loop over the literal's characters driving an
+//     EXPLICIT frame stack — `root`, `tag` (the attribute zone of an open
+//     tag), `elem` / `comp` / `frag` / `slot` (a body being collected), `expr`
+//     (a `{…}` copied as botopink) and `mexpr` (a run of markup inside an
+//     expression) — kept as parallel arrays
+//     (`fKind`, `fName`, `fCode`, …); the braces of an expression are a second
+//     stack: `H` the hole's own, `I` an `if` block, `IM` an `if` block that
+//     yielded markup (an `else { htmlFragment([]) }` follows it when the author
+//     wrote none), `E` an `else` block, `B` any other;
+//   - a lambda that writes a `var` of the body is legal only when every use of
+//     it is a call at statement position of the body (decision 148), so the
+//     writers (`push`, `pop`, `addChild`, `mark`, `failSpan`, …) never call one
+//     another; a lambda that only reads state takes it as arguments (on the
+//     BEAM a closure holds a copy of what it captured when it was made);
+//   - the built code is padded to start at the literal's own line and column,
+//     so two expansions in one module never share the location of a call.
+
+import {Element, Node, text, fragment} from "jhonstart";
+import {bpp} from "std";
+
+// The value an expression attribute may hold on an element (step 1).
+type AttrValue = ?string | bool;
+
+// What `#[isRaw]` records on a tag (decision 302): its body is text, read
+// verbatim — `html` reads it back by type.
+pub type RawBody(verbatim: bool)
+
+// `#[isRaw]` — a tag annotation (decision 302): on an element it records
+// `RawBody`; a component has no body of its own to keep as text.
+pub fn isRaw(comptime decl: @Decl) {
+    if (decl.kind != DeclKind.Element)
+        decl.fail(
+            "`#[isRaw]` is written on an element — <"
+                + decl.name
+                + "> is a component",
+        );
+    decl.setMeta(RawBody(verbatim: true));
+}
+
+// `class={classList(["box", classIf(isRed, "red"), extra])}` — Astro's
+// `class:list`: the empty strings dropped, the rest joined with one space.
+pub fn classList(names: Array<string>) -> string {
+    return names.filter({ n -> n != "" }).join(" ");
+}
+
+// Astro's `Astro.slots.has(name)`: whether a slot's value renders anything.
+pub fn hasContent(node: Node) -> bool {
+    if (node is Element[]) return node.length > 0;
+    if (node is string) return node != "";
+    return true;
+}
+
+// The class name when `cond` holds, `""` otherwise — `classList` drops it.
+pub fn classIf(cond: bool, name: string) -> string {
+    return if (cond) name else "";
+}
+
+fn htmlText(value: string) -> Element {
+    return text(value, attrs: []);
+}
+
+fn htmlRaw(value: string) -> Element {
+    return Element(tag: "#raw", value: value, children: [], attrs: []);
+}
+
+fn htmlFragment(children: Element[]) -> Element {
+    return fragment(children, attrs: []);
+}
+
+fn htmlEl(
+    tag: string,
+    children: Element[],
+    attrs: Array<#(string, string)>,
+) -> Element {
+    return Element(tag: tag, value: "", children: children, attrs: attrs);
+}
+
+// A hole's value as one child (decision 191): text for a string, a number or
+// a `bool` (their `toString()`, the same on every target), the element
+// itself, a list as a fragment.
+fn htmlNode(node: Node) -> Element {
+    if (node is string) return text(node, attrs: []);
+    if (node is i32) return text(node.toString(), attrs: []);
+    if (node is i64) return text(node.toString(), attrs: []);
+    if (node is f32) return text(node.toString(), attrs: []);
+    if (node is f64) return text(node.toString(), attrs: []);
+    if (node is bool) return text(node.toString(), attrs: []);
+    if (node is Element) return node;
+    if (node is Element[]) return fragment(node, attrs: []);
+    return fragment([], attrs: []);
+}
+
+// `<slot>fallback</slot>`: the children when there are any, else the fallback.
+fn htmlSlot(children: Node, fallback: Element) -> Element {
+    if (children is Element[]) if (children.length == 0) return fallback;
+    if (children is string) if (children == "") return fallback;
+    return htmlNode(children);
+}
+
+// One written attribute: a string as written, `true` bare, `false` and `null`
+// absent.
+fn htmlAttr(name: string, value: AttrValue) -> Array<#(string, string)> {
+    if (value is bool) return if (value) [#(name, "")] else [];
+    if (value == null) return [];
+    if (value is string) return [#(name, value)];
+    return [];
+}
+
+// A `data-*` attribute written `{expr}`: a `string`, nothing else (decision
+// 351 (3)).
+fn htmlDataAttr(name: string, value: string) -> Array<#(string, string)> {
+    return [#(name, value)];
+}
+
+// The attribute groups in written order.
+fn htmlAttrs(
+    groups: Array<Array<#(string, string)>>,
+) -> Array<#(string, string)> {
+    var out: Array<#(string, string)> = [];
+    for (groups) { g ->
+        out = out.append(g);
+    }
+    return out;
+}
+
+// ── the template's helpers ───────────────────────────────────────────────────
+//
+// Plain functions `html`'s body calls: they run in the template module beside
+// it (decision 331), never at run time.
+
+fn isLetter(c: string) -> bool {
+    return c.length() == 1
+        && ("abcdefghijklmnopqrstuvwxyz".contains(c)
+            || "ABCDEFGHIJKLMNOPQRSTUVWXYZ".contains(c));
+}
+
+fn isUpper(c: string) -> bool {
+    return c.length() == 1 && "ABCDEFGHIJKLMNOPQRSTUVWXYZ".contains(c);
+}
+
+fn isIdentCh(c: string) -> bool {
+    return isLetter(c)
+        || (c.length() == 1 && "0123456789".contains(c))
+        || c == "_";
+}
+
+fn isNameCh(c: string) -> bool {
+    return isIdentCh(c) || c == "-" || c == "." || c == ":";
+}
+
+fn isWs(c: string) -> bool {
+    return c == " " || c == "\n" || c == "\t" || c == "\r";
+}
+
+// Decision 351 (3): `data-` and a suffix, the one kebab-case family.
+fn isDataName(name: string) -> bool {
+    return name.startsWith("data-") && name.length() > 5;
+}
+
+// Decision 351 (5): `on` and an upper-case letter — an event attribute.
+fn isEventName(name: string) -> bool {
+    return name.length() > 2
+        && name.slice(0, 2) == "on"
+        && isUpper(name.slice(2, 3));
+}
+
+// `aria-label` → `ariaLabel`: the camelCase spelling of a kebab-case name.
+fn camelOf(name: string) -> string {
+    val words = name.split("-");
+    var out = words.at(0) ?? "";
+    for (words.slice(1, words.length)) { w ->
+        out = out + w.slice(0, 1).toUpper() + w.slice(1, w.length());
+    }
+    return out;
+}
+
+// An attribute's HTML spelling (decision 351 (3)): `data-*` as written,
+// `ariaLabel` → `aria-label`, React's two hyphenated names (`httpEquiv`,
+// `acceptCharset`), any other name lower-cased (`tabIndex` → `tabindex`).
+fn htmlName(name: string) -> string {
+    if (isDataName(name)) return name;
+    if (name == "httpEquiv") return "http-equiv";
+    if (name == "acceptCharset") return "accept-charset";
+    if (name.length() > 4
+        && name.slice(0, 4) == "aria"
+        && isUpper(name.slice(4, 5)))
+        return "aria-" + name.slice(4, name.length()).toLower();
+    return name.toLower();
+}
+
+// `s` as a botopink string literal.
+fn lit(s: string) -> string {
+    return "\""
+        + s
+            .split("\\")
+            .join("\\\\")
+            .split("\"")
+            .join("\\\"")
+            .split("\n")
+            .join("\\n")
+            .split("\r")
+            .join("\\r")
+            .split("\t")
+            .join("\\t")
+            .split("$")
+            .join("\\$")
+        + "\"";
+}
+
+fn topS(arr: Array<string>) -> string {
+    return arr.at(arr.length - 1) ?? "";
+}
+
+fn topI(arr: Array<i32>) -> i32 {
+    return arr.at(arr.length - 1) ?? 0;
+}
+
+fn setS(arr: Array<string>, v: string) -> Array<string> {
+    return arr.slice(0, arr.length - 1).append([v]);
+}
+
+fn setI(arr: Array<i32>, v: i32) -> Array<i32> {
+    return arr.slice(0, arr.length - 1).append([v]);
+}
+
+fn joinTo(cur: string, v: string) -> string {
+    return if (cur == "") v else cur + ", " + v;
+}
+
+fn attrsCode(flat: string, groups: string, dyn: string) -> string {
+    return if (dyn != "") "htmlAttrs([" + groups + "])" else "[" + flat + "]";
+}
+
+fn decode(s: string) -> string {
+    return s
+        .split("&lt;")
+        .join("<")
+        .split("&gt;")
+        .join(">")
+        .split("&quot;")
+        .join("\"")
+        .split("&#39;")
+        .join("'")
+        .split("&apos;")
+        .join("'")
+        .split("&amp;")
+        .join("&");
+}
+
+// The first entity of `s` `decode` does not know, or "".
+fn badEntity(s: string) -> string {
+    val rest = s.split("&amp;").join("");
+    val segs = rest.split("&");
+    var bad = "";
+    for (segs.slice(1, segs.length)) { seg ->
+        val semi = seg.indexOf(";");
+        if (semi > 0 && bad == "") {
+            val name = seg.slice(0, semi);
+            val known = name == "lt"
+                || name == "gt"
+                || name == "quot"
+                || name == "#39"
+                || name == "apos";
+            if (name.contains(" ") == false && known == false)
+                bad = "&" + name + ";";
+        }
+    }
+    return bad;
+}
+
+fn entityMessage(bad: string) -> string {
+    return "the entity `"
+        + bad
+        + "` is not decoded — write the character itself (`&lt;`, `&gt;`, `&amp;`, `&quot;`, `&#39;` are)";
+}
+
+// A run of text as one child: the lines trimmed where they meet, joined by
+// one space, the entities decoded.
+fn textOut(buf: string) -> string {
+    val lines = buf.split("\n");
+    val last = lines.length - 1;
+    var out = "";
+    var li = 0;
+    for (lines) { ln ->
+        var t = ln.split("\r").join("").split("\t").join(" ");
+        if (li > 0) t = t.trimStart();
+        if (li < last) t = t.trimEnd();
+        if (t != "") out = if (out == "") t else out + " " + t;
+        li = li + 1;
+    }
+    return decode(out);
+}
+
+// The code a closed tag lowers to (the LOWERING table above).
+fn closeTagCode(
+    kind: string,
+    name: string,
+    kids: string,
+    count: i32,
+    props: string,
+    attrs: string,
+) -> string {
+    val withKids = if (count == 0)
+        props
+    else if (count == 1)
+        joinTo(props, "children: " + kids)
+    else
+        joinTo(props, "children: [" + kids + "]");
+    return if (kind == "comp")
+        name + "(" + withKids + ")"
+    else if (kind == "frag")
+        "htmlFragment([" + kids + "])"
+    else if (kind == "slot")
+        "htmlSlot(children, htmlFragment([" + kids + "]))"
+    else if (name == "html")
+        "htmlEl(\"html\", [" + kids + "], " + attrs + ")"
+    else
+        name + "([" + kids + "], attrs: " + attrs + ")";
+}
+
+// Decision 361 — std's `#[bpp.html]` marks this the markup's unfold target:
+// the toolchain finds it by the annotation in the package `"bpp"` names. It
+// becomes the core's `pub default fn` at `05-jhonstart/26` step 0 (200); until
+// then the core marks no `#[bpp.html]`, and `"bpp": "jhonstart"` is refused.
+#[bpp.html]
+pub fn html(comptime template: @Expr<string>) -> @ExprCustom<Element> {
+    val interpMark = "@@interp@@";
+    var chs: Array<string> = [];
+    var poss: Array<i32> = [];
+    var pend: Array<i32> = [];
+    var codes: Array<string> = [];
+    var srcEnd = 0;
+    for (template.parts()) { part ->
+        if (part.kind == "Interp") {
+            chs = chs.append([interpMark]);
+            poss = poss.append([part.span.start]);
+            pend = pend.append([part.span.end]);
+            codes = codes.append([part.code]);
+        } else {
+            var k = part.span.start;
+            for (part.text.split("")) { c ->
+                chs = chs.append([c]);
+                poss = poss.append([k]);
+                pend = pend.append([k + 1]);
+                codes = codes.append([""]);
+                k = k + 1;
+            }
+        }
+        srcEnd = part.span.end;
+    }
+    val n = chs.length;
+
+    val ch = { k -> chs.at(k) ?? "" };
+    val posOf = { k -> poss.at(k) ?? srcEnd };
+    val endOf = { k -> pend.at(k) ?? srcEnd };
+    val codeOf = { k -> codes.at(k) ?? "" };
+    val voids = [
+        "area",
+        "base",
+        "br",
+        "col",
+        "embed",
+        "hr",
+        "img",
+        "input",
+        "link",
+        "meta",
+        "param",
+        "source",
+        "track",
+        "wbr",
+    ];
+    val rawTexts = ["script", "style", "textarea", "title"];
+
+    var failed = false;
+    val failSpan = { a, b, msg ->
+        if (failed == false) template.failAt(Span(a, b, 1), "html: " + msg);
+        failed = true;
+    };
+
+    var nodes: Array<CustomNode> = [];
+    val mark = { kind, a, b, label, ref ->
+        nodes = nodes.append(
+            [
+                CustomNode(
+                    kind: kind,
+                    span: Span(a, b, 1),
+                    label: label,
+                    ref: ref,
+                    children: [],
+                ),
+            ],
+        );
+    };
+
+    var fKind: Array<string> = ["root"];
+    var fName: Array<string> = [""];
+    var fCode: Array<string> = [""];
+    var fCount: Array<i32> = [0];
+    var fFlat: Array<string> = [""];
+    var fGroups: Array<string> = [""];
+    var fDyn: Array<string> = [""];
+    var fSeen: Array<string> = ["|"];
+    var fFlag: Array<string> = [""];
+    // Decision 302 — the `@Decl` of the tag whose attribute zone is open: its
+    // annotations run over it in written order.
+    var tagDecl = template.tagDecl(DeclKind.Element, "", []);
+    var fStart: Array<i32> = [0];
+    var fEnd: Array<i32> = [0];
+    var fParen: Array<i32> = [0];
+    var braces: Array<string> = [];
+    var parenDepth = 0;
+    var ifParen = 0;
+    var ifState = 0;
+    var elsePending = false;
+    var lastSig = "op";
+
+
+    val push = { kind, name, a, b, flag ->
+        fKind = fKind.append([kind]);
+        fName = fName.append([name]);
+        fCode = fCode.append([""]);
+        fCount = fCount.append([0]);
+        fFlat = fFlat.append([""]);
+        fGroups = fGroups.append([""]);
+        fDyn = fDyn.append([""]);
+        fSeen = fSeen.append(["|"]);
+        fFlag = fFlag.append([flag]);
+        fStart = fStart.append([a]);
+        fEnd = fEnd.append([b]);
+        fParen = fParen.append([parenDepth]);
+    };
+    val pop = { ->
+        val last = fKind.length - 1;
+        parenDepth = topI(fParen);
+        fKind = fKind.slice(0, last);
+        fName = fName.slice(0, last);
+        fCode = fCode.slice(0, last);
+        fCount = fCount.slice(0, last);
+        fFlat = fFlat.slice(0, last);
+        fGroups = fGroups.slice(0, last);
+        fDyn = fDyn.slice(0, last);
+        fSeen = fSeen.slice(0, last);
+        fFlag = fFlag.slice(0, last);
+        fStart = fStart.slice(0, last);
+        fEnd = fEnd.slice(0, last);
+        fParen = fParen.slice(0, last);
+    };
+    val addChild = { code ->
+        fCode = setS(fCode, joinTo(topS(fCode), code));
+        fCount = setI(fCount, topI(fCount) + 1);
+    };
+    val addCode = { code ->
+        fCode = setS(fCode, topS(fCode) + code);
+    };
+    val addStaticAttr = { name, valueCode ->
+        val shown = lit(htmlName(name));
+        fFlat = setS(
+            fFlat,
+            joinTo(topS(fFlat), "#(" + shown + ", " + valueCode + ")"),
+        );
+        fGroups = setS(
+            fGroups,
+            joinTo(topS(fGroups), "[#(" + shown + ", " + valueCode + ")]"),
+        );
+    };
+    val addDynAttr = { name, code ->
+        val helper = if (isDataName(name)) "htmlDataAttr(" else "htmlAttr(";
+        fGroups = setS(
+            fGroups,
+            joinTo(
+                topS(fGroups),
+                helper + lit(htmlName(name)) + ", " + code + ")",
+            ),
+        );
+        fDyn = setS(fDyn, "d");
+    };
+    val addProp = { name, code ->
+        fFlat = setS(fFlat, joinTo(topS(fFlat), name + ": " + code));
+    };
+
+    var tbuf = "";
+    var tStart = 0 - 1;
+    var tEnd = 0;
+
+    val exprState = { ->
+        braces = braces.append(["H"]);
+        parenDepth = 0;
+        ifState = 0;
+        elsePending = false;
+        lastSig = "{H";
+    };
+    var doClose = false;
+
+    var i = 0;
+    var j = 0;
+    var k = 0;
+    var e = 0;
+    var q = 0;
+    var depth = 0;
+    var going = true;
+    var closed = false;
+    var args = "";
+    var bodyCode = "";
+    var run = "";
+    var valueCode = "";
+    var dynamic = false;
+    while (i < n && failed == false) {
+        val kind = topS(fKind);
+        val c = ch(i);
+        val c1 = ch(i + 1);
+        val childMode = kind == "root"
+            || kind == "elem"
+            || kind == "comp"
+            || kind == "frag"
+            || kind == "slot"
+            || kind == "mexpr";
+        if (childMode && kind == "mexpr" && isWs(c))
+            i = i + 1
+        else if (childMode
+            && kind == "mexpr"
+            && (c != "<"
+                || (isLetter(c1) == false
+                    && c1 != ">"
+                    && c1 != "!"
+                    && c1 != "/"))) {
+            val kids = topS(fCode);
+            val count = topI(fCount);
+            pop();
+            addCode(if (count == 1) kids else "htmlFragment([" + kids + "])");
+            if (topS(braces) == "I") braces = setS(braces, "IM");
+            lastSig = "operand";
+        } else if (childMode) {
+            if (c == interpMark || c == "<" || c == "{" || c == "}")
+                if (tbuf != "") {
+                    val bad = badEntity(tbuf);
+                    if (bad != "") failSpan(tStart, tEnd, entityMessage(bad));
+                    val tx = textOut(tbuf);
+                    if (tx != "") {
+                        mark("text", tStart, tEnd, "string", null);
+                        addChild("htmlText(" + lit(tx) + ")");
+                    }
+                    tbuf = "";
+                    tStart = 0 - 1;
+                }
+            if (c == interpMark) {
+                mark("hole", posOf(i), endOf(i), "none", null);
+                addChild("htmlText(" + codeOf(i) + ")");
+                i = i + 1;
+            } else if (c == "<" && chs.slice(i, i + 4).join("") == "<!--") {
+                j = i + 4;
+                while (j < n && chs.slice(j, j + 3).join("") != "-->") {
+                    j = j + 1;
+                }
+                if (j >= n)
+                    failSpan(
+                        posOf(i),
+                        posOf(i + 4),
+                        "an unclosed comment `<!--`",
+                    )
+                else {
+                    val body = chs.slice(i, j + 3).join("");
+                    if (body.contains(interpMark))
+                        failSpan(
+                            posOf(i),
+                            endOf(j + 2),
+                            "a `\${…}` inside a comment — a comment is rendered as written",
+                        );
+                    mark("comment", posOf(i), endOf(j + 2), "comment", null);
+                    addChild("htmlRaw(" + lit(body) + ")");
+                }
+                i = j + 3;
+            } else if (c == "<" && c1 == "!") {
+                j = i + 2;
+                while (j < n && ch(j) != ">") {
+                    j = j + 1;
+                }
+                val body = chs.slice(i, j + 1).join("");
+                if (j >= n || body.contains(interpMark))
+                    failSpan(
+                        posOf(i),
+                        posOf(i + 2),
+                        "an unclosed `<!…>` declaration",
+                    )
+                else {
+                    mark("doctype", posOf(i), endOf(j), "keyword", null);
+                    addChild("htmlRaw(" + lit(body) + ")");
+                }
+                i = j + 1;
+            } else if (c == "<" && c1 == "/") {
+                j = i + 2;
+                while (j < n && ch(j) != ">") {
+                    j = j + 1;
+                }
+                val name = chs.slice(i + 2, j).join("").trim();
+                val a = posOf(i + 2);
+                val b = if (j > i + 2) endOf(j - 1) else posOf(i + 2);
+                val body = kind == "elem"
+                    || kind == "comp"
+                    || kind == "frag"
+                    || kind == "slot";
+                if (j >= n)
+                    failSpan(
+                        posOf(i),
+                        a,
+                        "an unclosed closing tag `</" + name + "`",
+                    )
+                else if (body == false)
+                    failSpan(a, b, "unexpected closing tag </" + name + ">")
+                else if (name != topS(fName))
+                    failSpan(
+                        a,
+                        b,
+                        "mismatched closing tag </"
+                            + name
+                            + ">, expected </"
+                            + topS(fName)
+                            + ">",
+                    )
+                else {
+                    if (name != "")
+                        mark("tag", a, b, "tag", template.lookup(name));
+                    doClose = true;
+                }
+                i = j + 1;
+            } else if (c == "<" && c1 == ">") {
+                mark("fragment", posOf(i), endOf(i + 1), "tag", null);
+                push("frag", "", posOf(i), endOf(i + 1), "");
+                i = i + 2;
+            } else if (c == "<" && isLetter(c1)) {
+                j = i + 1;
+                while (j < n && isNameCh(ch(j))) {
+                    j = j + 1;
+                }
+                val name = chs.slice(i + 1, j).join("");
+                val a = posOf(i + 1);
+                val b = endOf(j - 1);
+                val comp = isUpper(name.slice(0, 1)) && name != "Fragment";
+                if (name.contains(":"))
+                    failSpan(
+                        a,
+                        b,
+                        "a tag name holds no `:` — `<"
+                            + name
+                            + ">` is not in the grammar",
+                    )
+                else if (name == "Fragment"
+                    || name == "slot"
+                    || name == "html"
+                    || name == "style") {
+                    mark("tag", a, b, "tag", null);
+                    push("tag", name, a, b, "");
+                } else {
+                    val binding = template.lookup(name);
+                    if (binding == null) {
+                        val hint = if (comp)
+                            "a component tag calls the function of that name in scope"
+                        else
+                            "a tag calls the builder of that name — import it from \"jhonstart\", or write {el(\""
+                                + name
+                                + "\", …)}";
+                        failSpan(
+                            a,
+                            b,
+                            "unbound name `"
+                                + name
+                                + "` at <"
+                                + name
+                                + "> — "
+                                + hint,
+                        );
+                    } else {
+                        mark(
+                            if (comp) "component" else "tag",
+                            a,
+                            b,
+                            "tag",
+                            binding,
+                        );
+                        push("tag", name, a, b, if (comp) "comp" else "");
+                        tagDecl = template.tagDecl(
+                            if (comp) DeclKind.Component else DeclKind.Element,
+                            name,
+                            [],
+                        );
+                    }
+                }
+                i = j;
+            } else if (c == "<")
+                failSpan(posOf(i), endOf(i), "a `<` in text — write `&lt;`")
+            else if (c == "{") {
+                push("expr", "", posOf(i), endOf(i), "child");
+                exprState();
+                i = i + 1;
+            } else if (c == "}")
+                failSpan(
+                    posOf(i),
+                    endOf(i),
+                    "an unmatched `}` in text — write {\"}\"}",
+                )
+            else {
+                if (tStart < 0) tStart = posOf(i);
+                tEnd = endOf(i);
+                tbuf = tbuf + c;
+                i = i + 1;
+            }
+        } else if (kind == "tag") {
+            val name = topS(fName);
+            val comp = topS(fFlag) == "comp";
+            val isRawFlag = topS(fFlag) == "raw";
+            if (isWs(c)) i = i + 1 else if ((c == "/" && c1 == ">")
+                || c == ">") {
+                val selfClose = c == "/";
+                val step = if (selfClose) 2 else 1;
+                i = i + step;
+                if (name == "style")
+                    failSpan(
+                        topI(fStart),
+                        topI(fEnd),
+                        "`<style>` in markup is refused — a component's style is its `.bpp` file's `--- style ---` section, or `use styled \"\"\"…\"\"\";` in its body (decision 338)",
+                    )
+                else if (name == "slot") {
+                    if (selfClose) {
+                        pop();
+                        addChild("htmlNode(children)");
+                    } else fKind = setS(fKind, "slot");
+                } else if (name == "Fragment") {
+                    if (selfClose) {
+                        pop();
+                        addChild("htmlFragment([])");
+                    } else fKind = setS(fKind, "frag");
+                } else if (comp) {
+                    fKind = setS(fKind, "comp");
+                    if (selfClose) doClose = true;
+                } else if (selfClose || voids.contains(name)) {
+                    fKind = setS(fKind, "elem");
+                    doClose = true;
+                } else if (rawTexts.contains(name) || isRawFlag) {
+                    val closer = "</" + name;
+                    val cl = closer.length();
+                    j = i;
+                    while (j < n
+                        && chs.slice(j, j + cl).join("").toLower() != closer) {
+                        j = j + 1;
+                    }
+                    if (j >= n)
+                        failSpan(
+                            topI(fStart),
+                            topI(fEnd),
+                            "unclosed tag <" + name + ">",
+                        )
+                    else {
+                        bodyCode = "";
+                        run = "";
+                        k = i;
+                        while (k < j) {
+                            val u = ch(k);
+                            if (u == interpMark) {
+                                if (run != "")
+                                    bodyCode = if (bodyCode == "")
+                                        lit(run)
+                                    else
+                                        bodyCode + " + " + lit(run);
+                                run = "";
+                                bodyCode = if (bodyCode == "")
+                                    "(" + codeOf(k) + ")"
+                                else
+                                    bodyCode + " + (" + codeOf(k) + ")";
+                            } else run = run + u;
+                            k = k + 1;
+                        }
+                        if (run != "")
+                            bodyCode = if (bodyCode == "")
+                                lit(run)
+                            else
+                                bodyCode + " + " + lit(run);
+                        if (bodyCode != "") {
+                            mark("text", posOf(i), posOf(j), "string", null);
+                            addChild("htmlText(" + bodyCode + ")");
+                        }
+                        fKind = setS(fKind, "elem");
+                        e = j + cl;
+                        while (e < n && ch(e) != ">") {
+                            e = e + 1;
+                        }
+                        doClose = true;
+                        i = e + 1;
+                    }
+                } else fKind = setS(fKind, "elem");
+            } else if (c == "{" && chs.slice(i + 1, i + 4).join("") == "...") {
+                if (comp)
+                    failSpan(
+                        posOf(i),
+                        endOf(i + 3),
+                        "a spread `{...expr}` on a component is refused — write its attributes (props-f)",
+                    )
+                else
+                    failSpan(
+                        posOf(i),
+                        endOf(i + 3),
+                        "a spread `{...expr}` on <"
+                            + name
+                            + "> takes the element's props record (decision 351), which a template cannot build yet — write the attributes",
+                    );
+            } else if (c == "{")
+                failSpan(
+                    posOf(i),
+                    endOf(i),
+                    "a `{` in a tag — an attribute is `name={…}`",
+                )
+            else if (c == "#" && c1 == "[") {
+                j = i + 2;
+                closed = false;
+                while (j < n && closed == false && failed == false) {
+                    while (j < n && isWs(ch(j))) {
+                        j = j + 1;
+                    }
+                    e = j;
+                    while (e < n && isIdentCh(ch(e))) {
+                        e = e + 1;
+                    }
+                    val ann = chs.slice(j, e).join("");
+                    val a = posOf(j);
+                    val b = if (e > j) endOf(e - 1) else posOf(j);
+                    args = "";
+                    if (ch(e) == "(") {
+                        depth = 0;
+                        q = e;
+                        going = true;
+                        while (q < n && going) {
+                            val u = ch(q);
+                            if (u == "(") depth = depth + 1;
+                            if (u == ")") depth = depth - 1;
+                            if (depth == 0) going = false;
+                            q = q + 1;
+                        }
+                        args = chs.slice(e + 1, q - 1).join("").trim();
+                        e = q;
+                    }
+                    if (ann == "")
+                        failSpan(
+                            a,
+                            b,
+                            "an annotation `#[…]` names a function",
+                        )
+                    else {
+                        val binding = template.lookup(ann);
+                        if (binding == null)
+                            failSpan(
+                                a,
+                                b,
+                                "unbound name `"
+                                    + ann
+                                    + "` — a tag annotation is a function in scope",
+                            )
+                        else {
+                            mark("annotation", a, b, "tag", binding);
+                            // Decision 302 — the annotation runs over the
+                            // tag's `@Decl`; `html` reads back the meta it
+                            // knows by type, and leaves any other to its
+                            // reader.
+                            tagDecl = template.annotate(
+                                tagDecl,
+                                Span(a, if (e > j) endOf(e - 1) else b, 1),
+                            );
+                            if (tagDecl.meta(RawBody) != null)
+                                fFlag = setS(fFlag, "raw");
+                        }
+                    }
+                    while (e < n && isWs(ch(e))) {
+                        e = e + 1;
+                    }
+                    if (ch(e) == ",") {
+                        j = e + 1;
+                        while (j < n && isWs(ch(j))) {
+                            j = j + 1;
+                        }
+                        if (ch(j) == "]") {
+                            closed = true;
+                            j = j + 1;
+                        }
+                    } else if (ch(e) == "]") {
+                        closed = true;
+                        j = e + 1;
+                    } else {
+                        failSpan(
+                            posOf(e),
+                            endOf(e),
+                            "an annotation list `#[a, b]` is closed by `]`",
+                        );
+                        j = e;
+                    }
+                }
+                i = j;
+            } else if (c == "[") {
+                j = i + 1;
+                while (j < n && ch(j) != "]") {
+                    j = j + 1;
+                }
+                val bracketName = chs.slice(i + 1, j).join("");
+                failSpan(
+                    posOf(i),
+                    endOf(j),
+                    "`["
+                        + bracketName
+                        + "]={…}` is written `"
+                        + bracketName
+                        + "={…}`",
+                );
+            } else if (isNameCh(c) || c == "@") {
+                j = i;
+                while (j < n && (isNameCh(ch(j)) || ch(j) == "@")) {
+                    j = j + 1;
+                }
+                val aname = chs.slice(i, j).join("");
+                val a = posOf(i);
+                val b = endOf(j - 1);
+                k = j;
+                while (k < n && isWs(ch(k))) {
+                    k = k + 1;
+                }
+                if (aname == "class:list")
+                    failSpan(
+                        a,
+                        b,
+                        "`class:list` is written `class={classList([…])}`",
+                    )
+                else if (aname == "set:html")
+                    failSpan(
+                        a,
+                        b,
+                        "`set:html={s}` is written as the child `{raw(s)}`",
+                    )
+                else if (aname == "set:text")
+                    failSpan(
+                        a,
+                        b,
+                        "`set:text={s}` is written as the child `{s}`",
+                    )
+                else if (aname.contains(":")) {
+                    val parts = aname.split(":");
+                    val first = parts.slice(0, 1).join("");
+                    val second = parts.slice(1, parts.length).join("");
+                    failSpan(
+                        a,
+                        b,
+                        "`"
+                            + aname
+                            + "` is not in the grammar — a directive is the annotation `#["
+                            + first
+                            + second.slice(0, 1).toUpper()
+                            + second.slice(1, second.length())
+                            + "]`",
+                    );
+                } else if (aname == "slot")
+                    failSpan(
+                        a,
+                        b,
+                        "`slot=\"…\"` is refused — named slots wait on decision props-e",
+                    )
+                else if (topS(fSeen).contains("|" + aname + "|"))
+                    failSpan(
+                        a,
+                        b,
+                        "the attribute `"
+                            + aname
+                            + "` is written twice on <"
+                            + name
+                            + ">",
+                    )
+                else if (name == "slot" && aname == "name")
+                    failSpan(
+                        a,
+                        b,
+                        "`<slot name=\"…\">` is refused — named slots wait on decision props-e",
+                    )
+                else if (name == "slot" || name == "Fragment")
+                    failSpan(a, b, "<" + name + "> takes no attribute")
+                else if (comp && aname.contains("-"))
+                    failSpan(
+                        a,
+                        b,
+                        "`"
+                            + aname
+                            + "` is not a field name — a component's attributes are the fields of its props (decision 192)",
+                    )
+                else if (comp == false
+                    && aname.contains("-")
+                    && isDataName(aname) == false)
+                    failSpan(
+                        a,
+                        b,
+                        "`"
+                            + aname
+                            + "` is written `"
+                            + camelOf(aname)
+                            + "` — a multi-word attribute is camelCase, `data-*` the one kebab-case family (decision 351)",
+                    )
+                else if (comp == false && isEventName(aname))
+                    failSpan(
+                        a,
+                        b,
+                        "the event attribute `"
+                            + aname
+                            + "` on <"
+                            + name
+                            + "> is refused — no front declares typed events yet (decision 351)",
+                    )
+                else {
+                    fSeen = setS(fSeen, topS(fSeen) + aname + "|");
+                    mark("attr", a, b, "property", null);
+                    if (ch(k) == "=") {
+                        k = k + 1;
+                        while (k < n && isWs(ch(k))) {
+                            k = k + 1;
+                        }
+                        val quote = ch(k);
+                        if (quote == "\"" || quote == "'") {
+                            e = k + 1;
+                            valueCode = "";
+                            run = "";
+                            dynamic = false;
+                            while (e < n && ch(e) != quote) {
+                                val u = ch(e);
+                                if (u == interpMark) {
+                                    dynamic = true;
+                                    if (run != "")
+                                        valueCode = if (valueCode == "")
+                                            lit(decode(run))
+                                        else
+                                            valueCode
+                                                + " + "
+                                                + lit(decode(run));
+                                    run = "";
+                                    valueCode = if (valueCode == "")
+                                        "(" + codeOf(e) + ")"
+                                    else
+                                        valueCode + " + (" + codeOf(e) + ")";
+                                } else run = run + u;
+                                e = e + 1;
+                            }
+                            if (e >= n)
+                                failSpan(
+                                    posOf(k),
+                                    endOf(k),
+                                    "an unclosed attribute value",
+                                )
+                            else {
+                                if (run != "" || valueCode == "")
+                                    valueCode = if (valueCode == "")
+                                        lit(decode(run))
+                                    else
+                                        valueCode + " + " + lit(decode(run));
+                                mark(
+                                    "attrValue",
+                                    posOf(k),
+                                    endOf(e),
+                                    "string",
+                                    null,
+                                );
+                                if (comp)
+                                    addProp(aname, valueCode)
+                                else if (dynamic)
+                                    addDynAttr(aname, valueCode)
+                                else
+                                    addStaticAttr(aname, valueCode);
+                            }
+                            i = e + 1;
+                        } else if (quote == "{") {
+                            push(
+                                "expr",
+                                "",
+                                posOf(k),
+                                endOf(k),
+                                if (comp) "prop:" + aname else "attr:" + aname,
+                            );
+                            exprState();
+                            i = k + 1;
+                        } else failSpan(
+                            posOf(k),
+                            endOf(k),
+                            "an attribute value is `\"text\"` or `{expr}`",
+                        );
+                    } else {
+                        if (comp)
+                            addProp(aname, "true")
+                        else
+                            addStaticAttr(aname, "\"\"");
+                        i = j;
+                    }
+                }
+            } else if (c == "")
+                failSpan(
+                    topI(fStart),
+                    topI(fEnd),
+                    "unclosed tag <" + name + ">",
+                )
+            else
+                failSpan(
+                    posOf(i),
+                    endOf(i),
+                    "unexpected `" + c + "` in <" + name + ">",
+                );
+        } else if (c == interpMark)
+            failSpan(
+                posOf(i),
+                endOf(i),
+                "a `\${…}` inside `{…}` — write the expression itself",
+            )
+        else if (c == "\"") {
+            j = i + 1;
+            while (j < n && ch(j) != "\"") {
+                j = if (ch(j) == "\\") j + 2 else j + 1;
+            }
+            val s = chs.slice(i, j + 1).join("");
+            if (s.contains(interpMark))
+                failSpan(
+                    posOf(i),
+                    endOf(j),
+                    "a `\${…}` inside a string of an expression — the template's literal took it; concatenate instead",
+                );
+            addCode(s);
+            lastSig = "operand";
+            ifState = if (ifState == 3) 0 else ifState;
+            i = j + 1;
+        } else if (c == "/" && c1 == "/")
+            while (i < n && ch(i) != "\n") {
+                i = i + 1;
+            }
+        else if (c == "{") {
+            val bk = if (ifState == 3) "I" else if (elsePending) "E" else "B";
+            braces = braces.append([bk]);
+            addCode("{");
+            lastSig = "{" + bk;
+            ifState = 0;
+            elsePending = false;
+            i = i + 1;
+        } else if (c == "}") {
+            val bk = topS(braces);
+            braces = braces.slice(0, braces.length - 1);
+            if (bk == "H") {
+                val holeCode = topS(fCode).trim();
+                val holeRole = topS(fFlag);
+                val holeStart = topI(fStart);
+                pop();
+                mark("hole", holeStart, endOf(i), "none", null);
+                val isAttr = holeRole.startsWith("attr:");
+                val isProp = holeRole.startsWith("prop:");
+                if (holeCode == "")
+                    failSpan(
+                        holeStart,
+                        endOf(i),
+                        "an empty `{}` — a hole holds an expression",
+                    );
+                if (holeCode != "" && holeRole == "child")
+                    addChild("htmlNode(" + holeCode + ")");
+                if (holeCode != "" && isAttr)
+                    addDynAttr(holeRole.slice(5, holeRole.length()), holeCode);
+                if (holeCode != "" && isProp)
+                    addProp(holeRole.slice(5, holeRole.length()), holeCode);
+            } else {
+                addCode("}");
+                if (bk == "IM") {
+                    j = i + 1;
+                    while (j < n && isWs(ch(j))) {
+                        j = j + 1;
+                    }
+                    if (chs.slice(j, j + 4).join("") != "else"
+                        || isIdentCh(ch(j + 4)))
+                        addCode(" else { htmlFragment([]) }");
+                }
+                lastSig = "operand";
+            }
+            i = i + 1;
+        } else if (c == "(") {
+            parenDepth = parenDepth + 1;
+            if (ifState == 1) {
+                ifState = 2;
+                ifParen = parenDepth;
+            }
+            addCode("(");
+            lastSig = "op";
+            i = i + 1;
+        } else if (c == ")") {
+            if (ifState == 2 && parenDepth == ifParen) ifState = 3;
+            parenDepth = parenDepth - 1;
+            addCode(")");
+            lastSig = "operand";
+            i = i + 1;
+        } else if (c == "-" && c1 == ">") {
+            addCode("->");
+            lastSig = "arrow";
+            i = i + 2;
+        } else if (c == "<" && (isLetter(c1) || c1 == ">")) {
+            if (lastSig == "arrow" || lastSig == "{I" || lastSig == "{E") {
+                push("mexpr", "", posOf(i), endOf(i), "");
+                ifState = 0;
+                elsePending = false;
+            } else if (lastSig == "operand") {
+                addCode("<");
+                lastSig = "op";
+                i = i + 1;
+            } else failSpan(
+                posOf(i),
+                endOf(i),
+                "markup may begin a lambda body, an `if` / `else` block or a `case` arm — not an operand",
+            );
+        } else if (isIdentCh(c)) {
+            j = i;
+            while (j < n && isIdentCh(ch(j))) {
+                j = j + 1;
+            }
+            val word = chs.slice(i, j).join("");
+            addCode(word);
+            if (word == "if") {
+                ifState = 1;
+                elsePending = false;
+                lastSig = "op";
+            } else if (word == "else") {
+                elsePending = true;
+                lastSig = "op";
+            } else if (word == "case"
+                || word == "return"
+                || word == "val"
+                || word == "var") {
+                lastSig = "op";
+                elsePending = false;
+            } else {
+                lastSig = "operand";
+                elsePending = false;
+                if (ifState == 3) ifState = 0;
+            }
+            i = j;
+        } else if (isWs(c)) {
+            addCode(c);
+            i = i + 1;
+        } else if (c == "")
+            failSpan(topI(fStart), topI(fEnd), "an unclosed `{`")
+        else {
+            addCode(c);
+            lastSig = if (c == "]") "operand" else "op";
+            if (ifState == 3) ifState = 0;
+            i = i + 1;
+        }
+        if (doClose) {
+            doClose = false;
+            val code = closeTagCode(
+                topS(fKind),
+                topS(fName),
+                topS(fCode),
+                topI(fCount),
+                topS(fFlat),
+                attrsCode(topS(fFlat), topS(fGroups), topS(fDyn)),
+            );
+            pop();
+            addChild(code);
+        }
+    }
+
+    if (failed == false && tbuf != "") {
+        val bad = badEntity(tbuf);
+        if (bad != "") failSpan(tStart, tEnd, entityMessage(bad));
+        val tx = textOut(tbuf);
+        if (tx != "") {
+            mark("text", tStart, tEnd, "string", null);
+            addChild("htmlText(" + lit(tx) + ")");
+        }
+    }
+    if (failed == false) {
+        val kind = topS(fKind);
+        if (kind == "tag"
+            || kind == "elem"
+            || kind == "comp"
+            || kind == "frag"
+            || kind == "slot") {
+            val shown = if (topS(fName) == "")
+                "<>"
+            else
+                "<" + topS(fName) + ">";
+            failSpan(topI(fStart), topI(fEnd), "unclosed tag " + shown);
+        } else if (kind == "mexpr")
+            failSpan(
+                topI(fStart),
+                topI(fEnd),
+                "unclosed markup in an expression",
+            )
+        else if (kind == "expr")
+            failSpan(topI(fStart), topI(fEnd), "an unclosed `{`");
+    }
+
+    val rootKids = topS(fCode);
+    val code = if (failed)
+        "htmlFragment([])"
+    else if (topI(fCount) == 1)
+        rootKids
+    else
+        "htmlFragment([" + rootKids + "])";
+    val root = CustomNode(
+        kind: "fragment",
+        span: Span(0, srcEnd, 1),
+        label: "none",
+        ref: null,
+        children: nodes,
+    );
+    return template.custom(root, template.build(code));
+}

@@ -1,0 +1,260 @@
+// `botopink test` flat suite for `src/metadata.bp` (front 32).
+//
+// The front's assigned target is erlang; metadata is produced during the
+// server render, and every assertion also RUNS on the commonJS row because
+// the module is pure `.bp` over std's `escape`.
+
+import {metadata.Metadata, metadata.OpenGraph, metadata.TwitterCard, metadata.Icons, metadata.Viewport, metadata.emptyMetadata, metadata.emptyOpenGraph, metadata.emptyViewport, metadata.pick, metadata.pickList, metadata.applyTemplate, metadata.mergeMetadata, metadata.mergeViewport, metadata.renderHead, metadata.renderViewport};
+
+fn rootMetadata() -> Metadata {
+    return Metadata(
+        title: "botopink",
+        titleTemplate: "%s | botopink",
+        description: "A language and its libraries",
+        openGraph: OpenGraph(
+            title: "",
+            description: "",
+            url: "https://botopink.dev",
+            ogType: "website",
+            siteName: "botopink",
+            images: ["/og/default.png", "/og/wide.png", "/og/square.png"],
+        ),
+        twitter: TwitterCard(
+            card: "summary_large_image",
+            title: "",
+            description: "",
+            images: [],
+        ),
+        icons: Icons(icon: "/favicon.ico", apple: "/apple-touch-icon.png"),
+    );
+}
+
+fn pageMetadata() -> Metadata {
+    return Metadata(
+        title: "Hello",
+        titleTemplate: "",
+        description: "",
+        openGraph: OpenGraph(
+            title: "Hello",
+            description: "",
+            url: "",
+            ogType: "article",
+            siteName: "",
+            images: ["/og/hello.png"],
+        ),
+        twitter: TwitterCard(card: "", title: "", description: "", images: []),
+        icons: Icons(icon: "", apple: ""),
+    );
+}
+
+fn sectionMetadata() -> Metadata {
+    val m = emptyMetadata();
+    return Metadata(
+        title: "Docs",
+        titleTemplate: "",
+        description: "",
+        openGraph: m.openGraph,
+        twitter: m.twitter,
+        icons: m.icons,
+    );
+}
+
+// ── step 1 ──────────────────────────────────────────────────────────────────
+
+test "metadata: emptyMetadata has every string empty and every list empty" {
+    val m = emptyMetadata();
+    assert m.title == "";
+    assert m.titleTemplate == "";
+    assert m.description == "";
+    assert m.openGraph.images.length == 0;
+    assert m.openGraph.ogType == "";
+    assert m.twitter.images.length == 0;
+    assert m.icons.icon == "";
+    assert renderHead(m) == "";
+}
+
+// ── step 2: the merge rule, one test per row ────────────────────────────────
+
+test "metadata: a string — an empty child inherits, a non-empty child replaces" {
+    assert pick("parent", "") == "parent";
+    assert pick("parent", "child") == "child";
+}
+
+test "metadata: a list — a non-empty child replaces wholesale, an empty one inherits" {
+    val merged = mergeMetadata(rootMetadata(), pageMetadata());
+    assert merged.openGraph.images.length == 1;
+    assert merged.openGraph.images.at(0) ?? "" == "/og/hello.png";
+    val kept = mergeMetadata(rootMetadata(), emptyMetadata());
+    assert kept.openGraph.images.length == 3;
+    assert pickList(["a", "b"], []).length == 2;
+}
+
+test "metadata: a nested record merges field by field" {
+    val merged = mergeMetadata(rootMetadata(), pageMetadata());
+    assert merged.openGraph.title == "Hello";
+    assert merged.openGraph.ogType == "article";
+    assert merged.openGraph.siteName == "botopink";
+    assert merged.openGraph.url == "https://botopink.dev";
+}
+
+test "metadata: a child with no title inherits the parent's, untemplated" {
+    assert mergeMetadata(rootMetadata(), emptyMetadata()).title == "botopink";
+    assert applyTemplate("%s | x", "") == "";
+    assert applyTemplate("", "Plain") == "Plain";
+}
+
+test "metadata: a child with a title gets the parent's template exactly once" {
+    assert mergeMetadata(rootMetadata(), pageMetadata()).title
+        == "Hello | botopink";
+}
+
+test "metadata: three levels apply the template once, not twice" {
+    val merged = mergeMetadata(
+        mergeMetadata(rootMetadata(), sectionMetadata()),
+        pageMetadata(),
+    );
+    assert merged.title == "Hello";
+    assert merged.titleTemplate == "";
+    val templated = mergeMetadata(
+        mergeMetadata(rootMetadata(), pageMetadata()),
+        emptyMetadata(),
+    );
+    assert templated.title == "Hello | botopink";
+}
+
+// ── step 3: the head ────────────────────────────────────────────────────────
+
+test "metadata: the root layout's head, in the fixed order" {
+    assert renderHead(rootMetadata())
+        == [
+            "<title>botopink</title>",
+            "<meta name=\"description\" content=\"A language and its libraries\">",
+            "<meta property=\"og:url\" content=\"https://botopink.dev\">",
+            "<meta property=\"og:type\" content=\"website\">",
+            "<meta property=\"og:site_name\" content=\"botopink\">",
+            "<meta property=\"og:image\" content=\"/og/default.png\">",
+            "<meta property=\"og:image\" content=\"/og/wide.png\">",
+            "<meta property=\"og:image\" content=\"/og/square.png\">",
+            "<meta name=\"twitter:card\" content=\"summary_large_image\">",
+            "<link rel=\"icon\" href=\"/favicon.ico\">",
+            "<link rel=\"apple-touch-icon\" href=\"/apple-touch-icon.png\">",
+        ].join("\n");
+}
+
+test "metadata: the page merged onto the root — template once, images wholesale" {
+    assert renderHead(mergeMetadata(rootMetadata(), pageMetadata()))
+        == [
+            "<title>Hello | botopink</title>",
+            "<meta name=\"description\" content=\"A language and its libraries\">",
+            "<meta property=\"og:title\" content=\"Hello\">",
+            "<meta property=\"og:url\" content=\"https://botopink.dev\">",
+            "<meta property=\"og:type\" content=\"article\">",
+            "<meta property=\"og:site_name\" content=\"botopink\">",
+            "<meta property=\"og:image\" content=\"/og/hello.png\">",
+            "<meta name=\"twitter:card\" content=\"summary_large_image\">",
+            "<link rel=\"icon\" href=\"/favicon.ico\">",
+            "<link rel=\"apple-touch-icon\" href=\"/apple-touch-icon.png\">",
+        ].join("\n");
+}
+
+test "metadata: two renders of equal metadata are byte-identical" {
+    assert renderHead(rootMetadata()) == renderHead(rootMetadata());
+}
+
+test "metadata: a twitter card with images writes one twitter:image per image" {
+    val m = emptyMetadata();
+    val card = Metadata(
+        title: "",
+        titleTemplate: "",
+        description: "",
+        openGraph: m.openGraph,
+        twitter: TwitterCard(
+            card: "summary",
+            title: "T",
+            description: "D",
+            images: ["/a.png", "/b.png"],
+        ),
+        icons: m.icons,
+    );
+    assert renderHead(card)
+        == [
+            "<meta name=\"twitter:card\" content=\"summary\">",
+            "<meta name=\"twitter:title\" content=\"T\">",
+            "<meta name=\"twitter:description\" content=\"D\">",
+            "<meta name=\"twitter:image\" content=\"/a.png\">",
+            "<meta name=\"twitter:image\" content=\"/b.png\">",
+        ].join("\n");
+}
+
+// Each asserts that the dangerous form is absent and the escaped form present.
+test "metadata: markup in a title and a quote in a description are escaped" {
+    val m = emptyMetadata();
+    val hostile = Metadata(
+        title: "<script>alert(1)</script> & co",
+        titleTemplate: "",
+        description: "She said \"hi\"",
+        openGraph: m.openGraph,
+        twitter: m.twitter,
+        icons: m.icons,
+    );
+    val head = renderHead(hostile);
+    assert head
+        == "<title>&lt;script&gt;alert(1)&lt;/script&gt; &amp; co</title>\n<meta name=\"description\" content=\"She said &quot;hi&quot;\">";
+    assert head.contains("<script>") == false;
+}
+
+test "metadata: an image URL holding & is escaped in its attribute" {
+    val m = emptyMetadata();
+    val og = OpenGraph(
+        title: "",
+        description: "",
+        url: "",
+        ogType: "",
+        siteName: "",
+        images: ["/og?a=1&b=2"],
+    );
+    val out = renderHead(
+        Metadata(
+            title: "",
+            titleTemplate: "",
+            description: "",
+            openGraph: og,
+            twitter: m.twitter,
+            icons: m.icons,
+        ),
+    );
+    assert out == "<meta property=\"og:image\" content=\"/og?a=1&amp;b=2\">";
+    assert out.contains("a=1&b") == false;
+}
+
+// ── step 4: the viewport ────────────────────────────────────────────────────
+
+test "metadata: the viewport renders both tags" {
+    assert renderViewport(
+        Viewport(
+            width: "device-width",
+            initialScale: "1",
+            themeColor: "#0b0b0b",
+        ),
+    )
+        == "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<meta name=\"theme-color\" content=\"#0b0b0b\">";
+}
+
+test "metadata: the viewport merge picks the child colour and keeps the parent width" {
+    val parent = Viewport(
+        width: "device-width",
+        initialScale: "1",
+        themeColor: "#ffffff",
+    );
+    val child = Viewport(width: "", initialScale: "", themeColor: "#0b0b0b");
+    assert renderViewport(mergeViewport(parent, child))
+        == "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<meta name=\"theme-color\" content=\"#0b0b0b\">";
+}
+
+test "metadata: an empty viewport renders nothing" {
+    assert renderViewport(emptyViewport()) == "";
+    assert renderViewport(
+        Viewport(width: "", initialScale: "", themeColor: "\"><x"),
+    )
+        == "<meta name=\"theme-color\" content=\"&quot;&gt;&lt;x\">";
+}

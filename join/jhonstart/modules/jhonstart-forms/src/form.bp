@@ -1,0 +1,328 @@
+// jhonstart-forms/form — a form bound to a server action (front 67).
+//
+// Upstream fuses three things behind `<form action={fn}>`: the BINDING (a
+// function reference turned into a submit target), the TRANSPORT (encode the
+// fields, post them) and the STATE (what the action answered, whether a submit
+// is in flight, the value shown before the answer). botopink cannot pass a
+// function through an attribute — `attrs` holds string pairs — so the binding
+// is a STRING: front 24's action id, which this front echoes and never
+// constructs.
+//
+// ── Progressive enhancement is the reason for the shape ─────────────────────
+//
+// `formAttrs` + `hiddenActionField` are contract 3's markup exactly:
+//
+//     <form method="post" action="<pathname>" data-jh-a="<id>">
+//       <input type="hidden" name="<actionField>" value="<id>">
+//
+// With no JavaScript the browser posts the fields to the current pathname and
+// the hidden field tells the server which action ran. With the bundle loaded,
+// `formMount(actionHeader)` intercepts the submit, posts the same body with
+// the action header, and applies the answer without a document navigation.
+// Both hit the same URL through the same authorization path.
+//
+// ── The wire names are handed in, never spelled here ────────────────────────
+//
+// `actionField` (the hidden field's name) and `actionHeader` (the scripted
+// POST's header) are values onze passes to this front and, with the same
+// values, to rakun's configuration (decision 114 item 7). This file holds no
+// default and no literal for either: `setWireNames(field, header)` is the one
+// place onze installs them, once, at boot.
+//
+// ── The envelope is `actions`' ──────────────────────────────────────────────
+//
+// `ActionState`, `newActionState`, `parseActionState` and `writeRpcBody` are
+// the shared library `actions`' (decisions 116, 326). The submit cell answers the
+// response body AS IT ARRIVED and `parseActionState` reads it — one reader of
+// the envelope in the stack. An envelope with `ok: false` is DATA (front 31):
+// it becomes the form's state, rendered beside its field, and never reaches an
+// error boundary. Its `n` is read by front 26's router (`applySignal`).
+//
+// ── The hooks' server pass is their quiet value ─────────────────────────────
+//
+// `actionState` yields the initial state with `pending: false`, `formStatus`
+// yields idle, `optimistic` yields the base value. A spinner in the server
+// HTML is a spinner nobody can stop; an optimistic value in it is a lie. The
+// browser values come from dual-target cells (`form_runtime.mjs` /
+// `sidecars/jhonstart_forms.erl`, whose erlang twin answers exactly that
+// quiet truth — `decisions-pending.md` 27-a's choice).
+
+import {Element, ElementBase, input, form, snapshot, push} from "jhonstart"; // `form`, `input` provided by front 94
+import {linkPrefetch} from "jhonstart-link";
+import {state.ActionState, state.newActionState, envelope.parseActionState, rpc.RpcCall, rpc.writeRpcBody, id.isActionId} from "actions";
+import {encoding} from "std";
+
+// ── the browser cells ───────────────────────────────────────────────────────
+
+#[@External.Node("./form_runtime.mjs", "submit")]
+#[@External.Erlang("jhonstart_forms", "submit")]
+declare fn __jhFormSubmit(
+    actionId: string,
+    encodedBody: string,
+    actionHeader: string,
+) -> @Task<string>;
+
+#[@External.Node("./form_runtime.mjs", "invoke")]
+#[@External.Erlang("jhonstart_forms", "invoke")]
+declare fn __jhFormInvoke(
+    actionId: string,
+    rpcBody: string,
+    actionHeader: string,
+) -> @Task<string>;
+
+#[@External.Node("./form_runtime.mjs", "pending")]
+#[@External.Erlang("jhonstart_forms", "pending")]
+declare fn __jhFormPending(actionId: string) -> string;
+
+#[@External.Node("./form_runtime.mjs", "state")]
+#[@External.Erlang("jhonstart_forms", "state")]
+declare fn __jhFormState(actionId: string) -> string;
+
+#[@External.Node("./form_runtime.mjs", "mount")]
+#[@External.Erlang("jhonstart_forms", "mount")]
+declare fn __jhFormMount(actionHeader: string) -> i32;
+
+#[@External.Node("./form_runtime.mjs", "stub")]
+#[@External.Erlang("jhonstart_forms", "stub")]
+declare fn __jhFormStub(text: string) -> i32;
+
+#[@External.Node("./form_runtime.mjs", "lastCall")]
+#[@External.Erlang("jhonstart_forms", "last_call")]
+declare fn __jhFormLastCall() -> string;
+
+#[@External.Node("""((globalThis.__jhFormWire = [$0, $1]), 0)""")]
+#[@External.Erlang("""(fun(__F, __H) -> persistent_term:put(jh_forms_wire, {__F, __H}), 0 end)($0, $1)""")]
+declare fn __jhSetWire(actionField: string, actionHeader: string) -> i32;
+
+#[@External.Node("""((globalThis.__jhFormWire || ["", ""])[0])""")]
+#[@External.Erlang("""element(1, persistent_term:get(jh_forms_wire, {<<"">>, <<"">>}))""")]
+declare fn __jhWireField() -> string;
+
+#[@External.Node("""((globalThis.__jhFormWire || ["", ""])[1])""")]
+#[@External.Erlang("""element(2, persistent_term:get(jh_forms_wire, {<<"">>, <<"">>}))""")]
+declare fn __jhWireHeader() -> string;
+
+// onze installs the two wire names once, at boot — the values it also hands
+// rakun (`rakun.actions.field` / `rakun.actions.header`).
+pub fn setWireNames(actionField: string, actionHeader: string) -> i32 {
+    return __jhSetWire(actionField, actionHeader);
+}
+
+// The no-DOM store's test surface: the body the submit / invoke cell will
+// answer, and the last `id|header|body` it was handed.
+pub fn stubResponse(text: string) -> i32 {
+    return __jhFormStub(text);
+}
+
+pub fn lastFormCall() -> string {
+    return __jhFormLastCall();
+}
+
+// ── step 2: the binding and the attributes ──────────────────────────────────
+
+pub type FormBinding(actionId: string, pathname: string, method: string, actionField: string)
+
+// Front 24's id, echoed: an id that is not `actions`' `isActionId` grammar
+// (`a_` and exactly 24 lowercase hex digits, what `deriveActionId` writes) is
+// refused, naming it — this front never constructs one.
+pub fn formAction(
+    actionId: string,
+    pathname: string,
+    actionField: string,
+) -> FormBinding {
+    assert isActionId(actionId), "formAction: `"
+        + actionId
+        + "` is not an action id - an action id is `a_` and 24 lowercase hex digits";
+    return FormBinding(
+        actionId: actionId,
+        pathname: pathname,
+        method: "post",
+        actionField: actionField,
+    );
+}
+
+// Exactly three pairs, in this order: `method`, `action` (the CURRENT
+// pathname, never a synthesized endpoint), `data-jh-a`.
+pub fn formAttrs(binding: FormBinding) -> Array<#(string, string)> {
+    return [
+        #("method", binding.method),
+        #("action", binding.pathname),
+        #("data-jh-a", binding.actionId),
+    ];
+}
+
+// The hidden field that routes the un-hydrated POST.
+pub fn hiddenActionField(binding: FormBinding) -> Element {
+    return input(
+        [],
+        attrs: [
+            #("type", "hidden"),
+            #("name", binding.actionField),
+            #("value", binding.actionId),
+        ],
+    );
+}
+
+// A whole bound form: the attributes, the hidden field first, then the fields.
+pub fn actionForm(binding: FormBinding, fields: Array<Element>) -> Element {
+    var kids: Array<Element> = [hiddenActionField(binding)];
+    for (fields) { f ->
+        kids.push(f);
+    }
+    return form(kids, attrs: formAttrs(binding));
+}
+
+// ── the transport ───────────────────────────────────────────────────────────
+
+// Posts the fields (plus the hidden field) form-encoded with std's
+// `encoding.formStringify`, with the action header onze named, and reads the
+// answer with `actions`' `parseActionState`. A redirect in the envelope's `n`
+// is the router's single navigation (front 26's `applySignal`); an `ok: false`
+// envelope is returned as the state and raises nothing.
+pub fn submitForm(
+    binding: FormBinding,
+    fields: Array<#(string, string)>,
+) -> @Task<ActionState> {
+    var pairs: Array<#(string, string)> = [
+        #(binding.actionField, binding.actionId),
+    ];
+    for (fields) { f ->
+        pairs.push(f);
+    }
+    val raw = await __jhFormSubmit(
+        binding.actionId,
+        encoding.formStringify(pairs),
+        __jhWireHeader(),
+    );
+    val st = parseActionState(raw);
+    if (st.redirectTo != "") push(st.redirectTo);
+    return st;
+}
+
+// Front 24's scripted path: the JSON-RPC body written by `actions`'
+// `writeRpcBody`, never spelled here, and the answer read by
+// `parseActionState`. `ok: false` resolves with that state.
+pub fn invokeAction(
+    actionId: string,
+    args: Array<string>,
+    actionHeader: string,
+) -> @Task<ActionState> {
+    val raw = await __jhFormInvoke(
+        actionId,
+        writeRpcBody(RpcCall(id: actionId, args: args)),
+        actionHeader,
+    );
+    return parseActionState(raw);
+}
+
+// Delegated submit interception over `[data-jh-a]`, installed once. onze front
+// 68's entry calls it beside `linkMount()`, with the header onze names.
+pub fn formMount(actionHeader: string) -> i32 {
+    return __jhFormMount(actionHeader);
+}
+
+// ── step 3: `actionState` ───────────────────────────────────────────────────
+
+// Read positionally — `s._0` the state, `s._1` the binding, `s._2` pending —
+// the three things `useActionState` answers, in that order. Server pass: the
+// initial state unchanged and `false`.
+pub fn actionState(
+    actionId: string,
+    initial: ActionState,
+) -> @Component<#(ActionState, FormBinding, bool)> {
+    val here = snapshot().path;
+    val binding = formAction(actionId, here, __jhWireField());
+    val envelope = __jhFormState(actionId);
+    val st = if (envelope == "") initial else parseActionState(envelope);
+    return #(st, binding, __jhFormPending(actionId) == "1");
+}
+
+// ── step 4: `formStatus` ────────────────────────────────────────────────────
+
+pub type FormStatus(pending: bool, actionId: string, method: string)
+
+pub fn idleFormStatus() -> FormStatus {
+    return FormStatus(pending: false, actionId: "", method: "post");
+}
+
+// The status of the form whose id is given: in flight or idle. Outside any
+// form (`""`) it is idle, never an error.
+pub fn formStatusOf(actionId: string) -> FormStatus {
+    if (actionId == "") return idleFormStatus();
+    return FormStatus(
+        pending: __jhFormPending(actionId) == "1",
+        actionId: actionId,
+        method: "post",
+    );
+}
+
+// The hook a nested submit button reads. The server pass is idle.
+pub fn formStatus() -> @Component<FormStatus> {
+    return idleFormStatus();
+}
+
+// ── step 5: `optimistic` ────────────────────────────────────────────────────
+
+// `apply` folded over the recorded actions; no prediction is the identity.
+pub fn applyOptimistic<T>(
+    base: T,
+    actions: Array<T>,
+    apply: fn(current: T, action: T) -> T,
+) -> T {
+    var value = base;
+    for (actions) { a ->
+        value = apply(value, a);
+    }
+    return value;
+}
+
+fn noPush<T>(action: T) -> i32 {
+    return 0;
+}
+
+// Server pass: `#(base, <no-op>)`. In the browser the recorded actions of the
+// in-flight submit fold over `base`, and the envelope's arrival drops them —
+// the commit path and the roll-back path are one.
+pub fn optimistic<T>(
+    base: T,
+    apply: fn(current: T, action: T) -> T,
+) -> @Component<#(T, fn(action: T) -> i32)> {
+    return #(applyOptimistic(base, [], apply), { action -> noPush(action) });
+}
+
+// ── step 6: the GET search form (§ 25 `<Form>`) ────────────────────────────
+
+pub type SearchFormProps(action: string, prefetch: bool, replace: bool)
+
+pub fn searchFormProps(action: string) -> SearchFormProps {
+    return SearchFormProps(action: action, prefetch: true, replace: false);
+}
+
+// `method="get"`, `action`, and `data-jh-sf="1"` — NOT `data-jh-a`: a GET form
+// is not an action submit, and the action interceptor must not claim it.
+pub fn searchFormAttrs(props: SearchFormProps) -> Array<#(string, string)> {
+    var pairs: Array<#(string, string)> = [
+        #("method", "get"),
+        #("action", props.action),
+        #("data-jh-sf", "1"),
+    ];
+    if (props.replace) pairs.push(#("data-jh-replace", "1"));
+    return pairs;
+}
+
+// The URL both paths produce: the browser's own GET submit and the client
+// navigation the interceptor performs.
+pub fn searchHref(
+    props: SearchFormProps,
+    fields: Array<#(string, string)>,
+) -> string {
+    if (fields.length == 0) return props.action;
+    return props.action + "?" + encoding.formStringify(fields);
+}
+
+// With `prefetch: true` the target path is warmed through front 27's link
+// prefetcher.
+pub fn prefetchSearch(props: SearchFormProps) -> i32 {
+    if (props.prefetch == false) return 0;
+    return linkPrefetch(props.action, "full");
+}

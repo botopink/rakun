@@ -1,0 +1,740 @@
+// jhonstart/render — the escaping walker, composition, the document and the
+// payload (front 30, decisions 113, 114, 116 and 117).
+//
+// jhonstart writes the HTML. `renderToString` (`element.bp`, frozen) escapes
+// nothing and closes void tags; everything this front writes goes through
+// `renderNode` instead, which differs in four places:
+//
+//   | node                         | `renderToString`  | `renderNode`                               |
+//   |------------------------------|-------------------|--------------------------------------------|
+//   | `#text`                      | verbatim          | `escape.html(value)` (std)                 |
+//   | text inside `script`/`style` | verbatim          | verbatim; `</script` / `</style` REFUSED   |
+//   | attribute                    | verbatim          | `escape.attribute(value)` (std)            |
+//   | a void tag                   | `<input></input>` | `<input …>`, no closing tag                |
+//   | `#raw`                       | `<#raw>…`         | `value` verbatim — the one escape hatch    |
+//
+// `isVoidTag` and `isRawTextTag` are front 94's and are called, never restated.
+// A raw-text body is emitted verbatim because escaping CSS or a script changes
+// the program; the one sequence that can close the element early is refused,
+// case-insensitive, and no flag turns the refusal into escaping (decision 67).
+//
+// ── Composition ─────────────────────────────────────────────────────────────
+//
+// `compose(chain, route, page)` wraps the page per segment, root-first:
+// `layout > template > error > loading > not-found > page`. The layouts RUN
+// FIRST — each is called with a `#children` placeholder and the inner tree is
+// substituted afterwards — so a layout that raises a navigation signal means
+// the page's function is never called. Each layout render receives its
+// `selected` depth (root `0`) through front 26's route snapshot. A `template`
+// wrapper carries `data-jh-t="<pattern>#<nav>"`, a fresh key per render. A
+// segment with `loading` turns everything below it into a streamed boundary
+// (`Suspense`); a segment with `error` catches below it; a segment with
+// `not-found` wraps below it in `data-jh-n` and is the nearest not-found tree a
+// not-found signal from below renders.
+//
+// ── The payload — contract 2 ────────────────────────────────────────────────
+//
+// One executable script, last in `<body>` before `RenderHooks.bodyExtra`,
+// assigning `globals.payload`. The JSON is written with std's `json.quote` /
+// `json.array` / `json.object` and the finished text passes through
+// `escape.scriptJson`, so `</script` is unrepresentable inside the block; this
+// file keeps no JSON writer and no escaper of its own (decision 116). `t`, `a`
+// and `b` are written verbatim from the strings onze handed in; plugin keys
+// (`s` is the CSS bridge member's) are written verbatim under their key.
+
+import {element.Element, element.ElementBase};
+import {elements.isVoidTag, elements.isRawTextTag};
+import {escape, json, encoding, failure} from "std";
+import {router.fill, router.snapshot};
+import {client.islandId, client.islandAttr, client.Island, client.clientMount, client.islandEntry};
+import {error_boundary.ErrorInfo, error_boundary.infoFor, error_boundary.isSignal, error_boundary.notFoundReason, error_boundary.wrap};
+import {suspense.Boundary, suspense.Suspense, suspense.holeId};
+import {globals.globals};
+import {plugin.Json};
+import {routes.PageContext, routes.LayoutProps, routes.UiSegment, routes.segment};
+import {styled_sheet.renderSheet};
+import {context.createContext, context.provide, context.RenderScope} from "std";
+
+// ── the per-render state (render.mjs / sidecars/jhonstart_render.erl) ───────
+
+#[@External.Node("./render.mjs", "stateReset")]
+#[@External.Erlang("jhonstart_render", "state_reset")]
+pub declare fn __jhStateReset() -> i32;
+
+#[@External.Node("./render.mjs", "takeBoundaries")]
+#[@External.Erlang("jhonstart_render", "take_boundaries")]
+pub declare fn __jhTakeBoundaries() -> Array<Boundary>;
+
+#[@External.Node("./render.mjs", "nextIslandOrdinal")]
+#[@External.Erlang("jhonstart_render", "next_island_ordinal")]
+declare fn __jhNextIslandOrdinal() -> i32;
+
+#[@External.Node("./render.mjs", "pushIsland")]
+#[@External.Erlang("jhonstart_render", "push_island")]
+declare fn __jhPushIsland(row: #(string, string, string)) -> i32;
+
+#[@External.Node("./render.mjs", "islands")]
+#[@External.Erlang("jhonstart_render", "islands")]
+pub declare fn __jhIslands() -> Array<#(string, string, string)>;
+
+#[@External.Node("./render.mjs", "setIslandBase")]
+#[@External.Erlang("jhonstart_render", "set_island_base")]
+pub declare fn __jhSetIslandBase(n: i32) -> i32;
+
+#[@External.Node("./render.mjs", "stashNotFound")]
+#[@External.Erlang("jhonstart_render", "stash_not_found")]
+declare fn __jhStashNotFound(e: Element) -> i32;
+
+#[@External.Node("./render.mjs", "stashedNotFound")]
+#[@External.Erlang("jhonstart_render", "stashed_not_found")]
+pub declare fn __jhStashedNotFound(fallback: Element) -> Element;
+
+#[@External.Node("./render.mjs", "nextNav")]
+#[@External.Erlang("jhonstart_render", "next_nav")]
+declare fn __jhNextNav() -> i32;
+
+#[@External.Node("./render.mjs", "setHooks")]
+#[@External.Erlang("jhonstart_render", "set_hooks")]
+declare fn __jhSetHooks(h: RenderHooks) -> void;
+
+#[@External.Node("./render.mjs", "hooks")]
+#[@External.Erlang("jhonstart_render", "hooks")]
+declare fn __jhHooks(fallback: RenderHooks) -> RenderHooks;
+
+#[@External.Node("./render.mjs", "pushNode")]
+#[@External.Erlang("jhonstart_render", "push_node")]
+declare fn __jhPushNode(n: fn(scope: RenderScope) -> @Task<Walked>) -> i32;
+
+#[@External.Node("./render.mjs", "nodeAt")]
+#[@External.Erlang("jhonstart_render", "node_at")]
+declare fn __jhNodeAt(index: string) -> fn(scope: RenderScope) -> @Task<Walked>;
+
+// Raises `reason` and never returns: a signal or a failure that leaves the
+// boundary it was caught at goes on as an abort whose message is the reason,
+// which `failure.attempt` reads back as `Failure.message` on every target.
+fn raiseElement(reason: string) -> Element {
+    @panic(reason);
+}
+
+// The per-render state reached from OUTSIDE this directory goes through these
+// plain functions, never through the cells themselves: on the commonJS row a
+// cell called from another directory's module requires its own copy of
+// `render.mjs`, so its state would not be this render's.
+pub fn resetRender() -> i32 {
+    return __jhStateReset();
+}
+
+pub fn renderedIslands() -> Array<#(string, string, string)> {
+    return __jhIslands();
+}
+
+pub fn registeredBoundaries() -> Array<Boundary> {
+    return __jhTakeBoundaries();
+}
+
+// `f`'s task under std's `failure.attemptTask` (botopink decisions 431, 494):
+// its value, or `Error(reason)` — the message of the raise it crashed with.
+pub fn attemptTask<T>(f: fn() -> @Task<T>) -> @Task<@Result<T, string>> {
+    val out = await failure.attemptTask(f);
+    return case out {
+        Ok(v) -> v;
+        Error(e) -> throw e.message;
+    };
+}
+
+// A component's run walked with `scope`, under `attemptTask` —
+// `Error(reason)` for a raise.
+pub fn componentOutcome(
+    f: fn() -> @Component<Element>,
+    scope: RenderScope,
+) -> @Task<@Result<Walked, string>> {
+    val out = await attemptTask({ -> renderComponent(f(), scope) });
+    return try out;
+}
+
+// ── the renderer holds the scope (decisions 388, 414) ───────────────────────
+//
+// A component at run time is a lambda over a `RenderScope` (388): calling one
+// runs nothing, `c.run(scope)` runs it, so a try catches a component only
+// around its run, and only a function holding the scope can write one. The
+// composition's error and not-found boundaries are therefore NODES of the tree
+// (`ErrorBoundaryNode`, `NotFoundBoundaryNode`, beside `suspense.Boundary`):
+// `caughtBelow` / `notFoundLevel` answer a placeholder (`#node`, the node
+// registered per render) and call no host try, and the plain functions below
+// run each inside the host's try with the scope its parent's `run` answered.
+// A `Suspense` boundary a run registers is kept with that run's children
+// scope (`Fill`), and the stream fills it with that scope.
+
+// The error boundary of a segment: `child` runs inside the host's try; a
+// signal is re-raised, any other failure renders `view` (wrapped in
+// `data-jh-e` unless the segment streams, `wrapped`).
+pub type ErrorBoundaryNode(
+    id: string,
+    child: fn() -> @Component<Element>,
+    view: fn(info: ErrorInfo) -> Element,
+    wrapped: bool,
+)
+
+// The not-found level of a segment: `data-jh-n` around `child`, and `view`
+// stashed as the nearest not-found tree when a not-found signal leaves it.
+pub type NotFoundBoundaryNode(
+    pattern: string,
+    child: fn() -> @Component<Element>,
+    view: fn() -> Element,
+)
+
+// A `Suspense` boundary with the scope its fill runs with.
+pub type Fill(boundary: Boundary, scope: RenderScope)
+
+// A run walked: its tree, every boundary node resolved, and the fills the run
+// and the nodes below it registered.
+pub type Walked(tree: Element, fills: Fill[])
+
+// An application's error boundary around a component (decision 414 (3)): it
+// writes no try around its children — it places this node, and the renderer
+// runs `child` inside the host's try with the scope its parent answered,
+// rendering `fallback` (in `data-jh-e="ID"`) for an ordinary failure and
+// re-raising a signal.
+pub fn errorBoundaryNode(
+    id: string,
+    child: fn() -> @Component<Element>,
+    fallback: fn(info: ErrorInfo) -> Element,
+) -> Element {
+    return errorNode(
+        ErrorBoundaryNode(id: id, child: child, view: fallback, wrapped: true),
+    );
+}
+
+// A boundary node is its own renderer: the placeholder carries the index of
+// the function that runs it with the scope its parent's run answered.
+fn errorNode(b: ErrorBoundaryNode) -> Element {
+    return nodePlaceholder({ scope -> renderErrorBoundary(b, scope) });
+}
+
+fn notFoundNode(b: NotFoundBoundaryNode) -> Element {
+    return nodePlaceholder({ scope -> renderNotFound(b, scope) });
+}
+
+fn nodePlaceholder(n: fn(scope: RenderScope) -> @Task<Walked>) -> Element {
+    val index = __jhPushNode(n);
+    return Element(
+        tag: "#node",
+        value: index.toString(),
+        children: [],
+        attrs: [],
+    );
+}
+
+// Run `c` with `scope`, then every boundary node of its tree with the scope
+// its run answered.
+pub fn renderComponent(
+    c: @Component<Element>,
+    scope: RenderScope,
+) -> @Task<Walked> {
+    val r = await c.run(scope);
+    val own = __jhTakeBoundaries().map(
+        { b -> Fill(boundary: b, scope: r.scope) },
+    );
+    val inner = await resolveTree(r.value, r.scope);
+    return Walked(tree: inner.tree, fills: own.append(inner.fills));
+}
+
+fn resolveTree(e: Element, scope: RenderScope) -> @Task<Walked> {
+    if (e.tag == "#node") {
+        val run = __jhNodeAt(e.value);
+        val walked = await run(scope);
+        return walked;
+    }
+    var kids: Element[] = [];
+    var fills: Fill[] = [];
+    for (e.children) { c ->
+        val w = await resolveTree(c, scope);
+        kids.push(w.tree);
+        fills = fills.append(w.fills);
+    }
+    return Walked(
+        tree: Element(
+            tag: e.tag,
+            value: e.value,
+            children: kids,
+            attrs: e.attrs,
+        ),
+        fills: fills,
+    );
+}
+
+fn failureOf(outcome: @Result<Walked, string>) -> string {
+    return case outcome {
+        Ok(w) -> "";
+        Error(message) -> message;
+    };
+}
+
+pub fn renderErrorBoundary(
+    b: ErrorBoundaryNode,
+    scope: RenderScope,
+) -> @Task<Walked> {
+    val outcome = await componentOutcome(b.child, scope);
+    val failure = failureOf(outcome);
+    if (isSignal(failure))
+        return Walked(tree: raiseElement(failure), fills: []);
+    val view = b.view;
+    val walked = case outcome {
+        Ok(w) -> w;
+        Error(message) -> Walked(tree: view(infoFor(message)), fills: []);
+    };
+    if (b.wrapped)
+        return Walked(tree: wrap(b.id, walked.tree), fills: walked.fills);
+    return walked;
+}
+
+pub fn renderNotFound(
+    b: NotFoundBoundaryNode,
+    scope: RenderScope,
+) -> @Task<Walked> {
+    val outcome = await componentOutcome(b.child, scope);
+    val failure = failureOf(outcome);
+    if (failure == notFoundReason()) {
+        val view = b.view;
+        __jhStashNotFound(notFoundAnchor(b.pattern, view()));
+    }
+    if (failure != "") return Walked(tree: raiseElement(failure), fills: []);
+    val walked = case outcome {
+        Ok(w) -> w;
+        Error(message) -> Walked(tree: childrenMarker(), fills: []);
+    };
+    return Walked(
+        tree: notFoundAnchor(b.pattern, walked.tree),
+        fills: walked.fills,
+    );
+}
+
+// `f` under std's `failure.attempt` (botopink decision 431): its value, or
+// `Error(reason)` — the message of the raise it crashed with.
+pub fn attemptRender<T>(f: fn() -> T) -> @Result<T, string> {
+    val out = failure.attempt(f);
+    return case out {
+        Ok(v) -> v;
+        Error(e) -> throw e.message;
+    };
+}
+
+// ── step 3: the escaping walker ─────────────────────────────────────────────
+
+pub fn renderNode(e: Element) -> string {
+    if (e.tag == "#text") return escape.html(e.value);
+    if (e.tag == "#raw") return e.value;
+    if (e.tag == "#fragment") return renderChildren(e.children);
+    val open = "<" + e.tag + renderAttrs(e.attrs) + ">";
+    if (isVoidTag(e.tag)) return open;
+    if (isRawTextTag(e.tag))
+        return open + rawBody(e.tag, e.children) + "</" + e.tag + ">";
+    return open + renderChildren(e.children) + "</" + e.tag + ">";
+}
+
+fn renderChildren(children: Children) -> string {
+    var out = "";
+    for (children) { c ->
+        out = out + renderNode(c);
+    }
+    return out;
+}
+
+fn renderAttrs(attrs: Array<#(string, string)>) -> string {
+    var out = "";
+    for (attrs) { a ->
+        out = out + " " + a._0 + "=\"" + escape.attribute(a._1) + "\"";
+    }
+    return out;
+}
+
+// The text of a raw-text element, verbatim. A body holding `</script` /
+// `</style` (any case) would close the element early: the render FAILS, naming
+// the tag.
+fn rawBody(tag: string, children: Children) -> string {
+    var out = "";
+    for (children) { c ->
+        out = out + c.value;
+    }
+    val closer = "</" + tag;
+    assert out.toLower().contains(closer) == false, "render: a <"
+        + tag
+        + "> body contains `"
+        + closer
+        + "`, which would close the element early - refused, never escaped";
+    return out;
+}
+
+// The single documented escape hatch: `html` is written verbatim. Its two uses
+// are a plugin's `<style>` block and the payload script.
+pub fn raw(html: string) -> Element {
+    return Element(tag: "#raw", value: html, children: [], attrs: []);
+}
+
+// The shell: the page with every boundary showing its fallback. No doctype and
+// no head — the document is `document`'s.
+pub fn shellHtml(page: Element) -> string {
+    return renderNode(page);
+}
+
+// ── islands — the ordinals are the render's (front 29's `islandAttr`) ───────
+
+// An island in render order: the next ordinal, the placeholder front 29's
+// `clientMount` builds, and the payload `i` row recorded for this render.
+pub fn mountIsland(
+    component: string,
+    props: Array<#(string, string)>,
+    children: Children,
+) -> Element {
+    val ordinal = __jhNextIslandOrdinal();
+    val island = Island(
+        id: islandId(ordinal),
+        component: component,
+        props: props,
+    );
+    __jhPushIsland(islandEntry(island));
+    return clientMount(island, children);
+}
+
+// ── `RenderHooks` ───────────────────────────────────────────────────────────
+//
+// The two fields that carry markup another package writes — onze front 68's
+// bundle tags — and nothing else. The style moments are `RenderPlugin`'s.
+
+pub type RenderHooks(
+    headExtra: fn(route: string) -> string,
+    bodyExtra: fn(route: string) -> string,
+)
+
+fn noExtra(route: string) -> string {
+    return "";
+}
+
+pub fn defaultHooks() -> RenderHooks {
+    return RenderHooks(
+        headExtra: { route -> noExtra(route) },
+        bodyExtra: { route -> noExtra(route) },
+    );
+}
+
+// Stored once, at boot, for every render that follows (a process-independent
+// store on the BEAM: onze sets it in another process than the renders).
+pub fn setHooks(h: RenderHooks) -> void {
+    __jhSetHooks(h);
+}
+
+pub fn currentHooks() -> RenderHooks {
+    return __jhHooks(defaultHooks());
+}
+
+// ── step 4: composition ─────────────────────────────────────────────────────
+
+fn childrenMarker() -> Element {
+    return Element(tag: "#children", value: "", children: [], attrs: []);
+}
+
+// `tree` with every `#children` placeholder replaced by `inner`.
+pub fn substitute(tree: Element, inner: Element) -> Element {
+    if (tree.tag == "#children") return inner;
+    var kids: Array<Element> = [];
+    for (tree.children) { c ->
+        kids.push(substitute(c, inner));
+    }
+    return Element(
+        tag: tree.tag,
+        value: tree.value,
+        children: kids,
+        attrs: tree.attrs,
+    );
+}
+
+fn segmentOf(chain: Array<UiSegment>, i: i32) -> UiSegment {
+    var found = segment("");
+    var n = 0;
+    for (chain) { s ->
+        if (n == i) found = s;
+        n = n + 1;
+    }
+    return found;
+}
+
+fn propsFor(route: PageContext) -> LayoutProps {
+    return LayoutProps(route: route, children: childrenMarker(), slots: []);
+}
+
+// The route snapshot for the layout at `depth`: front 26's `selected`.
+// The query is the snapshot's own — the render filled it at depth 0 — since
+// `PageContext` carries none.
+fn enterDepth(route: PageContext, depth: i32) -> i32 {
+    return fill(
+        route.pathname,
+        encoding.formStringify(route.params),
+        encoding.formStringify(snapshot().search),
+        route.pattern,
+        depth,
+    );
+}
+
+fn layoutOf(
+    seg: UiSegment,
+    route: PageContext,
+    depth: i32,
+) -> @Component<Element> {
+    enterDepth(route, depth);
+    if (seg.hasLayout == false) return childrenMarker();
+    val view = seg.layoutView;
+    val tree = await view(propsFor(route));
+    return tree;
+}
+
+fn templateOf(seg: UiSegment, route: PageContext) -> @Component<Element> {
+    if (seg.hasTemplate == false) return childrenMarker();
+    val view = seg.templateView;
+    val tree = await view(propsFor(route));
+    val key = seg.pattern + "#" + __jhNextNav().toString();
+    return Element(
+        tag: "div",
+        value: "",
+        children: [tree],
+        attrs: [#("data-jh-t", key)],
+    );
+}
+
+// The page, composed through `chain`: root-first, layouts before the page.
+// The root of every page render: it provides `styled`'s `StyledSheet`
+// context (decisions 352, 354 (7), 379), so a `styled` component computed at
+// render below it writes to this render's sheet (`styled_sheet.bp`).
+pub fn compose(
+    chain: Array<UiSegment>,
+    route: PageContext,
+    page: fn() -> @Component<Element>,
+) -> @Component<Element> {
+    use provide(createContext(renderSheet()));
+    val tree = await composeAt(chain, 0, route, page);
+    return tree;
+}
+
+fn composeAt(
+    chain: Array<UiSegment>,
+    i: i32,
+    route: PageContext,
+    page: fn() -> @Component<Element>,
+) -> @Component<Element> {
+    if (i >= chain.length) {
+        val leaf = await page();
+        return leaf;
+    }
+    val seg = segmentOf(chain, i);
+    val shell = await layoutOf(seg, route, i);
+    val tmpl = await templateOf(seg, route);
+    val inner = await errorLevel(chain, i, route, page);
+    return substitute(shell, substitute(tmpl, inner));
+}
+
+fn errorId(seg: UiSegment) -> string {
+    return seg.pattern;
+}
+
+// `error > loading > not-found > (the rest)` for segment `i`.
+fn errorLevel(
+    chain: Array<UiSegment>,
+    i: i32,
+    route: PageContext,
+    page: fn() -> @Component<Element>,
+) -> @Component<Element> {
+    val seg = segmentOf(chain, i);
+    if (seg.hasLoading) {
+        val loading = seg.loadingView;
+        val hole = holeId(nextHoleOrdinal());
+        val child: fn() -> @Component<Element> = { -> caughtBelow(chain, i, route, page) };
+        val placeholder = Suspense(
+            Boundary(id: hole, fallback: loading(), child: child),
+        );
+        if (seg.hasError) return wrap(errorId(seg), placeholder);
+        return placeholder;
+    }
+    val tree = await caughtBelow(chain, i, route, page);
+    return tree;
+}
+
+// The error boundary of segment `i` around its not-found level, as a node
+// the renderer runs (`renderErrorBoundary`): a signal is re-raised, an
+// ordinary failure renders the segment's error view.
+fn caughtBelow(
+    chain: Array<UiSegment>,
+    i: i32,
+    route: PageContext,
+    page: fn() -> @Component<Element>,
+) -> @Component<Element> {
+    val seg = segmentOf(chain, i);
+    if (seg.hasError == false) {
+        val plain = await notFoundLevel(chain, i, route, page);
+        return plain;
+    }
+    return errorNode(
+        ErrorBoundaryNode(
+            id: errorId(seg),
+            child: { -> notFoundLevel(chain, i, route, page) },
+            view: seg.errorView,
+            wrapped: seg.hasLoading == false,
+        ),
+    );
+}
+
+// The not-found level, as a node the renderer runs (`renderNotFound`):
+// `data-jh-n` around the rest, and the nearest not-found tree for a not-found
+// signal raised below it.
+fn notFoundLevel(
+    chain: Array<UiSegment>,
+    i: i32,
+    route: PageContext,
+    page: fn() -> @Component<Element>,
+) -> @Component<Element> {
+    val seg = segmentOf(chain, i);
+    if (seg.hasNotFound == false) {
+        val plain = await composeAt(chain, i + 1, route, page);
+        return plain;
+    }
+    return notFoundNode(
+        NotFoundBoundaryNode(
+            pattern: seg.pattern,
+            child: { -> composeAt(chain, i + 1, route, page) },
+            view: seg.notFoundView,
+        ),
+    );
+}
+
+// The not-found anchor: the client swaps a late not-found into the nearest one.
+pub fn notFoundAnchor(pattern: string, tree: Element) -> Element {
+    return Element(
+        tag: "div",
+        value: "",
+        children: [tree],
+        attrs: [#("data-jh-n", pattern)],
+    );
+}
+
+#[@External.Node("./render.mjs", "nextHoleOrdinal")]
+#[@External.Erlang("jhonstart_render", "next_hole_ordinal")]
+declare fn __jhNextHoleOrdinal() -> i32;
+
+// The next hole ordinal of this render: `h1`, `h2`, … in shell order.
+pub fn nextHoleOrdinal() -> i32 {
+    return __jhNextHoleOrdinal();
+}
+
+// ── step 5: the payload (contract 2) ────────────────────────────────────────
+
+pub type Payload(
+    build: string,
+    pathname: string,
+    pattern: string,
+    params: string,
+    query: string,
+    table: string,
+    islands: Array<#(string, string, string)>,
+    actions: Array<#(string, string)>,
+    holes: string[],
+    dynamic: bool,
+    extras: Array<#(string, Json)>,
+)
+
+// The keys the render writes itself; a plugin may give none of them.
+pub fn renderKeys() -> string[] {
+    return ["v", "b", "p", "r", "m", "q", "t", "i", "a", "h", "d", "k", "z"];
+}
+
+pub fn writePayload(p: Payload) -> string {
+    val islandRows = p.islands.map(
+        { row -> json.array([json.quote(row._0), json.quote(row._1), json.quote(row._2)]) },
+    );
+    val actionRows = p.actions.map(
+        { row -> json.array([json.quote(row._0), json.quote(row._1)]) },
+    );
+    val holeRows = p.holes.map({ h -> json.quote(h) });
+    var fields: Array<#(string, string)> = [
+        #("v", "1"),
+        #("b", json.quote(p.build)),
+        #("p", json.quote(p.pathname)),
+        #("r", json.quote(p.pattern)),
+        #("m", json.quote(p.params)),
+        #("q", json.quote(p.query)),
+        #("t", json.quote(p.table)),
+        #("i", json.array(islandRows)),
+        #("a", json.array(actionRows)),
+        #("h", json.array(holeRows)),
+        #("d", if (p.dynamic) "true" else "false"),
+    ];
+    for (p.extras) { extra ->
+        fields.push(extra);
+    }
+    return escape.scriptJson(json.object(fields));
+}
+
+// The payload script: `<script>window.<globals.payload> = {…}</script>`.
+pub fn payloadScript(p: Payload) -> string {
+    return "<script>window."
+        + globals.payload
+        + " = "
+        + writePayload(p)
+        + "</script>";
+}
+
+// ── the document ────────────────────────────────────────────────────────────
+
+// A language tag `app(lang: …)` accepts: letters, digits and `-`, starting
+// with a letter (`en`, `pt-BR`, `zh-Hant-TW`). Anything else is refused by
+// `app`, so the attribute never carries markup.
+pub fn isLangTag(tag: string) -> bool {
+    val chars = tag.split("");
+    val letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    val allowed = letters + "0123456789-";
+    val first = chars.at(0) ?? "";
+    val startsWithLetter = first != "" && letters.contains(first);
+    return startsWithLetter && chars.all({ c -> allowed.contains(c) });
+}
+
+// Everything up to and including the root's opening tag: the doctype, the
+// `<html lang>` the app was built with, the head (front 32's tags, the
+// plugins' `head`, `RenderHooks.headExtra`), and `<div data-jh-root="">`.
+pub fn documentStart(
+    lang: string,
+    head: string,
+    pluginHead: string,
+    route: string,
+) -> string {
+    val hooks = currentHooks();
+    val headExtra = hooks.headExtra;
+    return "<!DOCTYPE html><html lang=\""
+        + escape.attribute(lang)
+        + "\"><head><meta charset=\"utf-8\">"
+        + head
+        + pluginHead
+        + headExtra(route)
+        + "</head><body><div data-jh-root=\"\">";
+}
+
+// Everything after the fills: the payload script, `RenderHooks.bodyExtra`, and
+// the closing tags.
+pub fn documentEnd(p: Payload, route: string) -> string {
+    val hooks = currentHooks();
+    val bodyExtra = hooks.bodyExtra;
+    return payloadScript(p) + bodyExtra(route) + "</body></html>";
+}
+
+// A whole document in one string: `documentStart`, the composed tree, the
+// root's close, `fills`, `documentEnd`.
+pub fn document(
+    lang: string,
+    head: string,
+    pluginHead: string,
+    body: string,
+    fills: string,
+    p: Payload,
+) -> string {
+    return documentStart(lang, head, pluginHead, p.pattern)
+        + body
+        + "</div>"
+        + fills
+        + documentEnd(p, p.pattern);
+}

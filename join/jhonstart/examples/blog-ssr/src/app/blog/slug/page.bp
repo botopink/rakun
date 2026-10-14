@@ -1,0 +1,58 @@
+// blog-ssr/app/blog/slug/page — the post page: two loaders awaited in
+// sequence (`@Task` is eager on erlang, so a second loader that needs the
+// first's value is simply the next line), every untrusted string through the
+// escaping walker. A missing post raises jhonstart's `notFound()`; a failing
+// comment service is the segment's error page.
+
+import {Element, ElementBase, article, h1, h2, p, section, ul, li, span, text, notFound} from "jhonstart";
+import {repo.Post, repo.Comment, repo.findPost, repo.findComments, repo.loadPost, repo.loadComments};
+
+fn commentRow(c: Comment) -> Element {
+    return li([span([text(c.author)], attrs: [#("class", "author")]), text(c.text)]);
+}
+
+fn postArticle(post: Post, comments: Array<Comment>) -> Element {
+    return article([
+        h1([text(post.title)]),
+        p([text(post.body)]),
+        section([h2([text("Comments")]), ul(comments.map({ c -> commentRow(c) }))], attrs: [#("class", "comments")]),
+    ], attrs: [#("data-post", post.id)]);
+}
+
+fn slugOf(params: Array<#(string, string)>) -> string {
+    val hit = params.filter({ kv -> kv._0 == "slug" });
+    return (hit.at(0) ?? #("", ""))._1;
+}
+
+// A page never propagates an error: a missing post is `notFound()`, and a
+// comment failure renders the article with no comments.
+pub fn PostPage(params: Array<#(string, string)>) -> @Component<Element> {
+    val found = await loadPost(slugOf(params));
+    val post = case found {
+        Ok(p) -> p;
+        Error(m) -> Post(id: "", slug: "", title: "", body: "");
+    };
+    if (post.id == "") val gone = notFound();
+    val loaded = await loadComments(post.id);
+    val comments = case loaded {
+        Ok(cs) -> cs;
+        Error(m) -> [];
+    };
+    return postArticle(post, comments);
+}
+
+fn panelFor(slug: string) -> @Result<Element, string> {
+    val found = findPost(slug);
+    val post = case found {
+        Ok(p) -> p;
+        Error(m) -> Post(id: "", slug: "", title: "", body: "");
+    };
+    if (post.id == "") throw notFound();
+    val comments = try findComments(post.id);
+    return postArticle(post, comments);
+}
+
+// The post as an error boundary's child: the thunk answering `@Result`.
+pub fn postPanel(slug: string) -> fn() -> @Result<Element, string> {
+    return { -> panelFor(slug) };
+}

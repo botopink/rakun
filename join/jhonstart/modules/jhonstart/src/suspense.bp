@@ -1,0 +1,49 @@
+// jhonstart/suspense — the streaming boundary and its hole (front 30).
+//
+// An `Element` cannot carry a deferred child — `Children` coerces from an
+// array, an element or a string, never from a thunk — so a boundary is a
+// RECORD beside the tree: its fallback goes out with the shell, and its child
+// is an UNSTARTED thunk over a server component. `@Task` is eager on the erlang
+// row, so a boundary that held a started Task would hold a value that has
+// already run; the thunk is what lets front 30's render spawn the child and
+// flush the shell first.
+//
+// `Suspense(b)` renders only the HOLE: the fallback inside
+// `<div data-jh-h="h1">` (`contracts.md § 2`). The child never appears in the
+// shell. A boundary's id is an ordinal assigned by the render in shell order
+// (`holeId`), never derived from the route: a client navigation is a new
+// response with a new set of ordinals.
+
+import {element.Element, element.ElementBase};
+
+pub type Boundary(
+    id: string,
+    fallback: Element,
+    child: fn() -> @Component<Element>,
+)
+
+// The boundary is registered with the render as the hole is written: an
+// `Element` has nowhere to carry the thunk, so the render learns the
+// boundaries a tree holds from this cell (`render.mjs` /
+// `sidecars/jhonstart_render.erl`, per render). Outside a render the
+// registration is simply never read.
+#[@External.Node("./render.mjs", "pushBoundary")]
+#[@External.Erlang("jhonstart_render", "push_boundary")]
+declare fn __jhPushBoundary(b: Boundary) -> i32;
+
+pub fn Suspense(b: Boundary) -> Element {
+    __jhPushBoundary(b);
+    return Element(
+        tag: "div",
+        value: "",
+        children: [b.fallback],
+        attrs: [#("data-jh-h", b.id)],
+    );
+}
+
+// `h` followed by the ordinal — the spelling `contracts.md § 2` pins. Nothing
+// but `[h0-9]` can come out of it, so a hole id needs no escaping anywhere it
+// is written.
+pub fn holeId(index: i32) -> string {
+    return "h" + index.toString();
+}

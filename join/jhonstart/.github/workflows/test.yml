@@ -1,0 +1,243 @@
+# CI for jhonstart: the library's own gate, `scripts/gate.sh`, on the runners the
+# compiler itself is gated on: linux only.
+#
+# What a row runs is the repository's gate with conformance (decisions 470,
+# 477): the shared runner's stages — the repository's own stages, `botopink test
+# --target <t>` in every workspace member on every target its manifest declares,
+# every `examples/*/` built, every `refusals/*/` case refused — then `botopink
+# cell check conformance/` over the repository's `conformance/` cells. The
+# targets are the manifests' own, so the row is the runner, not a target. Every
+# row is hard: no `allow_fail`, no `continue-on-error`. No `beam` row (`botopink
+# test` cannot run beam). No windows row (gate-f): botopink-lang's own workflow
+# has none.
+#
+# The linux runner is ubuntu-24.04: botopink-lang's `build.zig` links the
+# compiler against a pinned glibc 2.35 (decision 219 — ubuntu-22.04's, the
+# oldest the shipped binary supports), so it starts on 22.04 and 24.04 alike;
+# the compiler's own workflow gates the 22.04 floor, this row runs on 24.04.
+#
+# Bootstrap: check out botopink-lang (feat) and place this library under
+# `botopink-lang/repository/jhonstart/` next to the sibling libraries its members depend on by `path`, build the compiler, then FETCH THE
+# DEPENDENCIES (front 163 s8): every `botopink.json` that declares a `git`
+# dependency gets `bpmp install` run beside it, which clones the dependency at
+# the manifest's branch into the package store and links it under that
+# manifest's `.botopinkbuild/deps/` — the compiler's lib loader resolves the
+# name through the link. A library that only another library's checkout used to
+# provide (`snap`, `routing`, `css`, …) is fetched, never assumed to be next to
+# this one. Then `scripts/gate.sh`.
+#
+# `BOTOPINK_LANG_REF` (repo variable, default `feat`) pins a botopink-lang ref.
+name: test
+
+# The workflows run on `feat` (decision 477): a push to `feat` runs the gate with
+# conformance; no `front/*` branch goes to GitHub.
+on:
+  push:
+    branches: [feat]
+  pull_request:
+    branches: [feat, main]
+
+concurrency:
+  # decision 528: a push to feat runs in a group of its own commit, so every commit has its verdict;
+  # a pull request keeps one group and cancels its older runs
+  group: test-${{ github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
+
+env:
+  LIB_NAME: jhonstart
+  BOTOPINK_LANG_REPO: botopink/botopink-lang
+  # Libraries checked out beside this one for `path` dependencies.
+  PATH_DEP_LIBS: "emilia"
+
+jobs:
+  test:
+    name: ${{ matrix.runner }} · scripts/gate.sh
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout botopink-lang
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.BOTOPINK_LANG_REPO }}
+          ref: ${{ vars.BOTOPINK_LANG_REF || 'feat' }}
+          path: botopink-lang
+
+      - name: Checkout this lib under botopink-lang/repository/${{ env.LIB_NAME }}/
+        uses: actions/checkout@v5
+        with:
+          path: botopink-lang/repository/${{ env.LIB_NAME }}
+
+
+      # The members' `path` dependencies are workspace-relative
+      # (`../../../<lib>/modules/<member>`), which resolves to
+      # botopink-lang/repository/<lib>: the sibling libraries are checked out
+      # there at `feat`. Their own `git` dependencies are fetched below like
+      # this library's.
+      - name: Checkout emilia (path dependency)
+        uses: actions/checkout@v5
+        with:
+          repository: botopink/emilia
+          ref: feat
+          path: botopink-lang/repository/emilia
+
+      # Both hosts on every row. Building the compiler runs `erlc` (the
+      # resident comptime modules are compiled at build time and embedded),
+      # and comptime evaluation spawns `erl` whatever the row's target — so
+      # a `commonJS` row needs Erlang/OTP exactly as an `erlang` row does.
+      # The release is the root botopink.json's "otp" (decision 228): the one
+      # the compiler emits for, which refuses any other `erl` on PATH.
+      - name: Read the Erlang/OTP release (botopink.json "otp")
+        id: otp
+        shell: bash
+        run: |
+          release="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("otp", ""))' "botopink-lang/repository/${LIB_NAME}/botopink.json")"
+          [ -n "$release" ] || { echo "${LIB_NAME}/botopink.json declares no \"otp\" (decision 228)"; exit 1; }
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+
+      - name: Install Erlang/OTP (linux)
+        if: runner.os == 'Linux'
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ steps.otp.outputs.release }}
+
+      # Decisions 227 and 228: the manifest's release on every row; any other
+      # release here fails the job rather than testing against it.
+      - name: Assert Erlang/OTP
+        shell: bash
+        env:
+          OTP: ${{ steps.otp.outputs.release }}
+        run: |
+          otp="$(erl -noshell -eval 'io:format("~s",[erlang:system_info(otp_release)]),halt().')"
+          [ "$otp" = "$OTP" ] || { echo "Erlang/OTP is '$otp', not $OTP (decisions 227, 228)"; exit 1; }
+
+      # Node 22, the floor std's commonJS bodies need: `fs.glob` matches a
+      # segment with `fs.globSync` (Node 22+, botopink-lang's
+      # libs/std/src/io/fs.bp); under Node 20 it throws and the walk answers `[]`.
+      - name: Install Node 22
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      # The cells run every target they declare, wasm among them: `botopink
+      # cell check` evaluates the generated module with `wasmtime`, so it is on
+      # PATH (the release botopink-lang's own workflow pins).
+      - name: Install wasmtime
+        shell: bash
+        env:
+          WASMTIME_VERSION: v45.0.1
+        run: |
+          set -euo pipefail
+          url="https://github.com/bytecodealliance/wasmtime/releases/download/${WASMTIME_VERSION}/wasmtime-${WASMTIME_VERSION}-x86_64-linux.tar.xz"
+          curl --proto '=https' --tlsv1.2 -sSfL -o /tmp/wasmtime.tar.xz "$url"
+          mkdir -p "$HOME/.wasmtime/bin"
+          tar -xJf /tmp/wasmtime.tar.xz -C /tmp/
+          mv "/tmp/wasmtime-${WASMTIME_VERSION}-x86_64-linux/wasmtime" "$HOME/.wasmtime/bin/"
+          chmod +x "$HOME/.wasmtime/bin/wasmtime"
+          echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
+          "$HOME/.wasmtime/bin/wasmtime" --version
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      # `zig build install` produces `botopink`, `botopink-lib-test` and `bpmp`
+      # in zig-out/bin.
+      - name: zig build install
+        working-directory: botopink-lang
+        shell: bash
+        run: |
+          zig build install
+          echo "$GITHUB_WORKSPACE/botopink-lang/zig-out/bin" >> "$GITHUB_PATH"
+
+      # One compiler for every step below — the cells, the suites that build
+      # fixtures (they read `BOTOPINK_BIN`) and the gate's stages. A miss fails
+      # the job.
+      - name: Export BOTOPINK_BIN and print the build identity
+        shell: bash
+        run: |
+          bin="$(command -v botopink)" || { echo "botopink is not on PATH"; exit 1; }
+          command -v bpmp >/dev/null || { echo "bpmp is not on PATH"; exit 1; }
+          echo "BOTOPINK_BIN=$bin" >> "$GITHUB_ENV"
+          echo "lib:      ${LIB_NAME} @ $(git -C "botopink-lang/repository/${LIB_NAME}" rev-parse HEAD)"
+          echo "compiler: $bin @ $(git -C botopink-lang rev-parse HEAD) (ref ${{ vars.BOTOPINK_LANG_REF || 'feat' }})"
+          echo "row:      ${{ matrix.runner }}"
+          erl -noshell -eval 'io:format("otp:      ~s~n", [erlang:system_info(otp_release)]), halt().'
+
+      # Front 163 s8: the dependencies come from the manifests. Every
+      # `botopink.json` of this library (and of the sibling libraries checked
+      # out for `path` dependencies) that has a `git` dependency gets `bpmp
+      # install` in its directory: the clone into the store and the link under
+      # `.botopinkbuild/deps/`. A failed install fails the job.
+      - name: bpmp install (the manifests' git dependencies)
+        working-directory: botopink-lang/repository
+        shell: bash
+        run: |
+          set -euo pipefail
+          n=0
+          for lib in "${LIB_NAME}" ${PATH_DEP_LIBS}; do
+            while IFS= read -r manifest; do
+              dir="$(dirname "$manifest")"
+              echo "── bpmp install in $dir"
+              (cd "$dir" && bpmp install)
+              n=$((n + 1))
+            done < <(grep -rl --include=botopink.json '"git"' "$lib" --exclude-dir=.botopinkbuild --exclude-dir=node_modules | sort)
+          done
+          echo "bpmp install: $n manifest(s)"
+          # `bpmp install` links a manifest's own `git` entries only. The compiler
+          # looks a package's `git` dependencies up in the project's tier and, for
+          # a workspace member, in its workspace root's (decision 483), so the
+          # closure is fetched here: each linked dependency's own `git` entries
+          # are installed in turn, and every link lands under the library root's
+          # `.botopinkbuild/deps/` — the tier the gate step reads whole through
+          # `BOTOPINK_LIB_ROOTS` (a refusal, a cell's scratch copy, a member).
+          for lib in "${LIB_NAME}" ${PATH_DEP_LIBS}; do
+            [ -d "$lib" ] || continue
+            root="$lib/.botopinkbuild/deps"
+            mkdir -p "$root"
+            seen=" "
+            queue=()
+            while IFS= read -r link; do queue+=("$link"); done < <(find "$lib" -type l -path '*/.botopinkbuild/deps/*' -not -path "$root/*" -not -path '*/node_modules/*' | sort)
+            i=0
+            while [ "$i" -lt "${#queue[@]}" ]; do
+              link="${queue[$i]}"
+              i=$((i + 1))
+              name="$(basename "$link")"
+              target="$(cd "$link" && pwd -P)"
+              [ -e "$root/$name" ] || ln -s "$target" "$root/$name"
+              case "$seen" in *" $target "*) continue ;; esac
+              seen="$seen$target "
+              while IFS= read -r manifest; do
+                dir="$(dirname "$manifest")"
+                echo "── bpmp install in $dir (a dependency's own)"
+                (cd "$dir" && bpmp install)
+                for next in "$dir"/.botopinkbuild/deps/*; do
+                  if [ -L "$next" ]; then queue+=("$next"); fi
+                done
+              done < <(grep -rl --include=botopink.json '"git"' "$target" --exclude-dir=.botopinkbuild --exclude-dir=node_modules | sort)
+            done
+            echo "deps of $lib: $(ls "$root" | tr '\n' ' ')"
+          done
+          # The sibling libraries checked out for `path` dependencies carry git
+          # dependencies of their own: the library's root reads them too.
+          for lib in ${PATH_DEP_LIBS}; do
+            for dep in "$lib"/.botopinkbuild/deps/*; do
+              [ -e "$dep" ] || continue
+              [ -e "${LIB_NAME}/.botopinkbuild/deps/$(basename "$dep")" ] || ln -s "$(cd "$dep" && pwd -P)" "${LIB_NAME}/.botopinkbuild/deps/$(basename "$dep")"
+            done
+          done
+
+      # The repository's gate with conformance (decisions 470, 477): a red here
+      # is reproduced locally, fixed at once and read again — never rerun until
+      # green.
+      - name: scripts/gate.sh
+        working-directory: botopink-lang/repository/${{ env.LIB_NAME }}
+        shell: bash
+        env:
+          # The links the install step wrote, the whole closure — read first by
+          # every project the gate builds, a cell's scratch copy included.
+          BOTOPINK_LIB_ROOTS: ${{ github.workspace }}/botopink-lang/repository/${{ env.LIB_NAME }}/.botopinkbuild/deps
+        run: scripts/gate.sh

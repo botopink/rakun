@@ -1,0 +1,339 @@
+// `botopink test` flat suite for `src/render.bp`, `src/suspense.bp` and
+// `src/globals.bp` (front 30): the escaping walker, the hole, the payload and
+// the globals registry. Both rows run every assertion; the payload round trip
+// is decoded with std's `json.decode` on each, which is the one reader both
+// sides share.
+
+import {element.Element, element.ElementBase, element.text, element.div, element.p, element.span, element.ul, element.renderToString};
+import {elements.input, elements.script, elements.style, elements.a, elements.h2};
+import {render.renderNode, render.raw, render.shellHtml, render.Payload, render.writePayload, render.payloadScript, render.renderKeys, render.mountIsland, render.resetRender, render.renderedIslands, render.registeredBoundaries, render.attemptRender};
+import {suspense.Boundary, suspense.Suspense, suspense.holeId};
+import {globals.alias, globals.globals};
+import {streaming.Chunk, streaming.resolve, streaming.fillHtml};
+import {json.decode, json.Json} from "std";
+import {render.renderComponent, render.errorBoundaryNode};
+import {error_boundary.ErrorInfo};
+import {context.createContext, context.provide, context.context, context.RenderScope} from "std";
+
+// ── step 3: the escaping walker ─────────────────────────────────────────────
+
+test "render: a text node is escaped — no < survives" {
+    val out = renderNode(text("<script>alert(1)</script>", attrs: []));
+    assert out.contains("<") == false;
+    assert out == "&lt;script&gt;alert(1)&lt;/script&gt;";
+}
+
+test "render: an attribute value holding a quote renders &quot; and re-parses" {
+    val out = renderNode(
+        a([text("x", attrs: [])], attrs: [#("title", "say \"hi\" & <go>")]),
+    );
+    assert out == "<a title=\"say &quot;hi&quot; &amp; &lt;go&gt;\">x</a>";
+}
+
+test "render: a void tag has no closing tag" {
+    assert renderNode(input([], attrs: [#("name", "q")]))
+        == "<input name=\"q\">";
+    assert renderNode(
+        Element(
+            tag: "meta",
+            value: "",
+            children: [],
+            attrs: [#("charset", "utf-8")],
+        ),
+    )
+        == "<meta charset=\"utf-8\">";
+}
+
+test "render: a style and a script body are raw text, verbatim" {
+    assert renderNode(
+        style([text("a > b { color: red }", attrs: [])], attrs: []),
+    )
+        == "<style>a > b { color: red }</style>";
+    assert renderNode(script([text("if (a && b) go();", attrs: [])], attrs: []))
+        == "<script>if (a && b) go();</script>";
+}
+
+fn closingScript() -> string {
+    return renderNode(
+        script([text("x = 1; </SCRIPT><img>", attrs: [])], attrs: []),
+    );
+}
+
+fn closingStyle() -> string {
+    return renderNode(style([text("a{} </style >", attrs: [])], attrs: []));
+}
+
+test "render: a raw-text body that would close its element fails the render, naming the tag" {
+    val s = attemptRender({ -> closingScript() });
+    val scriptMessage = case s {
+        Ok(html) -> "rendered " + html;
+        Error(message) -> message;
+    };
+    assert scriptMessage.contains("<script> body contains `</script`");
+    val st = attemptRender({ -> closingStyle() });
+    val styleMessage = case st {
+        Ok(html) -> "rendered " + html;
+        Error(message) -> message;
+    };
+    assert styleMessage.contains("<style> body contains `</style`");
+}
+
+test "render: #raw is the one element written verbatim" {
+    assert renderNode(raw("<b>x</b>")) == "<b>x</b>";
+    assert renderNode(div([raw("<i>&</i>"), text("&", attrs: [])], attrs: []))
+        == "<div><i>&</i>&amp;</div>";
+}
+
+test "render: renderNode is renderToString on a tree with nothing to escape" {
+    val tree = div(
+        [
+            p([text("hi", attrs: [])], attrs: [#("class", "x")]),
+            ul([], attrs: []),
+        ],
+        attrs: [],
+    );
+    assert renderNode(tree) == renderToString(tree);
+}
+
+// ── step 1: the boundary and its hole ───────────────────────────────────────
+
+fn slowList() -> @Component<Element> {
+    return ul([text("posts", attrs: [])], attrs: [#("class", "posts")]);
+}
+
+fn listBoundary(ordinal: i32) -> Boundary {
+    return Boundary(
+        id: holeId(ordinal),
+        fallback: div(
+            [text("Loading...", attrs: [])],
+            attrs: [#("class", "skeleton")],
+        ),
+        child: { -> slowList() },
+    );
+}
+
+test "render: Suspense renders the fallback in the hole and never the child" {
+    resetRender();
+    val out = renderNode(Suspense(listBoundary(1)));
+    assert out
+        == "<div data-jh-h=\"h1\"><div class=\"skeleton\">Loading...</div></div>";
+    assert out.contains("posts") == false;
+}
+
+test "render: holeId spells h<n> and nothing outside [h0-9]" {
+    assert holeId(1) == "h1";
+    assert holeId(0) == "h0";
+    assert holeId(12) == "h12";
+    val id = holeId(4096);
+    assert id
+        .replaceAll("h", "")
+        .replaceAll("0", "")
+        .replaceAll("1", "")
+        .replaceAll("2", "")
+        .replaceAll("3", "")
+        .replaceAll("4", "")
+        .replaceAll("5", "")
+        .replaceAll("6", "")
+        .replaceAll("7", "")
+        .replaceAll("8", "")
+        .replaceAll("9", "")
+        == "";
+}
+
+test "render: the shell carries every placeholder and no child, and no document" {
+    resetRender();
+    val page = div(
+        [Suspense(listBoundary(1)), Suspense(listBoundary(2))],
+        attrs: [],
+    );
+    val out = shellHtml(page);
+    assert out.contains("data-jh-h=\"h1\"");
+    assert out.contains("data-jh-h=\"h2\"");
+    assert out.contains("class=\"posts\"") == false;
+    assert out.contains("<!DOCTYPE") == false;
+    assert out.contains("<head") == false;
+    val registered = registeredBoundaries();
+    assert registered.length == 2;
+    assert (registered.at(1) ?? listBoundary(9)).id == "h2";
+}
+
+test "render: building a boundary runs nothing" {
+    val b = listBoundary(3);
+    assert b.id == "h3";
+    assert renderNode(b.fallback).contains("Loading");
+}
+
+// ── step 2: the chunk and the fill ──────────────────────────────────────────
+
+test "render: resolve awaits the child once and renders it through the walker" {
+    val c = await resolve(listBoundary(2));
+    assert c.id == "h2";
+    assert c.html == "<ul class=\"posts\">posts</ul>";
+}
+
+test "render: a fill is the contract-2 template plus the fill call" {
+    assert fillHtml(Chunk(id: "h1", html: "<ul></ul>"), "")
+        == "<template data-jh-f=\"h1\"><ul></ul></template><script>__bp1(\"h1\")</script>";
+}
+
+test "render: a fill's CSS goes first inside the template, with no marker" {
+    assert fillHtml(Chunk(id: "h1", html: "<ul></ul>"), "<style>.e_1{}</style>")
+        == "<template data-jh-f=\"h1\"><style>.e_1{}</style><ul></ul></template><script>__bp1(\"h1\")</script>";
+}
+
+// ── step 7: the globals registry ────────────────────────────────────────────
+
+test "render: the four globals come from the registry's declaration order" {
+    assert globals.payload == "__bp0";
+    assert globals.fill == "__bp1";
+    assert globals.signal == "__bp2";
+    assert globals.starters == "__bp3";
+    assert alias("fill") == "__bp1";
+}
+
+fn unknownGlobal() -> string {
+    return alias("router");
+}
+
+test "render: an unknown global fails, naming it" {
+    val out = attemptRender({ -> unknownGlobal() });
+    val message = case out {
+        Ok(v) -> v;
+        Error(m) -> m;
+    };
+    assert message.contains("`router` is not a registered global");
+}
+
+// ── step 5: the payload ─────────────────────────────────────────────────────
+
+fn payloadWith(params: string, extras: Array<#(string, string)>) -> Payload {
+    return Payload(
+        build: "b1",
+        pathname: "/blog/hi",
+        pattern: "/blog/[slug]",
+        params: params,
+        query: "",
+        table: "P|/blog/[slug]",
+        islands: [#("i0", "LikeButton", "postId=7")],
+        actions: [#("createPost", "a_9f2c")],
+        holes: ["h1"],
+        dynamic: true,
+        extras: extras,
+    );
+}
+
+test "render: the payload starts with v, and v is 1" {
+    val text = writePayload(payloadWith("slug=hi", []));
+    assert text.startsWith("{\"v\":1,");
+}
+
+test "render: the payload leaves no literal <, > or &, and </script> cannot close it" {
+    val text = writePayload(
+        payloadWith("slug=%3C/script%3E</script><img src=x>&", []),
+    );
+    assert text.contains("<") == false;
+    assert text.contains(">") == false;
+    assert text.contains("&") == false;
+    val doc = payloadScript(payloadWith("x=</script><img src=x>", []));
+    assert doc.split("</script>").length == 2;
+    assert doc.contains("<img") == false;
+    assert doc.startsWith("<script>window.__bp0 = {");
+}
+
+test "render: a control character in a param is escaped by std's json.quote" {
+    val text = writePayload(payloadWith("c=\u{1}", []));
+    assert text.contains("\\u0001");
+}
+
+fn memberNames(doc: Json) -> string {
+    return case doc {
+        Obj(members) -> members.map({ m -> m._0 }).join(",");
+        Null -> "null";
+        Bool(value) -> "bool";
+        Num(value) -> "num";
+        Str(value) -> "str";
+        Arr(items) -> "arr";
+    };
+}
+
+test "render: the payload decodes with std's json.decode to the contract-2 field set" {
+    val decoded = decode(
+        writePayload(payloadWith("slug=hi", [#("s", "[\"e_1\"]")])),
+    );
+    val names = case decoded {
+        Ok(doc) -> memberNames(doc);
+        Error(m) -> "error " + m;
+    };
+    assert names == "v,b,p,r,m,q,t,i,a,h,d,s";
+}
+
+test "render: an extra is written verbatim under its key, and s only when given" {
+    assert writePayload(payloadWith("", [#("x", "[1]")])).contains("\"x\":[1]");
+    assert writePayload(payloadWith("", [])).contains("\"s\"") == false;
+    assert renderKeys().contains("s") == false;
+    assert renderKeys().contains("t");
+}
+
+// ── islands: the render's ordinals, through front 29's islandAttr ───────────
+
+test "render: islands take i0, i1 in render order, and the i rows follow" {
+    resetRender();
+    val first = mountIsland("LikeButton", [#("postId", "7")], []);
+    val second = mountIsland(
+        "ThemeToggle",
+        [],
+        [span([text("x", attrs: [])], attrs: [])],
+    );
+    assert renderNode(first) == "<div data-jh-i=\"i0\"></div>";
+    assert renderNode(second) == "<div data-jh-i=\"i1\"><span>x</span></div>";
+    val rows = renderedIslands();
+    assert rows.length == 2;
+    assert (rows.at(0) ?? #("", "", ""))._1 == "LikeButton";
+    assert (rows.at(0) ?? #("", "", ""))._2 == "postId=7";
+    assert (rows.at(1) ?? #("", "", ""))._0 == "i1";
+}
+
+// ── decisions 388, 414: a boundary around a component is a node ─────────────
+
+type Label(text: string)
+
+pub val labelContext = comptime createContext(Label(text: "outside"));
+
+fn LabelView() -> @Component<Element> {
+    val l = use context(Label);
+    return text(l.text, attrs: []);
+}
+
+fn Broken() -> @Component<Element> {
+    @panic("broken panel");
+}
+
+fn caughtView(info: ErrorInfo) -> Element {
+    return text("caught", attrs: []);
+}
+
+fn Panel() -> @Component<Element> {
+    use provide(createContext(Label(text: "inside")));
+    return div(
+        [
+            errorBoundaryNode(
+                "ok",
+                { -> LabelView() },
+                { info -> caughtView(info) },
+            ),
+            errorBoundaryNode(
+                "bad",
+                { -> Broken() },
+                { info -> caughtView(info) },
+            ),
+        ],
+        attrs: [],
+    );
+}
+
+test "an error boundary node runs its child with the scope its parent answered, and catches a failure" {
+    val _r = resetRender();
+    val w = await renderComponent(Panel(), RenderScope.root());
+    assert renderNode(w.tree)
+        == "<div><div data-jh-e=\"ok\">inside</div><div data-jh-e=\"bad\">caught</div></div>";
+}

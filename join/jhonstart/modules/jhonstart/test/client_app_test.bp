@@ -1,0 +1,120 @@
+// `botopink test` flat suite for `src/client_app.bp` (front 26 Step 6): a
+// client-only app. With no `window` the location and the mount are
+// `client_app.mjs`'s module store (and its BEAM twin), so the start, the two
+// signals and the target check run on both rows. The front's gate for
+// `clientApp` is the commonJS row.
+
+import {element.Element, element.ElementBase, element.text, element.div, element.p};
+import {elements.main, elements.h2};
+import {server.cookies};
+import {error_boundary.notFound, error_boundary.redirect};
+import {router.lastNavigation};
+import {routes.page, routes.layout, routes.PageContext, routes.LayoutProps, routes.jhRegisterRoutes, routes.jhNotFound, routes.ctxParam, routes.ctxRest};
+import {client_app.ClientApp, client_app.clientApp, client_app.setClientLocation, client_app.mountedHtml, client_app.replacedLocation};
+
+#[layout("ca")]
+pub fn CaLayout(props: LayoutProps) -> @Component<Element> {
+    return main([props.children], attrs: [#("class", "ca")]);
+}
+
+#[page("ca/[id]")]
+pub fn caItem(route: PageContext) -> @Component<Element> {
+    val ps = caItemParams(route);
+    return p([text("item " + ps.id, attrs: [])], attrs: []);
+}
+
+#[page("ca/login")]
+pub fn caLogin(route: PageContext) -> @Component<Element> {
+    return p([text("login", attrs: [])], attrs: []);
+}
+
+#[page("ca/missing")]
+pub fn caMissing(route: PageContext) -> @Component<Element> {
+    notFound();
+    return p([], attrs: []);
+}
+
+#[page("ca/private")]
+pub fn caPrivate(route: PageContext) -> @Component<Element> {
+    redirect("/ca/login");
+    return p([text("secret", attrs: [])], attrs: []);
+}
+
+#[page("ca/nowhere")]
+pub fn caNowhere(route: PageContext) -> @Component<Element> {
+    redirect("/nope");
+    return p([], attrs: []);
+}
+
+#[page("ca/evil")]
+pub fn caEvil(route: PageContext) -> @Component<Element> {
+    redirect("https://evil.example");
+    return p([], attrs: []);
+}
+
+fn CaNotFound() -> Element {
+    return div([h2([text("no such item", attrs: [])], attrs: [])], attrs: []);
+}
+
+val __caNotFound = jhNotFound("ca", { -> CaNotFound() });
+
+val __caRoutes = jhRegisterRoutes(
+    @TypeInfo.all(with: page),
+    @TypeInfo.all(with: layout),
+    [],
+    [],
+);
+
+val table = "L|/ca\nP|/ca/[id]\nP|/ca/login\nP|/ca/missing\nP|/ca/private\nP|/ca/nowhere\nP|/ca/evil";
+
+fn outcomeText(r: @Result<void, string>) -> string {
+    return case r {
+        Ok(v) -> "ok";
+        Error(message) -> message;
+    };
+}
+
+test "clientApp: start renders the matched route into mount, the layout before the page" {
+    setClientLocation("/ca/7", "");
+    val out = await clientApp(table, "#root", []).start();
+    assert outcomeText(out) == "ok";
+    assert mountedHtml("#root")
+        == "<main class=\"ca\"><div data-jh-n=\"/ca\"><p>item 7</p></div></main>";
+}
+
+test "clientApp: notFound renders the route's not-found boundary and leaves the URL alone" {
+    setClientLocation("/ca/missing", "");
+    val out = await clientApp(table, "#root", []).start();
+    assert outcomeText(out) == "ok";
+    assert mountedHtml("#root")
+        == "<div data-jh-n=\"/ca\"><div><h2>no such item</h2></div></div>";
+    assert replacedLocation() == "";
+}
+
+test "clientApp: a relative redirect in routes is a replaceState and a client navigation" {
+    setClientLocation("/ca/private", "");
+    val out = await clientApp(table, "#root", []).start();
+    assert outcomeText(out) == "ok";
+    assert lastNavigation() == "replace /ca/login";
+    assert mountedHtml("#root").contains("<p>login</p>");
+    assert mountedHtml("#root").contains("secret") == false;
+}
+
+test "clientApp: an unlisted target fails the start and navigates nowhere; a listed absolute one is location.replace" {
+    setClientLocation("/ca/nowhere", "");
+    val nowhere = await clientApp(table, "#root", []).start();
+    assert outcomeText(nowhere).contains("`/nope` refused");
+    assert mountedHtml("#root") == "";
+    setClientLocation("/ca/evil", "");
+    val evil = await clientApp(table, "#root", []).start();
+    assert outcomeText(evil).contains("`https://evil.example` refused");
+    assert replacedLocation() == "";
+    setClientLocation("/ca/evil", "");
+    val listed = await clientApp(
+        table,
+        "#root",
+        ["https://evil.example"],
+    ).start();
+    assert outcomeText(listed) == "ok";
+    assert replacedLocation() == "https://evil.example";
+}

@@ -1,0 +1,54 @@
+//// The `jhonstart-dom-test` package — the browser half of front 30's render,
+//// run against a minimal document on node (`fake_dom.mjs`).
+////
+//// The core's `render.mjs` fill and signal functions and its payload reader
+//// act on `document`, `history` and `location`, which exist only in a
+//// browser; the core member runs on both rows and its erlang twins answer the
+//// empty value, so these cells are asserted here, on commonJS only
+//// (`specs/1.0.10-beta/decisions-pending.md` 30-g). A document is installed
+//// from the markup the render wrote, the registered function is called by its
+//// registry name (`callFill`, `callSignal`), and the document is read back
+//// serialized.
+////
+//// The manifest's `"targets": ["commonJS"]` is structural (1.0.11-beta
+//// `00-gate` decision gate-d): every cell below is `#[@External.Node]` only,
+//// and `callFill` / `callSignal` call one from compiled code, so
+//// `botopink build --target erlang` refuses this member with the host-binding
+//// error at their call site — the restriction excludes a target the module
+//// cannot exist on, and hides no red.
+
+#[@External.Node("./fake_dom.mjs", "install")]
+pub declare fn installDocument(html: string) -> i32;
+
+#[@External.Node("./fake_dom.mjs", "markup")]
+pub declare fn documentMarkup() -> string;
+
+#[@External.Node("./fake_dom.mjs", "recorded")]
+pub declare fn recordedNavigation() -> string;
+
+// Calls `globalThis[name](arg)` (no argument when `arg` is `""`); answers
+// `"called"`, or `"no function <name>"` when nothing is registered under it.
+#[@External.Node("./fake_dom.mjs", "call")]
+declare fn callGlobal(name: string, arg: string) -> string;
+
+// Calls the fill function registered under `name` with a hole id, as a fill's
+// `<script>__bpN("h1")</script>` does.
+pub fn callFill(name: string, id: string) -> string {
+    return callGlobal(name, id);
+}
+
+// Calls the signal function registered under `name` with no argument, as a
+// signal's `<script>__bpN()</script>` does.
+pub fn callSignal(name: string) -> string {
+    return callGlobal(name, "");
+}
+
+#[@External.Node("./fake_dom.mjs", "uninstall")]
+pub declare fn uninstallDocument() -> i32;
+
+test "jhonstart-dom-test: a document round-trips through the minimal DOM" {
+    installDocument("<div data-jh-root=\"\"><p class=\"a\">x &amp; y</p><input value=\"v\"></div>");
+    assert documentMarkup()
+        == "<div data-jh-root=\"\"><p class=\"a\">x &amp; y</p><input value=\"v\"></div>";
+    uninstallDocument();
+}

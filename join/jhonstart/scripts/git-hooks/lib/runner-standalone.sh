@@ -1,0 +1,648 @@
+#!/usr/bin/env bash
+# runner-standalone.sh — the gate of a botopink library.
+#
+# Sourced by scripts/gate.sh (the one entry: the pre-commit hook calls it with
+# `--staged --no-conformance`, CI and a front's Conformance step call it whole).
+# It is the only runner and it is one
+# text in every library repository (the meta repository's `hook-integrity`
+# workflow compares the bytes): it needs nothing outside the repository it sits
+# in — standalone clone, meta checkout, worktree, bpmp packing — and it names
+# no library. What differs between repositories is what their trees hold, never
+# this file.
+#
+# Stages, in order:
+#
+#   1. staged files  (`--staged` only) no snapshot candidate (`*.snap.new` / `*.snap.md.new` — a
+#                    mismatch writes one, it is recorded by renaming it, never
+#                    committed) and no conflict marker;
+#   2. the compiler  found, or the gate fails saying how to provide one;
+#   3. repository    `scripts/git-hooks/repository-stages.sh`, when the
+#      stages        repository tracks one: the checks only this repository has;
+#   4. tests         `botopink test --target <t>` in every workspace member, on
+#                    every target the member's manifest declares;
+#   5. examples      `botopink build --target <t>` of every `examples/*/`, on
+#                    every target its manifest declares;
+#   6. refusals      every `refusals/*/` project is refused by `botopink check`
+#                    with the lines of its `expect.txt`, when the repository has
+#                    a `refusals/` directory;
+#   7. conformance   `botopink cell check conformance/` (decisions 463, 464):
+#                    every `conformance/modules/*/` cell on the targets it
+#                    declares; a mismatch writes a `.snap.new` candidate and is
+#                    red. Skipped by `--no-conformance` (the hook's, decision
+#                    470), which prints that it was not run.
+#
+# Arguments of `runStandaloneGate` (scripts/gate.sh forwards its own):
+# `--staged`, `--no-conformance`, `--jobs <N>` — the total of jobs the cell
+# pools may use (default: the machine's, as when the gate runs alone). The
+# runner knows no pool and no lock: a scheduler above it, when there is one,
+# only hands it a number (decisions 468, 469).
+#
+# Stages 4 and 5 run their cells side by side on a pool sized to the machine
+# (`gatePool`: one per CPU, bounded by memory, a cell admitted while the
+# runnable threads are at most the CPUs; with `--jobs <N>` the width is N and
+# the admission is left to whoever handed the number) and print their report in plan order
+# once every cell has finished — the same lines, cell for cell, the
+# one-at-a-time gate printed. Front 115 of 1.0.11-beta measured emilia's
+# serial hook at ~4 000 s.
+#
+# Fail beats warn (decision 67; 1.0.11-beta 00-gate, gate-i): nothing here
+# skips. No flag, environment variable or list turns a stage off or names a
+# member, target or example that may fail. A stage is absent only structurally
+# — no `refusals/` directory, no `repository-stages.sh`, no `examples/` — and a
+# cell is absent only because the manifest does not declare the target.
+# Stages 1–3 stop the gate at the first red (they are cheap and everything
+# after them depends on them); stages 4–6 all run, every red is listed, and the
+# gate fails at the end — one run tells the whole truth.
+#
+# `botopink format` is applied, never checked (decision 524): no stage fails on
+# a file that is not canonical. The pre-commit hook calls `runFormatStaged`
+# before the gate, which formats the version of each staged source file that
+# enters the commit and writes the result into the index (§ runFormatStaged).
+#
+# The functions `requireBotopink`, `runRepositoryStagesGate`, `runTestsGate`,
+# `runExamplesGate`, `runRefusalsGate` and `runConformanceGate` are also what
+# `scripts/check-refusals.sh` calls: they report their reds and return non-zero.
+set -euo pipefail
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+NC='\033[0m'
+
+fail() { echo -e "${RED}✗ $1${NC}"; exit 1; }
+pass() { echo -e "${GREEN}✓ $1${NC}"; }
+
+# The repository this runner belongs to — three directories above this file —
+# and the runner's own path. Assigned here, on every source: never read from
+# the environment, and independent of the caller's working directory.
+gate_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
+gate_runner="$gate_root/scripts/git-hooks/lib/runner-standalone.sh"
+# The total of jobs the cell pools may use, set by `runStandaloneGate --jobs`.
+# Assigned (empty) on every source, never read from the environment.
+gate_jobs_total=""
+
+# locateBotopink — the compiler's path on stdout, or status 1.
+#
+# `$BOTOPINK_BIN` when it is set (and then nothing else: a `BOTOPINK_BIN` that
+# is not an executable is a miss, never a reason to pick another compiler);
+# else the compiler of the ENCLOSING checkout — the nearest ancestor holding
+# `repository/botopink-lang/` (its `zig-out/bin/botopink` or nothing: the walk
+# stops there, so a worktree nested under another checkout never borrows that
+# checkout's binary); else a botopink-lang checkout's own `zig-out`; else
+# `$PATH`.
+locateBotopink() {
+    if [ -n "${BOTOPINK_BIN:-}" ]; then
+        [ -f "$BOTOPINK_BIN" ] && [ -x "$BOTOPINK_BIN" ] || return 1
+        echo "$BOTOPINK_BIN"; return 0
+    fi
+    local cur="$gate_root" cand
+    while [ "$cur" != "/" ]; do
+        if [ -d "$cur/repository/botopink-lang" ]; then
+            cand="$cur/repository/botopink-lang/zig-out/bin/botopink"
+            if [ -x "$cand" ]; then echo "$cand"; return 0; fi
+            break
+        fi
+        cand="$cur/zig-out/bin/botopink"
+        if [ -x "$cand" ] && [ -f "$cur/build.zig" ]; then echo "$cand"; return 0; fi
+        cur=$(dirname "$cur")
+    done
+    if command -v botopink >/dev/null 2>&1; then command -v botopink; return 0; fi
+    return 1
+}
+
+# requireBotopink — locateBotopink, or the refusal with the way out. Called as
+# `bin=$(requireBotopink) || exit 1`: the path is stdout, the refusal stderr.
+# Never a warning: a gate that skips its `.bp` stages gates nothing.
+requireBotopink() {
+    local bin
+    if bin=$(locateBotopink); then
+        echo "$bin"; return 0
+    fi
+    {
+        if [ -n "${BOTOPINK_BIN:-}" ]; then
+            echo "  BOTOPINK_BIN is set to '$BOTOPINK_BIN', which is not an executable file."
+        fi
+        echo "  botopink compiler not found. Either"
+        echo "    - build one: \`zig build install\` in the botopink-lang checkout (the enclosing"
+        echo "      checkout's repository/botopink-lang/, so its zig-out/bin/botopink exists), or"
+        echo "    - point at one: export BOTOPINK_BIN=/path/to/botopink, or put \`botopink\` on \$PATH."
+        echo -e "${RED}✗ no compiler — the .bp gate cannot run, so the gate fails${NC}"
+    } >&2
+    return 1
+}
+
+# manifestList <botopink.json> <key> — the entries of the manifest's `<key>`
+# string array, one per line; nothing when the manifest has no such key.
+manifestList() {
+    [ -f "$1" ] || return 0
+    tr -d '\n\r' < "$1" \
+        | sed -n 's/.*"'"$2"'"[[:space:]]*:[[:space:]]*\[\([^]]*\)\].*/\1/p' \
+        | tr -d '" ' | tr ',' '\n' | sed '/^$/d'
+}
+
+# manifestTargets <botopink.json> — the targets a member declares, one per
+# line. The lib-test runner's reading, so the hook runs exactly the cells CI
+# runs: the member's `targets` list when it has one (a member may only restrict
+# its workspace's), else the workspace's `targets`, else every target
+# `botopink test` runs (commonJS and erlang). A manifest's `target` — the
+# default of a bare `botopink build` — is not a restriction and is not read.
+manifestTargets() {
+    local listed
+    listed=$(manifestList "$1" targets)
+    if [ -z "$listed" ]; then
+        listed=$(manifestList "$gate_root/botopink.json" targets)
+    fi
+    if [ -z "$listed" ]; then
+        listed=$(printf 'commonJS\nerlang')
+    fi
+    echo "$listed"
+}
+
+# workspaceMembers — the directories `botopink test` runs in, one per line:
+# every directory the root manifest's `workspaces` patterns expand to that
+# holds a `botopink.json` (modules, examples, starters — whatever the workspace
+# declares; the umbrella itself compiles nothing, decision 75), or the root
+# itself when the root manifest is a plain package with `.bp` sources.
+workspaceMembers() {
+    local manifest="$gate_root/botopink.json" pattern dir
+    if grep -q '"workspaces"' "$manifest" 2>/dev/null; then
+        for pattern in $(manifestList "$manifest" workspaces); do
+            # $pattern is unquoted on purpose: `modules/*` is a glob.
+            for dir in "$gate_root"/$pattern/; do
+                if [ -f "${dir}botopink.json" ]; then echo "${dir%/}"; fi
+            done
+        done
+    elif [ -n "$(cd "$gate_root" && find src test -name '*.bp' ! -name '*.d.bp' 2>/dev/null | head -1)" ]; then
+        echo "$gate_root"
+    fi
+}
+
+# stripColours — stdin to stdout without ANSI colour sequences (the escape byte
+# is spelled through printf: BSD sed reads no `\x1b`).
+stripColours() {
+    sed -E "s/$(printf '\033')\[[0-9;]*m//g"
+}
+
+# testTally <log> — the verdict line of a `botopink test` log.
+testTally() {
+    stripColours < "$1" | grep -E '^total: |^no test blocks found' | tail -1 || true
+}
+
+# runStagedFilesGate — stage 1. A `*.snap.new` / `*.snap.md.new` is written by
+# a snapshot mismatch or a missing snapshot and is recorded by renaming it
+# after it was compared with the spec's literal; the candidate itself is never
+# committed, `.gitignore` or not (`git add -f` gets past that). Conflict
+# markers are read in regular files only — gitlinks are skipped.
+runStagedFilesGate() {
+    local lt7 eq7 gt7
+    lt7=$(printf '<%.0s' {1..7})
+    eq7=$(printf '=%.0s' {1..7})
+    gt7=$(printf '>%.0s' {1..7})
+    local marker_re="${lt7} |${eq7}\$|${gt7} "
+    local staged f hits="" candidates=""
+    staged=$(git -C "$gate_root" diff --cached --name-only --diff-filter=ACMR)
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        case "$f" in
+            *.snap.new|*.snap.md.new) candidates="$candidates $f" ;;
+        esac
+        [ -f "$gate_root/$f" ] || continue
+        if grep -qE "$marker_re" "$gate_root/$f" 2>/dev/null; then
+            hits="$hits $f"
+        fi
+    done <<< "$staged"
+    if [ -n "$candidates" ]; then
+        echo "  Snapshot candidates staged:$candidates"
+        echo "  Compare each with the spec's literal and record it by renaming (mv x.snap.new x.snap); never commit the candidate."
+        echo -e "${RED}✗ Snapshot candidate (*.snap.new / *.snap.md.new) staged${NC}"
+        return 1
+    fi
+    if [ -n "$hits" ]; then
+        echo "  Conflict markers in:$hits"
+        echo -e "${RED}✗ Conflict markers found in staged files${NC}"
+        return 1
+    fi
+    pass "No snapshot candidate, no conflict marker"
+}
+
+# runRepositoryStagesGate — stage 3, the one extension point.
+#
+# `scripts/git-hooks/repository-stages.sh`, when the repository tracks it, is
+# the checks only that repository has (a grep over its own sources, a lint of
+# its own layout). It can only ADD a red, never remove a stage: it runs in a
+# child bash process, so nothing it defines, sets, traps or changes directory
+# to exists in the shell that runs the shared stages, and the one thing that
+# comes back is its exit status — non-zero fails the gate, zero means "go on"
+# and every shared stage then runs exactly as it would without the file. The
+# child sources this runner first, so `fail`, `pass`, `gate_root` and
+# `$BOTOPINK_BIN` are there for it to use.
+runRepositoryStagesGate() {
+    local file="$gate_root/scripts/git-hooks/repository-stages.sh"
+    [ -f "$file" ] || return 0
+    if ( cd "$gate_root" && exec "$BASH" -euo pipefail -c '. "$1"; . "$2"' repository-stages "$gate_runner" "$file" ) </dev/null; then
+        return 0
+    fi
+    echo -e "${RED}✗ $(basename "$gate_root"): repository stages failed (scripts/git-hooks/repository-stages.sh)${NC}"
+    return 1
+}
+
+# ── the cell pool ────────────────────────────────────────────────────────────
+# Stages 4 and 5 run their cells side by side: one per CPU, bounded by
+# `MemAvailable / 1664 MiB` (a `botopink` child plus its `erl`/`node`: a beam
+# cell was measured at ~1.6 GB; 768 MiB let one hook exhaust the machine), and a cell starts only while the machine's runnable threads
+# (`procs_running`, the 4th field of /proc/loadavg) are at most its CPUs —
+# other gates may share the machine. The two cells of one member are safe side
+# by side: `botopink test` writes to its own per-run directory and hands each
+# test its own scratch directory. Every cell writes its log and status to its
+# own files, and the report is printed afterwards in the order the cells were
+# planned, so it is the same text the one-at-a-time gate printed.
+
+gateCpus() {
+    getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 4
+}
+
+# gateJobs — how many cells run at once.
+gateJobs() {
+    local jobs avail_kb by_mem
+    if [ -n "$gate_jobs_total" ]; then echo "$gate_jobs_total"; return 0; fi
+    jobs=$(gateCpus)
+    avail_kb=$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo 2>/dev/null || true)
+    if [ -n "$avail_kb" ]; then
+        by_mem=$(( avail_kb / (1664 * 1024) ))
+        [ "$by_mem" -ge 1 ] || by_mem=1
+        [ "$by_mem" -lt "$jobs" ] && jobs=$by_mem
+    fi
+    echo "$jobs"
+}
+
+# gateCell <dir> <test|build> <bin> <index> <cwd> <target> — wait for a CPU
+# while another cell of this stage is in flight, then, in <cwd>, `<bin> test
+# --target <target>` or `<bin> build --target <target>` into a throwaway
+# --out; the output goes to <dir>/<index>.log and the status to
+# <dir>/<index>.rc. A cell with no .rc did not run, and is reported red.
+gateCell() {
+    local dir="$1" mode="$2" bin="$3" i="$4" cwd="$5" target="$6" r cpus code out
+    if [ -z "$gate_jobs_total" ] && [ -r /proc/loadavg ]; then
+        cpus=$(gateCpus)
+        while [ -n "$(ls -A "$dir/inflight" 2>/dev/null)" ]; do
+            read -r _ _ _ r _ </proc/loadavg
+            [ "${r%%/*}" -le "$cpus" ] && break
+            sleep 0.2
+        done
+    fi
+    : >"$dir/inflight/$i"
+    code=0
+    case "$mode" in
+        test) ( cd "$cwd" && "$bin" test --target "$target" ) >"$dir/$i.log" 2>&1 </dev/null || code=$? ;;
+        build)
+            out=$(mktemp -d)
+            ( cd "$cwd" && "$bin" build --target "$target" --out "$out" ) >"$dir/$i.log" 2>&1 </dev/null || code=$?
+            rm -rf "$out" ;;
+    esac
+    echo "$code" >"$dir/$i.rc"
+    rm -f "$dir/inflight/$i"
+}
+
+# gatePool <dir> <test|build> <bin> — every cell of <dir>/plan (NUL-separated
+# `<index> <cwd> <target>` triples) through gateCell, the pool's width at a
+# time; returns when every cell has finished.
+gatePool() {
+    local dir="$1" mode="$2" bin="$3"
+    mkdir -p "$dir/inflight"
+    [ -s "$dir/plan" ] || return 0
+    export gate_jobs_total
+    export -f gateCell gateCpus
+    xargs -0 -n 3 -P "$(gateJobs)" "$BASH" -c 'gateCell "$@"' gate-cell "$dir" "$mode" "$bin"         < "$dir/plan" || true
+}
+
+# runTestsGate <botopink-bin> [<target>]
+#
+# Stage 4: `botopink test --target <t>` in every workspace member on every
+# target its manifest declares — or, with `<target>`, on that one target for
+# the members that declare it. A member with no `test` block is still compiled
+# (`botopink test` compiles it and reports `no test blocks found`). Every cell
+# runs, on the cell pool; the reds are listed with the tail of their output and
+# the gate fails.
+runTestsGate() {
+    local bin="$1" only="${2:-}"
+    local members member rel target log tally dir i cells=0 bad=""
+    members=$(workspaceMembers)
+    if [ -z "$members" ]; then
+        if grep -q '"workspaces"' "$gate_root/botopink.json" 2>/dev/null; then
+            echo -e "${RED}✗ botopink.json is a workspace but none of its patterns holds a botopink.json${NC}"
+            return 1
+        fi
+        echo "  (no .bp sources under src/ or test/ — nothing to test)"
+        return 0
+    fi
+    dir=$(mktemp -d)
+    : >"$dir/plan"
+    while IFS= read -r member <&3; do
+        for target in $(manifestTargets "$member/botopink.json"); do
+            [ -z "$only" ] || [ "$target" = "$only" ] || continue
+            cells=$((cells + 1))
+            printf '%s\0%s\0%s\0' "$cells" "$member" "$target" >>"$dir/plan"
+        done
+    done 3<<< "$members"
+    gatePool "$dir" test "$bin"
+    i=0
+    while IFS= read -r member <&3; do
+        rel="${member#"$gate_root"}"; rel="${rel#/}"; rel="${rel:-.}"
+        for target in $(manifestTargets "$member/botopink.json"); do
+            [ -z "$only" ] || [ "$target" = "$only" ] || continue
+            i=$((i + 1))
+            log="$dir/$i.log"
+            echo -n "  Testing $rel · $target (botopink test)... "
+            if [ "$(cat "$dir/$i.rc" 2>/dev/null)" = 0 ]; then
+                tally=$(testTally "$log")
+                echo -e "${GREEN}✓${NC} ${tally}"
+            else
+                [ -f "$dir/$i.rc" ] || echo "the cell did not run" >>"$log"
+                tally=$(testTally "$log")
+                echo -e "${RED}✗${NC} ${tally}"
+                stripColours < "$log" | tail -n 30 | sed 's/^/      /'
+                bad="$bad\n  $rel · $target fails — re-run: ( cd $member && $bin test --target $target )"
+            fi
+        done
+    done 3<<< "$members"
+    rm -rf "$dir"
+    if [ -n "$bad" ]; then
+        echo -e "$bad"
+        echo -e "${RED}✗ $(basename "$gate_root"): tests gate failed${NC}"
+        return 1
+    fi
+    pass "tests: $cells cell(s) — every member on ${only:-every declared target}"
+}
+
+# runExamplesGate <botopink-bin> [<target>]
+#
+# Stage 5: builds every `examples/*/` that has a `botopink.json` on every
+# target its manifest declares (into a throwaway --out) — or, with `<target>`,
+# on that one target for the examples that declare it (a CI row builds its
+# own) — on the cell pool. An example that does not build fails the gate;
+# there is no list of examples allowed to fail.
+runExamplesGate() {
+    local bin="$1" only="${2:-}"
+    local d rel target dir i builds=0 bad=""
+    dir=$(mktemp -d)
+    : >"$dir/plan"
+    for d in "$gate_root"/examples/*/; do
+        [ -f "${d}botopink.json" ] || continue
+        d="${d%/}"
+        for target in $(manifestTargets "$d/botopink.json"); do
+            [ -z "$only" ] || [ "$target" = "$only" ] || continue
+            builds=$((builds + 1))
+            printf '%s\0%s\0%s\0' "$builds" "$d" "$target" >>"$dir/plan"
+        done
+    done
+    gatePool "$dir" build "$bin"
+    i=0
+    for d in "$gate_root"/examples/*/; do
+        [ -f "${d}botopink.json" ] || continue
+        d="${d%/}"
+        rel="examples/$(basename "$d")"
+        for target in $(manifestTargets "$d/botopink.json"); do
+            [ -z "$only" ] || [ "$target" = "$only" ] || continue
+            i=$((i + 1))
+            echo -n "  Building $rel · $target (botopink build)... "
+            if [ "$(cat "$dir/$i.rc" 2>/dev/null)" = 0 ]; then
+                echo -e "${GREEN}✓${NC}"
+            else
+                echo -e "${RED}✗${NC}"
+                bad="$bad\n  $rel · $target does not build — re-run: ( cd $d && $bin build --target $target --out \$(mktemp -d) )"
+            fi
+        done
+    done
+    rm -rf "$dir"
+    if [ -n "$bad" ]; then
+        echo -e "$bad"
+        echo -e "${RED}✗ $(basename "$gate_root"): examples gate failed${NC}"
+        return 1
+    fi
+    pass "examples: $builds build(s) — every example on ${only:-every declared target}"
+}
+
+# runRefusalsGate <botopink-bin>
+#
+# Stage 6: `refusals/<case>/` holds a project that must NOT compile — a
+# compile-time refusal of the library (a decorator's `decl.fail`), which no
+# `test { }` block can express. Each case is `botopink check`ed; it passes when
+# the check fails and its output holds every line of the case's `expect.txt`
+# (the message and its ` --> file:line:col` location), verbatim. A case that
+# compiles, that fails with another message, or that has no `expect.txt` fails
+# the gate. The stage exists when the directory does.
+runRefusalsGate() {
+    local bin="$1"
+    [ -d "$gate_root/refusals" ] || return 0
+    local dir rel out line missing cases=0 bad=""
+    for dir in "$gate_root"/refusals/*/; do
+        [ -f "${dir}botopink.json" ] || continue
+        dir="${dir%/}"
+        rel="refusals/$(basename "$dir")"
+        cases=$((cases + 1))
+        echo -n "  Refusing $rel (botopink check)... "
+        if [ ! -f "$dir/expect.txt" ]; then
+            echo -e "${RED}✗${NC}"
+            bad="$bad\n  $rel has no expect.txt"
+            continue
+        fi
+        if out=$( cd "$dir" && "$bin" check 2>&1 </dev/null ); then
+            echo -e "${RED}✗${NC}"
+            bad="$bad\n  $rel compiles — it must be refused"
+            continue
+        fi
+        out=$(printf '%s\n' "$out" | stripColours)
+        missing=""
+        while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            # `grep … >/dev/null`, not `grep -q`: an early exit under `pipefail`
+            # would turn a found line into a missing one.
+            printf '%s\n' "$out" | grep -xF -- "$line" >/dev/null || missing="$missing\n    $line"
+        done < "$dir/expect.txt"
+        if [ -n "$missing" ]; then
+            echo -e "${RED}✗${NC}"
+            bad="$bad\n  $rel is refused, but without:$missing\n  re-run: ( cd $dir && $bin check )"
+        else
+            echo -e "${GREEN}✓${NC}"
+        fi
+    done
+    if [ -n "$bad" ]; then
+        echo -e "$bad"
+        echo -e "${RED}✗ $(basename "$gate_root"): refusals gate failed${NC}"
+        return 1
+    fi
+    pass "refusals: $cases case(s) refused with their exact message"
+}
+
+# runConformanceGate <botopink-bin>
+#
+# Stage 7 (decisions 463, 464): `botopink cell check conformance/` — every cell
+# under `conformance/modules/*/` is built and run on every target it declares
+# and compared with its accepted snapshots; a difference writes a `.snap.new`
+# candidate beside the snapshot and is red, and a person accepts it by renaming.
+# The stage exists when `conformance/modules/` holds a cell (a directory with
+# `src/`); with none, there is nothing to check and the stage is green.
+runConformanceGate() {
+    local bin="$1"
+    [ -d "$gate_root/conformance" ] || return 0
+    # No cell yet (a `conformance/` that holds only `docs.md`) is nothing to check.
+    [ -n "$(find "$gate_root/conformance/modules" -type d -name src -print -quit 2>/dev/null)" ] || return 0
+    echo -n "  Checking conformance/ (botopink cell check)... "
+    local log
+    log=$(mktemp)
+    if ( cd "$gate_root" && "$bin" cell check conformance/ ) >"$log" 2>&1 </dev/null; then
+        echo -e "${GREEN}✓${NC}"
+        rm -f "$log"
+        pass "conformance: every cell of conformance/ answers its snapshots"
+        return 0
+    fi
+    echo -e "${RED}✗${NC}"
+    stripColours < "$log" | tail -n 60 | sed 's/^/      /'
+    rm -f "$log"
+    echo "  re-run: ( cd $gate_root && $bin cell check conformance/ )"
+    echo -e "${RED}✗ $(basename "$gate_root"): conformance gate failed${NC}"
+    return 1
+}
+
+# runFormatStaged — `botopink format` applied to the commit (decision 524), by
+# the pre-commit hook before the gate; never a gate stage, and never a red:
+#
+#   1. the staged source files (`.bp`, `.d.bp`, `.bpp`, `.botopink`; added,
+#      copied, modified or renamed) are checked out of the index into a scratch
+#      tree (`git checkout-index --prefix`), with the `snapshot/output/` files of
+#      every directory above them;
+#   2. `botopink format .` walks the scratch tree — the walk of the checkout, so
+#      its structural exemptions hold (a hidden directory, `node_modules`, a
+#      conformance cell's module whose `snapshot/output/<module>.snap` holds a
+#      `refused` record);
+#   3. a staged file the formatter changed is written as a blob and replaces the
+#      staged one in the committing index (`GIT_INDEX_FILE`: `git commit -a`
+#      included; under `git commit <path>` the real index git writes beside it,
+#      `index.lock`, takes it too);
+#   4. the working-tree file takes the formatted text only when it holds exactly
+#      the staged text: unstaged changes are never pulled in, and stay untouched.
+#
+# The compiler is `locateBotopink`'s. No compiler, or a file that does not
+# parse, leaves the staged files as written — the gate reports the compiler, and
+# a parse error is the tests' to report.
+runFormatStaged() {
+    local list bin scratch dirs out esc status=0
+    list=$(git -C "$gate_root" diff --cached --name-only --diff-filter=ACMR -- '*.bp' '*.bpp' '*.botopink')
+    [ -n "$list" ] || return 0
+    echo "── botopink format: the staged source files (decision 524) ──"
+    if ! bin=$(locateBotopink); then
+        echo "format: no compiler found — the staged files are committed as written" >&2
+        return 0
+    fi
+    scratch=$(mktemp -d "${TMPDIR:-/tmp}/bp-format-staged.XXXXXX")
+
+    dirs=$(printf '%s\n' "$list" | while IFS= read -r f; do
+        d=$(dirname "$f")
+        while :; do
+            if [ "$d" = . ]; then printf 'snapshot/output\n'; break; fi
+            printf '%s/snapshot/output\n' "$d"
+            d=$(dirname "$d")
+        done
+    done | sort -u)
+    if ! {
+        printf '%s\n' "$list"
+        printf '%s\n' "$dirs" | while IFS= read -r d; do git -C "$gate_root" ls-files -- "$d"; done
+    } | sort -u | (cd "$gate_root" && git checkout-index --prefix="$scratch/" --stdin); then
+        echo "format: could not check the staged files out of the index — committed as written" >&2
+        rm -rf "$scratch"
+        return 0
+    fi
+
+    out=$(cd "$scratch" && "$bin" format . 2>&1) || status=$?
+    if [ "$status" -ne 0 ]; then
+        esc="$(printf '\033')"
+        printf '%s\n' "$out" | grep -vE "^[[:space:]]*(${esc}\[[0-9;]*m)?(Unchanged|Formatted)" >&2 || true
+        echo "format: the files named above are committed as written" >&2
+    fi
+
+    local f mode old new partial_index="" changed=0
+    case "${GIT_INDEX_FILE:-}" in
+        */next-index-*.lock)
+            partial_index="$(dirname "$GIT_INDEX_FILE")/index.lock"
+            [ -f "$partial_index" ] || partial_index="" ;;
+    esac
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        read -r mode old _ < <(git -C "$gate_root" ls-files -s -- "$f") || continue
+        case "$mode" in 100644|100755) ;; *) continue ;; esac
+        [ -f "$scratch/$f" ] || continue
+        new=$(git -C "$gate_root" hash-object -w --no-filters -- "$scratch/$f")
+        [ "$new" != "$old" ] || continue
+        git -C "$gate_root" update-index --cacheinfo "$mode,$new,$f"
+        if [ -n "$partial_index" ] &&
+            [ "$(GIT_INDEX_FILE="$partial_index" git -C "$gate_root" ls-files -s -- "$f" | cut -d' ' -f2)" = "$old" ]; then
+            GIT_INDEX_FILE="$partial_index" git -C "$gate_root" update-index --cacheinfo "$mode,$new,$f"
+        fi
+        if [ -f "$gate_root/$f" ] && [ "$(git -C "$gate_root" hash-object --no-filters -- "$gate_root/$f")" = "$old" ]; then
+            cp "$scratch/$f" "$gate_root/$f"
+            echo "  formatted $f"
+        else
+            echo "  formatted $f (in the index; its unstaged changes stay in the working tree)"
+        fi
+        changed=$((changed + 1))
+    done <<<"$list"
+    rm -rf "$scratch"
+    [ "$changed" -eq 0 ] || echo "format: $changed staged file(s) formatted into the commit"
+    return 0
+}
+
+# runStandaloneGate [--staged] [--no-conformance] [--jobs <N>] — the gate: the
+# seven stages above.
+runStandaloneGate() {
+    local staged=0 conformance=1 a
+    while [ "$#" -gt 0 ]; do
+        a="$1"; shift
+        case "$a" in
+            --staged) staged=1 ;;
+            --no-conformance) conformance=0 ;;
+            --jobs)
+                [ "$#" -gt 0 ] || fail "gate: --jobs needs a number"
+                gate_jobs_total="$1"; shift ;;
+            --jobs=*) gate_jobs_total="${a#--jobs=}" ;;
+            *) fail "gate: unknown argument '$a'" ;;
+        esac
+    done
+    if [ -n "$gate_jobs_total" ]; then
+        case "$gate_jobs_total" in
+            ''|*[!0-9]*|0) fail "gate: --jobs needs a positive number, got '$gate_jobs_total'" ;;
+        esac
+    fi
+    cd "$gate_root"
+    SECONDS=0
+
+    # 1. staged files.
+    if [ "$staged" -eq 1 ]; then
+        runStagedFilesGate || exit 1
+    fi
+
+    # 2. the compiler. Absent is a failure, never a skipped gate. It is
+    #    exported: a suite that builds fixtures compiles them with the compiler
+    #    that runs it.
+    local bin
+    bin=$(requireBotopink) || exit 1
+    export BOTOPINK_BIN="$bin"
+    pass "Compiler: $bin"
+
+    # 3. the repository's own stages.
+    runRepositoryStagesGate || exit 1
+
+    # 4–7. every cell, every example, every refusal, every conformance cell —
+    #      all run, then the verdict.
+    local red=""
+    runTestsGate "$bin" || red="$red tests"
+    runExamplesGate "$bin" || red="$red examples"
+    runRefusalsGate "$bin" || red="$red refusals"
+    if [ "$conformance" -eq 1 ]; then
+        runConformanceGate "$bin" || red="$red conformance"
+    else
+        echo "gate: conformance not run (--no-conformance)"
+    fi
+    if [ -n "$red" ]; then
+        fail "$(basename "$gate_root"): gate failed —$red (${SECONDS}s)"
+    fi
+    pass "$(basename "$gate_root"): gate passed (${SECONDS}s)"
+}

@@ -1,0 +1,302 @@
+// `botopink test` flat suite for `src/link.bp` (front 27).
+//
+// Written from a CONSUMER's position, the way `router_test.bp`,
+// `server_test.bp` and `elements_test.bp` are: the module under test is
+// reached by its module name, so what the suite exercises is the surface a
+// `from "jhonstart"` consumer gets, not the module's private interior.
+//
+// The front's assigned target is **commonJS**, and every assertion below also
+// RUNS on the erlang row — not one is type-checked-only. That is not an extra:
+// it is the front's own claim that `Link` is pure and renders identically on
+// both backends, which is how the server pass is known to emit the exact
+// anchor the browser runtime later queries for. A divergence between the rows
+// would be a red cell here rather than a hydration mismatch a reader discovers.
+//
+// ── What this file does NOT assert, and why ─────────────────────────────────
+//
+// The browser half's four cells are dual-target (`link_runtime.mjs` /
+// `sidecars/jhonstart_link.erl`) until front 27 step 1's last box makes
+// `linkStatus` `#[clientOnly]` (decision 363), so `use linkStatus()` read by a
+// `#[client]` component and `linkMount()` idempotent are asserted on both rows
+// at the foot of this file; the DOM half (a click, an intersection) is front
+// 53's browser-in-the-loop app.
+//
+// Nor is the transition driver here, nor `data-jh-pending`; see
+// `reconcile_test.bp`.
+
+import {link.LinkProps, link.linkProps, link.withPrefetch, link.withReplace, link.withScroll, link.withTarget, link.withClass, link.Link, link.prefetchMode, link.layoutKey, link.LinkStatus, link.linkStatusOf, link.linkStatus, link.linkMount, link.linkPrefetch, link.linkRouteKind};
+import {Element, ElementBase, text, span, renderToString, client} from "jhonstart";
+
+// ── step 1: the props and their five copy helpers ───────────────────────────
+
+test "link: linkProps fills Next's documented defaults" {
+    val p = linkProps("/about");
+    assert p.href == "/about";
+    assert p.prefetch;
+    assert p.replace == false;
+    assert p.scroll;
+    assert p.target == "";
+    assert p.className == "";
+}
+
+test "link: withPrefetch changes exactly one field and copies the other five" {
+    val base = linkProps("/blog");
+    val p = withPrefetch(base, false);
+    assert p.prefetch == false;
+    assert p.href == "/blog";
+    assert p.replace == false;
+    assert p.scroll;
+    assert p.target == "";
+    assert p.className == "";
+    // and the argument is untouched — no helper assigns to a field of its
+    // argument, because the language has no such assignment.
+    assert base.prefetch;
+}
+
+test "link: withReplace, withScroll, withTarget and withClass do the same" {
+    val base = linkProps("/x");
+    val r = withReplace(base, true);
+    assert r.replace;
+    assert r.prefetch;
+    assert r.scroll;
+    val s = withScroll(base, false);
+    assert s.scroll == false;
+    assert s.prefetch;
+    assert s.replace == false;
+    val t = withTarget(base, "_blank");
+    assert t.target == "_blank";
+    assert t.className == "";
+    assert t.href == "/x";
+    val c = withClass(base, "nav");
+    assert c.className == "nav";
+    assert c.target == "";
+    assert c.prefetch;
+}
+
+test "link: the helpers compose, each keeping what the previous one set" {
+    val p = withClass(
+        withTarget(withPrefetch(linkProps("/y"), false), "_blank"),
+        "nav",
+    );
+    assert p.href == "/y";
+    assert p.prefetch == false;
+    assert p.target == "_blank";
+    assert p.className == "nav";
+}
+
+// ── step 2: the anchor, one assertion per attribute row ─────────────────────
+
+test "link: the common anchor is href plus the marker, in that order" {
+    val el = Link(linkProps("/about"), [text("About", attrs: [])]);
+    assert el.tag == "a";
+    assert el.attrs.length == 2;
+    assert renderToString(el) == "<a href=\"/about\" data-jh-l=\"1\">About</a>";
+}
+
+test "link: prefetch false adds data-jh-prefetch=\"0\" and nothing else" {
+    val el = Link(
+        withPrefetch(linkProps("/blog"), false),
+        [text("Blog", attrs: [])],
+    );
+    assert el.attrs.length == 3;
+    val html = renderToString(el);
+    assert html.contains("data-jh-prefetch=\"0\"");
+    assert html.contains("data-jh-replace") == false;
+    assert html.contains("data-jh-scroll") == false;
+    assert html
+        == "<a href=\"/blog\" data-jh-l=\"1\" data-jh-prefetch=\"0\">Blog</a>";
+}
+
+test "link: replace true adds data-jh-replace=\"1\"" {
+    val el = Link(
+        withReplace(linkProps("/blog"), true),
+        [text("Blog", attrs: [])],
+    );
+    assert el.attrs.length == 3;
+    assert renderToString(el).contains("data-jh-replace=\"1\"");
+}
+
+test "link: scroll false adds data-jh-scroll=\"0\"" {
+    val el = Link(
+        withScroll(linkProps("/blog"), false),
+        [text("Blog", attrs: [])],
+    );
+    assert el.attrs.length == 3;
+    assert renderToString(el).contains("data-jh-scroll=\"0\"");
+}
+
+test "link: target emits a REAL target attribute, not a data- one" {
+    val el = Link(
+        withTarget(linkProps("/ext"), "_blank"),
+        [text("Ext", attrs: [])],
+    );
+    val html = renderToString(el);
+    assert html.contains(" target=\"_blank\"");
+    assert html.contains("data-jh-target") == false;
+}
+
+test "link: className emits a REAL class attribute" {
+    val el = Link(
+        withClass(linkProps("/x"), "nav active"),
+        [text("X", attrs: [])],
+    );
+    assert renderToString(el).contains(" class=\"nav active\"");
+}
+
+test "link: a default-valued prop emits NO attribute" {
+    // prefetch true, replace false, scroll true, no target, no class — the
+    // whole point of the table: two hundred links do not carry five redundant
+    // pairs each.
+    val el = Link(
+        withScroll(withReplace(linkProps("/x"), false), true),
+        [text("X", attrs: [])],
+    );
+    assert el.attrs.length == 2;
+}
+
+test "link: every overridden prop at once, in the table's order" {
+    val p = withClass(
+        withTarget(
+            withScroll(
+                withReplace(withPrefetch(linkProps("/all"), false), true),
+                false,
+            ),
+            "_blank",
+        ),
+        "nav",
+    );
+    assert renderToString(Link(p, [text("All", attrs: [])]))
+        == "<a href=\"/all\" data-jh-l=\"1\" data-jh-prefetch=\"0\" data-jh-replace=\"1\" data-jh-scroll=\"0\" target=\"_blank\" class=\"nav\">All</a>";
+}
+
+test "link: children are an arbitrary tree, not only text" {
+    val el = Link(
+        linkProps("/p"),
+        [span([text("a", attrs: [])], attrs: []), text("b", attrs: [])],
+    );
+    assert renderToString(el)
+        == "<a href=\"/p\" data-jh-l=\"1\"><span>a</span>b</a>";
+}
+
+// A nav bar is what the front is for, and it is the shape a consumer writes.
+// `Link` reaches no host cell, so this component renders in a test with no
+// host present — which is also why it renders during the server pass.
+fn NavBar() -> Element {
+    return span(
+        [
+            Link(linkProps("/"), [text("Home", attrs: [])]),
+            Link(
+                withPrefetch(linkProps("/blog"), false),
+                [text("Blog", attrs: [])],
+            ),
+        ],
+        attrs: [],
+    );
+}
+
+test "link: a component built out of Links renders the server pass" {
+    val e = NavBar();
+    assert e.children.length == 2;
+    assert renderToString(e)
+        == "<span><a href=\"/\" data-jh-l=\"1\">Home</a><a href=\"/blog\" data-jh-l=\"1\" data-jh-prefetch=\"0\">Blog</a></span>";
+}
+
+// ── step 3: the prefetch table, one assertion per row ───────────────────────
+
+test "link: prefetchMode — a static route is prefetched whole" {
+    assert prefetchMode("static", false, true) == "full";
+    assert prefetchMode("static", true, true) == "full";
+}
+
+test "link: prefetchMode — a dynamic route with a loading boundary is partial" {
+    assert prefetchMode("dynamic", true, true) == "partial";
+}
+
+test "link: prefetchMode — a dynamic route with no loading boundary is skipped" {
+    assert prefetchMode("dynamic", false, true) == "skip";
+}
+
+test "link: prefetchMode — prefetch false skips whatever the route kind is" {
+    assert prefetchMode("static", true, false) == "skip";
+    assert prefetchMode("dynamic", true, false) == "skip";
+    assert prefetchMode("unknown", false, false) == "skip";
+}
+
+test "link: prefetchMode — an unknown kind is not static, so it asks the boundary" {
+    assert prefetchMode("unknown", true, true) == "partial";
+    assert prefetchMode("unknown", false, true) == "skip";
+    assert prefetchMode("", false, true) == "skip";
+}
+
+// ── the layout key ──────────────────────────────────────────────────────────
+
+test "link: layoutKey is the segment path, not a position in the tree" {
+    assert layoutKey(["docs", "api", "use-router"], 1) == "/docs";
+    assert layoutKey(["docs", "api", "use-router"], 2) == "/docs/api";
+    assert layoutKey(["docs", "guides"], 1) == "/docs";
+    assert layoutKey([], 0) == "/";
+    assert layoutKey(["docs"], 0) == "/";
+}
+
+test "link: two routes under /docs produce the SAME key for the docs layout" {
+    assert layoutKey(["docs", "api"], 1) == layoutKey(["docs", "guides"], 1);
+    assert layoutKey(["docs"], 1) != layoutKey(["blog"], 1);
+}
+
+test "link: a depth past the end of the segments is the whole path" {
+    assert layoutKey(["docs"], 7) == "/docs";
+}
+
+// The key a client transition computes and the key the server rendered under
+// are the same string, because both come from front 26's `segments()`.
+test "link: layoutKey over a RouterState's own segments keeps the bracket spelling" {
+    val segs = ["blog", "[slug]"];
+    assert layoutKey(segs, 1) == "/blog";
+    assert layoutKey(segs, 2) == "/blog/[slug]";
+}
+
+// ── step 4 (the pure half): the in-flight status ────────────────────────────
+
+test "link: linkStatusOf is idle for the empty href" {
+    val s = linkStatusOf("");
+    assert s.pending == false;
+    assert s.href == "";
+}
+
+test "link: linkStatusOf is pending for a navigation in flight" {
+    val s = linkStatusOf("/checkout");
+    assert s.pending;
+    assert s.href == "/checkout";
+}
+
+// ── step 4: the browser cells, both rows ────────────────────────────────────
+
+// Step 2 (decisions 354, 363): `linkStatus` is read with `use`, and only in a
+// `#[client]` component — the browser's island; a server-rendered `Link`
+// reads no hook (its pending state is `data-jh-pending`, `reconcile_test.bp`).
+// The component's return type is spelled `@Component<Element>`
+// until front 134 step 6's codemod drops the base (354 (1)).
+#[client]
+fn Pending() -> @Component<Element> {
+    val s = use linkStatus();
+    val label = if (s.pending) "Loading " + s.href else "Idle";
+    return span([text(label, attrs: [])], attrs: [#("class", "progress")]);
+}
+
+test "link: a #[client] component reads use linkStatus() and renders idle" {
+    val el = await Pending();
+    assert renderToString(el) == "<span class=\"progress\">Idle</span>";
+}
+
+test "link: linkMount is idempotent — a second call registers nothing" {
+    val first = linkMount();
+    val second = linkMount();
+    assert first == 1;
+    assert second == 1;
+}
+
+test "link: a skip-mode prefetch warms nothing, and an unknown route kind is unknown" {
+    val none = linkPrefetch("/x", "skip");
+    assert none == 0;
+    assert linkRouteKind("/x") == "unknown";
+}

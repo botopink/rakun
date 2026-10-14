@@ -1,0 +1,50 @@
+// forms — `test-snap-examples.md` § `examples/forms/`.
+
+import {Element, renderToString} from "jhonstart";
+import {formAction, FormStatus, applyOptimistic, searchFormProps, searchHref} from "jhonstart-forms";
+import {state.ActionState, state.writeState, state.newActionState, envelope.parseActionState} from "actions";
+import {create_post.createPostForm};
+import {like.likeWidget, like.addLike};
+import {search.searchForm};
+import {assertForm, assertActionState, assertOptimistic, stubEnvelope} from "jhonstart-test";
+import {assertText} from "snap";
+
+val actionId = "a_9f31c0d7a4b2e5081c6fa3d2";
+
+val failedState = writeState("Title must be at least 3 characters", [#("title", "Too short")]);
+
+test "forms: create post ---- empty" {
+    try assertForm(@src(), createPostForm(formAction(actionId, "/blog/new", "__bp_action"), newActionState(""), false));
+}
+
+test "forms: create post ---- returned message beside the title" {
+    val state = parseActionState(stubEnvelope(false, failedState, ""));
+    try assertForm(@src(), createPostForm(formAction(actionId, "/blog/new", "__bp_action"), state, false));
+}
+
+test "forms: a failed action's state as the page sees it" {
+    try assertActionState(@src(), parseActionState(stubEnvelope(false, failedState, "")));
+}
+
+test "forms: like widget ---- server pass shows the server's count" {
+    val idle = FormStatus(pending: false, actionId: "", method: "post");
+    try assertForm(@src(), likeWidget(formAction(actionId, "/blog/hello", "__bp_action"), 41, idle));
+}
+
+test "forms: like widget ---- optimistic count with a busy nested button" {
+    val busy = FormStatus(pending: true, actionId: actionId, method: "post");
+    val shown = applyOptimistic(41, [1, 1], { c, a -> addLike(c, a) });
+    try assertForm(@src(), likeWidget(formAction(actionId, "/blog/hello", "__bp_action"), shown, busy));
+}
+
+test "forms: optimistic fold and its collapse" {
+    try assertOptimistic(@src(), 41, [1, 1]);
+}
+
+test "forms: search form and the URL a plain GET produces" {
+    val props = searchFormProps("/search");
+    val fields = [#("q", "botopink lang"), #("sort", "new")];
+    try assertText(@src(), renderToString(searchForm(props))
+        + "\n"
+        + searchHref(props, fields));
+}

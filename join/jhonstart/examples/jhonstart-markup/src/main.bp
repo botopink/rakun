@@ -1,0 +1,94 @@
+// jhonstart-markup — the JSX-like `html """…"""` authoring DSL.
+//
+// `html` takes the caller's markup UNEVALUATED (the `"""…"""` triple-quoted
+// literal) and expands it, at compile time, into the `Element` builder pipeline
+// from `element.bp`: `<tag>` → `tag([...])`, a text run → `text("…")`, and each
+// `${expr}` hole spliced as a `text(<expr>)` child. The lowercase tags resolve
+// to the builders the caller imports — `div`/`p`/`text`/`li` below — so the
+// markup names exactly what is in scope. `html` never reaches runtime: `val page
+// = html """…"""` compiles straight to the builder calls, rendered synchronously.
+//
+// Bare `html`/`div`/`p`/`text` are reached unqualified via the generic
+// loader-bare binding (generic-loader-binding): the DSL from the
+// `jhonstart-html` member, the builders it lowers to from the core.
+
+import {html} from "jhonstart-html";
+import {Element, div, p, ul, li, text, renderToString} from "jhonstart";
+
+val name = "world";
+
+// The page authored as markup. Identical to writing
+// `div([p([text("hello, " + name)])])` by hand.
+val page = html """
+<div>
+  <p>hello, ${name}</p>
+</div>
+""";
+
+// Components authored with the DSL: ordinary `fn(...) -> Element` whose body is
+// markup. The `${…}` holes splice the component's own PARAMETERS — the hole
+// expression is type-checked and spliced at the call site (inside the component),
+// so a local param works. Capitalized `<Component/>` markup lookup is a future
+// layer; today a component is reused by an ordinary call (`greeting("world")`).
+fn greeting(who: string) -> Element {
+    return html """<p>hello, ${who}</p>""";
+}
+
+fn menu(a: string, b: string) -> Element {
+    return html """<ul><li>${a}</li><li>${b}</li></ul>""";
+}
+
+fn main() {
+    @print(renderToString(page)); // <div><p>hello, world</p></div>
+}
+
+test "markup expands to the builder pipeline and renders" {
+    assert renderToString(page) == "<div><p>hello, world</p></div>";
+}
+
+test "a lowercase tag maps to its builder" {
+    val hi = html "<p>hi</p>";
+    assert renderToString(hi) == "<p>hi</p>";
+}
+
+test "a ${...} hole splices the caller's value as a child" {
+    val who = "Eric";
+    val greet = html """<p>hi ${who}</p>""";
+    assert renderToString(greet) == "<p>hi Eric</p>";
+}
+
+test "a text run and a hole compose in the same element" {
+    val n = 3;
+    val row = html """<li>item ${n.toString()}</li>""";
+    assert renderToString(row) == "<li>item 3</li>";
+}
+
+test "nested tags build a nested Element tree" {
+    val tree = html "<div><p>one</p><p>two</p></div>";
+    assert renderToString(tree) == "<div><p>one</p><p>two</p></div>";
+}
+
+test "html-authored components compose by ordinary call" {
+    val ui = div([greeting("world"), menu("one", "two")], []);
+    assert renderToString(ui)
+        == "<div><p>hello, world</p><ul><li>one</li><li>two</li></ul></div>";
+}
+
+// ── B3 net-new: deeply nested markup with mixed text + multiple holes ────────
+
+test "deeply nested html with mixed text and holes renders the right tree" {
+    val title = "News";
+    val a = "Alpha";
+    val b = "Beta";
+    val page2 = html """
+<div>
+  <ul>
+    <li>first: ${a}</li>
+    <li>second: ${b}</li>
+  </ul>
+  <p>end ${title}</p>
+</div>
+""";
+    assert renderToString(page2)
+        == "<div><ul><li>first: Alpha</li><li>second: Beta</li></ul><p>end News</p></div>";
+}

@@ -1,0 +1,580 @@
+// jhonstart/routes — the UI file conventions (front 30 Step 10, decisions 114
+// and 117).
+//
+// A folder under `app/` is a URL segment and a file in it gives the segment its
+// UI. The file conventions that answer an `Element` are jhonstart's: the server
+// registers only an opaque `PageRenderer` per route and names none of them.
+// One decorator per file, taking the APP-RELATIVE DIRECTORY of the file it sits
+// in (`@Decl` carries no source location):
+//
+//   | file in `app/` | decorator            | the function it accepts                                        |
+//   |----------------|----------------------|----------------------------------------------------------------|
+//   | `layout.bp`    | `#[layout(seg)]`     | `fn(props: LayoutProps) -> @Component<Element>`   |
+//   | `template.bp`  | `#[template(seg)]`   | `fn(props: LayoutProps) -> @Component<Element>`   |
+//   | `page.bp`      | `#[page(seg)]`       | `fn(route: PageContext) -> @Component<Element>`   |
+//   | `default.bp`   | `#[defaultView(seg)]`| `fn(props: LayoutProps) -> Element`                            |
+//
+// A layout, a template and a page are components (decision 117 rule 3): each
+// may `await`, `use` a hook and raise a navigation signal. A function under
+// `#[layout]`, `#[template]` or `#[page]` whose return is not
+// `@Component<Element>` is refused at compile time, naming the
+// function and the form it needs; there is no plain-layout form (decision 67).
+// `default` is a reserved keyword, so `default.bp`'s marker is `#[defaultView]`.
+// `loading.bp`, `error.bp` and `not-found.bp` export an undecorated
+// `Loading()` / `ErrorPage(info)` / `NotFound()`; onze registers them with
+// `jhLoading` / `jhError` / `jhNotFound` from the scan front 22 performs.
+//
+// Each decorator body records its segment as comptime meta (`seg`, decision
+// 216) — the program's entry point registers every marked function from
+// `@TypeInfo.all` with `jhRegisterRoutes` (below), no module registers itself
+// at load — then `#[page]` emits the per-route parameter accessor, then each
+// enforces placement with `decl.fail`. A decorator body cannot call a sibling
+// function and a `//` comment in it breaks the flattened emit, so `page` reads
+// a segment's parameters from `routing` — `segment.paramNamesOf` for the names,
+// `parseSegment` / `kindName` for which of them is a list (front 102) — and
+// stays comment-free. `routing` owns the segment grammar; `test/routes_test.bp`
+// round-trips `uiTable()` through its `parsePath`.
+//
+// The registration is a LAMBDA, never a bare function name: a named function
+// used as a value lowers to an unbound erlang variable.
+//
+// The per-segment record the render composes — `UiSegment` — lives here too,
+// beside the conventions it collects: `render.bp` imports it, and a
+// `UiSegment` in `render.bp` would make this module and that one import each
+// other.
+
+import {element.Element, element.ElementBase};
+import {router.pairValue};
+import {error_boundary.ErrorInfo};
+import {segment.kindName, segment.paramNamesOf, segment.parsePath, segment.parseSegment, segment.patternOf, segment.slotOf, table.RouteEntry, table.writeTable} from "routing";
+
+// NO `query` FIELD. The query is per-request input, and reading it marks the
+// render dynamic; a public field is a read nothing can intercept, so the only
+// reader is front 26's `searchParams()` hook, which marks (`AGENTS.md` § *The
+// `query` hole, closed*).
+pub type PageContext(
+    pathname: string,
+    pattern: string,
+    params: Array<#(string, string)>,
+    rest: string[],
+)
+
+// One record rather than three parameters: a declared default is never
+// applied, and a layout that uses no slot would otherwise spell an empty
+// `slots:` at every call site the registry generates.
+pub type LayoutProps(
+    route: PageContext,
+    children: Element,
+    slots: Array<#(string, Element)>,
+)
+
+// ── the registry ────────────────────────────────────────────────────────────
+//
+// botopink has no top-level mutable state, so the registry lives in the host
+// (`routes.mjs` / `sidecars/jhonstart_routes.erl`), holding each render
+// FUNCTION beside its finished `kind|pattern|slot|verb` line. Neither host
+// parses a segment or builds a line.
+
+#[@External.Node("./routes.mjs", "registerPage")]
+#[@External.Erlang("jhonstart_routes", "register_page")]
+pub declare fn jhRegisterPage(
+    record: string,
+    render: fn(route: PageContext) -> @Component<Element>,
+) -> i32;
+
+#[@External.Node("./routes.mjs", "registerLayout")]
+#[@External.Erlang("jhonstart_routes", "register_layout")]
+pub declare fn jhRegisterLayout(
+    record: string,
+    render: fn(props: LayoutProps) -> @Component<Element>,
+) -> i32;
+
+#[@External.Node("./routes.mjs", "registerTemplate")]
+#[@External.Erlang("jhonstart_routes", "register_template")]
+pub declare fn jhRegisterTemplate(
+    record: string,
+    render: fn(props: LayoutProps) -> @Component<Element>,
+) -> i32;
+
+#[@External.Node("./routes.mjs", "registerDefault")]
+#[@External.Erlang("jhonstart_routes", "register_default")]
+pub declare fn jhRegisterDefault(
+    record: string,
+    render: fn(props: LayoutProps) -> Element,
+) -> i32;
+
+#[@External.Node("./routes.mjs", "registerLoading")]
+#[@External.Erlang("jhonstart_routes", "register_loading")]
+pub declare fn jhRegisterLoading(
+    record: string,
+    render: fn() -> Element,
+) -> i32;
+
+#[@External.Node("./routes.mjs", "registerError")]
+#[@External.Erlang("jhonstart_routes", "register_error")]
+pub declare fn jhRegisterError(
+    record: string,
+    render: fn(info: ErrorInfo) -> Element,
+) -> i32;
+
+#[@External.Node("./routes.mjs", "registerNotFound")]
+#[@External.Erlang("jhonstart_routes", "register_not_found")]
+pub declare fn jhRegisterNotFound(
+    record: string,
+    render: fn() -> Element,
+) -> i32;
+
+#[@External.Node("./routes.mjs", "table")]
+#[@External.Erlang("jhonstart_routes", "table")]
+declare fn __jhRoutesTable() -> string;
+
+// The stored function for a record, or `fallback` when nothing registered it.
+#[@External.Node("./routes.mjs", "lookup")]
+#[@External.Erlang("jhonstart_routes", "lookup")]
+declare fn __jhRoutesLookup<F>(record: string, fallback: F) -> F;
+
+#[@External.Node("./routes.mjs", "has")]
+#[@External.Erlang("jhonstart_routes", "has")]
+declare fn __jhRoutesHas(record: string) -> bool;
+
+// The one place a kind and a segment become a wire line. It HALTS on a segment
+// that may not be registered (`routing`'s `parsePath`), which is right for a
+// module-load `val`: the program stops at load rather than serving something
+// surprising.
+pub fn entryLine(kind: string, seg: string) -> string {
+    val segs = parsePath(seg);
+    return writeTable(
+        [
+            RouteEntry(
+                kind: kind,
+                pattern: patternOf(segs),
+                slot: slotOf(segs),
+                verb: "",
+            ),
+        ],
+    );
+}
+
+pub fn jhPage(
+    seg: string,
+    render: fn(route: PageContext) -> @Component<Element>,
+) -> i32 {
+    return jhRegisterPage(entryLine("P", seg), render);
+}
+
+pub fn jhLayout(
+    seg: string,
+    render: fn(props: LayoutProps) -> @Component<Element>,
+) -> i32 {
+    return jhRegisterLayout(entryLine("L", seg), render);
+}
+
+pub fn jhTemplate(
+    seg: string,
+    render: fn(props: LayoutProps) -> @Component<Element>,
+) -> i32 {
+    return jhRegisterTemplate(entryLine("T", seg), render);
+}
+
+pub fn jhDefault(
+    seg: string,
+    render: fn(props: LayoutProps) -> Element,
+) -> i32 {
+    return jhRegisterDefault(entryLine("D", seg), render);
+}
+
+pub fn jhLoading(seg: string, render: fn() -> Element) -> i32 {
+    return jhRegisterLoading(entryLine("S", seg), render);
+}
+
+pub fn jhError(seg: string, render: fn(info: ErrorInfo) -> Element) -> i32 {
+    return jhRegisterError(entryLine("E", seg), render);
+}
+
+pub fn jhNotFound(seg: string, render: fn() -> Element) -> i32 {
+    return jhRegisterNotFound(entryLine("N", seg), render);
+}
+
+// ── the reader: the four markers' declarations, registered ─────────────────
+//
+// A marker registers nothing itself (decision 216): it records its segment
+// as meta (`seg`) and the program's entry point hands the catalogue in, once —
+//
+//     val __jhRoutes = jhRegisterRoutes(
+//         @TypeInfo.all(with: page),
+//         @TypeInfo.all(with: layout),
+//         @TypeInfo.all(with: template),
+//         @TypeInfo.all(with: defaultView),
+//     );
+//
+// Layouts, then templates, then pages, then default views; inside each, the
+// catalogue's order (module path, then declaration order). A declaration
+// whose value is not the function its marker accepts, or that carries no
+// `seg`, halts: the marker refused it already, so it cannot be one of the
+// marker's.
+
+fn segOf(d: Declared<unknown>) -> string {
+    var seg = "";
+    var found = false;
+    for (d.meta) { m ->
+        if (m.key == "seg") {
+            seg = m.value;
+            found = true;
+        }
+    }
+    if (found == false)
+        @panic(
+            "jhonstart: `"
+                + d.module
+                + "."
+                + d.name
+                + "` carries no route segment",
+        );
+    return seg;
+}
+
+fn notMarked(d: Declared<unknown>, marker: string) -> i32 {
+    @panic(
+        "jhonstart: `"
+            + d.module
+            + "."
+            + d.name
+            + "` is not the function #["
+            + marker
+            + "] accepts",
+    );
+}
+
+pub fn jhRegisterRoutes(
+    pages: Declared<unknown>[],
+    layouts: Declared<unknown>[],
+    templates: Declared<unknown>[],
+    defaults: Declared<unknown>[],
+) -> i32 {
+    var n = 0;
+    for (layouts) { d ->
+        val v = d.value;
+        val k = if (v is fn(props: LayoutProps) -> @Component<Element>)
+            jhLayout(segOf(d), { props -> v(props) })
+        else
+            notMarked(d, "layout");
+        n = n + k;
+    }
+    for (templates) { d ->
+        val v = d.value;
+        val k = if (v is fn(props: LayoutProps) -> @Component<Element>)
+            jhTemplate(segOf(d), { props -> v(props) })
+        else
+            notMarked(d, "template");
+        n = n + k;
+    }
+    for (pages) { d ->
+        val v = d.value;
+        val k = if (v is fn(route: PageContext) -> @Component<Element>)
+            jhPage(segOf(d), { route -> v(route) })
+        else
+            notMarked(d, "page");
+        n = n + k;
+    }
+    for (defaults) { d ->
+        val v = d.value;
+        val k = if (v is fn(props: LayoutProps) -> Element)
+            jhDefault(segOf(d), { props -> v(props) })
+        else
+            notMarked(d, "defaultView");
+        n = n + k;
+    }
+    return n;
+}
+
+// This registry's records as contract-1 lines (`L`, `T`, `P`, `D`, `S`, `E`,
+// `N`), in registration order — the blob onze copies into the server's table, so
+// the table the server matches and the payload's `t` are one table.
+pub fn uiTable() -> string {
+    return __jhRoutesTable();
+}
+
+// ── what an emitted accessor reads ──────────────────────────────────────────
+
+pub fn ctxParam(route: PageContext, name: string) -> string {
+    return pairValue(route.params, name);
+}
+
+pub fn ctxRest(route: PageContext) -> string[] {
+    return route.rest;
+}
+
+// ── the four markers ────────────────────────────────────────────────────────
+//
+// `decl.returnType` is the return type as the source spells it:
+// `-> @Component<Element>` reflects as
+// `"@Component<Element>"`, `-> @Task<Element>` as
+// `"@Task<Element>"`, `-> Element` as `"Element"`. The required spelling is in
+// the message.
+
+pub fn page(comptime decl: @Decl, comptime seg: @Expr<string>) {
+    decl.setMeta("seg", seg.value);
+    val kinds = seg.value
+        .split("/")
+        .map({ raw -> kindName(parseSegment(raw).kind) })
+        .filter(
+            { k -> k == "Dynamic" || k == "CatchAll" || k == "OptionalCatchAll" },
+        );
+    var lets: Array<string> = [];
+    var sigs: Array<string> = [];
+    var fields: Array<string> = [];
+    paramNamesOf(seg.value)
+        .zip(kinds)
+        .forEach({ p ->
+            val isList = p._1 != "Dynamic";
+            val reader = if (isList)
+                "ctxRest(route)"
+            else
+                "ctxParam(route, \"" + p._0 + "\")";
+            val shown = if (isList) "string[]" else "string";
+            lets.push("val " + p._0 + " = " + reader + ";");
+            sigs.push(p._0 + ": " + shown);
+            fields.push(p._0);
+        });
+    @emit(
+        "pub fn "
+            + decl.name
+            + "Params(route: PageContext) -> #("
+            + sigs.join(", ")
+            + ") { "
+            + lets.join(" ")
+            + " return #("
+            + fields.join(", ")
+            + "); }",
+    );
+    if (decl.kind != DeclKind.Fn) decl.fail("#[page] must annotate a function");
+    if (decl.returnType != "@Component<Element>")
+        decl.fail(
+            "#[page] on `"
+                + decl.name
+                + "`: a page is `fn "
+                + decl.name
+                + "(route: PageContext) -> @Component<Element>`, not `"
+                + decl.returnType
+                + "`",
+        );
+}
+
+pub fn layout(comptime decl: @Decl, comptime seg: @Expr<string>) {
+    decl.setMeta("seg", seg.value);
+    if (decl.kind != DeclKind.Fn)
+        decl.fail("#[layout] must annotate a function");
+    if (decl.returnType != "@Component<Element>")
+        decl.fail(
+            "#[layout] on `"
+                + decl.name
+                + "`: a layout is `fn "
+                + decl.name
+                + "(props: LayoutProps) -> @Component<Element>`, not `"
+                + decl.returnType
+                + "`",
+        );
+}
+
+pub fn template(comptime decl: @Decl, comptime seg: @Expr<string>) {
+    decl.setMeta("seg", seg.value);
+    if (decl.kind != DeclKind.Fn)
+        decl.fail("#[template] must annotate a function");
+    if (decl.returnType != "@Component<Element>")
+        decl.fail(
+            "#[template] on `"
+                + decl.name
+                + "`: a template is `fn "
+                + decl.name
+                + "(props: LayoutProps) -> @Component<Element>`, not `"
+                + decl.returnType
+                + "`",
+        );
+}
+
+pub fn defaultView(comptime decl: @Decl, comptime seg: @Expr<string>) {
+    decl.setMeta("seg", seg.value);
+    if (decl.kind != DeclKind.Fn)
+        decl.fail("#[defaultView] must annotate a function");
+    if (decl.returnType != "Element")
+        decl.fail(
+            "#[defaultView] on `"
+                + decl.name
+                + "`: a default view is `fn "
+                + decl.name
+                + "(props: LayoutProps) -> Element`, not `"
+                + decl.returnType
+                + "`",
+        );
+}
+
+// ── `UiSegment` — one segment's conventions, for `compose` ────────────────────
+//
+// No optionals: a convention the segment lacks is `has<X> == false` and an
+// inert function. onze builds the chain root-first from `routing`'s
+// `layoutChain` and this registry (`segmentFor(pattern)`); a test builds it
+// with `segment(pattern)` and the `with*` refiners.
+
+pub type UiSegment(
+    pattern: string,
+    hasLayout: bool,
+    layoutView: fn(props: LayoutProps) -> @Component<Element>,
+    hasTemplate: bool,
+    templateView: fn(props: LayoutProps) -> @Component<Element>,
+    hasError: bool,
+    errorView: fn(info: ErrorInfo) -> Element,
+    hasLoading: bool,
+    loadingView: fn() -> Element,
+    hasNotFound: bool,
+    notFoundView: fn() -> Element,
+)
+
+fn passThrough(props: LayoutProps) -> @Component<Element> {
+    return props.children;
+}
+
+fn emptyTree() -> Element {
+    return Element(tag: "#fragment", value: "", children: [], attrs: []);
+}
+
+fn emptyErrorView(info: ErrorInfo) -> Element {
+    return emptyTree();
+}
+
+pub fn segment(pattern: string) -> UiSegment {
+    return UiSegment(
+        pattern: pattern,
+        hasLayout: false,
+        layoutView: { props -> passThrough(props) },
+        hasTemplate: false,
+        templateView: { props -> passThrough(props) },
+        hasError: false,
+        errorView: { info -> emptyErrorView(info) },
+        hasLoading: false,
+        loadingView: { -> emptyTree() },
+        hasNotFound: false,
+        notFoundView: { -> emptyTree() },
+    );
+}
+
+pub fn withLayout(
+    s: UiSegment,
+    f: fn(props: LayoutProps) -> @Component<Element>,
+) -> UiSegment {
+    return UiSegment(
+        pattern: s.pattern,
+        hasLayout: true,
+        layoutView: f,
+        hasTemplate: s.hasTemplate,
+        templateView: s.templateView,
+        hasError: s.hasError,
+        errorView: s.errorView,
+        hasLoading: s.hasLoading,
+        loadingView: s.loadingView,
+        hasNotFound: s.hasNotFound,
+        notFoundView: s.notFoundView,
+    );
+}
+
+pub fn withTemplate(
+    s: UiSegment,
+    f: fn(props: LayoutProps) -> @Component<Element>,
+) -> UiSegment {
+    return UiSegment(
+        pattern: s.pattern,
+        hasLayout: s.hasLayout,
+        layoutView: s.layoutView,
+        hasTemplate: true,
+        templateView: f,
+        hasError: s.hasError,
+        errorView: s.errorView,
+        hasLoading: s.hasLoading,
+        loadingView: s.loadingView,
+        hasNotFound: s.hasNotFound,
+        notFoundView: s.notFoundView,
+    );
+}
+
+pub fn withError(s: UiSegment, f: fn(info: ErrorInfo) -> Element) -> UiSegment {
+    return UiSegment(
+        pattern: s.pattern,
+        hasLayout: s.hasLayout,
+        layoutView: s.layoutView,
+        hasTemplate: s.hasTemplate,
+        templateView: s.templateView,
+        hasError: true,
+        errorView: f,
+        hasLoading: s.hasLoading,
+        loadingView: s.loadingView,
+        hasNotFound: s.hasNotFound,
+        notFoundView: s.notFoundView,
+    );
+}
+
+pub fn withLoading(s: UiSegment, f: fn() -> Element) -> UiSegment {
+    return UiSegment(
+        pattern: s.pattern,
+        hasLayout: s.hasLayout,
+        layoutView: s.layoutView,
+        hasTemplate: s.hasTemplate,
+        templateView: s.templateView,
+        hasError: s.hasError,
+        errorView: s.errorView,
+        hasLoading: true,
+        loadingView: f,
+        hasNotFound: s.hasNotFound,
+        notFoundView: s.notFoundView,
+    );
+}
+
+pub fn withNotFound(s: UiSegment, f: fn() -> Element) -> UiSegment {
+    return UiSegment(
+        pattern: s.pattern,
+        hasLayout: s.hasLayout,
+        layoutView: s.layoutView,
+        hasTemplate: s.hasTemplate,
+        templateView: s.templateView,
+        hasError: s.hasError,
+        errorView: s.errorView,
+        hasLoading: s.hasLoading,
+        loadingView: s.loadingView,
+        hasNotFound: true,
+        notFoundView: f,
+    );
+}
+
+// The segment at `pattern` as the registry holds it: every convention
+// registered for that pattern, the rest absent.
+pub fn segmentFor(pattern: string) -> UiSegment {
+    var s = segment(pattern);
+    val layoutLine = lineFor("L", pattern);
+    if (__jhRoutesHas(layoutLine))
+        s = withLayout(s, __jhRoutesLookup(layoutLine, s.layoutView));
+    val templateLine = lineFor("T", pattern);
+    if (__jhRoutesHas(templateLine))
+        s = withTemplate(s, __jhRoutesLookup(templateLine, s.templateView));
+    val errorLine = lineFor("E", pattern);
+    if (__jhRoutesHas(errorLine))
+        s = withError(s, __jhRoutesLookup(errorLine, s.errorView));
+    val loadingLine = lineFor("S", pattern);
+    if (__jhRoutesHas(loadingLine))
+        s = withLoading(s, __jhRoutesLookup(loadingLine, s.loadingView));
+    val notFoundLine = lineFor("N", pattern);
+    if (__jhRoutesHas(notFoundLine))
+        s = withNotFound(s, __jhRoutesLookup(notFoundLine, s.notFoundView));
+    return s;
+}
+
+// The page registered at `pattern`, or `fallback`.
+pub fn pageFor(
+    pattern: string,
+    fallback: fn(route: PageContext) -> @Component<Element>,
+) -> fn(route: PageContext) -> @Component<Element> {
+    return __jhRoutesLookup(lineFor("P", pattern), fallback);
+}
+
+fn lineFor(kind: string, pattern: string) -> string {
+    return writeTable(
+        [RouteEntry(kind: kind, pattern: pattern, slot: "", verb: "")],
+    );
+}

@@ -1,0 +1,236 @@
+// `botopink test` flat suite for `src/form.bp` (front 67). The front's gate is
+// commonJS; every assertion also runs on erlang, because the cells are
+// dual-target and the envelope is `actions`' botopink on both rows. The
+// envelope grammar and the `state` literal are `libs/actions`' to test; this
+// file asserts only the body it hands the cell and the state it reads back.
+
+import {Element, ElementBase, text, renderToString, fill, lastNavigation} from "jhonstart";
+import {label, button} from "jhonstart"; // provided by front 94
+import {form.FormBinding, form.formAction, form.formAttrs, form.hiddenActionField, form.actionForm, form.submitForm, form.invokeAction, form.formMount, form.actionState, form.FormStatus, form.formStatus, form.formStatusOf, form.idleFormStatus, form.optimistic, form.applyOptimistic, form.SearchFormProps, form.searchFormProps, form.searchFormAttrs, form.searchHref, form.prefetchSearch, form.setWireNames, form.stubResponse, form.lastFormCall};
+import {state.ActionState, state.newActionState, state.writeState, envelope.ActionEnvelope, envelope.writeEnvelope, rpc.RpcCall, rpc.writeRpcBody} from "actions";
+import {encoding} from "std";
+import {attemptRender} from "jhonstart";
+
+fn failedEnvelope() -> string {
+    return writeEnvelope(
+        ActionEnvelope(
+            ok: false,
+            state: writeState("Fix the title", [#("title", "Too short")]),
+            revalidated: [],
+            n: "",
+            payload: "",
+        ),
+    );
+}
+
+fn redirectEnvelope() -> string {
+    return writeEnvelope(
+        ActionEnvelope(
+            ok: true,
+            state: writeState("", []),
+            revalidated: ["/blog"],
+            n: "R|303|/blog/hello",
+            payload: "",
+        ),
+    );
+}
+
+// ── step 2: the binding ─────────────────────────────────────────────────────
+
+test "form: formAttrs is exactly method, action, data-jh-a — the current pathname" {
+    val attrs = formAttrs(
+        formAction("a_9f2c1b7e0d4a6c8e1f3b5d7a", "/blog/hello", "__bp_action"),
+    );
+    assert attrs.length == 3;
+    assert (attrs.at(0) ?? #("", ""))._0 == "method";
+    assert (attrs.at(0) ?? #("", ""))._1 == "post";
+    assert (attrs.at(1) ?? #("", ""))._1 == "/blog/hello";
+    assert (attrs.at(2) ?? #("", ""))._0 == "data-jh-a";
+}
+
+test "form: the hidden field is named by the actionField passed in" {
+    val field = hiddenActionField(
+        formAction("a_9f2c1b7e0d4a6c8e1f3b5d7a", "/blog/hello", "__bp_action"),
+    );
+    assert renderToString(field)
+        == "<input type=\"hidden\" name=\"__bp_action\" value=\"a_9f2c1b7e0d4a6c8e1f3b5d7a\"></input>";
+}
+
+test "form: a complete form carries method=post, the pathname and the hidden field" {
+    val binding = formAction(
+        "a_9f2c1b7e0d4a6c8e1f3b5d7a",
+        "/blog/hello",
+        "__bp_action",
+    );
+    val out = renderToString(
+        actionForm(
+            binding,
+            [
+                label([text("Title", attrs: [])], attrs: []),
+                button([text("Save", attrs: [])], attrs: [#("type", "submit")]),
+            ],
+        ),
+    );
+    assert out
+        == "<form method=\"post\" action=\"/blog/hello\" data-jh-a=\"a_9f2c1b7e0d4a6c8e1f3b5d7a\"><input type=\"hidden\" name=\"__bp_action\" value=\"a_9f2c1b7e0d4a6c8e1f3b5d7a\"></input><label>Title</label><button type=\"submit\">Save</button></form>";
+}
+
+fn badId() -> FormBinding {
+    return formAction("createPost", "/", "__bp_action");
+}
+
+fn slashId() -> FormBinding {
+    return formAction("a_x/y", "/", "__bp_action");
+}
+
+test "form: an id that is not front 24's is refused, naming it" {
+    val bad = attemptRender({ -> badId() });
+    val badMessage = case bad {
+        Ok(b) -> "accepted";
+        Error(m) -> m;
+    };
+    assert badMessage.contains("`createPost` is not an action id");
+    val slash = attemptRender({ -> slashId() });
+    val slashMessage = case slash {
+        Ok(b) -> "accepted";
+        Error(m) -> m;
+    };
+    assert slashMessage.contains("`a_x/y` is not an action id");
+}
+
+// ── the transport: what goes into the cell and what comes back ──────────────
+
+test "form: submitForm hands the cell the form-encoded fields and reads actions' envelope" {
+    setWireNames("__bp_action", "X-Bp-Action");
+    stubResponse(failedEnvelope());
+    val binding = formAction(
+        "a_9f2c1b7e0d4a6c8e1f3b5d7a",
+        "/blog/new",
+        "__bp_action",
+    );
+    val st = await submitForm(binding, [#("title", "hi there")]);
+    assert lastFormCall()
+        == "a_9f2c1b7e0d4a6c8e1f3b5d7a|X-Bp-Action|"
+            + encoding.formStringify(
+                [
+                    #("__bp_action", "a_9f2c1b7e0d4a6c8e1f3b5d7a"),
+                    #("title", "hi there"),
+                ],
+            );
+    assert st.ok == false;
+    assert st.fieldError("title") == "Too short";
+    assert st.fieldError("body") == "";
+}
+
+test "form: a redirect in the envelope is the router's push, exactly once" {
+    setWireNames("__bp_action", "X-Bp-Action");
+    stubResponse(redirectEnvelope());
+    fill("/blog/new", "", "", "/blog/new", 0);
+    val st = await submitForm(
+        formAction("a_9f2c1b7e0d4a6c8e1f3b5d7a", "/blog/new", "__bp_action"),
+        [],
+    );
+    assert st.redirectTo == "/blog/hello";
+    assert lastNavigation() == "push /blog/hello";
+}
+
+test "form: invokeAction hands the cell writeRpcBody's body and the header passed" {
+    stubResponse(failedEnvelope());
+    val st = await invokeAction(
+        "a_9f2c1b7e0d4a6c8e1f3b5d7a",
+        ["x"],
+        "X-Bp-Action",
+    );
+    assert lastFormCall()
+        == "a_9f2c1b7e0d4a6c8e1f3b5d7a|X-Bp-Action|"
+            + writeRpcBody(
+                RpcCall(id: "a_9f2c1b7e0d4a6c8e1f3b5d7a", args: ["x"]),
+            );
+    assert st.ok == false;
+    assert st.message == "Fix the title";
+}
+
+test "form: formMount is idempotent" {
+    assert formMount("X-Bp-Action") == 1;
+    assert formMount("X-Bp-Action") == 1;
+}
+
+// ── step 3: actionState ─────────────────────────────────────────────────────
+
+test "form: actionState's server pass is the initial state, a binding for the id, not pending" {
+    setWireNames("__bp_action", "X-Bp-Action");
+    fill("/blog/new", "", "", "/blog/new", 0);
+    val s = await actionState(
+        "a_9f2c1b7e0d4a6c8e1f3b5d7a",
+        newActionState("Write something"),
+    );
+    assert s._0.message == "Write something";
+    assert s._0.ok;
+    assert s._1.actionId == "a_9f2c1b7e0d4a6c8e1f3b5d7a";
+    assert s._1.pathname == "/blog/new";
+    assert s._1.actionField == "__bp_action";
+    assert s._2 == false;
+    val other = await actionState(
+        "a_0000aaaa0000aaaa0000aaaa",
+        newActionState(""),
+    );
+    assert other._1.actionId == "a_0000aaaa0000aaaa0000aaaa";
+}
+
+// ── step 4: formStatus ──────────────────────────────────────────────────────
+
+test "form: formStatus is idle on the server pass and outside any form" {
+    val s = await formStatus();
+    assert s.pending == false;
+    assert s.actionId == "";
+    assert s.method == "post";
+    assert formStatusOf("").pending == false;
+    assert formStatusOf("a_1").actionId == "a_1";
+}
+
+// ── step 5: optimistic ──────────────────────────────────────────────────────
+
+fn add(c: i32, a: i32) -> i32 {
+    return c + a;
+}
+
+test "form: applyOptimistic folds the actions, and no prediction is the identity" {
+    assert applyOptimistic(0, [1, 1, 1], { c, a -> add(c, a) }) == 3;
+    assert applyOptimistic(12, [], { c, a -> add(c, a) }) == 12;
+}
+
+test "form: optimistic's server pass is the base and a no-op push" {
+    val pair = await optimistic(12, { c, a -> add(c, a) });
+    assert pair._0 == 12;
+    val push = pair._1;
+    assert push(5) == 0;
+    val again = await optimistic(12, { c, a -> add(c, a) });
+    assert again._0 == pair._0;
+}
+
+// ── step 6: the GET search form ─────────────────────────────────────────────
+
+test "form: the search form is method=get with data-jh-sf and no data-jh-a" {
+    val attrs = searchFormAttrs(searchFormProps("/search"));
+    assert attrs.length == 3;
+    assert (attrs.at(0) ?? #("", ""))._1 == "get";
+    assert (attrs.at(1) ?? #("", ""))._1 == "/search";
+    assert (attrs.at(2) ?? #("", ""))._0 == "data-jh-sf";
+    assert attrs.filter({ a -> a._0 == "data-jh-a" }).length == 0;
+}
+
+test "form: the GET submit's URL is the one the client navigation builds" {
+    val props = searchFormProps("/search");
+    assert searchHref(props, [#("q", "a b"), #("page", "2")])
+        == "/search?" + encoding.formStringify([#("q", "a b"), #("page", "2")]);
+    assert searchHref(props, []) == "/search";
+}
+
+test "form: prefetch goes through the link prefetcher only when asked" {
+    val off = prefetchSearch(
+        SearchFormProps(action: "/search", prefetch: false, replace: false),
+    );
+    assert off == 0;
+    val on = prefetchSearch(searchFormProps("/search"));
+    assert on >= 0;
+}

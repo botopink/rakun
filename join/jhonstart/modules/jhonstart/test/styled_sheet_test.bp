@@ -1,0 +1,74 @@
+// `botopink test` suite for `src/styled_sheet.bp` (front 119 step 1;
+// decisions 352, 354 (7), 361): `compose`, the root of a page render, provides
+// `StyledContext`, so a `styled` component computed at render below it writes
+// its class and rules to this render's sheet — once, however many times it
+// renders — and `resetRender()` starts the next render's sheet empty. Below
+// an `error` segment the page is a node of the tree the renderer runs inside
+// the host's try with the scope `compose`'s run answered (decisions 388,
+// 414): the sheet is written.
+
+import {element.Element, element.text, element.div, element.span};
+import {render.compose, render.renderNode, render.resetRender, render.renderComponent};
+import {context.RenderScope} from "std";
+import {routes.PageContext, routes.UiSegment, routes.segment, routes.withError};
+import {error_boundary.ErrorInfo};
+import {styled_sheet.renderedStyles};
+import styled, {StyledView} from "styled";
+
+fn badge(c: string) -> StyledView {
+    return styled "color: ${c};";
+}
+
+fn Badge(c: string) -> @Component<Element> {
+    val s = await badge(c);
+    return span([text(c, attrs: [])], attrs: [#("class", s.className)]);
+}
+
+// Twenty red badges and a blue one.
+fn Page() -> @Component<Element> {
+    var items: Element[] = [];
+    var k = 0;
+    while (k < 20) {
+        val b = await Badge("red");
+        items = items.append([b]);
+        k = k + 1;
+    }
+    val other = await Badge("blue");
+    return div(items.append([other]), attrs: []);
+}
+
+fn caught(info: ErrorInfo) -> Element {
+    return text("caught", attrs: []);
+}
+
+fn route() -> PageContext {
+    return PageContext(pathname: "/", pattern: "/", params: [], rest: []);
+}
+
+test "styled: a component rendered twenty times writes its sheet once" {
+    val _r = resetRender();
+    val chain: UiSegment[] = [];
+    val tree = await compose(chain, route(), { -> Page() });
+    assert renderedStyles()
+        == "@layer styled{.s_c9b86112{color:red}.s_ffa7179f{color:blue}}";
+    assert renderNode(tree).split("class=\"s_c9b86112\"").length == 21;
+}
+
+test "styled: the next render's sheet starts empty" {
+    val _r = resetRender();
+    assert renderedStyles() == "";
+    val chain: UiSegment[] = [];
+    val _t = await compose(chain, route(), { -> Badge("blue") });
+    assert renderedStyles() == "@layer styled{.s_ffa7179f{color:blue}}";
+}
+
+test "styled: a page under an error segment writes its sheet (decision 414)" {
+    val _r = resetRender();
+    val chain = [withError(segment("/"), { info -> caught(info) })];
+    val w = await renderComponent(
+        compose(chain, route(), { -> Badge("blue") }),
+        RenderScope.root(),
+    );
+    assert renderedStyles() == "@layer styled{.s_ffa7179f{color:blue}}";
+    assert renderNode(w.tree).contains("caught") == false;
+}

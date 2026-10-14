@@ -1,0 +1,257 @@
+// jhonstart/client_app — a client-only app (front 26 Step 6, decision 117
+// rule 1).
+//
+// An application with no server runs the same pages under the router alone:
+//
+//     clientApp(routes: routeTable, mount: "#root", allowedRedirects: []).start()
+//
+// `routes` is contract 1's wire (the text a server writes into the payload's
+// `t`), read with `routing`'s `parseTable` and matched with `matchPath` — this
+// file defines neither. `start()` matches the location, composes the matched
+// chain with front 30's `compose` (the pages, layouts and conventions of the UI
+// registry, `routes.bp`) and writes the markup into `mount` through the one
+// browser-only write, `__jhMount`. A navigation signal a page, layout or
+// template raises is handled HERE, as front 30's render handles it on the
+// server:
+//
+//   | raised                         | `start()` does                                              |
+//   |--------------------------------|-------------------------------------------------------------|
+//   | `notFound()`                   | the matched route's nearest not-found boundary into `mount`; the URL does not change |
+//   | `redirect(to)`, relative       | `history.replaceState` (the router's `replace`) and a client navigation to `to`, no reload |
+//   | `redirect(to)`, absolute+listed| `location.replace(to)`                                      |
+//   | any other target               | the start FAILS with the refused target; nothing navigates  |
+//
+// The target check is front 30's `redirectAllowed`, with the table `clientApp`
+// was given and its `allowedRedirects` (empty by default: every absolute target
+// is refused). It lives in its own module rather than in `router.bp` because it
+// composes through `render.bp`, and `render.bp` reads the route snapshot.
+
+import {element.Element, element.ElementBase};
+import {encoding} from "std";
+import {table.parseTable, table.RouteEntry, match.ancestorPatterns, match.RouteMatch, navigation.NavKind, navigation.NavOutcome, navigation.signalFromReason} from "routing";
+import {router.RouterState, router.resolveRoute, router.fill, router.replace};
+import {error_boundary.ErrorInfo, error_boundary.isSignal, error_boundary.notFound, error_boundary.notFoundReason};
+import {render.compose, render.renderNode, render.resetRender, render.componentOutcome, render.attemptRender};
+import {context.RenderScope} from "std";
+import {streaming.redirectAllowed};
+import {routes.PageContext, routes.LayoutProps, routes.UiSegment, routes.segmentFor, routes.pageFor};
+
+#[@External.Node("./client_app.mjs", "locationPath")]
+#[@External.Erlang("jhonstart_client_app", "location_path")]
+declare fn __jhLocationPath() -> string;
+
+#[@External.Node("./client_app.mjs", "locationSearch")]
+#[@External.Erlang("jhonstart_client_app", "location_search")]
+declare fn __jhLocationSearch() -> string;
+
+// The ONE node-only write of the front: the markup into `mount`. (Its erlang
+// twin writes the test store — the core is compiled on both rows, and a called
+// node-only cell reds the erlang compile.)
+#[@External.Node("./client_app.mjs", "mount")]
+#[@External.Erlang("jhonstart_client_app", "mount")]
+declare fn __jhMount(selector: string, html: string) -> i32;
+
+#[@External.Node("./client_app.mjs", "locationReplace")]
+#[@External.Erlang("jhonstart_client_app", "location_replace")]
+declare fn __jhLocationReplace(to: string) -> i32;
+
+#[@External.Node("./client_app.mjs", "setLocation")]
+#[@External.Erlang("jhonstart_client_app", "set_location")]
+declare fn __jhSetLocation(path: string, search: string) -> i32;
+
+#[@External.Node("./client_app.mjs", "mounted")]
+#[@External.Erlang("jhonstart_client_app", "mounted")]
+declare fn __jhMounted(selector: string) -> string;
+
+#[@External.Node("./client_app.mjs", "replaced")]
+#[@External.Erlang("jhonstart_client_app", "replaced")]
+declare fn __jhReplaced() -> string;
+
+// The no-DOM store's test surface: set the location, read what was mounted and
+// what `location.replace` was handed.
+pub fn setClientLocation(path: string, search: string) -> i32 {
+    return __jhSetLocation(path, search);
+}
+
+pub fn mountedHtml(selector: string) -> string {
+    return __jhMounted(selector);
+}
+
+pub fn replacedLocation() -> string {
+    return __jhReplaced();
+}
+
+pub type ClientApp(routes: string, mount: string, allowedRedirects: string[]) {
+    pub fn start(self: Self) -> @Task<@Result<void, string>> {
+        return startClientApp(self);
+    }
+}
+
+pub fn clientApp(
+    routes: string,
+    mount: string,
+    allowedRedirects: string[] = [],
+) -> ClientApp {
+    return ClientApp(
+        routes: routes,
+        mount: mount,
+        allowedRedirects: allowedRedirects,
+    );
+}
+
+fn defaultNotFound() -> Element {
+    return Element(
+        tag: "h1",
+        value: "",
+        children: [
+            Element(tag: "#text", value: "Not found", children: [], attrs: []),
+        ],
+        attrs: [],
+    );
+}
+
+fn noPage(route: PageContext) -> @Component<Element> {
+    notFound();
+    return defaultNotFound();
+}
+
+fn chainOf(pattern: string) -> Array<UiSegment> {
+    return ancestorPatterns(pattern).map({ p -> segmentFor(p) });
+}
+
+fn contextOf(r: RouterState) -> PageContext {
+    return PageContext(
+        pathname: r.path,
+        pattern: r.pattern,
+        params: r.params,
+        rest: [],
+    );
+}
+
+fn pathPart(to: string) -> string {
+    return to.split("?").at(0) ?? to;
+}
+
+fn queryPart(to: string) -> string {
+    val parts = to.split("?");
+    if (parts.length < 2) return "";
+    return parts.at(1) ?? "";
+}
+
+fn kindWord(out: NavOutcome) -> string {
+    return case out.kind {
+        None -> "none";
+        NotFound -> "not-found";
+        Redirect -> "redirect";
+    };
+}
+
+fn mountTree(target: string, tree: Element) -> @Result<void, string> {
+    val html = attemptRender({ -> renderNode(tree) });
+    val failure = case html {
+        Ok(h) -> "";
+        Error(m) -> m;
+    };
+    if (failure != "") throw failure;
+    val markup = case html {
+        Ok(h) -> h;
+        Error(m) -> "";
+    };
+    __jhMount(target, markup);
+    return;
+}
+
+pub fn startClientApp(site: ClientApp) -> @Task<@Result<void, string>> {
+    val out = await navigateTo(
+        site,
+        __jhLocationPath(),
+        __jhLocationSearch(),
+        0,
+    );
+    return try out;
+}
+
+fn navigateTo(
+    site: ClientApp,
+    path: string,
+    search: string,
+    hops: i32,
+) -> @Task<@Result<void, string>> {
+    if (hops > 8)
+        throw "clientApp: more than 8 redirects in a row, stopping at `"
+            + path
+            + "`";
+    resetRender();
+    val routeState = resolveRoute(site.routes, path, search);
+    val ctx = contextOf(routeState);
+    fill(
+        ctx.pathname,
+        encoding.formStringify(ctx.params),
+        encoding.formStringify(routeState.search),
+        ctx.pattern,
+        0,
+    );
+    if (routeState.pattern == "") {
+        val missing = mountTree(site.mount, defaultNotFound());
+        return try missing;
+    }
+    val page = pageFor(routeState.pattern, { route -> noPage(route) });
+    val chain = chainOf(routeState.pattern);
+    val outcome = await componentOutcome(
+        { -> compose(chain, ctx, { -> page(ctx) }) },
+        RenderScope.root(),
+    );
+    val failure = case outcome {
+        Ok(w) -> "";
+        Error(message) -> message;
+    };
+    if (failure == "") {
+        val tree = case outcome {
+            Ok(w) -> w.tree;
+            Error(m) -> defaultNotFound();
+        };
+        val mounted = mountTree(site.mount, tree);
+        return try mounted;
+    }
+    val handled = await handleSignal(site, failure, hops);
+    return try handled;
+}
+
+// The one handler for a raised signal in the browser.
+pub fn handleSignal(
+    site: ClientApp,
+    reason: string,
+    hops: i32,
+) -> @Task<@Result<void, string>> {
+    if (isSignal(reason) == false) throw reason;
+    val out = signalFromReason(reason);
+    if (kindWord(out) == "not-found") {
+        val nf = mountTree(site.mount, stashedNotFoundTree());
+        return try nf;
+    }
+    val to = out.location;
+    if (redirectAllowed(site.routes, site.allowedRedirects, to) == false)
+        throw "clientApp: redirect target `"
+            + to
+            + "` refused - a relative target must be in the route table, an absolute one listed in clientApp(allowedRedirects: [...])";
+    if (to.startsWith("/") && to.startsWith("//") == false) {
+        replace(to);
+        val next = await navigateTo(
+            site,
+            pathPart(to),
+            queryPart(to),
+            hops + 1,
+        );
+        return try next;
+    }
+    __jhLocationReplace(to);
+    return;
+}
+
+#[@External.Node("./render.mjs", "stashedNotFound")]
+#[@External.Erlang("jhonstart_render", "stashed_not_found")]
+declare fn __jhStashedNotFound(fallback: Element) -> Element;
+
+fn stashedNotFoundTree() -> Element {
+    return __jhStashedNotFound(defaultNotFound());
+}

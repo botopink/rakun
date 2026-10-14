@@ -1,0 +1,64 @@
+// blog-ssr — `test-snap-examples.md` § `examples/blog-ssr/`.
+//
+// Escaping happens once, in front 30's `renderNode` (the walker the render and
+// `renderToStream` use); a tree holding untrusted text is snapshotted through
+// it, never through the frozen `renderToString`, which escapes nothing.
+
+import {Element, RouterState, Boundary, Suspense, holeId, ErrorInfo, catchError, mergeMetadata, renderNode, digestOf} from "jhonstart";
+import {app.layout.RootLayout, app.layout.metadata, app.layout.viewport};
+import {app.loading.Loading};
+import {app.error.ErrorPage};
+import {app.not_found.NotFound};
+import {app.global_error.GlobalError};
+import {app.blog.slug.page.PostPage, app.blog.slug.page.postPanel};
+import {app.blog.slug.metadata.generateMetadata};
+import {assertHtml, assertHtmlLines, tagPerLine, assertStream, assertErrorBoundary, assertMetadata, assertViewport, assertRoute, renderToStream, fixtureRouter} from "jhonstart-test";
+import {assertText} from "snap";
+
+test "blog: the post page ---- hello" {
+    val tree = await PostPage([#("slug", "hello")]);
+    try assertText(@src(), renderNode(tree));
+}
+
+test "blog: the root layout wraps the page and the nav marks the section" {
+    val r = fixtureRouter("/blog/hello", "/blog/[slug]", "slug=hello", "");
+    val page = await PostPage(r.params);
+    try assertText(@src(), tagPerLine(renderNode(RootLayout(r, page))));
+}
+
+test "blog: streamed ---- shell with the loading boundary then the page" {
+    val params = [#("slug", "hello")];
+    val b = Boundary(id: holeId(0), fallback: Loading(), child: { -> PostPage(params) });
+    val chunks = await renderToStream(Suspense(b), [b]);
+    try assertStream(@src(), chunks);
+}
+
+test "blog: a missing slug raises the not-found signal through the boundary" {
+    try assertErrorBoundary(@src(), catchError("post", { info -> ErrorPage(info) }, postPanel("nope")));
+}
+
+test "blog: a failing comment service shows the segment error page" {
+    assert digestOf("comment service down").length == 8;
+    try assertErrorBoundary(@src(), catchError("comments", { info -> ErrorPage(info) }, postPanel("broken-comments")));
+}
+
+test "blog: not-found page" {
+    try assertHtml(@src(), NotFound());
+}
+
+test "blog: global error owns its document" {
+    try assertHtmlLines(@src(), GlobalError(ErrorInfo(message: "", digest: "a3f19c2b")));
+}
+
+test "blog: metadata ---- post merged onto the root layout" {
+    val page = await generateMetadata([#("slug", "hello")], metadata());
+    try assertMetadata(@src(), mergeMetadata(metadata(), page));
+}
+
+test "blog: viewport of the root layout" {
+    try assertViewport(@src(), viewport());
+}
+
+test "blog: the route snapshot the layout reads" {
+    try assertRoute(@src(), fixtureRouter("/blog/hello", "/blog/[slug]", "slug=hello", "ref=home"));
+}

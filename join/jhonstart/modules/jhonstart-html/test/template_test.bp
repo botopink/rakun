@@ -1,0 +1,274 @@
+// The template language of front 118, steps 1–5, rendered through the core's
+// escaping walker `renderNode` (the frozen `renderToString` knows neither void
+// tags nor raw nodes). Every test runs on both targets.
+
+import {html, html.isRaw, html.classList, html.classIf, html.hasContent};
+import {Element, Node, a, div, span, p, h1, h2, ul, li, nav, section, article, header, footer, form, input, br, img, hr, meta, title, script, textarea, button, raw, renderNode} from "jhonstart";
+
+type Status { Draft, Live }
+
+// ── step 1: attributes ──────────────────────────────────────────────────────
+
+test "an anchor renders a static, an expression, a false bool and a kebab-case attribute" {
+    val t = "a \"title\" & more";
+    val off = false;
+    val markup = renderNode(
+        html """<a href="/a b" title={t} hidden={off} data-x="1">go</a>""",
+    );
+    assert markup
+        == "<a href=\"/a b\" title=\"a &quot;title&quot; &amp; more\" data-x=\"1\">go</a>";
+}
+
+test "a true bool is a bare attribute; a null ?string is absent, a present one renders" {
+    val on = true;
+    val none: ?string = null;
+    val some: ?string = "x";
+    assert renderNode(html "<input disabled={on} name={none} value={some}/>")
+        == "<input disabled=\"\" value=\"x\">";
+    assert renderNode(html "<input required/>") == "<input required=\"\">";
+}
+
+test "a multi-word attribute is camelCase, rendered in HTML's spelling (decision 351)" {
+    val label = "Close";
+    val markup = renderNode(
+        html """<form acceptCharset="utf-8" encType="text/plain" autoComplete="off"><button ariaLabel={label} ariaDescribedBy="hint">x</button></form>""",
+    );
+    assert markup
+        == "<form accept-charset=\"utf-8\" enctype=\"text/plain\" autocomplete=\"off\"><button aria-label=\"Close\" aria-describedby=\"hint\">x</button></form>";
+    assert renderNode(html """<meta httpEquiv="refresh" content="5"/>""")
+        == "<meta http-equiv=\"refresh\" content=\"5\">";
+}
+
+test "a data-* attribute keeps its kebab-case name and takes a string" {
+    val id = "f1";
+    val markup = renderNode(
+        html """<form data-id={id} data-row-key="r${id}" data-flag></form>""",
+    );
+    assert markup
+        == "<form data-id=\"f1\" data-row-key=\"rf1\" data-flag=\"\"></form>";
+}
+
+test "single quotes, a hole inside a quoted value, and the five decoded entities" {
+    val who = "Ann";
+    val markup = renderNode(
+        html """<p title='it is "${who}"' class="a&amp;b">&lt;tag&gt; &amp; &quot;q&quot;</p>""",
+    );
+    assert markup
+        == "<p title=\"it is &quot;Ann&quot;\" class=\"a&amp;b\">&lt;tag&gt; &amp; \"q\"</p>";
+}
+
+// ── step 2: holes, void and self-closing tags, fragments, comments ──────────
+
+test "a hole renders a string escaped, a number and a bool as their text" {
+    val s = "<b>";
+    val n = 3;
+    val big: i64 = 40000000000;
+    val f = 2.5;
+    val yes = true;
+    val markup = renderNode(html "<p>{s} {n} {big} {f} {yes}</p>");
+    assert markup == "<p>&lt;b&gt; 3 40000000000 2.5 true</p>";
+}
+
+test "a hole renders an Element unescaped and a list of them in order" {
+    val one = span([raw("<i>ok</i>")], attrs: []);
+    val items = ["x", "y"].map({ v -> li([raw(v)], attrs: []) });
+    assert renderNode(html "<div>{one}<ul>{items}</ul></div>")
+        == "<div><span><i>ok</i></span><ul><li>x</li><li>y</li></ul></div>";
+}
+
+test "a void tag stays where it was written, with or without the slash" {
+    assert renderNode(html """<p>a<br/>b<br>c<img src="/d.png" alt=""/></p>""")
+        == "<p>a<br>b<br>c<img src=\"/d.png\" alt=\"\"></p>";
+    assert renderNode(html "<div><hr/><span>x</span></div>")
+        == "<div><hr><span>x</span></div>";
+}
+
+test "a self-closing non-void tag is an empty element in place" {
+    assert renderNode(html "<div><span/><p>x</p></div>")
+        == "<div><span></span><p>x</p></div>";
+}
+
+test "a fragment, Fragment, several roots and a rendered comment" {
+    assert renderNode(html "<><p>a</p><p>b</p></>") == "<p>a</p><p>b</p>";
+    assert renderNode(html "<Fragment><p>a</p></Fragment><p>b</p>")
+        == "<p>a</p><p>b</p>";
+    assert renderNode(html "<!-- note --><p>x</p>") == "<!-- note --><p>x</p>";
+    assert renderNode(html "<!doctype html><p>x</p>")
+        == "<!doctype html><p>x</p>";
+}
+
+test "whitespace between tags on separate lines is dropped; text keeps its inner spaces" {
+    val name = "Astro";
+    val markup = renderNode(
+        html """
+      <div class="greeting">
+        <h1>Hello {name}!</h1>
+        <p>
+          two words
+          on two lines
+        </p>
+      </div>
+    """,
+    );
+    assert markup
+        == "<div class=\"greeting\"><h1>Hello Astro!</h1><p>two words on two lines</p></div>";
+}
+
+test "a raw-text element keeps its body unparsed" {
+    val markup = renderNode(
+        html "<div><script>if (a < b && c > d) { go({x: 1}); }</script></div>",
+    );
+    assert markup
+        == "<div><script>if (a < b && c > d) { go({x: 1}); }</script></div>";
+    assert renderNode(html "<textarea><b>{x}</b></textarea>")
+        == "<textarea>&lt;b&gt;{x}&lt;/b&gt;</textarea>";
+}
+
+// ── step 3: markup inside if, case and lambdas ──────────────────────────────
+
+fn menu(items: Array<string>, visible: bool, status: Status) -> Element {
+    return html """
+      <ul>
+        {items.map({ item -> <li>{item}</li> })}
+      </ul>
+      {if (visible) { <p>Show me!</p> }}
+      {if (visible) { <p>Show me!</p> } else { <p>Else show me!</p> }}
+      {case status { Draft -> <span>draft</span>; Live -> <span>live</span>; }}
+    """;
+}
+
+test "the four forms render: a lambda, an if, an if / else, a case" {
+    assert renderNode(menu(["Dog", "Cat"], true, Status.Draft))
+        == "<ul><li>Dog</li><li>Cat</li></ul><p>Show me!</p><p>Show me!</p><span>draft</span>";
+}
+
+test "an if without else renders nothing when false" {
+    assert renderNode(menu([], false, Status.Live))
+        == "<ul></ul><p>Else show me!</p><span>live</span>";
+}
+
+test "an optional is shown through the binder form of if" {
+    val label: ?string = "<b>";
+    val none: ?string = null;
+    assert renderNode(
+        html "<p>{if (label) { text -> <span>{text}</span> }}</p>",
+    )
+        == "<p><span>&lt;b&gt;</span></p>";
+    assert renderNode(html "<p>{if (none) { text -> <span>{text}</span> }}</p>")
+        == "<p></p>";
+}
+
+test "three nesting levels: a list of lists of conditionals" {
+    val rows = [[1, 2, 3], [4, 5]];
+    val markup = renderNode(
+        html """
+      <section>
+        {rows.map({ row ->
+          <ul>
+            {row.map({ n ->
+              <li>{if (n % 2 == 0) { <span>even {n}</span> } else { <h2>odd {n}</h2> }}</li>
+            })}
+          </ul>
+        })}
+      </section>
+    """,
+    );
+    assert markup
+        == "<section><ul><li><h2>odd 1</h2></li><li><span>even 2</span></li><li><h2>odd 3</h2></li></ul><ul><li><span>even 4</span></li><li><h2>odd 5</h2></li></ul></section>";
+}
+
+test "a less-than in an expression stays an operator" {
+    val n = 2;
+    assert renderNode(
+        html "<p>{if (n < 3) { <span>small</span> } else { <span>big</span> }}</p>",
+    )
+        == "<p><span>small</span></p>";
+}
+
+test "an expression attribute may hold an if expression" {
+    val external = true;
+    assert renderNode(
+        html """<a target={if (external) { "_blank" } else { "_self" }}>x</a>""",
+    )
+        == "<a target=\"_blank\">x</a>";
+}
+
+// ── step 4: components and slots ────────────────────────────────────────────
+
+// A component's props are an inline type (207): each attribute a field.
+fn Greeting(props: type(name: string, greeting: string = "Hello")) -> Element {
+    return html "<h2>{props.greeting}, {props.name}!</h2>";
+}
+
+fn Card(title: string, children: Node = []) -> Element {
+    return html """
+      <article>
+        <h2>{title}</h2>
+        <slot />
+        <footer><slot><span>no body</span></slot></footer>
+      </article>
+    """;
+}
+
+fn Tree(label: string, kids: Array<string>) -> Element {
+    return html "<li>{label}{if (kids.length > 0) { <ul>{kids.map({ k -> <Tree label={k} kids={[]} /> })}</ul> }}</li>";
+}
+
+test "a component tag is a call with its attributes as the props" {
+    val markup = renderNode(
+        html """<div><Greeting name="Partner" /><Greeting greeting="Howdy" name={"Pal"} /></div>""",
+    );
+    assert markup == "<div><h2>Hello, Partner!</h2><h2>Howdy, Pal!</h2></div>";
+}
+
+test "content inside a component tag is its children; an empty slot renders its fallback" {
+    assert renderNode(html """<Card title="T"><p>body</p></Card>""")
+        == "<article><h2>T</h2><p>body</p><footer><p>body</p></footer></article>";
+    assert renderNode(html """<Card title="E" />""")
+        == "<article><h2>E</h2><footer><span>no body</span></footer></article>";
+    assert renderNode(html """<Card title="M"><p>a</p><p>b</p></Card>""")
+        == "<article><h2>M</h2><p>a</p><p>b</p><footer><p>a</p><p>b</p></footer></article>";
+}
+
+test "a component renders itself to any depth" {
+    assert renderNode(html """<ul><Tree label="A" kids={["B", "C"]} /></ul>""")
+        == "<ul><li>A<ul><li>B</li><li>C</li></ul></li></ul>";
+}
+
+test "hasContent tells an empty slot value" {
+    val none: Element[] = [];
+    assert hasContent(none) == false;
+    assert hasContent("") == false;
+    assert hasContent("x");
+    assert hasContent(p(["x"], attrs: []));
+}
+
+// ── step 5: raw, classList, #[isRaw] ────────────────────────────────────────
+
+test "raw writes its value unescaped; a hole escapes" {
+    val content = "<p>raw</p>";
+    assert renderNode(html "<article>{raw(content)}</article>")
+        == "<article><p>raw</p></article>";
+    assert renderNode(html "{raw(content)}") == "<p>raw</p>";
+    assert renderNode(html "<p>{content}</p>")
+        == "<p>&lt;p&gt;raw&lt;/p&gt;</p>";
+}
+
+test "classList drops what is empty" {
+    val isRed = true;
+    val extra = "";
+    assert renderNode(
+        html """<div class={classList(["box", classIf(isRed, "red"), extra])}></div>""",
+    )
+        == "<div class=\"box red\"></div>";
+    assert classList(["", "a", "", "b"]) == "a b";
+    assert classIf(false, "x") == "";
+}
+
+test "#[isRaw] keeps braces and angle brackets as text" {
+    val markup = renderNode(
+        html "<div><span #[isRaw]>{items.map({ x -> <li>{x}</li> })}</span></div>",
+    );
+    assert markup
+        == "<div><span>{items.map({ x -&gt; &lt;li&gt;{x}&lt;/li&gt; })}</span></div>";
+}

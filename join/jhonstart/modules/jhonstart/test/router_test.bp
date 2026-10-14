@@ -1,0 +1,344 @@
+// `botopink test` flat suite for `src/router.bp` (front 26).
+//
+// Written from a CONSUMER's position, the way `elements_test.bp` is: the
+// module under test is reached by its module name, so what the suite exercises
+// is the surface a `from "jhonstart"` consumer gets, not the module's private
+// interior.
+//
+// Both rows run this file. The front's assigned target is erlang and every
+// assertion below RUNS there; the commonJS row runs the same assertions
+// against the `.mjs` half of the same cells.
+
+import {router.RouterState, router.pairValue, router.patternSegments, router.segmentAt, router.navigationFor, router.applySignal, router.resolveRoute, router.fill, router.snapshot, router.router, router.pathname, router.params, router.searchParams, router.selectedLayoutSegment, router.selectedLayoutSegments, router.push, router.replace, router.back, router.forward, router.refresh, router.prefetch, router.lastNavigation};
+import {element.Element, element.ElementBase, element.div, element.span, element.text, element.renderToString};
+import {encoding} from "std";
+import {refresh.refreshValue} from "actions";
+
+// ── step 1: the record and its accessors ────────────────────────────────────
+
+fn blogPost() -> RouterState {
+    return RouterState(
+        path: "/blog/hi",
+        params: [#("slug", "hi")],
+        search: [],
+        pattern: "/blog/[slug]",
+        selected: 0,
+    );
+}
+
+test "router: a param is read by name" {
+    assert blogPost().param("slug") == "hi";
+}
+
+test "router: an absent param is the empty string, not a runtime error" {
+    assert blogPost().param("nope") == "";
+    assert blogPost().searchParam("nope") == "";
+}
+
+test "router: searchParam reads the search list, not the params list" {
+    val r = RouterState(
+        path: "/blog",
+        params: [#("slug", "hi")],
+        search: [#("sort", "new")],
+        pattern: "/blog",
+        selected: 0,
+    );
+    assert r.searchParam("sort") == "new";
+    assert r.searchParam("slug") == "";
+    assert r.param("sort") == "";
+}
+
+test "router: pairValue answers the FIRST match of a duplicated key" {
+    val dup = [#("tag", "one"), #("tag", "two")];
+    assert pairValue(dup, "tag") == "one";
+    assert pairValue([], "tag") == "";
+}
+
+test "router: segments keep the bracket spelling and drop the empty parts" {
+    val segs = blogPost().segments();
+    assert segs.length == 2;
+    assert segmentAt(segs, 0) == "blog";
+    assert segmentAt(segs, 1) == "[slug]";
+    assert patternSegments("/").length == 0;
+    assert patternSegments("").length == 0;
+}
+
+test "router: segment answers the layout depth, and out of range is empty" {
+    assert blogPost().segment() == "blog";
+    val deeper = RouterState(
+        path: "/blog/hi",
+        params: [],
+        search: [],
+        pattern: "/blog/[slug]",
+        selected: 1,
+    );
+    assert deeper.segment() == "[slug]";
+    val past = RouterState(
+        path: "/blog/hi",
+        params: [],
+        search: [],
+        pattern: "/blog/[slug]",
+        selected: 7,
+    );
+    assert past.segment() == "";
+}
+
+// ── the pair codec: std's `encoding` (decision 116 rule 4) ──────────────────
+//
+// The package carries no pair codec of its own: the snapshot's `m` and `q` are
+// decoded with `encoding.formParse` and a URL is written back with
+// `encoding.formStringify`. These cells pin the behaviour the router relies on.
+
+test "router: the snapshot codec splits ampersand-separated pairs in order" {
+    val out = encoding.formParse("a=1&b=2&c=3");
+    assert out.length == 3;
+    assert pairValue(out, "a") == "1";
+    assert pairValue(out, "b") == "2";
+    assert pairValue(out, "c") == "3";
+}
+
+// The one cell that asserts both directions: `q=a%20b` read through the
+// snapshot is `a b` — the stand-in decoder the package carried before
+// answered `a%20b` — and the form the router writes back into a URL is
+// `q=a%20b` again.
+test "router: a percent-encoded search value is decoded, and written back encoded" {
+    val seeded = fill("/search", "", "q=a%20b", "/search", 0);
+    assert snapshot().searchParam("q") == "a b";
+    assert encoding.formStringify([#("q", "a b")]) == "q=a%20b";
+}
+
+test "router: an empty query decodes to the empty list, not one empty pair" {
+    assert encoding.formParse("").length == 0;
+    assert encoding.formParse("&&").length == 0;
+}
+
+test "router: a chunk with no `=` decodes to an empty value" {
+    val out = encoding.formParse("flag");
+    assert out.length == 1;
+    assert pairValue(out, "flag") == "";
+}
+
+test "router: an empty value is preserved" {
+    val out = encoding.formParse("q=&r=1");
+    assert out.length == 2;
+    assert pairValue(out, "q") == "";
+    assert pairValue(out, "r") == "1";
+}
+
+// ── step 2: the five cells and the snapshot builder ─────────────────────────
+//
+// `fill` is the stub the front's test plan asks for, and it is the same seam
+// front 28's server adapter and fronts 27/29's client transition use. Both
+// rows run these: on erlang the store is the calling process's dictionary
+// (`src/sidecars/jhonstart_router.erl`), on commonJS a module-global
+// (`src/router_runtime.mjs`), and the assertions do not know which.
+
+test "router: the five cells round-trip into the record of step 1" {
+    val ignored = fill("/blog/hi", "slug=hi", "", "/blog/[slug]", 0);
+    val r = snapshot();
+    assert r.path == "/blog/hi";
+    assert r.pattern == "/blog/[slug]";
+    assert r.selected == 0;
+    assert r.param("slug") == "hi";
+    assert r.params.length == 1;
+    assert r.search.length == 0;
+}
+
+test "router: an empty params string yields the empty list, not one empty pair" {
+    val ignored = fill("/", "", "", "/", 0);
+    val r = snapshot();
+    assert r.params.length == 0;
+    assert r.search.length == 0;
+    assert r.param("anything") == "";
+}
+
+test "router: the search list comes back through the same decoder" {
+    val ignored = fill("/blog", "", "sort=new&page=2", "/blog", 0);
+    val r = snapshot();
+    assert r.search.length == 2;
+    assert r.searchParam("sort") == "new";
+    assert r.searchParam("page") == "2";
+    assert r.searchParam("missing") == "";
+}
+
+test "router: selected reaches the record and drives segment()" {
+    val ignored = fill("/blog/hi", "slug=hi", "", "/blog/[slug]", 1);
+    assert snapshot().segment() == "[slug]";
+    val again = fill("/blog/hi", "slug=hi", "", "/blog/[slug]", 0);
+    assert snapshot().segment() == "blog";
+}
+
+test "router: a fill replaces the WHOLE snapshot, never one field of it" {
+    val first = fill("/a", "x=1", "s=1", "/a", 0);
+    val second = fill("/b", "", "", "/b", 0);
+    val r = snapshot();
+    assert r.path == "/b";
+    assert r.param("x") == "";
+    assert r.searchParam("s") == "";
+}
+
+// ── step 3: the six hooks ───────────────────────────────────────────────────
+//
+// `use f(x)` lowers to `f(x)` on every backend, so a hook body is exercised by
+// DIRECT CALL — the first-render value, which on the server is the only value.
+// `ActiveNav` below is the activating form; it type-checks the capability and,
+// called plainly, renders the server pass, exactly as `hooks.bp` does with
+// `Counter`.
+
+// A hook called WITHOUT `use` answers its `@Component<T>` — a Promise on
+// commonJS (decisions 104/128 of botopink 1.0.10-beta) — so the test body awaits it
+// and reads the value; the `use` form below activates it inside a component.
+test "router: each hook answers the field it names, called without `use`" {
+    val ignored = fill("/blog/hi", "slug=hi", "sort=new", "/blog/[slug]", 0);
+    val path = await pathname();
+    assert path == "/blog/hi";
+    val ps = await params();
+    assert ps.length == 1;
+    val qs = await searchParams();
+    assert qs.length == 1;
+    val r = await router();
+    assert r.pattern == "/blog/[slug]";
+    assert r.param("slug") == "hi";
+}
+
+test "router: selectedLayoutSegment(s) answer the layout depth, root-first" {
+    val ignored = fill("/blog/hi", "slug=hi", "", "/blog/[slug]", 0);
+    val segs = await selectedLayoutSegments();
+    assert segs.length == 2;
+    assert segs.join("/") == "blog/[slug]";
+    val top = await selectedLayoutSegment();
+    assert top == "blog";
+    val deeper = fill("/blog/hi", "slug=hi", "", "/blog/[slug]", 1);
+    val inner = await selectedLayoutSegment();
+    assert inner == "[slug]";
+}
+
+// A component by the rule: a `@Component<Element>` return (the owner
+// `Element` — the return is the effect), and every `use` in the static prefix. The binding never reuses
+// the hook's name (`val r = use router()`, never `val router = …`) — a local
+// that shadows a module-level `pub fn` shadows it for an importer too.
+fn ActiveNav() -> @Component<Element> {
+    val here = use pathname();
+    val seg = use selectedLayoutSegment();
+    val ps = use params();
+    return div(
+        [
+            span([text(here, attrs: [])], attrs: []),
+            span([text(seg, attrs: [])], attrs: [#("class", "active")]),
+            span([text(pairValue(ps, "slug"), attrs: [])], attrs: []),
+        ],
+        attrs: [],
+    );
+}
+
+test "router: a component activating the hooks renders the server pass" {
+    val ignored = fill("/blog/hi", "slug=hi", "", "/blog/[slug]", 0);
+    val e = await ActiveNav();
+    assert e.tag == "div";
+    assert e.children.length == 3;
+    assert renderToString(e)
+        == "<div><span>/blog/hi</span><span class=\"active\">blog</span><span>hi</span></div>";
+}
+
+// ── step 4: the navigation verbs ────────────────────────────────────────────
+//
+// Six verbs, one cell. Every one of these RUNS on the erlang row: the host
+// module is `src/sidecars/jhonstart_router.erl` and it is shipped and loaded
+// by the test runner, so "callable without a host stub crash" is an execution
+// and not a compile.
+
+test "router: push and replace record what the dispatcher turns into a 307" {
+    val a = push("/x");
+    assert lastNavigation() == "push /x";
+    val b = replace("/y");
+    assert lastNavigation() == "replace /y";
+}
+
+test "router: the four server no-ops are callable and return" {
+    val a = back();
+    assert lastNavigation() == "back ";
+    val b = forward();
+    assert lastNavigation() == "forward ";
+    val c = refresh();
+    assert lastNavigation() == "refresh " + refreshValue();
+    val d = prefetch("/z");
+    assert lastNavigation() == "prefetch /z";
+}
+
+test "router: a navigation does not disturb the snapshot" {
+    val seeded = fill("/blog/hi", "slug=hi", "", "/blog/[slug]", 0);
+    val moved = push("/elsewhere");
+    val r = snapshot();
+    assert r.path == "/blog/hi";
+    assert r.param("slug") == "hi";
+}
+
+// ── the encoder, and the round trip ─────────────────────────────────────────
+
+test "router: formStringify is formParse reversed, with no leading `?`" {
+    assert encoding.formStringify([#("a", "1"), #("b", "2")]) == "a=1&b=2";
+    assert encoding.formStringify([]) == "";
+    assert encoding.formStringify([#("q", "")]) == "q=";
+}
+
+test "router: a snapshot's search list round-trips through both" {
+    val seeded = fill("/p", "", "q=boots&page=2&sort=asc", "/p", 0);
+    val r = snapshot();
+    assert encoding.formStringify(r.search) == "q=boots&page=2&sort=asc";
+    val kept = r.search.filter({ p ->
+        p._0 != "sort";
+    });
+    assert encoding.formStringify(kept) == "q=boots&page=2";
+}
+
+// ── decision 116 rule 1: the envelope's `n`, read with `routing` ────────────
+//
+// The four `n` forms of `contracts.md § 5b` pick the navigation the router
+// performs; the grammar is `routing`'s `signalFromWire`, never a copy here.
+
+test "router: the four n forms pick the navigation the router performs" {
+    assert navigationFor("") == "";
+    assert navigationFor("N") == "not-found";
+    assert navigationFor("R|307|/login") == "replace /login";
+    assert navigationFor("R|308|/a|b") == "replace /a|b";
+    assert navigationFor("garbage") == "";
+}
+
+test "router: applying an n performs the navigation through the one cell" {
+    val a = applySignal("R|307|/login");
+    assert lastNavigation() == "replace /login";
+    val b = applySignal("N");
+    assert lastNavigation() == "not-found ";
+    val c = push("/here");
+    val d = applySignal("");
+    assert lastNavigation() == "push /here";
+}
+
+test "router: refresh() carries actions' refreshValue, spelled nowhere here" {
+    val r = refresh();
+    assert lastNavigation() == "refresh " + refreshValue();
+    assert refreshValue() != "";
+}
+
+// ── decision 115: the route a URL is, through `routing`'s matcher ───────────
+
+test "router: resolveRoute matches with routing's matchPath over the payload's t" {
+    val t = "L|/\nP|/blog\nP|/blog/[slug]\nP|/shop/[...rest]";
+    val r = resolveRoute(t, "/blog/hi", "q=a%20b");
+    assert r.pattern == "/blog/[slug]";
+    assert r.param("slug") == "hi";
+    assert r.searchParam("q") == "a b";
+    assert r.segments().length == 2;
+    val s = resolveRoute(t, "/shop/a/b", "");
+    assert s.pattern == "/shop/[...rest]";
+    assert s.param("rest") == "a/b";
+    assert resolveRoute(t, "/blog", "").pattern == "/blog";
+}
+
+test "router: an unmatched pathname resolves to the empty pattern and no params" {
+    val t = "P|/blog/[slug]";
+    val r = resolveRoute(t, "/nowhere", "");
+    assert r.pattern == "";
+    assert r.params.length == 0;
+    assert r.path == "/nowhere";
+}

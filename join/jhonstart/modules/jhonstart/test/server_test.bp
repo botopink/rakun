@@ -1,0 +1,503 @@
+// `botopink test` flat suite for `src/server.bp` (front 28).
+//
+// Written from a CONSUMER's position, the way `router_test.bp` and
+// `elements_test.bp` are: the module under test is reached by its module name,
+// so what the suite exercises is the surface a `from "jhonstart"` consumer
+// gets, not the module's private interior.
+//
+// Both rows run this file. The front's assigned target is erlang and every
+// assertion below RUNS there — none is type-checked-only and none is a
+// commonJS-only claim. That is possible because the six request cells carry
+// both targets and ship their two host halves with the module
+// (`src/server_runtime.mjs`, `src/sidecars/jhonstart_server.erl`); `server.bp`'s
+// header carries the measurement that made that the only writable shape.
+//
+// ── Compile errors this file asserts by NOT containing them ─────────────────
+//
+// A compile error cannot be a `test` block, so the ones the front's acceptance
+// asks for are recorded here by their diagnostic code. Since botopink front 24
+// the return type is the effect (decisions 118–128) and there is no annotation
+// to omit or duplicate; what is left to get wrong is the return:
+//
+//   `pub fn f() -> i32 { val p = await loadPost("x"); … }` — `await` under a
+//   return that is not a `@Task` (or above)
+//     error: effect-await-without-task
+//
+//   `fn Page() -> @Task<Element> { val here = use pathname(); … }` — `@Task`
+//   grants no `use`; the chain spells the case instead
+//   (`fn Page() -> @Component<Element>`)
+//     error: use-without-context-effect
+//
+//   `fn Page() -> @Component<Element> { val p = try await load(); … }`
+//   — `Element` is not a `@Result`, so a component cannot propagate a failed
+//   load; it writes `try await load() catch …`, a `case`, or an error screen
+//     error: effect-try-without-fallible-channel
+//
+//   any of the six removed effect annotations on a fn (decision 127)
+//     error: effect-annotation-removed
+//
+// ── One call-site rule, and it only shows on the erlang row ─────────────────
+//
+// `renderServerComponent` is handed a LAMBDA, never a bare function name.
+// `renderServerComponent(Page)` compiles on commonJS and fails
+// `variable 'Page' is unbound` on erlang — a compiler defect measured against
+// `2e6bb4ac`, reported, and not worked around anywhere in `server.bp`. Every
+// call below spells `{ -> Page(…) }`.
+
+import {server.RequestData, server.request, server.cookies, server.headers, server.enterRequest, server.leaveRequest, server.renderServerComponent, server.renderComponent};
+import {router.fill, router.pathname};
+import {element.Element, element.ElementBase, element.div, element.p, element.h1, element.ul, element.li, element.text, element.renderToString};
+import {elements.article};
+import {encoding} from "std";
+
+// ── step 1: the record and its four accessors ───────────────────────────────
+
+// Constructible with no host present, which is the point of the record being a
+// record: every assertion in this section runs without a filled request.
+fn blogRequest() -> RequestData {
+    return RequestData(
+        method: "GET",
+        path: "/blog/hi",
+        params: [#("slug", "hi")],
+        query: [#("sort", "desc")],
+        headers: [#("accept", "text/html")],
+        cookies: [#("sid", "42")],
+    );
+}
+
+fn emptyRequest() -> RequestData {
+    return RequestData(
+        method: "GET",
+        path: "/",
+        params: [],
+        query: [],
+        headers: [],
+        cookies: [],
+    );
+}
+
+test "server: the four accessors read their own list by name" {
+    val r = blogRequest();
+    assert r.param("slug") == "hi";
+    assert r.queryParam("sort") == "desc";
+    assert r.header("accept") == "text/html";
+    assert r.cookie("sid") == "42";
+}
+
+test "server: an absent key is the empty string, not a runtime error" {
+    val r = blogRequest();
+    assert r.param("nope") == "";
+    assert r.queryParam("nope") == "";
+    assert r.header("nope") == "";
+    assert r.cookie("nope") == "";
+}
+
+test "server: every accessor over the empty list answers the empty string" {
+    val r = emptyRequest();
+    assert r.param("slug") == "";
+    assert r.queryParam("sort") == "";
+    assert r.header("accept") == "";
+    assert r.cookie("sid") == "";
+}
+
+// Each accessor reads its OWN list. A `param` that fell through to the query,
+// or a `cookie` that read a header, is the bug this asserts against: all four
+// funnel through one `pairValue` and the list is the only thing that differs.
+test "server: an accessor never reads another accessor's list" {
+    val r = RequestData(
+        method: "GET",
+        path: "/x",
+        params: [#("k", "from-params")],
+        query: [#("k", "from-query")],
+        headers: [#("k", "from-headers")],
+        cookies: [#("k", "from-cookies")],
+    );
+    assert r.param("k") == "from-params";
+    assert r.queryParam("k") == "from-query";
+    assert r.header("k") == "from-headers";
+    assert r.cookie("k") == "from-cookies";
+}
+
+// `pairValue` is front 26's and its duplicate-key rule is tested there, not
+// re-tested here. What IS this front's is that all four accessors go through
+// it, so the answer to "what does a duplicated cookie mean" cannot differ
+// between two accessors of the same record.
+test "server: a duplicated key answers the FIRST match, in every accessor" {
+    val r = RequestData(
+        method: "GET",
+        path: "/x",
+        params: [#("k", "one"), #("k", "two")],
+        query: [#("k", "one"), #("k", "two")],
+        headers: [#("k", "one"), #("k", "two")],
+        cookies: [#("k", "one"), #("k", "two")],
+    );
+    assert r.param("k") == "one";
+    assert r.queryParam("k") == "one";
+    assert r.header("k") == "one";
+    assert r.cookie("k") == "one";
+}
+
+// Field names and method names are disjoint, so a field read never shadows a
+// method and both spellings are reachable on the same value. `method` and
+// `path` are plain fields with no accessor at all — there is nothing to look
+// up by name in a single string.
+test "server: the fields are readable beside the methods that never shadow them" {
+    val r = blogRequest();
+    assert r.method == "GET";
+    assert r.path == "/blog/hi";
+    assert r.params.length == 1;
+    assert r.query.length == 1;
+    assert r.headers.length == 1;
+    assert r.cookies.length == 1;
+    assert r.param("slug") == "hi";
+}
+
+// ── step 2: the six cells and the request builder ───────────────────────────
+
+// The six values as the old flat writer took them — the four pair lists
+// `k=v&k=v`-encoded — built into the record `enterRequest` takes. No parameter
+// is named after an imported function (`cookies`, `headers`) — a reading
+// convention; the checker defect that forced it (a binding leaking into every
+// later declaration's scope) is closed.
+fn encoded(
+    verb: string,
+    at: string,
+    ps: string,
+    qs: string,
+    hs: string,
+    cs: string,
+) -> RequestData {
+    return RequestData(
+        method: verb,
+        path: at,
+        params: encoding.formParse(ps),
+        query: encoding.formParse(qs),
+        headers: encoding.formParse(hs),
+        cookies: encoding.formParse(cs),
+    );
+}
+
+test "server: the six cells round-trip into the record of step 1" {
+    enterRequest(
+        encoded(
+            "POST",
+            "/blog/hi",
+            "slug=hi",
+            "sort=desc&page=2",
+            "accept=text/html",
+            "sid=42&theme=dark",
+        ),
+    );
+    val r = await request();
+    assert r.method == "POST";
+    assert r.path == "/blog/hi";
+    assert r.param("slug") == "hi";
+    assert r.queryParam("sort") == "desc";
+    assert r.queryParam("page") == "2";
+    assert r.header("accept") == "text/html";
+    assert r.cookie("sid") == "42";
+    assert r.cookie("theme") == "dark";
+}
+
+// An entered request with empty lists is the EMPTY request:
+// `encoding.formParse("")` is `[]` rather than `[#("", "")]`.
+test "server: an empty encoding yields the empty list, not one empty pair" {
+    enterRequest(encoded("GET", "/", "", "", "", ""));
+    val r = await request();
+    assert r.params.length == 0;
+    assert r.query.length == 0;
+    assert r.headers.length == 0;
+    assert r.cookies.length == 0;
+    assert r.param("slug") == "";
+    assert r.cookie("sid") == "";
+}
+
+// An enter replaces the WHOLE request, never one field of it — the same rule
+// front 26's `fill` follows, for the same reason: a half-updated request is a
+// component reading the previous reader's cookie against this reader's path.
+test "server: an enter replaces the whole request" {
+    enterRequest(encoded("POST", "/a", "id=1", "q=1", "accept=a", "sid=1"));
+    enterRequest(encoded("GET", "/b", "id=2", "", "", ""));
+    val r = await request();
+    assert r.method == "GET";
+    assert r.path == "/b";
+    assert r.param("id") == "2";
+    assert r.queryParam("q") == "";
+    assert r.header("accept") == "";
+    assert r.cookie("sid") == "";
+}
+
+// The two re-exported shortcuts read the same two cells the record does, so a
+// page that wants only the cookies does not pay for the other four decodes —
+// and cannot disagree with `request().cookie(n)` about what it finds.
+test "server: cookies() and headers() answer the same lists the record carries" {
+    enterRequest(
+        encoded("GET", "/x", "", "", "accept=text/html&x=1", "sid=42"),
+    );
+    assert cookies().length == 1;
+    assert headers().length == 2;
+    val r = await request();
+    assert r.cookies.length == cookies().length;
+    assert r.headers.length == headers().length;
+}
+
+// ── step 3: the server-component convention ─────────────────────────────────
+
+pub type Post(id: string, title: string)
+
+pub type Comment(author: string, body: string)
+
+// A loader is an ordinary fn returning `@Task<T>` — the return is the effect.
+// These two stand in for a database read and cannot fail, so their Task carries
+// no `@Result` and a component awaits them with a bare `await`; a loader that can
+// fail returns `@Task<@Result<T, E>>` and a component handles it with
+// `try await … catch …` (decision 121). `server.bp` ships no loader machinery,
+// because `libs/std/src/http.bp` already has `fetch(url)`, a database loader is
+// front 08's and parallel awaiting is front 02's.
+fn loadPost(slug: string) -> @Task<Post> {
+    return Post(id: "p-" + slug, title: "Post " + slug);
+}
+
+// A component that needs N rows awaits ONE loader returning `Array<T>` and maps
+// synchronously afterwards — never N awaits inside a `map`. `§2.38` makes a
+// lambda's last statement an implicit-return expression, so an `await` cannot
+// stand there.
+fn loadComments(postId: string) -> @Task<Array<Comment>> {
+    return [
+        Comment(author: "ana", body: "first on " + postId),
+        Comment(author: "bo", body: "second on " + postId),
+    ];
+}
+
+fn commentRow(c: Comment) -> Element {
+    return li([text(c.author + ": " + c.body, attrs: [])], attrs: []);
+}
+
+// One await, then a synchronous render.
+fn PostTitlePage(params: Array<#(string, string)>) -> @Task<Element> {
+    val r = RequestData(
+        method: "GET",
+        path: "/blog",
+        params: params,
+        query: [],
+        headers: [],
+        cookies: [],
+    );
+    val post = await loadPost(r.param("slug"));
+    return div([h1([text(post.title, attrs: [])], attrs: [])], attrs: []);
+}
+
+test "server: a @Task component awaits a loader and renders" {
+    val out = await renderServerComponent(
+        { -> PostTitlePage([#("slug", "hi")]) },
+    );
+    assert out == "<div><h1>Post hi</h1></div>";
+}
+
+// TWO sequential awaits, both at STATEMENT level, the second depending on the
+// first. On the erlang row these cost two round trips even when the results are
+// independent, because `@Task` there is eager (botopink decision 120):
+// the page costs the SUM of its loaders. When the loaders are INDEPENDENT the
+// answer is front 02's spawn-and-gather over unstarted tasks
+// (`[{ -> loadPost(s) }, { -> loadSidebar() }]`), not a `map` over Tasks,
+// which would simply run them in order. These two are dependent — `loadComments`
+// needs `post.id` — so sequence is what they actually are.
+fn PostPage(params: Array<#(string, string)>) -> @Task<Element> {
+    val r = RequestData(
+        method: "GET",
+        path: "/blog",
+        params: params,
+        query: [],
+        headers: [],
+        cookies: [],
+    );
+    val post = await loadPost(r.param("slug"));
+    val comments = await loadComments(post.id);
+    return article(
+        [
+            h1([text(post.title, attrs: [])], attrs: []),
+            ul(
+                comments.map({ c ->
+                    commentRow(c);
+                }),
+                attrs: [],
+            ),
+        ],
+        attrs: [],
+    );
+}
+
+test "server: two sequential awaits at statement level, then a sync render" {
+    val out = await renderServerComponent({ -> PostPage([#("slug", "hi")]) });
+    assert out
+        == "<article><h1>Post hi</h1><ul><li>ana: first on p-hi</li><li>bo: second on p-hi</li></ul></article>";
+}
+
+// `renderServerComponent` awaits EXACTLY once and renders synchronously
+// afterwards: handed a component that awaits nothing, it is `renderToString`
+// with one extra frame, and the two spellings agree character for character.
+test "server: renderServerComponent awaits once and then is renderToString" {
+    val tree = div([text("plain", attrs: [])], attrs: []);
+    val out = await renderServerComponent({ -> justTree(tree) });
+    assert out == renderToString(tree);
+    assert out == "<div>plain</div>";
+}
+
+fn justTree(e: Element) -> @Task<Element> {
+    return e;
+}
+
+// ── the request, read from inside a server component ────────────────────────
+
+// The shape a real page has: the request is read at the top of the body, the
+// loader is awaited at statement level, and the render is synchronous. This is
+// what makes the front worth having — the data layer and the component tree in
+// one file.
+fn GreetingPage() -> @Task<Element> {
+    val r = await request();
+    val post = await loadPost(r.param("slug"));
+    return div(
+        [
+            h1([text("Hello, " + r.cookie("name"), attrs: [])], attrs: []),
+            p([text(post.title, attrs: [])], attrs: []),
+            p([text("via " + r.header("accept"), attrs: [])], attrs: []),
+        ],
+        attrs: [],
+    );
+}
+
+test "server: a component reads the filled request and renders it" {
+    enterRequest(
+        encoded(
+            "GET",
+            "/blog/hi",
+            "slug=hi",
+            "",
+            "accept=text/html",
+            "name=ana",
+        ),
+    );
+    val out = await renderServerComponent({ -> GreetingPage() });
+    assert out
+        == "<div><h1>Hello, ana</h1><p>Post hi</p><p>via text/html</p></div>";
+}
+
+// The SAME page rendered from an explicit `RequestData` — no host, no fill.
+// That is the property the record buys and the reason `request()` is a thin
+// builder over six cells rather than the thing components call: a page written
+// against the record is testable, and one written against the cells is not.
+fn GreetingFor(r: RequestData) -> @Task<Element> {
+    val post = await loadPost(r.param("slug"));
+    return div(
+        [
+            h1([text("Hello, " + r.cookie("name"), attrs: [])], attrs: []),
+            p([text(post.title, attrs: [])], attrs: []),
+            p([text("via " + r.header("accept"), attrs: [])], attrs: []),
+        ],
+        attrs: [],
+    );
+}
+
+test "server: the same page renders from an explicit request, with no host" {
+    val r = RequestData(
+        method: "GET",
+        path: "/blog/hi",
+        params: [#("slug", "hi")],
+        query: [],
+        headers: [#("accept", "text/html")],
+        cookies: [#("name", "ana")],
+    );
+    val out = await renderServerComponent({ -> GreetingFor(r) });
+    assert out
+        == "<div><h1>Hello, ana</h1><p>Post hi</p><p>via text/html</p></div>";
+}
+
+// ── decision 128: a server component that uses and awaits ───────────────────
+//
+// `fn … -> @Component<Element>`: `@Component` extends `@Task`, so the
+// one return grants `use` and `await` (decisions 104/118/128 of 1.0.10-beta —
+// a `@Task` body does not activate a hook). `renderComponent` renders its thunk.
+fn RoutedPage() -> @Component<Element> {
+    val here = use pathname();
+    val post = await loadPost("hi");
+    return div(
+        [
+            h1([text(post.title, attrs: [])], attrs: []),
+            p([text(here, attrs: [])], attrs: []),
+        ],
+        attrs: [],
+    );
+}
+
+test "server: a @Component component activates a hook and awaits a loader" {
+    fill("/blog/hi", "slug=hi", "", "/blog/[slug]", 0);
+    val out = await renderComponent({ -> RoutedPage() });
+    assert out == "<div><h1>Post hi</h1><p>/blog/hi</p></div>";
+}
+
+// ── what this front does NOT escape ─────────────────────────────────────────
+//
+// `renderToString` writes `e.value` straight into the output and neither
+// escapes nor knows void elements (`element.bp:56`, frozen). A server component
+// renders attacker-influenced text, so the value below comes out as markup —
+// this assertion PINS that, so that the day front 01's `escape.html` lands and
+// a page starts calling it, the change is visible as a red cell here rather
+// than as a silently different answer.
+//
+// front 01's `libs/std/src/escape.bp` does not exist in compiler `2e6bb4ac`, so
+// nothing in this package can call it yet. `server.bp` hand-rolls no
+// replacement: a stand-in would be a second answer to "what is an escaped `&`"
+// the day the real one arrives.
+test "server: a rendered value is NOT escaped — escaping is front 01's, at the call site" {
+    val r = RequestData(
+        method: "GET",
+        path: "/search",
+        params: [],
+        query: [#("q", "<script>alert(1)</script>")],
+        headers: [],
+        cookies: [],
+    );
+    val out = await renderServerComponent({ -> SearchEcho(r) });
+    assert out == "<div><p><script>alert(1)</script></p></div>";
+}
+
+fn SearchEcho(r: RequestData) -> @Task<Element> {
+    return div([p([text(r.queryParam("q"), attrs: [])], attrs: [])], attrs: []);
+}
+
+// ── decisions 114 and 116: the writer pair and the percent-aware codec ─────
+
+test "server: request() after enterRequest(req) reconstructs the six fields" {
+    val req = RequestData(
+        method: "POST",
+        path: "/blog/hi",
+        params: [#("slug", "hi")],
+        query: [#("q", "a b")],
+        headers: [#("accept", "text/html")],
+        cookies: [#("sid", "4 2"), #("theme", "dark")],
+    );
+    enterRequest(req);
+    val r = await request();
+    assert r.method == "POST";
+    assert r.path == "/blog/hi";
+    assert r.param("slug") == "hi";
+    assert r.queryParam("q") == "a b";
+    assert r.header("accept") == "text/html";
+    assert r.cookie("sid") == "4 2";
+    assert r.cookie("theme") == "dark";
+    leaveRequest();
+}
+
+// The stored form is std's `encoding.formStringify`, so a value carrying `%20`
+// reads back as a space — the stand-in decoder the package carried before
+// decision 116 answered `a%20b`.
+test "server: a percent-encoded query value reads back decoded" {
+    enterRequest(
+        encoded("GET", "/search", "", "q=a%20b&n=1%2B1", "", "c=x%3Dy"),
+    );
+    val r = await request();
+    assert r.queryParam("q") == "a b";
+    assert r.queryParam("n") == "1+1";
+    assert r.cookie("c") == "x=y";
+    leaveRequest();
+}

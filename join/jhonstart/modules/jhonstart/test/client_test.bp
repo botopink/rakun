@@ -1,0 +1,461 @@
+// `botopink test` flat suite for `src/client.bp` (front 29).
+//
+// Written from a CONSUMER's position, the way `router_test.bp`,
+// `server_test.bp`, `link_test.bp` and `elements_test.bp` are: the module under
+// test is reached by its module name, so what the suite exercises is the
+// surface a `from "jhonstart"` consumer gets, not the module's private
+// interior. **That is also the front's § Step 1 acceptance row "the marker
+// is reachable at the application site, which must therefore import
+// `client`"**: the `import { client, clientProps } from "client";` below is
+// what makes `#[client]` applicable here at all, and the meta read further
+// down (`@typeInfo(X).meta.client.component`) is recorded by that application.
+//
+// The front's assigned target is **commonJS**, and every assertion below also
+// RUNS on the erlang row — not one is type-checked-only. That is the front's
+// own claim that `clientMount` and `serverSlot` are pure and produce the same
+// placeholder on both backends, which is how a client boundary is known to
+// render during the server pass at all: a placeholder that did not render on
+// the server would be a boundary that never starts.
+//
+// ── What this file does NOT assert, and why ─────────────────────────────────
+//
+// 1. **Every wrong-placement case is a COMPILE failure, not a value.** A
+//    rejected decorator does not return anything a runtime `assert` can read,
+//    so the four refusals are recorded here as comments naming the exact
+//    message, the way `rakun/test/di_test.bp` does. Measured against compiler
+//    `2e6bb4ac`; each is located at the annotation:
+//
+//      #[client] on a `type`
+//        error: #[client] must annotate a function
+//      #[client] on `fn Srv() -> @Task<Element>`
+//        error: #[client] must annotate a component returning Element
+//      #[clientProps] on an enum-shaped `type`
+//        error: #[clientProps] must annotate a record, not an enum
+//      #[clientProps] on a record with a field typed `Element`
+//        error: a client prop must be serializable; 'e' is Element
+//      #[clientProps] on a record with a field typed `fn(x: i32) -> i32`
+//        error: a client prop must be serializable; 'cb' is a type reflection
+//               cannot name (a function, tuple or T[] type)
+//
+//    The compile-failure coverage itself lives in the compiler's own suites.
+//
+// 2. **`hydrate()` idempotent, and `propsFor(name)` over the real cell.** The
+//    front's § Step 4 asks for both and neither is assertable: the two host
+//    cells are not declared, because their module `"jhonstart/client-runtime"`
+//    is the bundle **front 68** generates and does not exist, and because a
+//    called node-only cell reds the ERLANG build of this member — the
+//    measurement in `client.bp`'s header. Nothing is stubbed to get a green
+//    cell. What IS assertable is the pure decode `propsFor` performs —
+//    `propsOf` — and it is asserted below, empty case included.
+//
+// 3. **That a secret does not cross the boundary.** Nothing in this front
+//    checks it; see `client.bp`'s § *What is ENFORCED here, and what is NOT*.
+//    The check is front 68's walk over the client module graph.
+//
+// ── One naming rule this file follows, and the defect behind it ─────────────
+//
+// No local below is named `p`, `li`, `text` or any other imported builder —
+// `val like = LikeProps(…)`, never `val p = LikeProps(…)`. The rule was
+// forced when it was written: a local `val` leaked into the module scope the
+// checker saw for every top-level declaration that appears AFTER its body
+// (closed in the compiler — a local now ends with its body; the jhonstart-free
+// repro went with the fix). Back then, with `val p = LikeProps(…)` in a
+// `test {}` above it, `Dashboard`'s
+// `p([text(…)], attrs: [])` further down reds the whole module with
+// `error: type mismatch: expected Element, got LikeProps` — and with no line
+// or column, at a call site that is correct. Nothing here works around it in
+// library source; `client.bp` declares no local that shadows anything.
+
+import {client.client, client.clientProps, client.islandId, client.islandAttrOf, client.islandAttr, client.Island, client.clientMount, client.islandEntry, client.propsOf, client.serverSlotAttr, client.serverSlot, client.serverOnly, client.hydrate, client.propsFor, client.registerStarter, client.registerRouteStarters, client.registeredStarters, client.registeredRouteStarters};
+import {globals.globals};
+import {render.attemptRender};
+import {element.Element, element.div, element.h1, element.p, element.ul, element.li, element.text, element.renderToString};
+import {elements.button, elements.h2, elements.section};
+import {hooks.state};
+import {element.ElementBase};
+
+// ── step 1: `#[client]` — the marker, and the proof `@emit` fired ───────────
+//
+// A real client component: `#[client]` for the boundary, the
+// `@Component<Element>` return for the effect (decisions 118/128 — the
+// return is the activation, and `#[client]` is a decorator rather than an effect,
+// so the two coexist). `use state` means
+// nothing on the server; the body renders its first-render value, which is all
+// a placeholder ever needs.
+
+#[clientProps]
+pub type LikeProps(
+    postId: string,
+    likes: i32,
+)
+
+#[client]
+pub fn LikeButton(props: LikeProps) -> @Component<Element> {
+    val c = use state(props.likes);
+    return button(
+        [
+            text(c.value.toString() + " likes", attrs: []),
+        ],
+        attrs: [
+            #("data-jh-on-click", "LikeButton:like"),
+            #("data-jh-post", props.postId),
+        ],
+    );
+}
+
+#[clientProps]
+pub type ThemeProps(theme: string)
+
+// `children` is a PARAMETER, not a prop: it is not part of `ThemeProps` and it
+// is not serialized. That separation is the whole Context-Provider pattern, and
+// it is why `Element` is off the serializable whitelist.
+#[client]
+pub fn ThemeProvider(
+    props: ThemeProps,
+    children: Children,
+) -> @Component<Element> {
+    val current = use state(props.theme);
+    return div(children, attrs: [#("class", "theme-" + current.value)]);
+}
+
+// A client component that activates nothing returns bare `Element`
+// (decision 104) and is marked the same way.
+#[client]
+pub fn StaticBadge(props: ThemeProps) -> Element {
+    return div([text(props.theme, attrs: [])], attrs: [#("class", "badge")]);
+}
+
+test "client: the marker fires on a plain -> Element component too" {
+    assert @typeInfo(StaticBadge).meta.client.component == "StaticBadge";
+    assert renderToString(StaticBadge(ThemeProps(theme: "dark")))
+        == "<div class=\"badge\">dark</div>";
+}
+
+test "client: the marker records the component's name as comptime meta" {
+    assert @typeInfo(LikeButton).meta.client.component == "LikeButton";
+    assert @typeInfo(ThemeProvider).meta.client.component == "ThemeProvider";
+}
+
+test "client: the marker is a CONSTANT, not a call into a host registry" {
+    // It answers on the erlang row too, which is the point: a marker that
+    // called a Node-only cell would make every `#[client]` component fail to
+    // link during the server render — the exact case the boundary exists to
+    // support. Meta is a compile-time constant on every target.
+    val name = @typeInfo(LikeButton).meta.client.component;
+    assert name.length == 10;
+}
+
+test "client: the decorated component is unchanged and still renders" {
+    assert renderToString(await LikeButton(LikeProps(postId: "7", likes: 3)))
+        == "<button data-jh-on-click=\"LikeButton:like\" data-jh-post=\"7\">3 likes</button>";
+}
+
+// ── step 2: `#[clientProps]` — a whitelisted record is applied and compiles ─
+
+#[clientProps]
+pub type EveryScalar(
+    s: string,
+    i: i32,
+    f: f64,
+    b: bool,
+)
+
+test "client: a record of whitelisted fields passes and is an ordinary record" {
+    val every = EveryScalar(s: "x", i: 1, f: 2.5, b: true);
+    assert every.s == "x";
+    assert every.i == 1;
+    assert every.b;
+}
+
+test "client: the props record a client component takes is just a record" {
+    val like = LikeProps(postId: "7", likes: 3);
+    assert like.postId == "7";
+    assert like.likes == 3;
+}
+
+// ── step 3: the island, and decision 77's single spelling ───────────────────
+
+test "client: islandId is the ordinal's spelling and nothing else" {
+    assert islandId(0) == "i0";
+    assert islandId(1) == "i1";
+    assert islandId(42) == "i42";
+}
+
+test "client: islandAttr is the marker pair for an ordinal — decision 77" {
+    val pair = islandAttr(0);
+    assert pair._0 == "data-jh-i";
+    assert pair._1 == "i0";
+    assert islandAttr(3)._1 == "i3";
+}
+
+test "client: islandAttrOf and islandAttr agree by construction, not by review" {
+    // The one property decision 77 is about: front 23 reads the pair through
+    // `RenderHooks.islandAttr` and front 68's entry imports the same function,
+    // so there is no second spelling that has to be kept in step with this one.
+    assert islandAttr(2)._0 == islandAttrOf("i2")._0;
+    assert islandAttr(2)._1 == islandAttrOf("i2")._1;
+}
+
+test "client: the placeholder carries the id only — the name and props are payload" {
+    val el = clientMount(
+        Island(id: "i0", component: "Counter", props: [#("start", "3")]),
+        [],
+    );
+    assert el.tag == "div";
+    assert el.attrs.length == 1;
+    assert renderToString(el) == "<div data-jh-i=\"i0\"></div>";
+}
+
+test "client: children render inside the placeholder, unmodified" {
+    val el = clientMount(
+        Island(id: "i1", component: "ThemeProvider", props: []),
+        [h1([text("Hello", attrs: [])], attrs: []), text("!", attrs: [])],
+    );
+    assert renderToString(el) == "<div data-jh-i=\"i1\"><h1>Hello</h1>!</div>";
+}
+
+test "client: islandEntry is the payload's i row — id, component, encoded props" {
+    val row = islandEntry(
+        Island(id: "i0", component: "Counter", props: [#("start", "3")]),
+    );
+    assert row._0 == "i0";
+    assert row._1 == "Counter";
+    assert row._2 == "start=3";
+}
+
+test "client: islandEntry encodes several props k=v&k=v, in order" {
+    val row = islandEntry(
+        Island(
+            id: "i0",
+            component: "LikeButton",
+            props: [
+                #("postId", "7"),
+                #("likes", "3"),
+            ],
+        ),
+    );
+    assert row._2 == "postId=7&likes=3";
+}
+
+test "client: an island with no props encodes to the empty string" {
+    assert islandEntry(Island(id: "i9", component: "Now", props: []))._2 == "";
+}
+
+// ── step 3b: the hole — `data-jh-s` ───────────────────────────────────────
+
+test "client: serverSlot emits data-jh-s=\"1\" and nothing else" {
+    val el = serverSlot([]);
+    assert el.attrs.length == 1;
+    assert serverSlotAttr()._0 == "data-jh-s";
+    assert serverSlotAttr()._1 == "1";
+    assert renderToString(el) == "<div data-jh-s=\"1\"></div>";
+}
+
+test "client: the server subtree is carried through the slot untouched" {
+    val markup = renderToString(
+        serverSlot(
+            [
+                section(
+                    [p([text("4 tickets open", attrs: [])], attrs: [])],
+                    attrs: [#("class", "dashboard")],
+                ),
+            ],
+        ),
+    );
+    assert markup
+        == "<div data-jh-s=\"1\"><section class=\"dashboard\"><p>4 tickets open</p></section></div>";
+}
+
+// The Context-Provider shape: a client provider wrapping a server-rendered
+// tree. The island is the provider; the hole is the server's.
+fn Dashboard(userName: string, openTickets: i32) -> Element {
+    return section(
+        [
+            h1([text("Hello, " + userName, attrs: [])], attrs: []),
+            p(
+                [text(openTickets.toString() + " tickets open", attrs: [])],
+                attrs: [],
+            ),
+        ],
+        attrs: [#("class", "dashboard")],
+    );
+}
+
+fn RootLayout(theme: string, page: Element) -> Element {
+    return clientMount(
+        Island(
+            id: islandId(0),
+            component: "ThemeProvider",
+            props: [#("theme", theme)],
+        ),
+        [serverSlot([page])],
+    );
+}
+
+test "client: the layout nests a server slot inside the island" {
+    val markup = renderToString(RootLayout("dark", Dashboard("Ana", 4)));
+    assert markup.contains("data-jh-i=\"i0\"");
+    assert markup.contains("data-jh-s=\"1\"");
+    assert markup.contains("<h1>Hello, Ana</h1>");
+    // The component name is NOT in the markup — it is in the payload's `i` row.
+    assert markup.contains("ThemeProvider") == false;
+}
+
+test "client: the server subtree is rendered ONCE, by the server" {
+    val markup = renderToString(RootLayout("light", Dashboard("Ana", 1)));
+    assert markup.split("1 tickets open").length == 2;
+}
+
+// The Server + Client shape: a server component that emits the ISLAND rather
+// than calling the client component. Front 23 assigns the ids in render order;
+// a page that emits its own does the same, so the ids in the markup and the ids
+// in the payload's `i` row agree.
+fn postRow(ordinal: i32, title: string, postId: string, likes: i32) -> Element {
+    return li(
+        [
+            h2([text(title, attrs: [])], attrs: []),
+            clientMount(
+                Island(
+                    id: islandId(ordinal),
+                    component: "LikeButton",
+                    props: [
+                        #("postId", postId),
+                        #("likes", likes.toString()),
+                    ],
+                ),
+                [],
+            ),
+        ],
+        attrs: [#("class", "post-row")],
+    );
+}
+
+fn PostList() -> Element {
+    return div(
+        [
+            h1([text("Posts", attrs: [])], attrs: []),
+            ul(
+                [
+                    postRow(0, "First", "1", 0),
+                    postRow(1, "Second", "2", 9),
+                ],
+                attrs: [#("class", "posts")],
+            ),
+        ],
+        attrs: [#("class", "page")],
+    );
+}
+
+test "client: a server component emits the island, not the component" {
+    val markup = renderToString(postRow(0, "On BEAM rendering", "7", 3));
+    assert markup.contains("<h2>On BEAM rendering</h2>");
+    assert markup.contains("data-jh-i=\"i0\"");
+    // The handler attribute belongs to the component's own markup, which the
+    // server never renders for an island.
+    assert markup.contains("data-jh-on-click") == false;
+}
+
+test "client: the list renders one island per post, numbered in render order" {
+    val markup = renderToString(PostList());
+    assert markup.contains("data-jh-i=\"i0\"");
+    assert markup.contains("data-jh-i=\"i1\"");
+    assert markup.contains("LikeButton") == false;
+}
+
+// ── step 4: the pure half of `propsFor`, and the poison pill ────────────────
+
+test "client: propsOf decodes the row islandEntry encoded" {
+    val row = islandEntry(
+        Island(
+            id: "i0",
+            component: "LikeButton",
+            props: [
+                #("postId", "7"),
+                #("likes", "3"),
+            ],
+        ),
+    );
+    val back = propsOf(row._2);
+    assert back.length == 2;
+    assert (back.at(0) ?? #("", ""))._0 == "postId";
+    assert (back.at(0) ?? #("", ""))._1 == "7";
+    assert (back.at(1) ?? #("", ""))._1 == "3";
+}
+
+test "client: propsOf of a component with no props is the empty list" {
+    assert propsOf("").length == 0;
+}
+
+test "client: serverOnly is pub and its value is meaningless" {
+    // The value is never read by anything. Its PRESENCE in a module's import
+    // list is the signal, and front 68 is what reads the import list.
+    assert serverOnly() == 1;
+}
+
+// ── step 4: the hydrate point and the props cell, both rows ─────────────────
+
+test "client: propsFor of a component with no row is the empty list" {
+    assert propsFor("Nothing").length == 0;
+}
+
+test "client: hydrate is idempotent — a second call starts nothing new" {
+    val first = hydrate();
+    val second = hydrate();
+    assert first == second;
+}
+
+// ── the island starter table — `globals.starters` ───────────────────────────
+
+fn startNothing(raw: string, commit: fn(html: string) -> i32) -> i32 {
+    return commit("<b>" + raw + "</b>");
+}
+
+fn loadNothing() -> @Task<i32> {
+    return 0;
+}
+
+test "client: registerStarter fills the registry's table, in registration order" {
+    val before = registeredStarters().length;
+    registerStarter("StarterA", { raw, commit -> startNothing(raw, commit) });
+    registerStarter("StarterB", { raw, commit -> startNothing(raw, commit) });
+    val names = registeredStarters();
+    assert names.length == before + 2;
+    assert names.contains("StarterA");
+    assert names.at(names.length - 1) ?? "" == "StarterB";
+}
+
+test "client: a second starter for one component fails, naming it" {
+    registerStarter(
+        "StarterTwice",
+        { raw, commit -> startNothing(raw, commit) },
+    );
+    val out = attemptRender(
+        { -> registerStarter("StarterTwice", { raw, commit -> startNothing(raw, commit) }) },
+    );
+    val message = case out {
+        Ok(n) -> "";
+        Error(m) -> m;
+    };
+    assert message.contains(
+        "a starter for `StarterTwice` is already registered",
+    );
+}
+
+test "client: registerRouteStarters keeps one loader per route pattern" {
+    registerRouteStarters("/blog/[slug]", { -> loadNothing() });
+    assert registeredRouteStarters().contains("/blog/[slug]");
+    val out = attemptRender(
+        { -> registerRouteStarters("/blog/[slug]", { -> loadNothing() }) },
+    );
+    val message = case out {
+        Ok(n) -> "";
+        Error(m) -> m;
+    };
+    assert message.contains(
+        "a starter loader for route `/blog/[slug]` is already registered",
+    );
+}
+
+test "client: the starter table is the registry's fourth global" {
+    assert globals.starters == "__bp3";
+}

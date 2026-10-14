@@ -1,0 +1,144 @@
+// `botopink test` flat suite for `src/routes.bp` (front 30 Step 10): the UI
+// file conventions. The markers run under `botopink test` only — `botopink
+// check` skips decorator invocation and reports every `@emit`ted name
+// (`<page>Params`) as unbound. The module is its own entry point: it registers
+// its marked functions from `@TypeInfo.all` with `jhRegisterRoutes`
+// (decision 216), so nothing imports it.
+//
+// Wrong-placement cases are COMPILE failures, not values, so no `test { }`
+// block holds them: each is a project under the repository's `refusals/`,
+// refused by `botopink check` with its exact located message
+// (`scripts/check-refusals.sh`, stage 4 of the pre-commit gate) — a layout, a
+// page and a template whose return is not `@Component<Element>`.
+// The application site imports what `#[page]`'s accessor EMITS —
+// `PageContext`, `ctxParam` / `ctxRest` — beside the marker itself.
+
+import {element.Element, element.ElementBase, element.text, element.div, element.p};
+import {elements.main};
+import {routes.page, routes.layout, routes.template, routes.defaultView, routes.PageContext, routes.LayoutProps, routes.uiTable, routes.ctxParam, routes.ctxRest, routes.jhRegisterRoutes, routes.jhLoading, routes.jhNotFound, routes.segmentFor, routes.pageFor};
+import {table.parseTable, table.RouteEntry, segment.parsePath, segment.patternOf} from "routing";
+
+#[layout("")]
+pub fn RootLayout(props: LayoutProps) -> @Component<Element> {
+    return main([props.children], attrs: []);
+}
+
+#[layout("(marketing)")]
+pub fn MarketingLayout(props: LayoutProps) -> @Component<Element> {
+    return div([props.children], attrs: [#("class", "mk")]);
+}
+
+#[template("blog")]
+pub fn BlogTemplate(props: LayoutProps) -> @Component<Element> {
+    return div([props.children], attrs: []);
+}
+
+#[page("blog")]
+pub fn blogIndex(route: PageContext) -> @Component<Element> {
+    return p([text("index", attrs: [])], attrs: []);
+}
+
+#[page("blog/[slug]")]
+pub fn blogPostPage(route: PageContext) -> @Component<Element> {
+    val ps = blogPostPageParams(route);
+    return p([text("post " + ps.slug, attrs: [])], attrs: []);
+}
+
+#[page("shop/[...slug]")]
+pub fn shopPage(route: PageContext) -> @Component<Element> {
+    val ps = shopPageParams(route);
+    return p([text(ps.slug.join("/"), attrs: [])], attrs: []);
+}
+
+#[page("about")]
+pub fn aboutPage(route: PageContext) -> @Component<Element> {
+    return p([text("about", attrs: [])], attrs: []);
+}
+
+#[defaultView("@team")]
+pub fn TeamDefault(props: LayoutProps) -> Element {
+    return div([], attrs: []);
+}
+
+fn BlogLoading() -> Element {
+    return div([text("loading", attrs: [])], attrs: []);
+}
+
+val __loading = jhLoading("blog", { -> BlogLoading() });
+
+val __routes = jhRegisterRoutes(
+    @TypeInfo.all(with: page),
+    @TypeInfo.all(with: layout),
+    @TypeInfo.all(with: template),
+    @TypeInfo.all(with: defaultView),
+);
+
+fn ctx(
+    pattern: string,
+    params: Array<#(string, string)>,
+    rest: string[],
+) -> PageContext {
+    return PageContext(
+        pathname: "/x",
+        pattern: pattern,
+        params: params,
+        rest: rest,
+    );
+}
+
+test "routes: each marker puts its contract-1 line in uiTable, in registration order" {
+    val t = uiTable();
+    assert t.contains("L|/");
+    assert t.contains("T|/blog");
+    assert t.contains("P|/blog");
+    assert t.contains("P|/blog/[slug]");
+    assert t.contains("P|/shop/[...slug]");
+    assert t.contains("P|/about");
+    assert t.contains("S|/blog");
+}
+
+test "routes: a group contributes no segment — (marketing) is the root pattern" {
+    val lines = uiTable().split("\n").filter({ l -> l == "L|/" });
+    assert lines.length == 2;
+}
+
+test "routes: a slot segment is the record's slot field, not part of the pattern" {
+    assert uiTable().contains("D|/|team");
+}
+
+test "routes: the table round-trips through routing's parseTable and parsePath" {
+    val rows = parseTable(uiTable());
+    assert rows.length >= 9;
+    assert patternOf(parsePath("blog/[slug]")) == "/blog/[slug]";
+    assert patternOf(parsePath("(marketing)")) == "/";
+    var pages = 0;
+    for (rows) { r ->
+        if (r.kind == "P") pages = pages + 1;
+    }
+    assert pages == 4;
+}
+
+test "routes: blogPostPageParams reads slug: string off the route" {
+    val ps = blogPostPageParams(ctx("/blog/[slug]", [#("slug", "hi")], []));
+    assert ps.slug == "hi";
+}
+
+test "routes: a catch-all's field is string[]" {
+    val ps = shopPageParams(ctx("/shop/[...slug]", [], ["a", "b"]));
+    assert ps.slug.length == 2;
+    assert ps.slug.join("/") == "a/b";
+}
+
+test "routes: a page with no dynamic segment answers the empty tuple" {
+    val ps = aboutPageParams(ctx("/about", [], []));
+    assert ctxParam(ctx("/about", [], []), "x") == "";
+}
+
+test "routes: the registry answers the registered page and the segment's conventions" {
+    val seg = segmentFor("/blog");
+    assert seg.hasTemplate;
+    assert seg.hasLoading;
+    assert seg.hasLayout == false;
+    val root = segmentFor("/");
+    assert root.hasLayout;
+}

@@ -1,0 +1,533 @@
+// jhonstart/elements — the element surface.
+//
+// `element.bp` declares eight constructors (`text`, `fragment`, `div`, `span`,
+// `p`, `h1`, `ul`, `li`) and is frozen. This module holds the rest of the tag
+// set the framework needs, in the SAME shape, so that a reader cannot tell from
+// a call site which of the two files a tag came from:
+//
+//     pub fn <tag>(children: Children, attrs: Array<#(string, string)> = []) -> Element
+//
+// Children positional, `attrs:` labeled. The shape is not a free choice: the
+// `html """…"""` DSL writes exactly `tag([kids], attrs: [pairs])`
+// (`html.bp`, the close-tag arm), so a constructor with any other arity is
+// unreachable from the markup front-end. The declared default is never applied
+// by the compiler today, so EVERY call spells `attrs:`, inner ones included —
+// it stays in the declaration only because the eight have it.
+//
+// Every constructor funnels through `el` (or `voidEl`), so there is exactly one
+// place in this file where an `Element` is built. `el` is also the public escape
+// hatch for a tag this surface does not name: `el("figure", kids, attrs: [])`.
+//
+// Attribute values are stored VERBATIM. Escaping happens once, at render, in the
+// renderer that ships (front 23's `renderNode` via `escape.attribute`); escaping
+// here as well would double-escape the moment both layers are present, and a
+// constructor cannot know whether its output is bound for HTML, for a payload
+// envelope, or for a test.
+
+import {element.Element, element.text, element.renderToString};
+
+// ── the two builders every constructor in this file goes through ──
+
+pub fn el(
+    tag: string,
+    children: Children,
+    attrs: Array<#(string, string)>,
+) -> Element {
+    return Element(tag: tag, value: "", children: children, attrs: attrs);
+}
+
+// A void element cannot have children at all, so `voidEl` stores none whatever
+// the constructor was handed. The uniform two-parameter shape is kept on the
+// constructors themselves — a one-parameter `input(attrs:)` would be a second
+// convention and would break the DSL's call shape.
+pub fn voidEl(tag: string, attrs: Array<#(string, string)>) -> Element {
+    return Element(tag: tag, value: "", children: [], attrs: attrs);
+}
+
+// ── the two predicates a void-aware renderer consults ──
+
+// The HTML spec's void-element list, written once so the renderer that is
+// void-aware does not restate it:
+// <https://html.spec.whatwg.org/multipage/syntax.html#void-elements>
+pub fn isVoidTag(tag: string) -> bool {
+    val voids = [
+        "area",
+        "base",
+        "br",
+        "col",
+        "embed",
+        "hr",
+        "img",
+        "input",
+        "link",
+        "meta",
+        "param",
+        "source",
+        "track",
+        "wbr",
+    ];
+    return voids.contains(tag);
+}
+
+// Raw text: content that must NOT be HTML-escaped. `title` and `textarea` are
+// *escapable* raw text, where escaping is the correct treatment, so they are
+// deliberately absent.
+pub fn isRawTextTag(tag: string) -> bool {
+    val raws = ["script", "style"];
+    return raws.contains(tag);
+}
+
+// ── the non-void constructors ──
+//
+// Each one is `element.bp`'s declaration with the name and the tag string
+// changed and nothing else: same parameter names, same order, same types, same
+// declared default.
+
+// sectioning and flow
+//
+// The document's structural tags. `main` ships under its own name because the
+// consuming fronts import it that way — see the caveat in `conformance/docs.md`: a module
+// that declares the program entry point `fn main()` must not also import `main`
+// from "jhonstart" in that same module; `el("main", kids, attrs: [])` is the
+// remedy.
+
+pub fn a(children: Children, attrs: Array<#(string, string)> = []) -> Element {
+    return el("a", children, attrs);
+}
+
+pub fn nav(
+    children: Children,
+    attrs: Array<#(string, string)> = [],
+) -> Element {
+    return el("nav", children, attrs);
+}
+
+pub fn section(
+    children: Children,
+    attrs: Array<#(string, string)> = [],
+) -> Element {
+    return el("section", children, attrs);
+}
+
+pub fn article(
+    children: Children,
+    attrs: Array<#(string, string)> = [],
+) -> Element {
+    return el("article", children, attrs);
+}
+
+pub fn header(
+    children: Children,
+    attrs: Array<#(string, string)> = [],
+) -> Element {
+    return el("header", children, attrs);
+}
+
+pub fn footer(
+    children: Children,
+    attrs: Array<#(string, string)> = [],
+) -> Element {
+    return el("footer", children, attrs);
+}
+
+pub fn main(
+    children: Children,
+    attrs: Array<#(string, string)> = [],
+) -> Element {
+    return el("main", children, attrs);
+}
+
+pub fn aside(
+    children: Children,
+    attrs: Array<#(string, string)> = [],
+) -> Element {
+    return el("aside", children, attrs);
+}
+
+// headings and text-level
+//
+// `h1` lives in `element.bp`; the rest live here. `timeTag` carries the `<time>`
+// tag under a different name because `time` was a std module when it was named
+// (std's clock is `io.clock` since decision 106), and a consumer importing it
+// in the same file would have collided.
+
+pub fn h2(children: Children, attrs: Array<#(string, string)> = []) -> Element {
+    return el("h2", children, attrs);
+}
+
+pub fn h3(children: Children, attrs: Array<#(string, string)> = []) -> Element {
+    return el("h3", children, attrs);
+}
+
+pub fn h4(children: Children, attrs: Array<#(string, string)> = []) -> Element {
+    return el("h4", children, attrs);
+}
+
+pub fn h5(children: Children, attrs: Array<#(string, string)> = []) -> Element {
+    return el("h5", children, attrs);
+}
+
+pub fn h6(children: Children, attrs: Array<#(string, string)> = []) -> Element {
+    return el("h6", children, attrs);
+}
+
+pub fn label(
+    children: Children,
+    attrs: Array<#(string, string)> = [],
+) -> Element {
+    return el("label", children, attrs);
+}
+
+pub fn timeTag(
+    children: Children,
+    attrs: Array<#(string, string)> = [],
+) -> Element {
+    return el("time", children, attrs);
+}
+
+// forms
+//
+// The non-void half of the form surface; `input` is void and lives below.
+
+pub fn form(
+    children: Children,
+    attrs: Array<#(string, string)> = [],
+) -> Element {
+    return el("form", children, attrs);
+}
+
+pub fn button(
+    children: Children,
+    attrs: Array<#(string, string)> = [],
+) -> Element {
+    return el("button", children, attrs);
+}
+
+pub fn select(
+    children: Children,
+    attrs: Array<#(string, string)> = [],
+) -> Element {
+    return el("select", children, attrs);
+}
+
+pub fn option(
+    children: Children,
+    attrs: Array<#(string, string)> = [],
+) -> Element {
+    return el("option", children, attrs);
+}
+
+pub fn textarea(
+    children: Children,
+    attrs: Array<#(string, string)> = [],
+) -> Element {
+    return el("textarea", children, attrs);
+}
+
+// tables
+
+pub fn table(
+    children: Children,
+    attrs: Array<#(string, string)> = [],
+) -> Element {
+    return el("table", children, attrs);
+}
+
+pub fn thead(
+    children: Children,
+    attrs: Array<#(string, string)> = [],
+) -> Element {
+    return el("thead", children, attrs);
+}
+
+pub fn tbody(
+    children: Children,
+    attrs: Array<#(string, string)> = [],
+) -> Element {
+    return el("tbody", children, attrs);
+}
+
+pub fn tr(children: Children, attrs: Array<#(string, string)> = []) -> Element {
+    return el("tr", children, attrs);
+}
+
+pub fn th(children: Children, attrs: Array<#(string, string)> = []) -> Element {
+    return el("th", children, attrs);
+}
+
+pub fn td(children: Children, attrs: Array<#(string, string)> = []) -> Element {
+    return el("td", children, attrs);
+}
+
+// document
+//
+// `htmlTag` carries the `<html>` tag because `html` is already a `pub fn` in
+// this package — the `html """…"""` template fn — and two `pub fn html`
+// reachable from `import {…} from "jhonstart"` is a collision. The DSL keeps
+// the name.
+//
+// `script` and `style` are the two raw-text elements (`isRawTextTag`): their
+// text content must reach the output unescaped.
+
+pub fn htmlTag(
+    children: Children,
+    attrs: Array<#(string, string)> = [],
+) -> Element {
+    return el("html", children, attrs);
+}
+
+pub fn head(
+    children: Children,
+    attrs: Array<#(string, string)> = [],
+) -> Element {
+    return el("head", children, attrs);
+}
+
+pub fn body(
+    children: Children,
+    attrs: Array<#(string, string)> = [],
+) -> Element {
+    return el("body", children, attrs);
+}
+
+pub fn title(
+    children: Children,
+    attrs: Array<#(string, string)> = [],
+) -> Element {
+    return el("title", children, attrs);
+}
+
+pub fn script(
+    children: Children,
+    attrs: Array<#(string, string)> = [],
+) -> Element {
+    return el("script", children, attrs);
+}
+
+pub fn style(
+    children: Children,
+    attrs: Array<#(string, string)> = [],
+) -> Element {
+    return el("style", children, attrs);
+}
+
+// ── the void constructors ──
+//
+// A void element cannot have children, and with the frozen `Element` record
+// that is expressed in the BODY, not in the signature: the uniform
+// two-parameter shape is kept — a one-parameter `input(attrs:)` would be a
+// second convention, would be unreachable from the `html """…"""` DSL's call
+// shape, and would break the `input([], attrs: [...])` the consuming fronts
+// already write — and the children argument is dropped. A test asserts the
+// drop rather than leaving it to be discovered.
+
+pub fn input(
+    _children: Children,
+    attrs: Array<#(string, string)> = [],
+) -> Element {
+    return voidEl("input", attrs);
+}
+
+pub fn img(
+    _children: Children,
+    attrs: Array<#(string, string)> = [],
+) -> Element {
+    return voidEl("img", attrs);
+}
+
+pub fn meta(
+    _children: Children,
+    attrs: Array<#(string, string)> = [],
+) -> Element {
+    return voidEl("meta", attrs);
+}
+
+pub fn link(
+    _children: Children,
+    attrs: Array<#(string, string)> = [],
+) -> Element {
+    return voidEl("link", attrs);
+}
+
+pub fn br(
+    _children: Children,
+    attrs: Array<#(string, string)> = [],
+) -> Element {
+    return voidEl("br", attrs);
+}
+
+pub fn hr(
+    _children: Children,
+    attrs: Array<#(string, string)> = [],
+) -> Element {
+    return voidEl("hr", attrs);
+}
+
+test "el builds a tag the named surface does not carry" {
+    assert renderToString(el("figure", [text("x", attrs: [])], attrs: []))
+        == "<figure>x</figure>";
+}
+
+test "voidEl stores no children" {
+    val w = voidEl("wbr", []);
+    assert w.tag == "wbr";
+    assert w.children.length == 0;
+    assert renderToString(w) == "<wbr></wbr>";
+}
+
+test "isVoidTag answers the HTML spec's list and nothing else" {
+    assert isVoidTag("area");
+    assert isVoidTag("base");
+    assert isVoidTag("br");
+    assert isVoidTag("col");
+    assert isVoidTag("embed");
+    assert isVoidTag("hr");
+    assert isVoidTag("img");
+    assert isVoidTag("input");
+    assert isVoidTag("link");
+    assert isVoidTag("meta");
+    assert isVoidTag("param");
+    assert isVoidTag("source");
+    assert isVoidTag("track");
+    assert isVoidTag("wbr");
+    assert isVoidTag("div") == false;
+    assert isVoidTag("span") == false;
+    assert isVoidTag("form") == false;
+    assert isVoidTag("") == false;
+}
+
+test "isRawTextTag is script and style — escapable raw text is not raw text" {
+    assert isRawTextTag("script");
+    assert isRawTextTag("style");
+    assert isRawTextTag("title") == false;
+    assert isRawTextTag("textarea") == false;
+    assert isRawTextTag("div") == false;
+}
+
+test "a constructor renders its tag, nested" {
+    val out = renderToString(
+        section([h2([text("Posts", attrs: [])], attrs: [])], attrs: []),
+    );
+    assert out == "<section><h2>Posts</h2></section>";
+}
+
+test "a renamed constructor still renders the HTML tag" {
+    assert htmlTag([], attrs: []).tag == "html";
+    assert timeTag([text("now", attrs: [])], attrs: []).tag == "time";
+    assert renderToString(timeTag([text("now", attrs: [])], attrs: []))
+        == "<time>now</time>";
+}
+
+test "attribute order is the array order" {
+    val out = renderToString(
+        a([text("x", attrs: [])], attrs: [#("href", "/p"), #("rel", "next")]),
+    );
+    assert out == "<a href=\"/p\" rel=\"next\">x</a>";
+}
+
+test "an attribute value is stored verbatim — escaping belongs to the renderer" {
+    val out = renderToString(
+        a([text("x", attrs: [])], attrs: [#("href", "/a&b")]),
+    );
+    assert out == "<a href=\"/a&b\">x</a>";
+}
+
+test "the form surface builds the shape front 24 binds an action to" {
+    val f = form(
+        [
+            label([text("Title", attrs: [])], attrs: [#("for", "title")]),
+            select(
+                [option([text("a", attrs: [])], attrs: [#("value", "a")])],
+                attrs: [#("name", "kind")],
+            ),
+            textarea([], attrs: [#("name", "body")]),
+            button([text("Save", attrs: [])], attrs: [#("type", "submit")]),
+        ],
+        attrs: [#("data-jh-a", "createPost")],
+    );
+    assert renderToString(f)
+        == "<form data-jh-a=\"createPost\"><label for=\"title\">Title</label><select name=\"kind\"><option value=\"a\">a</option></select><textarea name=\"body\"></textarea><button type=\"submit\">Save</button></form>";
+}
+
+test "the document shell and the table surface build" {
+    val doc = htmlTag(
+        [
+            head([title([text("Home", attrs: [])], attrs: [])], attrs: []),
+            body(
+                [
+                    table(
+                        [
+                            thead(
+                                [
+                                    tr(
+                                        [th([text("h", attrs: [])], attrs: [])],
+                                        attrs: [],
+                                    ),
+                                ],
+                                attrs: [],
+                            ),
+                            tbody(
+                                [
+                                    tr(
+                                        [td([text("c", attrs: [])], attrs: [])],
+                                        attrs: [],
+                                    ),
+                                ],
+                                attrs: [],
+                            ),
+                        ],
+                        attrs: [],
+                    ),
+                ],
+                attrs: [],
+            ),
+        ],
+        attrs: [#("lang", "en")],
+    );
+    assert renderToString(doc)
+        == "<html lang=\"en\"><head><title>Home</title></head><body><table><thead><tr><th>h</th></tr></thead><tbody><tr><td>c</td></tr></tbody></table></body></html>";
+}
+
+test "the sectioning tags carry their own names" {
+    assert nav([], attrs: []).tag == "nav";
+    assert article([], attrs: []).tag == "article";
+    assert header([], attrs: []).tag == "header";
+    assert footer([], attrs: []).tag == "footer";
+    assert main([], attrs: []).tag == "main";
+    assert aside([], attrs: []).tag == "aside";
+    assert h3([], attrs: []).tag == "h3";
+    assert h4([], attrs: []).tag == "h4";
+    assert h5([], attrs: []).tag == "h5";
+    assert h6([], attrs: []).tag == "h6";
+    assert script([], attrs: []).tag == "script";
+    assert style([], attrs: []).tag == "style";
+}
+
+test "a void constructor type-checks with a bare empty children list" {
+    val i = input([], attrs: [#("name", "title")]);
+    assert i.tag == "input";
+    assert renderToString(i) == "<input name=\"title\"></input>";
+}
+
+test "a void element handed children drops them" {
+    val i = input([text("x", attrs: [])], attrs: []);
+    assert i.children.length == 0;
+    assert renderToString(i) == "<input></input>";
+}
+
+test "every void constructor's tag is in the void set" {
+    assert isVoidTag(input([], attrs: []).tag);
+    assert isVoidTag(img([], attrs: []).tag);
+    assert isVoidTag(meta([], attrs: []).tag);
+    assert isVoidTag(link([], attrs: []).tag);
+    assert isVoidTag(br([], attrs: []).tag);
+    assert isVoidTag(hr([], attrs: []).tag);
+}
+
+test "renderToString closes a void element — the frozen renderer's wrong answer" {
+    assert renderToString(meta([], attrs: [#("charset", "utf-8")]))
+        == "<meta charset=\"utf-8\"></meta>";
+    assert renderToString(br([], attrs: [])) == "<br></br>";
+    assert renderToString(link([], attrs: [#("rel", "icon")]))
+        == "<link rel=\"icon\"></link>";
+}

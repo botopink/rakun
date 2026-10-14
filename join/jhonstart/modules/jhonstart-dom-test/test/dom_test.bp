@@ -1,0 +1,132 @@
+// `botopink test` suite for the browser half of front 30's render — the fill
+// function under `globals.fill`, the signal function under `globals.signal`
+// and `readPayload(globals.payload)` — over markup the render's own writers
+// produce (`fillHtml`, `redirectSignalHtml`, `notFoundSignalHtml`), installed
+// as a minimal document. commonJS only: there is no DOM on the BEAM (the
+// member's `targets` is structural — see `src/root.bp`).
+
+import {Chunk, fillHtml, redirectSignalHtml, notFoundSignalHtml, globals, registerFill, registerSignal, readPayload} from "jhonstart";
+import {json.Json} from "std";
+import {root.installDocument, root.documentMarkup, root.recordedNavigation, root.callFill, root.callSignal, root.uninstallDocument};
+
+fn shell() -> string {
+    return "<div data-jh-root=\"\"><section><div data-jh-h=\"h1\"><p>Loading…</p></div></section></div>";
+}
+
+fn fill() -> string {
+    return fillHtml(Chunk(id: "h1", html: "<ul><li>one</li></ul>"), "");
+}
+
+// ── the fill function ───────────────────────────────────────────────────────
+
+test "dom: a fill replaces its hole with the template's content and removes the template" {
+    installDocument(shell() + fill());
+    registerFill(globals.fill, ["h1"]);
+    assert callFill(globals.fill, "h1") == "called";
+    assert documentMarkup()
+        == "<div data-jh-root=\"\"><section><div data-jh-h=\"h1\"><ul><li>one</li></ul></div></section></div><script>__bp1(\"h1\")</script>";
+    uninstallDocument();
+}
+
+test "dom: a second call for one id leaves the document unchanged" {
+    installDocument(shell() + fill());
+    registerFill(globals.fill, ["h1"]);
+    val first = callFill(globals.fill, "h1");
+    val once = documentMarkup();
+    val second = callFill(globals.fill, "h1");
+    assert documentMarkup() == once;
+    uninstallDocument();
+}
+
+test "dom: a fill for a hole that is not in the document is dropped" {
+    val stray = fillHtml(Chunk(id: "h9", html: "<p>late</p>"), "");
+    installDocument(shell() + stray);
+    registerFill(globals.fill, ["h1"]);
+    val called = callFill(globals.fill, "h9");
+    assert documentMarkup() == shell() + "<script>__bp1(\"h9\")</script>";
+    uninstallDocument();
+}
+
+// ── the payload reader ──────────────────────────────────────────────────────
+
+fn jsonField(j: Json, key: string) -> string {
+    return case j {
+        Obj(members: ms) -> ms
+            .filter({ m -> m._0 == key })
+            .map({ m -> jsonText(m._1) })
+            .join("");
+        _ -> "";
+    };
+}
+
+fn jsonText(j: Json) -> string {
+    return case j {
+        Str(value: s) -> s;
+        Num(value: n) -> n.toString();
+        _ -> "?";
+    };
+}
+
+test "dom: readPayload decodes the last payload script the render assigned" {
+    installDocument(shell()
+        + "<script>window."
+        + globals.payload
+        + " = {\"v\":1,\"b\":\"build-0001\",\"p\":\"/blog\"}</script>");
+    val out = readPayload(globals.payload);
+    val decoded = case out {
+        Ok(j) -> jsonField(j, "b") + " " + jsonField(j, "p");
+        Error(m) -> "error " + m;
+    };
+    assert decoded == "build-0001 /blog";
+    uninstallDocument();
+}
+
+test "dom: a payload json.decode refuses is an Error, never a partial payload" {
+    installDocument(shell()
+        + "<script>window."
+        + globals.payload
+        + " = {\"v\":1,\"b\":</script>");
+    val out = readPayload(globals.payload);
+    val refused = case out {
+        Ok(j) -> false;
+        Error(m) -> true;
+    };
+    assert refused;
+    uninstallDocument();
+}
+
+// ── the signal function ─────────────────────────────────────────────────────
+
+test "dom: a late relative redirect is a client navigation — replaceState, then popstate" {
+    installDocument(shell() + redirectSignalHtml("/login"));
+    registerSignal(globals.signal, []);
+    val called = callSignal(globals.signal);
+    assert recordedNavigation() == "replaceState /login\nevent popstate";
+    assert documentMarkup().contains("data-jh-g") == false;
+    uninstallDocument();
+}
+
+test "dom: a late absolute redirect is followed only when listed" {
+    installDocument(shell() + redirectSignalHtml("https://accounts.example/"));
+    registerSignal(globals.signal, ["https://accounts.example/"]);
+    val listed = callSignal(globals.signal);
+    assert recordedNavigation() == "location.replace https://accounts.example/";
+    installDocument(shell() + redirectSignalHtml("https://evil.example/"));
+    registerSignal(globals.signal, []);
+    val unlisted = callSignal(globals.signal);
+    assert recordedNavigation() == "";
+    uninstallDocument();
+}
+
+test "dom: a late not-found swaps the root's content and drops every later fill" {
+    installDocument(shell()
+        + notFoundSignalHtml("", "<h2>No such post</h2>")
+        + fill());
+    registerFill(globals.fill, ["h1"]);
+    registerSignal(globals.signal, []);
+    val signalled = callSignal(globals.signal);
+    val filled = callFill(globals.fill, "h1");
+    assert documentMarkup().startsWith("<div data-jh-root=\"\"><h2>No such post</h2></div>");
+    assert documentMarkup().contains("<ul><li>one</li></ul>") == false;
+    uninstallDocument();
+}
