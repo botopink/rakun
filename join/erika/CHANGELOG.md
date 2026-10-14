@@ -1,0 +1,122 @@
+# erika · CHANGELOG
+
+## Unreleased
+
+- **Both members reformatted to today's canonical form** (decisions 132 and 133, C-12's width
+  rules): `modules/erika/src/erika.bp` drops the `;` after its braced `if` / `for` statements and
+  breaks the `if … else …` values that exceed 80 columns; `examples/erika-linq/src/main.bp` is
+  formatted for the first time — the formatter now keeps an array element's trailing comment on
+  its element's line, so the reason it was left red is gone. Word-and-literal tokens and comment
+  text identical before and after, idempotent, 31/31 · 1/1 · 9/9 on commonJS and erlang, and the
+  example's emitted output byte-identical on both targets. `format --check` exits 0 in every
+  member. `AGENTS.md` records the decision-109 atoms (`erika@erika@@Query`) as measured, and its
+  parent link points at the meta repository's `AGENTS.md`.
+
+- **Front 95 — `modules/erika-test/`.** The `<lib>-test` member every library
+  carries (`specs/1.0.10-beta/02-packaging/README.md` § 5): an empty `pub`
+  surface, `{ "erika": { "workspace": true } }`, and one inline test proving the
+  core resolves from it — 1/1 on commonJS and erlang. The core stays 31/31.
+
+- **`modules/erika` reformatted after the method-chain rule** (botopink-lang `00 · C-12`, measured
+  at `f58fd392`): `src/erika.bp` only, 57+/32−, every hunk a chain of three or more calls broken one
+  call per line at `+4` — the word-and-literal token stream is identical before and after, the pass
+  is idempotent, the cell stays 31/31 on commonJS and erlang, and `examples/erika-linq`'s emitted
+  output is `diff -r` byte-identical on both targets. `examples/erika-linq/src/main.bp` is **not**
+  formatted: the formatter moves a trailing comment on an array-literal element below the element,
+  where it reads as the next element's — registered with front `00 · 16-formatter`, and `AGENTS.md`
+  § Formatting says why the file stays red. `AGENTS.md` re-derived at the same compiler: the three
+  "language-wide parser quirks" it listed (`if (a && b)`, `(expr).method()`, a comment inside a
+  closure body) all parse and run now, so they moved to the "safe to simplify" list; the header
+  and `docs.md` point at the 1.0.10-beta front instead of the deleted v0.beta.7 spec; and the
+  erlang output at C-01's per-type atom shape (`erika@erika__t__query.erl`) is recorded, with the
+  decision-109 respelling (`erika@erika@@Query`) named as the re-measure that follows it.
+
+- **The 8 red erlang cells of `examples/erika-linq` are fixed** — in botopink-lang
+  `2e6bb4ac` (`00 · 02-erlang`), not here: nothing in `modules/erika` or
+  `examples/erika-linq` was edited for them. Diagnosed 2026-09-21 against botopink-lang
+  feat `c1c0f71c` and re-measured the same day against `2e6bb4ac`: `botopink test
+  --target erlang` in the example goes from 1 passed / 8 failed — every one
+  `{error, badarg}`, not `{error, undef}` as the packaging note below recorded before
+  anyone read the stack — to **9 passed, 0 failed**. The frame was
+  `erlang:element(3, {erika@erika__t__query, […]})` inside
+  `erika@erika__t__grouping:toArray/1`: a method name declared by TWO records of an
+  imported module (`Query.toArray` and `Grouping.toArray`) was resolved by the NAME
+  alone, so the call entered the wrong record's module and read its field offset off the
+  right record's tuple. The backend already counted dissent for a local collision and,
+  since `fcc0244b`, for a field collision; the imported-method axis now counts its owner
+  over the program by `name/arity` too, and one dissenting declaration sends the call
+  through `'__bp_method'/3` — the twin of `'__bp_field'/2`, which asks the value's own
+  tag. The two measurements that pinned the diagnosis (removing the name collision;
+  dispatching on the receiver's own tag in a hand-patched `main.erl`) were never
+  committed — a library workaround for a compiler defect is not a fix. The reproduction
+  handed back with it (`repro/erlang-imported-method-name/`) is deleted with the fix, as
+  its README promised, and the case is covered in the compiler's own tree by
+  `tests/language/modules/method_name_collision`. `modules/erika` stays 31/31 on both
+  targets; `examples/erika-linq` is 9/0 on commonJS and on erlang, and its `targets`
+  array is unchanged — the ledger line in `scripts/restricted-targets.txt` moved 8 → 0,
+  and lifting the restriction is a separate decision.
+
+- **erika is a workspace** (1.0.10-beta front `02-packaging` step 2, decisions 75 and 76). The
+  root `botopink.json` declares members and is never a package — no `src`, `entry`, `files` or
+  `dependencies`, and `botopink build/check/run/test` there is the located refusal that names the
+  members (`erika, erika-linq`). The library moved to the member `modules/erika/`
+  (`git mv src modules/erika/src`, no source edited): `name erika`, `entry root.bp`,
+  `target commonJS`, `files ["root.bp", "erika.bp"]`. `from "erika"` resolves to that member — a
+  library root contributes a workspace's members by manifest name, so the umbrella answers no
+  import. `examples/erika-linq` is the member `erika-linq` (`entry main.bp`,
+  `targets ["commonJS"]`) and depends on the core with `{ "erika": { "workspace": true } }`
+  instead of the git form. The workspace declares no `targets`, so a member runs on every target
+  the runner is asked for, as before. `scripts/git-hooks/lib/runner-standalone.sh` runs one
+  `botopink test` per `modules/*` member when the root manifest carries `"workspaces"`.
+  Measured unchanged across the move: `modules/erika` 31/31 on commonJS and 31/31 on erlang,
+  `examples/erika-linq` 9/9 and building; `botopink format --check` still reports the same two
+  files (`modules/erika/src/erika.bp`, `examples/erika-linq/src/main.bp`) — pre-existing.
+  `examples/erika-linq` on the erlang target is red (1 passed / 8 failed), which
+  is why the example restricts its `targets` to `["commonJS"]`; it is the cross-module erlang
+  codegen red that predates this front. (Recorded here as `{error, undef}`; the measured shape
+  is `{error, badarg}` — diagnosed in the entry above.)
+
+- **The 1.0.3 surface** (botopink-lang front 12): `Query`/`Grouping` and the test fixtures are
+  `type`s; every `record { … }` literal is a tuple. `select a, b` projects `#(a, b)` per row
+  (the selector binds locals named after the columns, so the labels are the column names) and
+  consumers destructure rows (`val #(a, b) = r`). The SQL template's private tokens,
+  fields and comparisons are tuples read positionally (the body is evaluated untyped). commonJS
+  and erlang 31/31, `examples/erika-linq` 9/9 with its output unchanged; the sources are not
+  reformatted — `botopink format` currently drops the package handle of
+  `import erika, {of}` and the `;` after a one-statement `if` in a loop body.
+- CI: the `erlang` rows are hard cells (`allow_fail: false`) — the suite passes
+  31/31 on erlang.
+
+- The examples gate no longer aborts silently on a `scripts/known-broken-examples.txt`
+  holding only comments or blank lines: the runner reads the list with `awk`, whose
+  "no entry" is not a failure under `set -euo pipefail`.
+
+- **MIT license.** `LICENSE` (`Copyright (c) 2026 Eric Fillipe and botopink
+  contributors`) backs the README's License section, which now points at it.
+
+- The gate builds the examples: after `botopink test`, the pre-commit hook
+  and CI run `botopink build` in every `examples/*/` with a `botopink.json`;
+  `scripts/known-broken-examples.txt` lists the ones allowed to fail, and a
+  listed example that builds fails the gate.
+- The pre-commit hook is self-contained: the dead delegation to a meta
+  workspace runner is gone, and `AGENTS.md` documents the install
+  (`git config core.hooksPath scripts/git-hooks`) instead of a
+  `scripts/install-hooks.sh` that exists in no repository.
+- Promoted from workspace subdir to standalone repository under
+  `botopink/erika`. Tracked from `botopink/projects` as a git submodule on the
+  `feat` branch.
+
+## 0.0.1 — v0.beta.8
+
+- `erika "…"` template fn — comptime SQL-subset → fluent pipeline.
+- Real lexer + parser + dual lowering in the template body (single append site).
+- Span-aware LSP overlay via `@ExprCustom<Element>` (custom tokens, diagnostics,
+  hover, go-to-def).
+- Cross-module `erika "…"` + multi-line `"""..."""` form.
+
+## 0.0.0 — v0.beta.7
+
+- Graduated out of `std` to its own package; reached only via `from "erika"`
+  (the generic loader carries it across the workspace boundary).
+- Fluent `Query<T>` over `Array<T>`: `where`, `select`, `orderBy`, `groupBy`,
+  `take`, `skip`, …
