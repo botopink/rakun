@@ -1,0 +1,103 @@
+import {sslBundle, sslBundleNames, sslExpiryDays, sslReload, sslPoll, sslLastError, sslSubject, rkSetProp} from "rakun";
+import {io.fs} from "std";
+
+// A self-signed certificate whose validity window closed in April 2020, and the
+// key that belongs to it: nothing below depends on the date it is run.
+fn certPem() -> string {
+    return """-----BEGIN CERTIFICATE-----
+MIIDOzCCAiOgAwIBAgIUOB4iVPYkEjVrpYNYnZ448T3bK/AwDQYJKoZIhvcNAQEL
+BQAwLTEbMBkGA1UEAwwScmFrdW4tc3NsLXNlbGZ0ZXN0MQ4wDAYDVQQKDAVyYWt1
+bjAeFw0yMDAxMDEwMDAwMDBaFw0yMDA0MDEwMDAwMDBaMC0xGzAZBgNVBAMMEnJh
+a3VuLXNzbC1zZWxmdGVzdDEOMAwGA1UECgwFcmFrdW4wggEiMA0GCSqGSIb3DQEB
+AQUAA4IBDwAwggEKAoIBAQDHiKWuPObBsyL/19TScTe+P9hLxehyMyu1/SXsehBs
+bo440lv+45a+oJF9lf5scN2akWhrGxWXsMioQ/nCDLZ906ayglchg0NPzFN4cEoR
+j0mAtN1KLebIiC44nEBgDg1I9Va5V6czsXueEKLYjpDH/gBrI4+xTiJL4CxU2dOS
+LPfNGhoK18es9w4slGLxvzzoJWidumPVRGHzjtctv2X0DKjR5spQM2Y2GVGXDwJR
+S4spxuCTBt7m1M+81pqjnuSARojM6C3TvpkGjvHVDDs6MFNZdfvPQPZE1xsY7hN9
+tgvTkp226o4yJzjuydtkjK91kFBb5NswfdBH6WAMTlfHAgMBAAGjUzBRMB0GA1Ud
+DgQWBBQe5OWmUr5YtD4ecClWcmlFHBL0wTAfBgNVHSMEGDAWgBQe5OWmUr5YtD4e
+cClWcmlFHBL0wTAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQBE
+jEGIbGBFol9ThAI5AI8zROrmb9Tx9/dd4yaKZOghoS2bpqrYm4qu+80K8icTvYGv
+q3U1hkefOwGLvORv+Nu4Cgc0kMaqJpYz07a9E3y73KDuAjURqUS4bNkvDaWd4Rh1
+rQTjZOlXqXNguYgJgWjVqEjhettXNpgmbtN4MOJ3+qbV8LqB40VTuriE0WxZZioy
+c37NLSWLUrDLAz7kMt8exVKz19J+8qBzrMjtuh0QevnzgeKU2EBleEOS5mkMTVYB
+Hx4+nu+ZuZ7JWtf867sWiIlVdXoPOXmpHkXAr3eMlflQiXb9d2WUjz38mribv1Li
+W6//szzll8TjIBvXaXOO
+-----END CERTIFICATE-----
+""";
+}
+
+fn keyPem() -> string {
+    return """-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDHiKWuPObBsyL/
+19TScTe+P9hLxehyMyu1/SXsehBsbo440lv+45a+oJF9lf5scN2akWhrGxWXsMio
+Q/nCDLZ906ayglchg0NPzFN4cEoRj0mAtN1KLebIiC44nEBgDg1I9Va5V6czsXue
+EKLYjpDH/gBrI4+xTiJL4CxU2dOSLPfNGhoK18es9w4slGLxvzzoJWidumPVRGHz
+jtctv2X0DKjR5spQM2Y2GVGXDwJRS4spxuCTBt7m1M+81pqjnuSARojM6C3TvpkG
+jvHVDDs6MFNZdfvPQPZE1xsY7hN9tgvTkp226o4yJzjuydtkjK91kFBb5NswfdBH
+6WAMTlfHAgMBAAECggEABtlMYo4pl4V4EpMMdYq4UJntaTBqWZ0jB3SgfBz2elpT
+HGUwDjAuqO1nAQoIeR1opdkO3fpIg/Pn90qaBIyeKPR+WMs7hWV1hoQra0tjZ3Xl
+HntWyyiHLuPpvjyywvlIgHQXXXZCQXZ6mULV7Bv8oTi5N/Q5But5JuSTcPgnGHHO
+La3k0s2vryAVSRDnFjkRPa6UYERuFY5FVq57F1qrW4IEU4/PQ9uXaw0lJabkfGfi
+xKeN1kMT1a0s4LHrQmVMPUDNbjIYSNZKdjBSrRHdW3jAlvHCDUi0edWigohUa6/G
+xrzz1Gu44TpI4V2rGZDogz1GHEWSXwbxIzlNKDawXQKBgQDirZmMIL6Jpngr09pN
+apkaqu+EBPGbQyhMTHpNI+z+ml3praY+zn/Wckvt0kS/PuycCtCY+Fr3kvEbRYxn
+KgDFmMVelYafgCgucAITRcew5UwkUBndEgc1z2psb1gDBognK8pCQmcpGqwn+Lns
+mN+E+vWjm0DADZIyIUG7Uav1BQKBgQDhWCr5YQWORymKwhZN2J1KJ9YB3JN7z+vY
+FzJhqDTDK1J4obRb+Y1n+XQIH5m1lKIO3g6/ktQtzL9II+U0v3x5/3SRm0wbOPL2
+Dlo+DXh/7++ACr4pbo718Q8Y0liPIGHKplWFsMQdWDdIw7LnFlSPsKDHxom+i946
+J/h1CzlzWwKBgQCc8TLxeS5S4aYsOhbYKOjuNNF2Z3HcXMgG46B9zlTlBn3lL6x9
+qb2K/UGi3EVq4Ccz9qzsbG+XH+69Qg7u0n8MUDS+wuodfr7TQAu/yj1zNZ7dOXRe
+wn+pev0lLIYUOi6EaGY2MAF6zRPK7QPVUxbW3Ga8Kt7O2daRzMLU7bwP/QKBgFDE
+y1JrJhSjCQ7FFj18wJPNx3UPXIVqNvxTBCngoli59GtsejrlLXvw+1fWC7/7sEJn
+8R1VQVvRIVZ4FzVa1QDdQSjXYuX2+Y6cAlhvd5tToqJgN1yeVfttFZ4t9rQGRUbf
+a5PpkcF61wXrrvoJFPITuu0gCksT0ulBXlqFVWg1AoGALql0vC4l7fDLRUvaXrf6
+vpq0w5wIEykltvzP89fiwIWZ7x2PnScRgAs41+aUOu0QAjdKV6XYDoeQvosFERFV
+Hmwm39Iy36Cgxic8OgxTzcMj92fam4K7t4flx2Ge8CJ2l7doYam6+9GrxgRblapO
+ReuBlfWXJJ0D8j68gA/cDAc=
+-----END PRIVATE KEY-----
+""";
+}
+
+fn writeFile(p: string, body: string) -> i32 {
+    return try fs.writeText(p, body) catch 0;
+}
+
+fn main() {
+    val _w1 = writeFile("server.pem", certPem());
+    val _w2 = writeFile("server.key", keyPem());
+    val _w3 = writeFile("ca.pem", certPem());
+    val _n = rkSetProp("rakun.ssl.bundle.pem", "mybundle,internal-ca");
+    val _c = rkSetProp("rakun.ssl.bundle.pem.mybundle.keystore.certificate", "server.pem");
+    val _k = rkSetProp("rakun.ssl.bundle.pem.mybundle.keystore.private-key", "server.key");
+    val _t = rkSetProp("rakun.ssl.bundle.pem.mybundle.truststore.certificate", "ca.pem");
+    val _a = rkSetProp("rakun.ssl.bundle.pem.mybundle.client-auth", "need");
+
+    val names: string[] = sslBundleNames();
+    @print(names.join(","));
+
+    val b = sslBundle("mybundle");
+    if (b) {
+        bundle ->
+        @print("presenting "
+            + bundle.certificateFile
+            + " with client-auth "
+            + bundle.clientAuth);
+    }
+
+    // `sslBundle("absent")` is the empty optional, NOT a bundle with empty fields:
+    // "no TLS configured" and "TLS misconfigured" must not have the same shape.
+    var seen = false;
+    val absent = sslBundle("absent");
+    if (absent) {
+        bundle ->
+        seen = true;
+    }
+    @print(seen.toString());
+
+    // Rotation without a restart.
+    @print(sslReload("mybundle").toString()); // true when the new material resolved
+    @print(sslPoll().toString()); // reloads every bundle with reload-on-update whose files moved
+    @print("[" + sslLastError("mybundle") + "]");
+    @print(sslSubject("mybundle"));
+}

@@ -88,7 +88,7 @@ fn main() {
 ## Docs
 
 - [AGENTS.md](AGENTS.md) — how the wiring works (singleton factories, `@emit`).
-- [conformance/docs.md](conformance/docs.md) — full reference; every example is a checked cell in [conformance/modules/](conformance/modules/).
+- [conformance/docs.md](conformance/docs.md) — full reference; every example is a checked cell in [conformance/rakun/](conformance/rakun/).
 - [examples/](examples/) — runnable demos.
 
 ## License

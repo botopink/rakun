@@ -1,0 +1,70 @@
+import {RequestPhase, RequestScope, beginRequest, endRequest, setPhase, requestId, drainAfter, headers, headerOf, cookies, cookieOf, Cookies, CookieAttrs, after, memoize, memoKey} from "rakun";
+
+fn writeAnalytics(id: string, what: string) -> i32 {
+    return 0;
+}
+
+fn loadPost(id: string) -> string {
+    return "post " + id;
+}
+
+// a layout's auth guard — front 23 renders this in phase Render
+fn requireSession() -> string {
+    val sid = cookieOf(cookies(), "session", "");
+    if (sid == "") return "" else return sid;
+}
+
+// a server action — front 24 dispatches this in phase Action
+fn setTheme(theme: string) -> i32 {
+    val jar: Cookies = cookies();
+    val _ = jar.set("theme", theme, CookieAttrs(
+        path: "/",
+        domain: "",
+        maxAge: 31536000,
+        httpOnly: false,
+        secure: true,
+        sameSite: "Lax",
+    ));
+    return after({ ->
+        writeAnalytics(requestId(), "theme:" + theme);
+        0;
+    });
+}
+
+// a route handler — front 25 dispatches this in phase Handler
+fn whoAmI() -> string {
+    return headerOf(headers(), "user-agent", "unknown");
+}
+
+// one loader shared by generateMetadata and the page — loads once per request
+fn getPost(id: string) -> string {
+    return memoize(memoKey("post", [id]), { -> loadPost(id) });
+}
+
+fn scope(phase: RequestPhase) -> RequestScope {
+    return RequestScope(
+        id: "req-9",
+        phase: phase,
+        method: "GET",
+        path: "/",
+        query: "",
+        headersWire: "cookie\tsession=s-42\nuser-agent\tcurl",
+        strict: false,
+    );
+}
+
+fn main() {
+    val _r = beginRequest(scope(RequestPhase.Render));
+    @print("session " + requireSession());
+    @print(getPost("7"));
+    val _x = endRequest();
+
+    val _a = beginRequest(scope(RequestPhase.Action));
+    val _t = setTheme("dark");
+    @print(endRequest());
+
+    val _h = beginRequest(scope(RequestPhase.Handler));
+    @print(whoAmI());
+    val _y = endRequest();
+    val _d = drainAfter(30000);
+}

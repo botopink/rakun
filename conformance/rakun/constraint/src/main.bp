@@ -1,0 +1,39 @@
+import {derived} from "validation";
+import {json.Json, io.clock, collections.Dict, collections.Set} from "std";
+import {decorators.validated, decorators.constraint} from "validation";
+import {report.ValidationReport, report.Violation} from "validation";
+import {table.constraintTableJson} from "validation";
+import {spi.Constraint, spi.registerConstraint, spi.vConstraint} from "validation";
+
+pub type CpfConstraint() {
+    pub fn code(self: Self) -> string {
+        return "cpf";
+    }
+    pub fn check(self: Self, field: string, value: string) -> string {
+        if (value.length() == 11)
+            return ""
+        else
+            return "{field} must be a CPF, got \"{value}\"";
+    }
+}
+
+// Reach it from a field with `#[constraint("cpf")]`.
+#[validated]
+pub type Taxpayer(
+    #[constraint("cpf")] document: string,
+    #[constraint("cnpj")] company: string,
+)
+
+fn main() {
+    // The reference registered at module level (`val __cpf = …; val __cpfRegistration = …`);
+    // the erlang backend leaves `__cpf` unbound there, so the registration runs in `main`.
+    val cpf = CpfConstraint();
+    val _registration = registerConstraint("cpf", cpf.code(), { f, v -> cpf.check(f, v) });
+    @print(Taxpayer(document: "12345678901", company: "").validate().violations
+        .map({ v -> v.field + ":" + v.code })
+        .join(","));
+    val bad = Taxpayer(document: "123", company: "x").validate();
+    @print(bad.violations
+        .map({ v -> v.field + ":" + v.code + ":" + v.message })
+        .join("\n"));
+}

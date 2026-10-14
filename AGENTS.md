@@ -33,6 +33,49 @@ value types + the `Request` behavior are real emitted code (`http.bp`);
 `Rakun.run` (`bootstrap.bp`) starts rakun's own `gen_tcp` transport
 (`rkServe` → `serve/2` in `rakun_runtime.erl`).
 
+## The workspace and its layers (front 165)
+
+`botopink/rakun` is one repository and one botopink workspace: `modules/<package>/` — one directory per package, the
+package's name the directory's name, each with its own `botopink.json`, `src/`, tests and `AGENTS.md` — the cells under
+`conformance/<package>/`, the examples under `examples/<package>/<example>/`, the refusals under
+`refusals/<package>/<case>/`. One version, one tag, one release; one gate (`scripts/gate.sh`), one hook, one CI. The
+repositories erika, dbcontext, emilia, styled, jhonstart and onze joined this one by `git subtree add`, history kept
+(front 165 s1), and still carry their old names; s2 renames them to the layers below.
+
+**The per-package rule.** A package owns its directory: its manifest, sources, tests, cells, examples, refusals and
+`AGENTS.md` (the package's own notes, never the workspace's). A package depends on packages of lower layers only (the
+compiler refuses a cycle), a sibling by `{ "workspace": true }` — never by a `path` — and an external library by its
+`git` source. `src/internal/` is private. A joined package's old repository-level files (root manifest, `scripts/`,
+`.github/`, `.gitignore`, `decisions-taken.md`) are gone: rakun's are the only ones.
+
+**The layers — the target** (front 165's table; until s2 lands the packages carry today's names in the second column):
+
+| Package | Absorbs (today's modules) | Depends on |
+|---|---|---|
+| `rakun` | `rakun` | `validation` |
+| `rakun-data` | `dbcontext`, `rakun-data` | `rakun`, `query` |
+| `rakun-restclient` | `rakun-client` | `rakun`, `http` |
+| `rakun-style` | `styled` | `css` |
+| `rakun-bpp` | `jhonstart`, `jhonstart-html`, `jhonstart-link`, `jhonstart-forms`, `jhonstart-test`, `jhonstart-dom-test` | `rakun-style`, `actions`, `routing` |
+| `rakun-stylesheet` | `emilia`, `emilia-test`, `jhonstart-emilia` | `rakun-bpp` |
+| `rakun-service` | `rakun-web`, `rakun-actuator` | `rakun`, `routing` |
+| `rakun-scheduling` | `rakun-scheduling` | `rakun-service`, `rakun-data` |
+| `rakun-session` | `rakun-session` | `rakun-service`, `rakun-data`, `rakun-scheduling` |
+| `rakun-cache` | `rakun-cache` | `rakun-service`, `rakun-session` |
+| `rakun-security` | `rakun-security` | `rakun-service`, `rakun-session`, `rakun-data`, `rakun-restclient` |
+| `rakun-websocket` | `rakun-websocket` | `rakun-service`, `rakun-security`, `rakun-data` |
+| `rakun-metrics` | `rakun-metrics` | `rakun-service`, `rakun-restclient` |
+| `rakun-messaging` | `rakun-messaging` | `rakun-service`, `rakun-metrics`, `rakun-restclient`, `rakun-data` |
+| `rakun-mail` | `rakun-mail` | `rakun-service`, `rakun-data` |
+| `rakun-app` | `rakun-app` | `rakun-service`, `rakun-cache`, `actions`, `routing` |
+| `rakun-ssr` | `onze`, `onze-cli`, `onze-server`, `onze-bundler`, `onze-assets`, `onze-content`, `onze-og`, `onze-release`, `onze-test` | `rakun-app`, `rakun-bpp`, `rakun-stylesheet`, `markdown`, `snap` |
+
+`erika` (to become `query`) stays a package here for now; `modules/dbcontext/` holds only its `AGENTS.md` (the repository
+was a scaffold, no manifest). The workspace's root `botopink.json` lists every member pattern: `modules/*`, `starters/*`,
+`examples/*` and one `examples/<package>/*` per package that has examples. The gate (`scripts/git-hooks/lib/runner-standalone.sh`)
+walks `examples/*/` and `examples/*/*/` (and `refusals/` the same), and `botopink cell check conformance/` finds
+`conformance/<package>/` workspaces by itself.
+
 ## Tree
 
 The repository is a **workspace** (decision 75 of 1.0.10-beta): the root `botopink.json` declares
@@ -46,18 +89,19 @@ root, no code). The **core is the member `modules/rakun/`**; `from "rakun"` reso
 rakun/
 ├── AGENTS.md          ← you are here
 ├── conformance/       ← the reference and its examples (decision 463): `docs.md` (what this lib
-│                        provides + Spring mapping + loading notes) and `modules/<example>/` cells
+│                        provides + Spring mapping + loading notes) and `<package>/<cell>/` cells
+│                        (`conformance/rakun/` is this package's; erika, emilia, jhonstart each have theirs)
 │                        in the language suite's shape — `botopink.json` (the members it adds
 │                        beside rakun as path dependencies, through the symlinks of the cell's
 │                        `deps/`; rakun itself, the targets [erlang, beam] and the version are the
-│                        workspace's, `modules/botopink.json`, decision 512), `src/main.bp`, `snapshot/output/main.snap`, its
+│                        workspace's, `conformance/rakun/botopink.json`, decision 512), `src/main.bp`, `snapshot/output/main.snap`, its
 │                        `"targets"` in `botopink.json` (erlang beam; the web cells erlang only) and the `docs.md` paragraph that
 │                        explains it. Every bp fence of `docs.md` is `<!-- example: <cell> -->` or a
-│                        text fence. `conformance/modules/botopink.json` is a workspace whose members are the cells (`"workspaces": ["*"]`, decision 512 of the compiler): it declares what every cell shares — rakun as the path dependency `../../modules/rakun`, the targets erlang and beam, the version — so a cell's own `botopink.json` holds its name and what it adds, and the cells' dependencies share one code cache, `conformance/modules/.botopinkbuild/cache/` (decision 509; `botopink cell check --cold` reads none of it).
+│                        text fence. `conformance/<package>/botopink.json` is a workspace whose members are the cells (`"workspaces": ["*"]`, decision 512 of the compiler): it declares what every cell shares — rakun as the path dependency `../../modules/rakun`, the targets erlang and beam, the version — so a cell's own `botopink.json` holds its name and what it adds, and the cells' dependencies share one code cache, `conformance/modules/.botopinkbuild/cache/` (decision 509; `botopink cell check --cold` reads none of it).
 │                        `botopink cell check conformance/` is green
-├── botopink.json      ← WORKSPACE: name rakun · version · targets [erlang] (decision 117
-│                        rule 9 — every member declares [erlang] too) · workspaces
-│                        ["modules/*", "starters/*", "examples/*"]. Nothing importable from it.
+├── botopink.json      ← WORKSPACE: name rakun · version · targets [commonJS, erlang] (the joined
+│                        packages build on both; the rakun packages declare [erlang] themselves) · workspaces
+│                        ["modules/*", "starters/*", "examples/*", "examples/<package>/*" …]. Nothing importable from it.
 ├── modules/
 │   ├── README.md      ← the member table (16 since front 128's nine merges), the
 │   │                    module ↔ Spring starter map, how to add a member
