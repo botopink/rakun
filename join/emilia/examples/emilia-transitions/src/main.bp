@@ -1,0 +1,546 @@
+// emilia-transitions — `§ 15`, and the reason every state emilia could express
+// arrived in one frame.
+//
+// Front 34 gave emilia `Hover`, `Focus`, `Active`, `Open`, `Disabled` and
+// seventy-eight more, and every one of them changed a property INSTANTLY,
+// because there was no `transition` token anywhere in the library: no
+// `transition-property`, no `duration`, no timing function, no `delay`. A
+// button that darkens on hover darkened between two frames with nothing in
+// between, and the only way to fix it was a hand-written stylesheet beside
+// emilia in the same codebase.
+//
+// The loading half was not cosmetic at all. There was no `animate-spin`, so
+// "something is happening" — the single most common piece of feedback an
+// application gives — had no token. A spinner meant leaving the library.
+//
+// FOUR THINGS THIS FILE IS HERE TO SHOW, beyond the catalogue:
+//
+//   - a preset is THREE DECLARATIONS FROM ONE TOKEN. `transition-colors` sets
+//     the property list, the timing function and the duration, and `emilia`
+//     needs no new machinery for that: `tokensToCss` joins with `;` already.
+//   - A PRESET THEN AN OVERRIDE IS TWO TOKENS IN LIST ORDER, and the later one
+//     wins. `[.Transition.Colors, .Transition.Duration.__200]` is how a
+//     200ms colour transition is written, and reversing the two is a different
+//     class with a different meaning.
+//   - THE EASINGS ARE THEME REFERENCES. `var(--ease-out)` and never the
+//     cubic-bezier behind it, so a project that redefines `--ease-out` moves
+//     every transition in the application and not one byte of any rule body.
+//     The three values are this front's `transitionEntries()`, composed here
+//     the way front 33's palette is composed.
+//   - AN ANIMATION IS A DECLARATION AND A BLOCK. `animate-spin` is
+//     `animation:var(--animate-spin)` in the rule AND `@keyframes spin{…}`
+//     beside it, hoisted out of every cascade layer to the end of the
+//     document — and two spinners on a page are still one block.
+//
+// THIS FILE IS A CONSUMER PACKAGE, not a test inside the library: a consumer
+// re-emits its own copy of the enum classes, so a `case` that crossed the
+// package boundary used to fall through every arm (§ Maintainer rules).
+// Asserting the full class bodies from outside is what catches that.
+//
+// Upstream: https://tailwindcss.com/docs/transition-property ·
+// /transition-behavior · /transition-duration · /transition-timing-function ·
+// /transition-delay · /animation
+
+import {emilia, emiliaWith, flushWith, Token} from "emilia";
+import {rawTransitionProperty, rawAnimate, transitionEntries} from "emilia";
+import {Theme, ThemeEntry, DarkMode, defaultTheme, extendTheme} from "emilia";
+import {Rule, Block, Sheet, Options} from "emilia";
+import {defaultOptions, withTheme, emptyTheme, themeValue} from "emilia";
+
+// A document with no theme in it, so the assertions below read as the rules
+// this example registered rather than as the stock theme's hundred variables.
+// It also empties the KEYFRAMES, which is what makes the one `@keyframes spin`
+// in the output demonstrably the one the TOKEN hoisted.
+fn bareOptions() -> Options {
+    return withTheme(defaultOptions(), emptyTheme());
+}
+
+// The theme a project that uses transitions actually builds: the stock theme
+// plus this front's three `--ease-*` entries, which `defaultTheme()` does not
+// carry.
+fn easedTheme() -> Theme {
+    return extendTheme(defaultTheme(), transitionEntries());
+}
+
+// ── `§ 15.1` · the six presets and the one that is not ───────────────────────
+
+// THE BARE `transition` UTILITY, spelled `Base`. Eleven properties, a timing
+// function and a duration — one token, three declarations.
+pub fn everythingThatCanTransition() -> string {
+    val tokens: Token[] = [.Transition.Base];
+    return emilia(tokens);
+}
+
+// The five narrow presets, each one property list and the same tail.
+pub fn theNarrowPresets() -> string {
+    val tokens: Token[] = [
+        .Transition.All,
+        .Transition.Colors,
+        .Transition.Opacity,
+        .Transition.Shadow,
+        .Transition.Transform,
+    ];
+    return emilia(tokens);
+}
+
+// The one row of `§ 15.1` that is a single declaration — and the one a
+// `prefers-reduced-motion` branch reaches for.
+pub fn noTransition() -> string {
+    val tokens: Token[] = [.Transition.None];
+    return emilia(tokens);
+}
+
+// ── `§ 15.2` · transition-behavior ───────────────────────────────────────────
+
+// THE CLASS SAYS `discrete` AND THE CSS SAYS `allow-discrete`. This is what
+// makes `display` and `content-visibility` — discrete properties — animate at
+// all, which is why it exists beside `@starting-style` upstream.
+pub fn discreteBehaviour() -> string {
+    val tokens: Token[] = [.Transition.All, .Transition.Behavior.Discrete];
+    return emilia(tokens);
+}
+
+// ── `§ 15.3`, `§ 15.5` · the two ms ladders ──────────────────────────────────
+
+// A PRESET THEN ITS OVERRIDES, which is the composition the whole section is
+// built around: the preset's 150ms is still in the rule and the 700ms after it
+// wins, because list order is declaration order.
+pub fn slowAndLinear() -> string {
+    val tokens: Token[] = [
+        .Transition.All,
+        .Transition.Duration.__700,
+        .Transition.Ease.Linear,
+    ];
+    return emilia(tokens);
+}
+
+// The same three tokens in a different order are a DIFFERENT class and a
+// different rule — which is the point of asserting the order rather than
+// describing it.
+pub fn slowAndLinearReversed() -> string {
+    val tokens: Token[] = [
+        .Transition.Ease.Linear,
+        .Transition.Duration.__700,
+        .Transition.All,
+    ];
+    return emilia(tokens);
+}
+
+// A staggered reveal: the same transition, three delays. `0ms` carries its
+// unit like every other step.
+pub fn staggeredReveal() -> string {
+    val tokens: Token[] = [
+        .Transition.Opacity,
+        .Transition.Duration.__300,
+        .Transition.Delay.__150,
+    ];
+    return emilia(tokens);
+}
+
+pub fn zeroSteps() -> string {
+    val tokens: Token[] = [.Transition.Duration.__0, .Transition.Delay.__0];
+    return emilia(tokens);
+}
+
+// ── `§ 15.4` · the easings ───────────────────────────────────────────────────
+
+// ONE KEYWORD AND THREE REFERENCES. `ease-linear` is CSS's own keyword;
+// upstream has no `--ease-linear` and this library does not invent one.
+pub fn theFourEasings() -> string {
+    val tokens: Token[] = [
+        .Transition.Ease.Linear,
+        .Transition.Ease.In,
+        .Transition.Ease.Out,
+        .Transition.Ease.InOut,
+    ];
+    return emilia(tokens);
+}
+
+// The same token under a project's own easing. The CLASS DOES NOT MOVE — only
+// the theme layer does — because the rule names the variable and never its
+// value.
+pub fn easedByTheProject() -> string {
+    val tokens: Token[] = [.Transition.Colors, .Transition.Ease.InOut];
+    val mine: ThemeEntry[] = [
+        ThemeEntry(name: "--ease-in-out", value: "cubic-bezier(0.65, 0, 0.35, 1)"),
+    ];
+    return emiliaWith(tokens, extendTheme(easedTheme(), mine));
+}
+
+pub fn easedByTheLibrary() -> string {
+    val tokens: Token[] = [.Transition.Colors, .Transition.Ease.InOut];
+    return emiliaWith(tokens, easedTheme());
+}
+
+// ── `§ 15.6` · the four built-in animations ──────────────────────────────────
+
+// A SPINNER. One token, one declaration and one hoisted `@keyframes` block —
+// the thing that had no token at all before this front.
+pub fn spinner() -> string {
+    val tokens: Token[] = [.Animate.Spin];
+    return emilia(tokens);
+}
+
+// TWO SPINNERS ON A PAGE ARE ONE BLOCK. Each is its own class; the keyframes
+// are deduplicated by header when the document renders.
+pub fn secondSpinner() -> string {
+    val tokens: Token[] = [.Animate.Spin, .Transition.Opacity];
+    return emilia(tokens);
+}
+
+// A skeleton placeholder, which is what `animate-pulse` is for.
+pub fn skeletonBar() -> string {
+    val tokens: Token[] = [.Animate.Pulse];
+    return emilia(tokens);
+}
+
+// A notification dot, which is what `animate-ping` is for.
+pub fn notificationDot() -> string {
+    val tokens: Token[] = [.Animate.Ping];
+    return emilia(tokens);
+}
+
+pub fn bouncingArrow() -> string {
+    val tokens: Token[] = [.Animate.Bounce];
+    return emilia(tokens);
+}
+
+// `animate-none` NAMES NO KEYFRAMES, so it hoists none — the token a
+// `motion-reduce:` branch reaches for.
+pub fn stillImage() -> string {
+    val tokens: Token[] = [.Animate.None];
+    return emilia(tokens);
+}
+
+// ── the two arbitrary-value variants ─────────────────────────────────────────
+
+// AN ANIMATION THIS LIBRARY DOES NOT SHIP. `AnimateRaw` is the only way to name
+// one, which is why it is a top-level variant and not a leaf inside `Animate`:
+// a payload leaf inside an enum section cannot be constructed by any spelling,
+// so the nested form would have shut this door rather than narrowed it. The
+// keyframes for `fade` are the project's own CSS, so no block is hoisted.
+pub fn customFade() -> string {
+    val tokens: Token[] = [rawAnimate("fade 300ms ease-out")];
+    return emilia(tokens);
+}
+
+// A property `§ 15.1` has no preset for.
+pub fn transitionOnWidth() -> string {
+    val tokens: Token[] = [
+        rawTransitionProperty("width"),
+        .Transition.Duration.__200,
+    ];
+    return emilia(tokens);
+}
+
+// ── the composition ──────────────────────────────────────────────────────────
+
+// THE SUBMIT BUTTON, which is what the whole front is for. At rest it is an
+// indigo button whose colours move over 200ms; on hover it darkens over that
+// transition instead of snapping; on focus it shows a ring; and while the form
+// is in flight the same button is dimmed, un-clickable and carrying a spinner.
+//
+// The transition is paired with a `Hover`, because a transition is only
+// OBSERVABLE when a state variant changes a property — which is why front 44
+// depends on front 34.
+pub fn submitButton() -> string {
+    val hovered: Token[] = [.Bg.Color.Indigo.700];
+    val tokens: Token[] = [
+        .Bg.Color.Indigo.600,
+        .Pad.X.__4,
+        .Pad.Y.__2,
+        .Border.Rounded.Md,
+        .Transition.Colors,
+        .Transition.Duration.__200,
+        .Transition.Ease.Out,
+        Token.Hover(hovered),
+    ];
+    return emiliaWith(tokens, easedTheme());
+}
+
+// THE SAME BUTTON IN FLIGHT. The colours still transition; the opacity is
+// dimmed; and the spinner beside it is the second class, with the block.
+pub fn submitButtonInFlight() -> string {
+    val tokens: Token[] = [
+        .Bg.Color.Indigo.600,
+        .Pad.X.__4,
+        .Pad.Y.__2,
+        .Border.Rounded.Md,
+        .Transition.Colors,
+        .Transition.Duration.__200,
+        .Effect.Opacity.__60,
+    ];
+    return emiliaWith(tokens, easedTheme());
+}
+
+pub fn submitSpinner() -> string {
+    val tokens: Token[] = [.Animate.Spin, .Size.W.__4, .Size.H.__4];
+    return emiliaWith(tokens, easedTheme());
+}
+
+pub fn main() -> void {
+    return;
+}
+
+// ── tests ────────────────────────────────────────────────────────────────────
+
+// THREE DECLARATIONS FROM ONE TOKEN, asserted WHOLE from outside the library.
+// The eleven-property list is the reference's order and the reference's
+// punctuation — a space after each comma — and a `contains` here would pass on
+// a list that had lost `backdrop-filter`.
+test "a preset is three declarations from one token, and the list is byte-exact" {
+    val cls = everythingThatCanTransition();
+    val doc = await flushWith(bareOptions());
+    assert doc.indexOf("."
+        + cls
+        + "{transition-property:color, background-color, "
+        + "border-color, text-decoration-color, fill, stroke, opacity, box-shadow, "
+        + "transform, filter, backdrop-filter;"
+        + "transition-timing-function:var(--ease-out);"
+        + "transition-duration:150ms}")
+        != -1;
+    assert doc.indexOf("color,background-color") == -1;
+}
+
+test "the five narrow presets are five rules, each with the same tail" {
+    val cls = theNarrowPresets();
+    val none = noTransition();
+    val doc = await flushWith(bareOptions());
+    assert doc.indexOf("."
+        + cls
+        + "{transition-property:all;"
+        + "transition-timing-function:var(--ease-out);transition-duration:150ms;"
+        + "transition-property:color, background-color, border-color, "
+        + "text-decoration-color, fill, stroke;"
+        + "transition-timing-function:var(--ease-out);transition-duration:150ms;"
+        + "transition-property:opacity;"
+        + "transition-timing-function:var(--ease-out);transition-duration:150ms;"
+        + "transition-property:box-shadow;"
+        + "transition-timing-function:var(--ease-out);transition-duration:150ms;"
+        + "transition-property:transform;"
+        + "transition-timing-function:var(--ease-out);transition-duration:150ms}")
+        != -1;
+    // `transition-none` is ONE declaration and carries none of the tail
+    assert doc.indexOf("." + none + "{transition-property:none}") != -1;
+}
+
+// THE ROW THAT GETS WRITTEN FROM MEMORY AND GETS WRITTEN WRONG: the class says
+// `discrete` and the value says `allow-discrete`. Asserted in both directions.
+test "transition-discrete emits allow-discrete, and never the class's own word" {
+    val cls = discreteBehaviour();
+    val doc = await flushWith(bareOptions());
+    assert doc.indexOf("transition-behavior:allow-discrete") != -1;
+    assert doc.indexOf("transition-behavior:discrete") == -1;
+    assert doc.indexOf("transition-discrete") == -1;
+}
+
+// A PRESET THEN AN OVERRIDE, AND THE ORDER IS THE MEANING. Both durations are
+// in the rule and the later one wins; reversing the list gives a different
+// class whose preset now overrides the override.
+test "a preset then its overrides — both declarations, the later winning" {
+    val a = slowAndLinear();
+    val b = slowAndLinearReversed();
+    val doc = await flushWith(bareOptions());
+    assert doc.indexOf("."
+        + a
+        + "{transition-property:all;"
+        + "transition-timing-function:var(--ease-out);transition-duration:150ms;"
+        + "transition-duration:700ms;transition-timing-function:linear}")
+        != -1;
+    assert doc.indexOf("."
+        + b
+        + "{transition-timing-function:linear;"
+        + "transition-duration:700ms;transition-property:all;"
+        + "transition-timing-function:var(--ease-out);"
+        + "transition-duration:150ms}")
+        != -1;
+    assert a != b;
+}
+
+// EVERY STEP CARRIES `ms`, `0ms` INCLUDED. A bare `0` is legal CSS for a length
+// and is not what `§ 15.3` prints.
+test "the two ms ladders — the delay is a third declaration, and zero keeps its unit" {
+    val a = staggeredReveal();
+    val z = zeroSteps();
+    val doc = await flushWith(bareOptions());
+    assert doc.indexOf("."
+        + a
+        + "{transition-property:opacity;"
+        + "transition-timing-function:var(--ease-out);transition-duration:150ms;"
+        + "transition-duration:300ms;transition-delay:150ms}")
+        != -1;
+    assert doc.indexOf("."
+        + z
+        + "{transition-duration:0ms;transition-delay:0ms}")
+        != -1;
+    assert doc.indexOf("transition-duration:0}") == -1;
+}
+
+test "the four easings — one CSS keyword and three theme references" {
+    val cls = theFourEasings();
+    val doc = await flushWith(bareOptions());
+    assert doc.indexOf("."
+        + cls
+        + "{transition-timing-function:linear;"
+        + "transition-timing-function:var(--ease-in);"
+        + "transition-timing-function:var(--ease-out);"
+        + "transition-timing-function:var(--ease-in-out)}")
+        != -1;
+    // upstream has no `--ease-linear`, and this library does not invent one
+    assert doc.indexOf("var(--ease-linear)") == -1;
+}
+
+// THE REFERENCE FORM IS WHY THE CLASS DOES NOT MOVE, asserted from a CONSUMER
+// package: the project's easing and the library's give the SAME class and the
+// SAME rule, and the cubic-bezier reaches the page through the theme layer
+// instead of through a second copy of every rule.
+test "a project's easing moves the theme layer and not one rule" {
+    val mine = easedByTheProject();
+    val stock = easedByTheLibrary();
+    val doc = await flushWith(bareOptions());
+    assert mine == stock;
+    assert doc.indexOf("cubic-bezier(") == -1;
+    assert doc.indexOf("transition-timing-function:var(--ease-in-out)") != -1;
+    // and the value IS reachable — it lives in the theme, which is where it
+    // belongs, and this is the control that shows the assertion above is not
+    // vacuous
+    assert themeValue(easedTheme(), "--ease-in-out")
+        == "cubic-bezier(0.4, 0, 0.2, 1)";
+    assert themeValue(defaultTheme(), "--ease-in-out") == "";
+}
+
+// AN ANIMATION IS A DECLARATION AND A BLOCK. The block is hoisted OUT of every
+// cascade layer to the end of the document, because a keyframes rule is not
+// subject to the cascade.
+test "a spinner is one declaration and one hoisted keyframes block" {
+    val cls = spinner();
+    val doc = await flushWith(bareOptions());
+    assert doc.indexOf("." + cls + "{animation:var(--animate-spin)}") != -1;
+    assert doc.endsWith("@keyframes spin{to{transform:rotate(360deg)}}</style>");
+    assert doc.indexOf("@layer utilities{@keyframes") == -1;
+}
+
+// TWO SPINNERS, TWO CLASSES, ONE BLOCK.
+test "two spinners on a page hoist one keyframes block, not two" {
+    val a = spinner();
+    val b = secondSpinner();
+    val doc = await flushWith(bareOptions());
+    assert a != b;
+    assert doc.split("@keyframes spin").length - 1 == 1;
+}
+
+test "the other three built-ins, each with its own block" {
+    val a = skeletonBar();
+    val b = notificationDot();
+    val c = bouncingArrow();
+    val n = stillImage();
+    val doc = await flushWith(bareOptions());
+    assert doc.indexOf("." + a + "{animation:var(--animate-pulse)}") != -1;
+    assert doc.indexOf("." + b + "{animation:var(--animate-ping)}") != -1;
+    assert doc.indexOf("." + c + "{animation:var(--animate-bounce)}") != -1;
+    assert doc.indexOf("@keyframes pulse{50%{opacity:0.5}}") != -1;
+    assert doc.indexOf("@keyframes ping{75%,100%{transform:scale(2);opacity:0}}")
+        != -1;
+    assert doc.indexOf("@keyframes bounce{0%,100%{") != -1;
+    // `animate-none` names no keyframes, so it hoists none
+    assert doc.indexOf("." + n + "{animation:none}") != -1;
+    assert doc.indexOf("@keyframes none") == -1;
+}
+
+// AN ARBITRARY VALUE REACHES ITS OWN TOP-LEVEL ARM, through the wrapper, and
+// hoists no block — the keyframes for `fade` are the project's own CSS.
+test "a custom animation names keyframes this library does not own, and hoists none" {
+    val a = customFade();
+    val b = transitionOnWidth();
+    val doc = await flushWith(bareOptions());
+    assert doc.indexOf("." + a + "{animation:fade 300ms ease-out}") != -1;
+    assert doc.indexOf("@keyframes fade") == -1;
+    assert doc.indexOf("."
+        + b
+        + "{transition-property:width;"
+        + "transition-timing-function:var(--ease-out);transition-duration:150ms;"
+        + "transition-duration:200ms}")
+        != -1;
+}
+
+// END TO END — the submit button, and the hover the transition exists for.
+// A transition is only OBSERVABLE when a state variant changes a property, so
+// the two halves are asserted together: this front's declarations in the class
+// rule, front 34's variant in the sibling rule.
+test "end to end — a submit button whose colours move over 200ms on hover" {
+    val cls = submitButton();
+    val doc = await flushWith(bareOptions());
+    assert doc.indexOf("."
+        + cls
+        + "{background-color:var(--color-indigo-600);"
+        + "padding-left:calc(var(--spacing) * 4);"
+        + "padding-right:calc(var(--spacing) * 4);"
+        + "padding-top:calc(var(--spacing) * 2);"
+        + "padding-bottom:calc(var(--spacing) * 2);"
+        + "border-radius:var(--radius-md);"
+        + "transition-property:color, background-color, border-color, "
+        + "text-decoration-color, fill, stroke;"
+        + "transition-timing-function:var(--ease-out);transition-duration:150ms;"
+        + "transition-duration:200ms;"
+        + "transition-timing-function:var(--ease-out)}")
+        != -1;
+    assert doc.indexOf("@media (hover: hover){."
+        + cls
+        + ":hover{background-color:var(--color-indigo-700)}}")
+        != -1;
+}
+
+test "end to end — the same button in flight, dimmed, with a spinner beside it" {
+    val b = submitButtonInFlight();
+    val s = submitSpinner();
+    val doc = await flushWith(bareOptions());
+    assert doc.indexOf("."
+        + b
+        + "{background-color:var(--color-indigo-600);"
+        + "padding-left:calc(var(--spacing) * 4);"
+        + "padding-right:calc(var(--spacing) * 4);"
+        + "padding-top:calc(var(--spacing) * 2);"
+        + "padding-bottom:calc(var(--spacing) * 2);"
+        + "border-radius:var(--radius-md);"
+        + "transition-property:color, background-color, border-color, "
+        + "text-decoration-color, fill, stroke;"
+        + "transition-timing-function:var(--ease-out);transition-duration:150ms;"
+        + "transition-duration:200ms;opacity:60%}")
+        != -1;
+    assert doc.indexOf("."
+        + s
+        + "{animation:var(--animate-spin);"
+        + "width:calc(var(--spacing) * 4);"
+        + "height:calc(var(--spacing) * 4)}")
+        != -1;
+    assert doc.endsWith("@keyframes spin{to{transform:rotate(360deg)}}</style>");
+}
+
+// THE FRONT'S ARGUMENT, asserted over everything this example emits: nothing it
+// renders resolves a timing function or an animation shorthand. The probe is
+// shown to discriminate — the document is not empty and does carry the
+// references those literals would have replaced.
+test "no token in this example resolves a timing function or an animation" {
+    val _a = everythingThatCanTransition();
+    val _b = theFourEasings();
+    val _c = spinner();
+    val _d = skeletonBar();
+    val _e = submitButton();
+    val _f = slowAndLinear();
+    val doc = await flushWith(bareOptions());
+    assert doc.indexOf("cubic-bezier(0, 0, 0.2, 1)") == -1;
+    assert doc.indexOf("cubic-bezier(0.4, 0, 0.2, 1)") == -1;
+    assert doc.indexOf("spin 1s linear infinite") == -1;
+    assert doc.indexOf("pulse 2s") == -1;
+    assert doc.indexOf("var(--ease-out)") != -1;
+    assert doc.indexOf("var(--animate-spin)") != -1;
+    assert doc.indexOf("var(--animate-pulse)") != -1;
+    // the ONE `cubic-bezier(` the document does carry is inside the
+    // `@keyframes bounce` BODY, which is front 54's data and not a declaration
+    // this front emits — so the walk above names the three it refuses rather
+    // than banning the string outright
+    val _g = bouncingArrow();
+    val doc2 = await flushWith(bareOptions());
+    assert doc2.indexOf("animation-timing-function:cubic-bezier(0.8,0,1,1)")
+        != -1;
+}

@@ -1,0 +1,434 @@
+//// emilia/arbitrary — front 57: the escape hatches of `§ 3.1`–`§ 3.3`, and
+//// the first place emilia reads a string before emitting it.
+////
+//// SIX TOP-LEVEL `Token` VARIANTS (`tokens.bp`, under this front's banner):
+//// `Arb(prop, value)` — `bg-[#316ff6]`; `ArbProp(name, value)` —
+//// `[--gutter-width:1rem]`; `ArbVariant(selector, inner)` — `[&.is-dragging]:`;
+//// `ArbAt(query, inner)` — `[@supports(display:grid)]:`; `ArbMin(px, inner)` /
+//// `ArbMax(px, inner)` — `min-[320px]:` / `max-[600px]:`. Top-level because a
+//// payload leaf inside a section cannot be constructed by any spelling.
+////
+//// THE SECURITY SURFACE: REFUSE, DO NOT SANITISE, AND NO WAY AROUND. A payload
+//// that reaches the document unread can close the rule with `}` or the
+//// `<style>` element with `<`. Two gates, each with the same five reject sets:
+////
+////   - COMPTIME: the template functions `cssValue`, `cssIdent`, `cssSelector`,
+////     `cssQuery`, `cssLength` read a literal at the call site and fail the
+////     BUILD with the offending text (`q.fail`).
+////   - RUN TIME: the builders (`arbValue`, `arbProp`, `arbSel`, `arbAt`,
+////     `arbMin`, `arbMax`) and the dispatcher helpers `@panic` on a violation.
+////     The `Token.Arb*` constructors cannot be made private, so the dispatcher
+////     re-checks every payload: the comptime gate moves the failure earlier,
+////     the run-time gate makes the guarantee. Neither has a flag.
+////
+//// | reject set | for                      | refuses                                  |
+//// | value      | a declaration value      | { } < > ; @ \                            |
+//// | ident      | a property name          | anything outside [A-Za-z0-9-_], or empty |
+//// | selector   | an `&`-relative selector | { } < ; @ \ and any `&` count but one    |
+//// | query      | an at-rule condition     | { } < > ; @ \ (the leading `@` is emilia's) |
+//// | length     | a breakpoint length      | anything but digits, `.` and one unit of px em rem ch vw vh % |
+////
+//// WHAT THAT COSTS, deliberately: media range syntax (`(width >= 40rem)`) is
+//// unreachable through `cssQuery` — `ArbMin`/`ArbMax` cover breakpoints with a
+//// validated length — and CSS escapes (`\2014`) are unreachable everywhere.
+////
+//// This module imports `tokens` and `output` only. The two `Token[]`-carrying
+//// helpers take the inner list ALREADY FOLDED to a `Sheet`, because folding it
+//// is `emilia.bp`'s `tokensToSheet` and that module imports this one.
+
+import {tokens.Token};
+import {output.Sheet, output.Variant, output.declSheet, output.nestVariant};
+
+// ── the five reject sets, as run-time predicates ─────────────────────────────
+//
+// `true` means the payload is REFUSED. Each counts the reject characters by
+// splitting, which lowers identically on both targets.
+
+fn hitsOf(raw: string, chars: string[]) -> i32 {
+    return chars.fold(0, { acc, c -> acc + raw.split(c).length - 1 });
+}
+
+fn identChars() -> string {
+    return "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_";
+}
+
+fn lengthUnits() -> string[] {
+    val out: string[] = ["px", "em", "rem", "ch", "vw", "vh", "%"];
+    return out;
+}
+
+pub fn refusesValue(raw: string) -> bool {
+    val chars: string[] = ["{", "}", "<", ">", ";", "@", "\\"];
+    return hitsOf(raw, chars) > 0;
+}
+
+// What is left of `raw` once every character of `allowed` is removed. NEVER
+// `raw.split("")`: on erlang `"a→b".split("")` answers `["a"]` — everything
+// from the first non-ASCII codepoint on is dropped — so a character scan over
+// `raw` would ADMIT exactly the payload it must refuse. `allowed` is ASCII, so
+// splitting it is safe on both targets.
+fn residue(raw: string, allowed: string) -> string {
+    return allowed.split("").fold(raw, { acc, c -> acc.split(c).join("") });
+}
+
+pub fn refusesIdent(raw: string) -> bool {
+    return raw == "" || residue(raw, identChars()) != "";
+}
+
+pub fn refusesSelector(raw: string) -> bool {
+    val chars: string[] = ["{", "}", "<", ";", "@", "\\"];
+    return hitsOf(raw, chars) > 0 || raw.split("&").length != 2;
+}
+
+pub fn refusesQuery(raw: string) -> bool {
+    val chars: string[] = ["{", "}", "<", ">", ";", "@", "\\"];
+    return raw == "" || hitsOf(raw, chars) > 0;
+}
+
+pub fn refusesLength(raw: string) -> bool {
+    val noDigits = residue(raw, "0123456789") == raw;
+    val unit = residue(raw, "0123456789.");
+    val known = lengthUnits().indexOf(unit) != -1;
+    return noDigits || !known || !raw.endsWith(unit);
+}
+
+// ── the run-time gate ────────────────────────────────────────────────────────
+//
+// A refused payload is not escaped, stripped, replaced or logged: the render
+// dies with the payload in the message.
+
+fn checkValue(prop: string, value: string) -> string {
+    if (refusesValue(value))
+        @panic("emilia arbitrary: the value of '"
+            + prop
+            + "' may not contain { } < > ; @ or a backslash: '"
+            + value
+            + "'");
+    return value;
+}
+
+fn checkIdent(name: string) -> string {
+    if (refusesIdent(name))
+        @panic("emilia arbitrary: a property name may contain only letters, digits, - and _: '"
+            + name
+            + "'");
+    return name;
+}
+
+fn checkSelector(selector: string) -> string {
+    if (refusesSelector(selector))
+        @panic("emilia arbitrary: a selector carries exactly one & and none of { } < ; @ or a backslash: '"
+            + selector
+            + "'");
+    return selector;
+}
+
+fn checkQuery(query: string) -> string {
+    if (refusesQuery(query))
+        @panic("emilia arbitrary: an at-rule condition is written without its @ and may not contain { } < > ; @ or a backslash: '"
+            + query
+            + "'");
+    return query;
+}
+
+fn checkLength(px: string) -> string {
+    if (refusesLength(px))
+        @panic("emilia arbitrary: a breakpoint length is digits and one unit of px em rem ch vw vh %: '"
+            + px
+            + "'");
+    return px;
+}
+
+// ── the builders ─────────────────────────────────────────────────────────────
+//
+// The spelling a typed list needs — `[.Arb(prop: …, value: …)]` does not parse,
+// because a leading-dot path followed by a payload call does not carry the
+// array's context — and the first place the run-time gate applies.
+
+pub fn arbValue(prop: string, value: string) -> Token {
+    return Token.Arb(prop: checkIdent(prop), value: checkValue(prop, value));
+}
+
+pub fn arbProp(name: string, value: string) -> Token {
+    return Token.ArbProp(name: checkIdent(name), value: checkValue(name, value));
+}
+
+pub fn arbSel(selector: string, inner: Token[]) -> Token {
+    return Token.ArbVariant(selector: checkSelector(selector), inner: inner);
+}
+
+pub fn arbAt(query: string, inner: Token[]) -> Token {
+    return Token.ArbAt(query: checkQuery(query), inner: inner);
+}
+
+pub fn arbMin(px: string, inner: Token[]) -> Token {
+    return Token.ArbMin(px: checkLength(px), inner: inner);
+}
+
+pub fn arbMax(px: string, inner: Token[]) -> Token {
+    return Token.ArbMax(px: checkLength(px), inner: inner);
+}
+
+// ── the dispatcher helpers — one per variant, each RE-CHECKING its payload ───
+
+pub fn arbValueToSheet(prop: string, value: string) -> Sheet {
+    return declSheet(checkIdent(prop) + ":" + checkValue(prop, value));
+}
+
+pub fn arbPropToSheet(name: string, value: string) -> Sheet {
+    return declSheet(checkIdent(name) + ":" + checkValue(name, value));
+}
+
+pub fn arbVariantToSheet(selector: string, inner: Sheet) -> Sheet {
+    return nestVariant(inner, Variant(atRule: "", selector: checkSelector(selector)));
+}
+
+pub fn arbAtToSheet(query: string, inner: Sheet) -> Sheet {
+    return nestVariant(inner, Variant(atRule: "@"
+        + checkQuery(query), selector: "&"));
+}
+
+pub fn arbMinToSheet(px: string, inner: Sheet) -> Sheet {
+    return nestVariant(inner, Variant(atRule: "@media (width >= "
+        + checkLength(px)
+        + ")", selector: "&"));
+}
+
+pub fn arbMaxToSheet(px: string, inner: Sheet) -> Sheet {
+    return nestVariant(inner, Variant(atRule: "@media (width < "
+        + checkLength(px)
+        + ")", selector: "&"));
+}
+
+// ── the comptime gate ────────────────────────────────────────────────────────
+//
+// Template functions: the literal is read at compile time and a refused one
+// fails the build with its text. Each body is self-contained — a template body
+// sees only itself plus a minimal prelude — and flat, with none of the four
+// comptime landmines (a line comment, a parenthesised receiver, `.at()`, a
+// tail-position `loop`).
+
+pub fn cssValue(comptime q: @Expr<string>) -> @Expr<string> {
+    val raw = q.text();
+    val braces = raw.split("{").length + raw.split("}").length;
+    val angles = raw.split("<").length + raw.split(">").length;
+    val others = raw.split(";").length
+        + raw.split("@").length
+        + raw.split("\\").length;
+    val hits = braces + angles + others;
+    val safe = if (hits > 7) {
+        q.fail("emilia: an arbitrary value may not contain { } < > ; @ or a backslash: "
+            + raw);
+        raw;
+    } else raw;
+    return @expr(safe);
+}
+
+pub fn cssIdent(comptime q: @Expr<string>) -> @Expr<string> {
+    val raw = q.text();
+    val allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_";
+    val rest = allowed.split("").fold(raw, { acc, c -> acc.split(c).join("") });
+    val safe = if (rest != "" || raw == "") {
+        q.fail("emilia: an arbitrary property name may contain only letters, digits, - and _: "
+            + raw);
+        raw;
+    } else raw;
+    return @expr(safe);
+}
+
+pub fn cssSelector(comptime q: @Expr<string>) -> @Expr<string> {
+    val raw = q.text();
+    val braces = raw.split("{").length + raw.split("}").length;
+    val others = raw.split("<").length
+        + raw.split(";").length
+        + raw.split("@").length
+        + raw.split("\\").length;
+    val amps = raw.split("&").length;
+    val safe = if (braces + others > 6 || amps != 2) {
+        q.fail("emilia: an arbitrary selector carries exactly one & and none of { } < ; @ or a backslash: "
+            + raw);
+        raw;
+    } else raw;
+    return @expr(safe);
+}
+
+pub fn cssQuery(comptime q: @Expr<string>) -> @Expr<string> {
+    val raw = q.text();
+    val braces = raw.split("{").length + raw.split("}").length;
+    val angles = raw.split("<").length + raw.split(">").length;
+    val others = raw.split(";").length
+        + raw.split("@").length
+        + raw.split("\\").length;
+    val hits = braces + angles + others;
+    val safe = if (hits > 7) {
+        q.fail("emilia: an at-rule condition is written without its @ and may not contain { } < > ; @ or a backslash: "
+            + raw);
+        raw;
+    } else raw;
+    return @expr(safe);
+}
+
+pub fn cssLength(comptime q: @Expr<string>) -> @Expr<string> {
+    val raw = q.text();
+    val unit = "0123456789."
+        .split("")
+        .fold(raw, { acc, c -> acc.split(c).join("") });
+    val bare = "0123456789"
+        .split("")
+        .fold(raw, { acc, c -> acc.split(c).join("") });
+    val units: string[] = ["px", "em", "rem", "ch", "vw", "vh", "%"];
+    val known = units.indexOf(unit) != -1 && raw.endsWith(unit);
+    val safe = if (bare == raw || !known) {
+        q.fail("emilia: a breakpoint length is digits and one unit of px em rem ch vw vh %: "
+            + raw);
+        raw;
+    } else raw;
+    return @expr(safe);
+}
+
+// ── front 57 · tests ─────────────────────────────────────────────────────────
+//
+// THE COMPTIME REFUSALS CANNOT BE A RUNTIME `assert`: a build that must fail
+// produces no value to read. They were run against the real compiler instead
+// on 2026-09-26 (a scratch copy of this module with one probe test per literal;
+// each build failed with `error: emilia: …` naming the offending text), and
+// belong, as reject fixtures, in the compiler's own suite:
+//   cssValue """red}</style><script>"""   cssIdent """background color"""
+//   cssIdent """a;b"""                     cssSelector """.is-dragging"""
+//   cssSelector """&.a &.b"""              cssQuery """@supports(display:grid)"""
+//   cssLength """320"""                    cssLength """calc(1px)"""
+// The RUN-TIME gate is observable, and every builder is asserted below.
+
+// The message a body raised, or "" when it completed — a host try/catch,
+// because a `@panic` is not a value. Test support, exported for the sibling
+// modules' refusal tests (`compose.bp` may declare no external of its own).
+#[@External.node(when(argc == 1): """(function(__B){ try { __B(); return ""; } catch (__e) { return (__e && __e.message) ? __e.message : String(__e); } })($0)""")]
+#[@External.Erlang("""(fun(B__) -> try B__(), <<>> catch _:{panic, M__} when is_binary(M__) -> M__; _:E__ -> iolist_to_binary(io_lib:format("~p", [E__])) end end)($0)""")]
+declare fn raisedBy(body: fn() -> i32) -> string;
+
+// The importable form: a host cell does not lower across a module boundary, a
+// plain `pub fn` around it does.
+pub fn panicMessage(body: fn() -> i32) -> string {
+    return raisedBy(body);
+}
+
+test "cssValue — a hex compiles and yields itself" {
+    assert cssValue "#316ff6" == "#316ff6";
+    assert cssValue "calc(100dvh - 1rem)" == "calc(100dvh - 1rem)";
+}
+
+test "cssIdent — a custom property and a property name compile" {
+    assert cssIdent "--gutter-width" == "--gutter-width";
+    assert cssIdent "background-color" == "background-color";
+}
+
+test "cssSelector — one & compiles" {
+    assert cssSelector "&.is-dragging" == "&.is-dragging";
+    assert cssSelector "& > li" == "& > li";
+}
+
+test "cssQuery — a supports condition compiles without its @" {
+    assert cssQuery "supports(display:grid)" == "supports(display:grid)";
+}
+
+test "cssLength — px and rem compile" {
+    assert cssLength "320px" == "320px";
+    assert cssLength "40rem" == "40rem";
+}
+
+test "the reject sets — each refuses its breakout and admits the ordinary case" {
+    assert refusesValue("red}</style><script>");
+    assert refusesValue("a;b");
+    assert refusesValue("#316ff6") == false;
+    assert refusesValue("calc(100dvh - calc(var(--spacing) * 6))") == false;
+    assert refusesValue("var(--color-brand)") == false;
+    assert refusesIdent("background color");
+    assert refusesIdent("a;b");
+    assert refusesIdent("");
+    assert refusesIdent("--gutter-width") == false;
+    assert refusesIdent("a→b");
+    assert refusesIdent("→");
+    assert refusesLength("1→px");
+    assert refusesValue("a→}");
+    assert refusesSelector(".is-dragging");
+    assert refusesSelector("&.a &.b");
+    assert refusesSelector("&{}");
+    assert refusesSelector("& > li") == false;
+    assert refusesQuery("@supports(display:grid)");
+    assert refusesQuery("supports(display:grid)") == false;
+    assert refusesLength("320");
+    assert refusesLength("calc(1px)");
+    assert refusesLength("1px2");
+    assert refusesLength("320px") == false;
+    assert refusesLength("40rem") == false;
+    assert refusesLength("12.5vw") == false;
+}
+
+// EVERY BUILDER REFUSES AT RUN TIME, with the payload in the message.
+test "arbValue / arbProp — a breakout panics and names the property and the payload" {
+    val m1 = raisedBy({ ->
+        val t = arbValue("color", "red}</style>");
+        0;
+    });
+    assert m1.indexOf("the value of 'color'") != -1;
+    assert m1.indexOf("red}</style>") != -1;
+    val m2 = raisedBy({ ->
+        val t = arbProp("a;b", "1rem");
+        0;
+    });
+    assert m2.indexOf("a property name may contain only") != -1;
+    assert raisedBy({ ->
+        val t = arbValue("color", "red");
+        0;
+    })
+        == "";
+    assert raisedBy({ ->
+        val t = arbValue("color", "red}");
+        0;
+    })
+        == "emilia arbitrary: the value of 'color' may not contain { } < > ; @ or a backslash: 'red}'";
+}
+
+test "arbSel / arbAt / arbMin / arbMax — each refuses its payload" {
+    val inner: Token[] = [];
+    assert raisedBy({ ->
+        val t = arbSel(".is-dragging", inner);
+        0;
+    }).indexOf("exactly one &")
+        != -1;
+    assert raisedBy({ ->
+        val t = arbAt("@supports(display:grid)", inner);
+        0;
+    }).indexOf("without its @")
+        != -1;
+    assert raisedBy({ ->
+        val t = arbMin("320", inner);
+        0;
+    }).indexOf("breakpoint length")
+        != -1;
+    assert raisedBy({ ->
+        val t = arbMax("calc(1px)", inner);
+        0;
+    }).indexOf("breakpoint length")
+        != -1;
+    assert raisedBy({ ->
+        val t = arbMin("320px", inner);
+        0;
+    })
+        == "";
+}
+
+// THE DISPATCHER RE-CHECKS: a token built by the bare constructor, around the
+// builders, still dies when it is rendered.
+test "arbValueToSheet — a payload that skipped the builder is refused when dispatched" {
+    val m = raisedBy({ ->
+        val s = arbValueToSheet("color", "red}</style>");
+        0;
+    });
+    assert m.indexOf("red}</style>") != -1;
+    assert raisedBy({ ->
+        val s = arbVariantToSheet("div", declSheet("color:red"));
+        0;
+    }).indexOf("exactly one &")
+        != -1;
+}

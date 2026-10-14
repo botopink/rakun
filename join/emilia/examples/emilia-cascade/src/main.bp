@@ -1,0 +1,189 @@
+// emilia-cascade — one card whose styles reach OUTSIDE its own class.
+//
+// Before front 56 every declaration a token produced had to fit inside one
+// class body, and a modifier was a block nested in it:
+//
+//     <style>.e_x{background:#ffffff;:hover{background:#000000}}</style>
+//
+// Four things in this example cannot be written that way, and all four are
+// ordinary now:
+//
+//   - the HOVER is a sibling rule, hoisted out of the class body with the
+//     selector and the at-rule the variant reference gives it —
+//     `@media (hover: hover) { &:hover }`, not a bare `:hover`;
+//   - the BREAKPOINT is a hoisted `@media (width >= 48rem)`, whose width is
+//     read from the theme's `--breakpoint-md` rather than written by emilia,
+//     so a project that overrides the variable moves the breakpoint;
+//     the PADDING is read from `--spacing` the same way, since front 35 —
+//     `padding:calc(var(--spacing) * 4)`, never `padding:1rem`;
+//   - the RESET is supplied through `Options` and lands in its own `base`
+//     layer. Its selector is LITERAL (`html`, `*`), which is a selector with
+//     no `&` — the class name, and the prefix, never reach it;
+//   - the document is LAYERED, which is the point of all of it: a project's
+//     own CSS beats a utility deliberately instead of by accident of order.
+//
+// Preflight is OPT-IN here: `defaultOptions()` carries an empty `base`, and a
+// project that wants a reset passes one. That is a deliberate inversion of
+// upstream's default, where the reset ships unless you turn it off.
+
+import {emilia, flushWith, Token} from "emilia";
+import {Theme, ThemeEntry, DarkMode, Block, Sheet} from "emilia";
+import {Rule, Options, staticSheet, defaultOptions} from "emilia";
+import {withBase, withPrefix, withLayers, withImportant} from "emilia";
+import {scrollbarHidden, named, compose} from "emilia";
+
+// The card. `Hover` and `Md` are the two tokens whose output leaves the class
+// body; the other three stay in it.
+fn cardTokens() -> Token[] {
+    val hoverInner: Token[] = [.Bg.Black, .Color.White];
+    val mdInner: Token[] = [.Pad.All.__8];
+    val out: Token[] = [
+        .Bg.White,
+        .Color.Black,
+        .Pad.All.__4,
+        Token.Hover(hoverInner),
+        Token.Md(mdInner),
+    ];
+    return out;
+}
+
+pub fn card() -> string {
+    return emilia(cardTokens());
+}
+
+// A reset, the way front 55 will supply one: rules whose selector is literal,
+// handed to `Options` rather than registered as a class. Two rules, so the
+// example also shows that `base` is a list and not one blob.
+pub fn reset() -> Rule[] {
+    val html = staticSheet("base", "html", "line-height:1.5;-webkit-text-size-adjust:100%");
+    val star = staticSheet("base", "*,::before,::after", "box-sizing:border-box;margin:0");
+    return html.rules.append(star.rules);
+}
+
+// The options a project would keep in one place: emilia's stock theme, the
+// reset above, cascade layers on.
+pub fn projectOptions() -> Options {
+    return withBase(defaultOptions(), reset());
+}
+
+fn main() -> @Task<void> {
+    val cls = card();
+    @print(cls);
+    @print(await flushWith(projectOptions()));
+}
+
+// ── tests ────────────────────────────────────────────────────────────────────
+// Track D is target-independent, so every assertion runs on `--target
+// commonJS` and on `--target erlang`.
+
+test "the hover is a SIBLING rule, not a block nested in the class body" {
+    val cls = card();
+    val doc = await flushWith(projectOptions());
+    assert doc.indexOf("@media (hover: hover){."
+        + cls
+        + ":hover{background:#000000;color:var(--color-white)}}")
+        != -1;
+    // The pre-56 nested form was `.e_x{background:#ffffff;:hover{...}}`, so a
+    // `;:hover` anywhere in the document would mean the hoist did not happen.
+    assert doc.indexOf(";:hover") == -1;
+    assert doc.indexOf("."
+        + cls
+        + "{background:#ffffff;color:var(--color-black);padding:calc(var(--spacing) * 4)}")
+        != -1;
+}
+
+test "the breakpoint is a hoisted @media whose width comes from the theme" {
+    val cls = card();
+    val doc = await flushWith(projectOptions());
+    assert doc.indexOf("@media (width >= 48rem){."
+        + cls
+        + "{padding:calc(var(--spacing) * 8)}}")
+        != -1;
+}
+
+test "the unconditioned rule of a class precedes its conditioned ones" {
+    val cls = card();
+    val doc = await flushWith(projectOptions());
+    assert doc.indexOf("."
+        + cls
+        + "{background:#ffffff;color:var(--color-black);padding:calc(var(--spacing) * 4)}")
+        < doc.indexOf("@media (hover: hover)");
+    assert doc.indexOf("@media (hover: hover)")
+        < doc.indexOf("@media (width >= 48rem)");
+}
+
+test "the reset is a literal selector in its own layer, and it is opt-in" {
+    val _cls = card();
+    val withReset = await flushWith(projectOptions());
+    assert withReset.indexOf("@layer base{html{line-height:1.5;-webkit-text-size-adjust:100%}*,::before,::after{box-sizing:border-box;margin:0}}")
+        != -1;
+    val _again = card();
+    val withoutReset = await flushWith(defaultOptions());
+    assert withoutReset.indexOf("@layer base") == -1;
+}
+
+test "the layer order is what lets a project beat a utility deliberately" {
+    val _cls = card();
+    val doc = await flushWith(projectOptions());
+    assert doc.startsWith("<style>@layer theme, base, components, utilities;");
+    assert doc.indexOf("@layer theme{") < doc.indexOf("@layer base{");
+    assert doc.indexOf("@layer base{") < doc.indexOf("@layer utilities{");
+}
+
+test "the keyframes sit outside every layer, at the end" {
+    val _cls = card();
+    val doc = await flushWith(projectOptions());
+    assert doc.indexOf("@layer utilities{") < doc.indexOf("@keyframes spin{");
+    assert doc.endsWith("}</style>");
+}
+
+test "a prefix reaches the class and not the reset's literal selector" {
+    val cls = card();
+    val doc = await flushWith(withPrefix(projectOptions(), "tw_"));
+    assert doc.indexOf(".tw_" + cls + "{background:#ffffff") != -1;
+    assert doc.indexOf("@layer base{html{line-height:1.5") != -1;
+}
+
+test "turning the layers off emits the same rules, in the same order, with no @layer" {
+    val _cls = card();
+    val doc = await flushWith(withLayers(projectOptions(), false));
+    assert doc.indexOf("@layer") == -1;
+    assert doc.indexOf("html{line-height:1.5")
+        < doc.indexOf("background:#ffffff");
+}
+
+test "the build-level important flag reaches every declaration of every rule" {
+    val cls = card();
+    val doc = await flushWith(withImportant(projectOptions(), true));
+    assert doc.indexOf("."
+        + cls
+        + "{background:#ffffff!important;color:var(--color-black)!important;padding:calc(var(--spacing) * 4)!important}")
+        != -1;
+    assert doc.indexOf("html{line-height:1.5!important") != -1;
+}
+
+test "two flushes are two independent documents, and the second has no utilities" {
+    val _cls = card();
+    val first = await flushWith(projectOptions());
+    val second = await flushWith(projectOptions());
+    assert first.indexOf("@layer utilities{") != -1;
+    assert second.indexOf("@layer utilities{") == -1;
+    assert second.indexOf("@layer base{html{") != -1;
+}
+
+// Front 59's surface CROSSES THE PACKAGE BOUNDARY: a bundle, `compose` and
+// `named` imported through `from "emilia"`, and the named class in its own
+// `components` layer ahead of the utilities.
+test "a bundle and a named class from compose.bp, used from another package" {
+    val drained = await flushWith(projectOptions());
+    assert drained.startsWith("<style>");
+    val bold: Token[] = [.Text.Bold];
+    val cls = emilia(compose([scrollbarHidden(), bold]));
+    val tag = named("cascade-tag", bold);
+    val doc = await flushWith(projectOptions());
+    assert tag == "cascade-tag";
+    assert doc.indexOf("." + cls + "{scrollbar-width:none}") != -1;
+    assert doc.indexOf("." + cls + "::-webkit-scrollbar{display:none}") != -1;
+    assert doc.indexOf("@layer components{.cascade-tag{font-weight:bold}}")
+        != -1;
+}

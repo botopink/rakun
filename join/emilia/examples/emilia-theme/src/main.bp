@@ -1,0 +1,160 @@
+// emilia-theme — a theme is a module.
+//
+// Upstream shares a theme between projects by importing a CSS file. In
+// botopink a theme is a FUNCTION in a module, so sharing it is an ordinary
+// package dependency: `brandTheme()` below could live in any package and be
+// imported by name, and `extendTheme` composes it with emilia's default the
+// same way either way. This example builds no machinery — it only shows the
+// composition and proves the front 54 surface is reachable across a package
+// boundary through `from "emilia"`.
+//
+// Front 56 closed the half this example used to be missing: the flushed
+// document carries the theme now. `flushWith(withTheme(defaultOptions(), th))`
+// renders the brand theme into a `:root` block inside the `theme` cascade
+// layer, ahead of the `utilities` layer the card's class lands in, so a
+// project's own CSS can beat a utility deliberately instead of by accident of
+// order.
+
+import {emilia, flush, flushWith, Token} from "emilia";
+import {Options, Rule, defaultOptions, withTheme, withPrefix, withLayers} from "emilia";
+import {Theme, ThemeEntry, Ns, DarkMode} from "emilia";
+import {defaultTheme, extendTheme, clearNamespace, namespace} from "emilia";
+import {themeValue, themeVar, themeCss, keyframeCss} from "emilia";
+import {darkAtRule, darkSelector, withDarkMode, spacing} from "emilia";
+
+// The brand theme: start from emilia's defaults, throw the stock colour
+// namespace away, and declare four variables of our own. `extendTheme` refuses
+// a name outside the nineteen known namespaces, so a typo such as
+// `--colour-lagoon` is refused instead of silently doing nothing.
+pub fn brandTheme() -> Theme {
+    val stripped = clearNamespace(defaultTheme(), Ns.Color);
+    val brand: ThemeEntry[] = [
+        ThemeEntry(name: "--spacing", value: "4px"),
+        ThemeEntry(name: "--font-body", value: "Inter, sans-serif"),
+        ThemeEntry(name: "--color-lagoon", value: "oklch(0.72 0.11 221.19)"),
+        ThemeEntry(name: "--color-coral", value: "oklch(0.74 0.17 40.24)"),
+    ];
+    return extendTheme(stripped, brand);
+}
+
+// A second package's theme, reduced to the one thing that matters here: it is
+// a plain `ThemeEntry[]` a dependency hands over, exactly as front 33 hands
+// over `paletteEntries()`.
+pub fn vendorEntries() -> ThemeEntry[] {
+    val out: ThemeEntry[] = [
+        ThemeEntry(name: "--radius-pill", value: "9999px"),
+        ThemeEntry(name: "--shadow-card", value: "0 1px 3px 0 rgb(0 0 0 / 0.1)"),
+    ];
+    return out;
+}
+
+// One card. Nothing here mentions the theme — the padding a front 35 token
+// will emit is `spacing(4)`, which references `--spacing` rather than
+// resolving it, so the same card renders differently under a theme whose
+// `--spacing` is `4px` and one whose `--spacing` is `0.25rem`.
+pub fn cardPadding() -> string {
+    return "padding:" + spacing(4);
+}
+
+pub fn card() -> string {
+    val tokens: Token[] = [.Bg.White, .Text.Bold];
+    return emilia(tokens);
+}
+
+fn main() -> @Task<void> {
+    val th = brandTheme();
+    @print(themeValue(th, "--color-lagoon"));
+    @print(themeVar("--color-lagoon"));
+    @print(cardPadding());
+    @print(card());
+    @print(darkAtRule(th) + " " + darkSelector(th));
+    val styles = await flushWith(withTheme(defaultOptions(), th));
+    @print(styles);
+}
+
+test "the brand theme keeps its own colours and drops the stock palette" {
+    val th = brandTheme();
+    assert themeValue(th, "--color-lagoon") == "oklch(0.72 0.11 221.19)";
+    assert themeValue(th, "--color-coral") == "oklch(0.74 0.17 40.24)";
+    assert themeValue(th, "--color-white") == "";
+    assert namespace(th, Ns.Color).length == 2;
+}
+
+test "overriding a variable replaces it rather than appending a second one" {
+    val th = brandTheme();
+    assert themeValue(th, "--spacing") == "4px";
+    assert themeValue(defaultTheme(), "--spacing") == "0.25rem";
+    assert namespace(th, Ns.Spacing).length == 1;
+}
+
+test "an imported theme composes with the default, and both stay reachable" {
+    val composed = extendTheme(defaultTheme(), vendorEntries());
+    assert themeValue(composed, "--radius-pill") == "9999px";
+    assert themeValue(composed, "--shadow-card")
+        == "0 1px 3px 0 rgb(0 0 0 / 0.1)";
+    assert themeValue(composed, "--radius-lg") == "0.5rem";
+    assert themeValue(composed, "--spacing") == "0.25rem";
+    assert themeValue(composed, "--animate-spin") == "spin 1s linear infinite";
+}
+
+test "a spacing utility references the theme instead of resolving it" {
+    assert spacing(0) == "0";
+    assert spacing(4) == "calc(var(--spacing) * 4)";
+    assert spacing(-4) == "calc(var(--spacing) * -4)";
+    assert cardPadding() == "padding:calc(var(--spacing) * 4)";
+}
+
+test "the brand theme renders its own custom-property block" {
+    val css = themeCss(brandTheme());
+    assert css.startsWith("--spacing:4px;");
+    assert css.endsWith("--color-lagoon:oklch(0.72 0.11 221.19);--color-coral:oklch(0.74 0.17 40.24)");
+    assert keyframeCss(brandTheme()).length == 4;
+}
+
+test "the dark strategy is a property of the theme, chosen once per project" {
+    val byClass = withDarkMode(brandTheme(), DarkMode.Class(name: "dark"));
+    assert darkAtRule(brandTheme()) == "@media (prefers-color-scheme: dark)";
+    assert darkSelector(byClass) == "&:where(.dark, .dark *)";
+    assert themeCss(byClass) == themeCss(brandTheme());
+}
+
+test "the flushed document carries the brand theme, in the theme layer" {
+    val _cls = card();
+    val styles = await flushWith(withTheme(defaultOptions(), brandTheme()));
+    assert styles.startsWith("<style>@layer theme, base, components, utilities;@layer theme{:root{--spacing:4px;");
+    assert styles.indexOf("--color-lagoon:oklch(0.72 0.11 221.19)") != -1;
+    assert styles.indexOf("--color-white") == -1;
+    assert styles.indexOf("@layer utilities{.") != -1;
+}
+
+test "the theme layer precedes the utilities layer, which is what lets a project beat a utility" {
+    val cls = card();
+    val styles = await flushWith(withTheme(defaultOptions(), brandTheme()));
+    assert styles.indexOf("@layer theme{")
+        < styles.indexOf("@layer utilities{");
+    assert styles.indexOf("@layer utilities{."
+        + cls
+        + "{background:#ffffff;font-weight:bold}}")
+        != -1;
+}
+
+test "turning the layers off emits the same rules and no @layer token" {
+    val cls = card();
+    val o = withLayers(withTheme(defaultOptions(), brandTheme()), false);
+    val styles = await flushWith(o);
+    assert styles.indexOf("@layer") == -1;
+    assert styles.startsWith("<style>:root{--spacing:4px;");
+    assert styles.indexOf("." + cls + "{background:#ffffff;font-weight:bold}")
+        != -1;
+}
+
+test "a prefix reaches the class and not the theme's literal selector" {
+    val cls = card();
+    val o = withPrefix(withTheme(defaultOptions(), brandTheme()), "tw_");
+    val styles = await flushWith(o);
+    assert styles.indexOf(":root{--spacing:4px;") != -1;
+    assert styles.indexOf(".tw_"
+        + cls
+        + "{background:#ffffff;font-weight:bold}")
+        != -1;
+}

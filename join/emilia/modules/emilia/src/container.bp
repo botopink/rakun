@@ -1,0 +1,255 @@
+//// emilia/container — front 58: container queries (`§ 3.3`).
+////
+//// A PARENT becomes a container — `.Container.Inline` / `.Normal` / `.Size`
+//// (`container-type`), or `Token.ContainerNamed(name)`, which is BOTH halves of
+//// `@container/main` (`container-type:inline-size;container-name:main`,
+//// because naming a container without making it one does nothing). A
+//// DESCENDANT asks about it through `ContainerAt(size, inner)` /
+//// `ContainerAtNamed(size, name, inner)` — two top-level variants carrying the
+//// size as its theme KEY — built through the thirteen typed builders below
+//// (`containerAtMd(inner)` …) and `containerKey`, the only place a key is
+//// written. Top-level because a payload leaf inside a section cannot be
+//// constructed.
+////
+//// SIZES COME FROM THE THEME, NEVER FROM A CONSTANT. `@container (width >= …)`
+//// reads `--container-<key>` through `themeValue` (a container query cannot
+//// hold a `var()`, so the value is resolved), so a project that narrows
+//// `--container-md` narrows every `md` query and nothing else. A size the theme
+//// does not define — or a key outside the thirteen — is a `@panic`: there is no
+//// fallback width and no way to emit `@container (width >= )`.
+////
+//// This module imports `tokens`, `theme`, `output` and `arbitrary` (for the
+//// `cssIdent` reject set a container name goes through). The `Token[]`-carrying
+//// helpers take the inner list already folded to a `Sheet`: folding is
+//// `emilia.bp`'s, and that module imports this one.
+
+import {tokens.Token};
+import {theme.Theme, theme.Ns, theme.nsPrefix, theme.themeValue, theme.clearNamespace, theme.defaultTheme, theme.extendTheme, theme.ThemeEntry, theme.DarkMode};
+import {output.Sheet, output.Variant, output.Rule, output.Block, output.declSheet, output.nestVariant};
+import {arbitrary.refusesIdent};
+
+pub type ContainerSize { X3xs, X2xs, Xs, Sm, Md, Lg, Xl, X2xl, X3xl, X4xl, X5xl, X6xl, X7xl }
+
+// The ONLY place a size key is written.
+pub fn containerKey(s: ContainerSize) -> string {
+    val out = case s {
+        X3xs -> "3xs";
+        X2xs -> "2xs";
+        Xs -> "xs";
+        Sm -> "sm";
+        Md -> "md";
+        Lg -> "lg";
+        Xl -> "xl";
+        X2xl -> "2xl";
+        X3xl -> "3xl";
+        X4xl -> "4xl";
+        X5xl -> "5xl";
+        X6xl -> "6xl";
+        X7xl -> "7xl";
+    };
+    return out;
+}
+
+fn containerKeys() -> string[] {
+    val sizes: ContainerSize[] = [
+        ContainerSize.X3xs,
+        ContainerSize.X2xs,
+        ContainerSize.Xs,
+        ContainerSize.Sm,
+        ContainerSize.Md,
+        ContainerSize.Lg,
+        ContainerSize.Xl,
+        ContainerSize.X2xl,
+        ContainerSize.X3xl,
+        ContainerSize.X4xl,
+        ContainerSize.X5xl,
+        ContainerSize.X6xl,
+        ContainerSize.X7xl,
+    ];
+    return sizes.map({ s -> containerKey(s) });
+}
+
+fn checkContainerName(name: string) -> string {
+    if (refusesIdent(name))
+        @panic("emilia container: a container name may contain only letters, digits, - and _: '"
+            + name
+            + "'");
+    return name;
+}
+
+// ── the builders ─────────────────────────────────────────────────────────────
+
+pub fn containerAt(size: ContainerSize, inner: Token[]) -> Token {
+    return Token.ContainerAt(size: containerKey(size), inner: inner);
+}
+
+pub fn containerNamed(size: ContainerSize, name: string, inner: Token[]) -> Token {
+    return Token.ContainerAtNamed(size: containerKey(size), name: checkContainerName(name), inner: inner);
+}
+
+pub fn containerName(name: string) -> Token {
+    return Token.ContainerNamed(name: checkContainerName(name));
+}
+
+pub fn containerAt3xs(inner: Token[]) -> Token {
+    return containerAt(ContainerSize.X3xs, inner);
+}
+
+pub fn containerAt2xs(inner: Token[]) -> Token {
+    return containerAt(ContainerSize.X2xs, inner);
+}
+
+pub fn containerAtXs(inner: Token[]) -> Token {
+    return containerAt(ContainerSize.Xs, inner);
+}
+
+pub fn containerAtSm(inner: Token[]) -> Token {
+    return containerAt(ContainerSize.Sm, inner);
+}
+
+pub fn containerAtMd(inner: Token[]) -> Token {
+    return containerAt(ContainerSize.Md, inner);
+}
+
+pub fn containerAtLg(inner: Token[]) -> Token {
+    return containerAt(ContainerSize.Lg, inner);
+}
+
+pub fn containerAtXl(inner: Token[]) -> Token {
+    return containerAt(ContainerSize.Xl, inner);
+}
+
+pub fn containerAt2xl(inner: Token[]) -> Token {
+    return containerAt(ContainerSize.X2xl, inner);
+}
+
+pub fn containerAt3xl(inner: Token[]) -> Token {
+    return containerAt(ContainerSize.X3xl, inner);
+}
+
+pub fn containerAt4xl(inner: Token[]) -> Token {
+    return containerAt(ContainerSize.X4xl, inner);
+}
+
+pub fn containerAt5xl(inner: Token[]) -> Token {
+    return containerAt(ContainerSize.X5xl, inner);
+}
+
+pub fn containerAt6xl(inner: Token[]) -> Token {
+    return containerAt(ContainerSize.X6xl, inner);
+}
+
+pub fn containerAt7xl(inner: Token[]) -> Token {
+    return containerAt(ContainerSize.X7xl, inner);
+}
+
+// ── the dispatcher helpers ───────────────────────────────────────────────────
+
+pub fn containerMarkerToCss(t: Token.Container) -> string {
+    val out = case t {
+        Inline -> "container-type:inline-size";
+        Normal -> "container-type:normal";
+        Size -> "container-type:size";
+    };
+    return out;
+}
+
+pub fn containerNamedToSheet(name: string) -> Sheet {
+    return declSheet("container-type:inline-size;container-name:"
+        + checkContainerName(name));
+}
+
+// `@container [name ](width >= <theme value>)`. A key outside the thirteen, or
+// one the theme does not define, is refused — never a rule with an empty width.
+pub fn containerAtRule(key: string, name: string, th: Theme) -> string {
+    if (containerKeys().indexOf(key) == -1)
+        @panic("emilia container: '"
+            + key
+            + "' is not one of the thirteen container sizes (3xs … 7xl)");
+    val width = themeValue(th, nsPrefix(Ns.Container) + key);
+    if (width == "")
+        @panic("emilia container: the theme defines no "
+            + nsPrefix(Ns.Container)
+            + key
+            + ", so a container query on it has no width");
+    val label = if (name == "") "" else checkContainerName(name) + " ";
+    return "@container " + label + "(width >= " + width + ")";
+}
+
+pub fn containerAtToSheet(key: string, name: string, inner: Sheet, th: Theme) -> Sheet {
+    return nestVariant(inner, Variant(atRule: containerAtRule(key, name, th), selector: "&"));
+}
+
+// ── front 58 · tests ─────────────────────────────────────────────────────────
+
+#[@External.node(when(argc == 1): """(function(__B){ try { __B(); return ""; } catch (__e) { return (__e && __e.message) ? __e.message : String(__e); } })($0)""")]
+#[@External.Erlang("""(fun(B__) -> try B__(), <<>> catch _:{panic, M__} when is_binary(M__) -> M__; _:E__ -> iolist_to_binary(io_lib:format("~p", [E__])) end end)($0)""")]
+declare fn containerRaised(body: fn() -> i32) -> string;
+
+test "containerKey — thirteen keys, in `§ 3.3`'s order" {
+    assert containerKeys().join(",")
+        == "3xs,2xs,xs,sm,md,lg,xl,2xl,3xl,4xl,5xl,6xl,7xl";
+}
+
+// The thirteen widths are `§ 3.3`'s table, asserted as rem values read out of
+// the theme — never as a class name.
+test "containerAtRule — the thirteen widths of `§ 3.3`, from the theme" {
+    val th = defaultTheme();
+    val rules = containerKeys().map({ k -> containerAtRule(k, "", th) });
+    assert rules.join("|")
+        == "@container (width >= 16rem)|@container (width >= 18rem)|@container (width >= 20rem)|@container (width >= 24rem)|@container (width >= 28rem)|@container (width >= 32rem)|@container (width >= 36rem)|@container (width >= 42rem)|@container (width >= 48rem)|@container (width >= 56rem)|@container (width >= 64rem)|@container (width >= 72rem)|@container (width >= 80rem)";
+    assert rules.filter({ r -> r.indexOf("min-width") != -1 }).length == 0;
+}
+
+// WRITTEN FIRST, because a hard-coded table passes every other test.
+test "containerAtRule — narrowing --container-md moves that query and nothing else" {
+    val narrow: ThemeEntry[] = [ThemeEntry(name: "--container-md", value: "20rem")];
+    val th = extendTheme(defaultTheme(), narrow);
+    assert containerAtRule("md", "", th) == "@container (width >= 20rem)";
+    assert containerAtRule("sm", "", th) == "@container (width >= 24rem)";
+    assert containerAtRule("lg", "", th) == "@container (width >= 32rem)";
+}
+
+test "containerAtRule — a named query, and exactly one space when unnamed" {
+    assert containerAtRule("sm", "main", defaultTheme())
+        == "@container main (width >= 24rem)";
+    assert containerAtRule("sm", "", defaultTheme()).startsWith("@container (");
+}
+
+test "containerAtRule — a cleared namespace or an unknown key panics, never an empty width" {
+    val cleared = clearNamespace(defaultTheme(), Ns.Container);
+    val m = containerRaised({ ->
+        val r = containerAtRule("md", "", cleared);
+        0;
+    });
+    assert m.indexOf("defines no --container-md") != -1;
+    val k = containerRaised({ ->
+        val r = containerAtRule("huge", "", defaultTheme());
+        0;
+    });
+    assert k.indexOf("not one of the thirteen") != -1;
+}
+
+test "container names — refused by front 57's cssIdent reject set" {
+    val inner: Token[] = [];
+    assert containerRaised({ ->
+        val t = containerName("main}</style>");
+        0;
+    }).indexOf("container name")
+        != -1;
+    assert containerRaised({ ->
+        val t = containerNamed(ContainerSize.Sm, "a<b", inner);
+        0;
+    }).indexOf("container name")
+        != -1;
+    assert containerRaised({ ->
+        val s = containerNamedToSheet("x}");
+        0;
+    }).indexOf("container name")
+        != -1;
+    assert containerRaised({ ->
+        val t = containerName("main");
+        0;
+    })
+        == "";
+}

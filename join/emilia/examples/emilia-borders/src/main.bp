@@ -1,0 +1,291 @@
+// emilia-borders — the `Border` section, end to end, in a real package.
+//
+// Before front 40 this section had four widths (shorthand only), four of the
+// nine radii (no corners, no sides) and two colour families whose dispatcher
+// DISCARDED THE SHADE: `.Border.Color.Red.100` and `.Border.Color.Red.900`
+// rendered byte-identically, as `border-color:red`. Three things here could
+// not be written at all:
+//
+//   - a border on ONE SIDE, or on one AXIS — `border-t-4`, `border-x`, and
+//     the logical `border-s` that follows the writing direction;
+//   - a border STYLE — a dashed or a dotted rule was inexpressible;
+//   - a card with a ROUNDED TOP AND A SQUARE BOTTOM, because a radius could
+//     only be set on all four corners at once.
+//
+// And one thing changed meaning: every radius now REFERENCES the theme
+// (`var(--radius-lg)`) where it used to resolve a literal (`0.5rem`), so a
+// project that overrides `--radius-lg` moves every rounded corner with it.
+// The two literals that survive are upstream's own — `rounded-none` is `0`
+// and `rounded-full` is `9999px`, neither of which is a theme entry.
+//
+// THIS FILE IS A CONSUMER PACKAGE, not a test inside the library. That matters:
+// a consumer re-emits its own copy of the enum classes, so a `case` that
+// crossed the package boundary used to fall through every arm (§ Maintainer
+// rules). Asserting the full class bodies from outside is what catches that.
+
+import {emilia, flushWith, Token} from "emilia";
+import {Theme, ThemeEntry, DarkMode, Options} from "emilia";
+import {Rule, Block, Sheet} from "emilia";
+import {defaultOptions, withTheme, emptyTheme} from "emilia";
+
+// The theme is emptied so the document carries only what these tokens emit —
+// the `@layer utilities` body and nothing else. The `var(--radius-*)`
+// references still render; an empty theme means the VALUES are absent, which
+// is exactly the point being made about who owns them.
+fn bareOptions() -> Options {
+    return withTheme(defaultOptions(), emptyTheme());
+}
+
+// ── one width per side, and the two axes ─────────────────────────────────────
+//
+// An AXIS is two declarations and a SIDE is one, because CSS has no
+// `border-x-width`. `S`/`E` are `border-inline-start`/`-end`, which follow the
+// writing direction where `L`/`R` do not.
+
+pub fn sides() -> string {
+    val tokens: Token[] = [
+        .Border.W.T.__4,
+        .Border.W.R.__1,
+        .Border.W.B.__0,
+        .Border.W.L.__2,
+    ];
+    return emilia(tokens);
+}
+
+pub fn axes() -> string {
+    val tokens: Token[] = [.Border.W.X.__2, .Border.W.Y.__8];
+    return emilia(tokens);
+}
+
+pub fn logical() -> string {
+    val tokens: Token[] = [.Border.W.S.__4, .Border.W.E.__1];
+    return emilia(tokens);
+}
+
+// ── the six styles ───────────────────────────────────────────────────────────
+//
+// `Hidden` and `None` are not the same value and are not interchangeable:
+// `hidden` loses a border-conflict resolution in a table, `none` does not
+// participate in one.
+
+pub fn styles() -> string {
+    val tokens: Token[] = [.Border.Style.Dashed];
+    return emilia(tokens);
+}
+
+// ── the palette, with the shade finally reaching the output ──────────────────
+
+pub fn palette() -> string {
+    val tokens: Token[] = [
+        .Border.W.__1,
+        .Border.Color.Slate.__200,
+    ];
+    return emilia(tokens);
+}
+
+// The three cells the old two-family stub carried, at the three shades it
+// carried them at. All three used to render as the same `border-color:red`.
+pub fn shades() -> string[] {
+    val a: Token[] = [.Border.Color.Red.__100];
+    val b: Token[] = [.Border.Color.Red.__500];
+    val c: Token[] = [.Border.Color.Red.__700];
+    val out: string[] = [emilia(a), emilia(b), emilia(c)];
+    return out;
+}
+
+// ── the radius family, sides and corners ─────────────────────────────────────
+
+pub fn radii() -> string {
+    val tokens: Token[] = [.Border.Rounded.X2xl];
+    return emilia(tokens);
+}
+
+pub fn sideRadius() -> string {
+    val tokens: Token[] = [.Border.Rounded.T.Lg];
+    return emilia(tokens);
+}
+
+pub fn cornerRadius() -> string {
+    val tokens: Token[] = [.Border.Rounded.Tl.Full];
+    return emilia(tokens);
+}
+
+// The logical corners, which follow the writing direction the way `S`/`E` do.
+pub fn logicalRadius() -> string {
+    val tokens: Token[] = [.Border.Rounded.Ss.Md, .Border.Rounded.Ee.Md];
+    return emilia(tokens);
+}
+
+// ── THE COMPOSITION THIS FRONT EXISTS FOR ────────────────────────────────────
+//
+// A table-like card: rounded across the top, square across the bottom, a solid
+// outer border and a dashed rule between the head and the body. Every one of
+// those four is a token that did not exist before this front — the per-corner
+// radius, the per-side width, the border style, and the shade on the colour.
+
+pub fn cardHead() -> string {
+    val tokens: Token[] = [
+        .Border.W.__1,
+        .Border.Color.Slate.__300,
+        .Border.Rounded.T.Lg,
+        .Border.Style.Solid,
+    ];
+    return emilia(tokens);
+}
+
+// The rule between head and body: a dashed border on the BOTTOM only, so the
+// card's own outer border is untouched.
+pub fn cardRule() -> string {
+    val tokens: Token[] = [
+        .Border.W.B.__2,
+        .Border.Style.Dashed,
+        .Border.Color.Slate.__200,
+    ];
+    return emilia(tokens);
+}
+
+// The foot squares off: the bottom corners are explicitly `None`, which is a
+// real value on the ladder and not the absence of a token.
+pub fn cardFoot() -> string {
+    val tokens: Token[] = [
+        .Border.W.__1,
+        .Border.Color.Slate.__300,
+        .Border.Rounded.B.None,
+    ];
+    return emilia(tokens);
+}
+
+// ── tests ────────────────────────────────────────────────────────────────────
+
+test "a side is one declaration and an axis is two" {
+    val sideCls = sides();
+    val axisCls = axes();
+    val doc = await flushWith(bareOptions());
+    assert doc.indexOf("."
+        + sideCls
+        + "{border-top-width:4px;border-right-width:1px;"
+        + "border-bottom-width:0;border-left-width:2px}")
+        != -1;
+    assert doc.indexOf("."
+        + axisCls
+        + "{border-left-width:2px;border-right-width:2px;"
+        + "border-top-width:8px;border-bottom-width:8px}")
+        != -1;
+}
+
+test "the logical pair is inline-start and inline-end, not left and right" {
+    val cls = logical();
+    val doc = await flushWith(bareOptions());
+    assert doc.indexOf("."
+        + cls
+        + "{border-inline-start-width:4px;"
+        + "border-inline-end-width:1px}")
+        != -1;
+    assert doc.indexOf("border-left-width") == -1;
+    assert doc.indexOf("border-right-width") == -1;
+}
+
+test "a border style is a token now, and it crosses the package boundary" {
+    val cls = styles();
+    val doc = await flushWith(bareOptions());
+    assert doc.indexOf("." + cls + "{border-style:dashed}") != -1;
+}
+
+test "the palette reaches border-color, shade included" {
+    val cls = palette();
+    val doc = await flushWith(bareOptions());
+    assert doc.indexOf("."
+        + cls
+        + "{border-width:1px;"
+        + "border-color:var(--color-slate-200)}")
+        != -1;
+}
+
+// THE DEFECT THIS FRONT CLOSED, asserted from OUTSIDE the library. Three
+// shades of one family used to produce one class between them, because the
+// dispatcher discarded the payload and the class name is a hash of the body.
+test "three shades of one family are three classes, not one" {
+    val cs = shades();
+    assert cs.length == 3;
+    val doc = await flushWith(bareOptions());
+    assert doc.indexOf("border-color:var(--color-red-100)") != -1;
+    assert doc.indexOf("border-color:var(--color-red-500)") != -1;
+    assert doc.indexOf("border-color:var(--color-red-700)") != -1;
+    assert doc.indexOf("border-color:red") == -1;
+}
+
+test "a radius references the theme; none and full stay literal" {
+    val cls = radii();
+    val doc = await flushWith(bareOptions());
+    assert doc.indexOf("." + cls + "{border-radius:var(--radius-2xl)}") != -1;
+    assert doc.indexOf("rem") == -1;
+}
+
+test "a side radius is two corners and a corner radius is one" {
+    val sideCls = sideRadius();
+    val cornerCls = cornerRadius();
+    val doc = await flushWith(bareOptions());
+    assert doc.indexOf("."
+        + sideCls
+        + "{border-top-left-radius:var(--radius-lg);"
+        + "border-top-right-radius:var(--radius-lg)}")
+        != -1;
+    assert doc.indexOf("." + cornerCls + "{border-top-left-radius:9999px}")
+        != -1;
+}
+
+test "the logical corners follow the writing direction" {
+    val cls = logicalRadius();
+    val doc = await flushWith(bareOptions());
+    assert doc.indexOf("."
+        + cls
+        + "{border-start-start-radius:var(--radius-md);"
+        + "border-end-end-radius:var(--radius-md)}")
+        != -1;
+}
+
+test "end to end — a card with a rounded top, a square bottom and a dashed rule" {
+    val head = cardHead();
+    val rule = cardRule();
+    val foot = cardFoot();
+    val doc = await flushWith(bareOptions());
+    assert doc.indexOf("."
+        + head
+        + "{border-width:1px;"
+        + "border-color:var(--color-slate-300);"
+        + "border-top-left-radius:var(--radius-lg);"
+        + "border-top-right-radius:var(--radius-lg);"
+        + "border-style:solid}")
+        != -1;
+    assert doc.indexOf("."
+        + rule
+        + "{border-bottom-width:2px;border-style:dashed;"
+        + "border-color:var(--color-slate-200)}")
+        != -1;
+    assert doc.indexOf("."
+        + foot
+        + "{border-width:1px;"
+        + "border-color:var(--color-slate-300);"
+        + "border-bottom-right-radius:0;border-bottom-left-radius:0}")
+        != -1;
+}
+
+// Nothing in this document resolves a colour or a length. The two literals it
+// does carry are upstream's own and are asserted by name, so a future front
+// that turned `9999px` into a theme entry would have to change this line.
+test "no token in this example resolves a colour or a length" {
+    val _a = sides();
+    val _b = axes();
+    val _c = logical();
+    val _d = styles();
+    val _e = palette();
+    val _f = radii();
+    val _g = sideRadius();
+    val _h = logicalRadius();
+    val doc = await flushWith(bareOptions());
+    assert doc.indexOf("rem") == -1;
+    assert doc.indexOf("#") == -1;
+    assert doc.indexOf("oklch(") == -1;
+    assert doc.indexOf("rounded-") == -1;
+    assert doc.indexOf("border-color:red") == -1;
+}

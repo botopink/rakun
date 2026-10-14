@@ -1,0 +1,1272 @@
+//// emilia/output — the rule model, the codec and the document renderer.
+////
+//// Front 56. Until this module existed a token lowered to a DECLARATION
+//// STRING and a modifier wrapped that string in braces, so the whole of a
+//// class was one nested block: `.e_x{background:#000;:hover{background:#fff}}`.
+//// That shape can only express what fits inside one class body, which leaves
+//// `group-*`, `peer-*`, `rtl`, `in-*`, `*`, `**`, `space-*`, `divide-*`,
+//// `@keyframes`, `@layer`, `@supports`, `@container` and the `important` flag
+//// with nowhere to go, and leaves no defined winner when two tokens set the
+//// same property.
+////
+//// A `Rule` replaces the declaration string. Its `selector` is a NESTING
+//// TEMPLATE carrying exactly one `&`, and `&` stands for the class, so every
+//// row of the variant reference is one template: `&:hover`, `.dark &`,
+//// `:is(& > *)`, `&:is(:where(.group):hover *)`. A selector WITHOUT an `&` is
+//// a literal selector — that is how the theme's `:root` and front 55's reset
+//// are written — and a selector with two or more is refused. There is no
+//// argument that permits it.
+////
+//// THIS MODULE IS PURE. It declares no external and touches no host cell: a
+//// cross-module bare import of an `#[@External.…]` declaration resolves at
+//// type level and is `undefined` at run time (`root.bp`), which is why
+//// emilia's cells live in `emilia.bp`. `emilia.bp` holds the cells and the
+//// public entry points; `output.bp` holds the model, the codec and the
+//// renderer, so document assembly happens ONCE, in botopink, rather than
+//// twice inside two `#[@External]` templates where nothing can test it.
+////
+//// FRONT 33/34/35 INTERFACE. Front 34 writes one `Variant`-returning function
+//// per variant name and nothing else about emission. Fronts 33–47 keep
+//// returning a declaration string from their own section sub-dispatcher and
+//// the shared `case` in `emilia.bp` adapts it with `declSheet(…)`; a front
+//// whose tokens genuinely need a selector — `space-x-*`, `divide-*` — writes
+//// a `…TokenToSheet(t, th) -> Sheet` instead and says so in its own README.
+//// Two shapes, one line each in the shared `case`.
+
+import {theme.Theme, theme.ThemeEntry, theme.DarkMode, theme.Ns, theme.nsPrefix, theme.defaultTheme, theme.emptyTheme, theme.themeCss, theme.keyframeCss};
+
+// ── the model ────────────────────────────────────────────────────────────────
+
+// One style rule. `layer` is one of `layerNames()`; `atRules` is
+// OUTERMOST-FIRST; `selector` is the nesting template described above;
+// `declarations` is a `;`-joined list with no braces around it; `important`
+// appends `!important` to each declaration at render time, never to the rule.
+pub type Rule(
+    layer: string,
+    atRules: string[],
+    selector: string,
+    declarations: string,
+    important: bool,
+)
+
+// A rule that is not a style rule — a `@keyframes` or a `@property`. `header`
+// is `"@keyframes spin"` / `"@property --tw-translate-x"` and `body` is the
+// brace-balanced body, braces included, which is exactly the shape `theme.bp`'s
+// `keyframeCss` hands over (`nsPrefix(Ns.Keyframes) + name + value`).
+pub type Block(header: string, body: string)
+
+// What a token list produces.
+pub type Sheet(rules: Rule[], blocks: Block[])
+
+// A variant is an at-rule and a selector template, and the whole variant
+// reference fits in the two: `hover` is `("@media (hover: hover)", "&:hover")`,
+// `rtl` is `("", "&:where(:dir(rtl), [dir=\"rtl\"], [dir=\"rtl\"] *)")`, `md` is `("@media (width >= 48rem)", "&")`,
+// `group-hover` is `("", "&:is(:where(.group):hover *)")`. An empty `atRule`
+// means the variant is purely a selector.
+pub type Variant(atRule: string, selector: string)
+
+// The four cascade layers, in cascade order. This list is the ONLY place the
+// order is written, and `renderDocument` walks it, so nothing can disagree
+// with the `@layer` statement it emits.
+pub fn layerNames() -> string[] {
+    val out: string[] = ["theme", "base", "components", "utilities"];
+    return out;
+}
+
+// ── constructors ─────────────────────────────────────────────────────────────
+
+pub fn emptySheet() -> Sheet {
+    val rules: Rule[] = [];
+    val blocks: Block[] = [];
+    return Sheet(rules: rules, blocks: blocks);
+}
+
+// The one-line adapter for the common case: a section sub-dispatcher answers a
+// declaration string and this turns it into a sheet. An EMPTY string answers an
+// empty sheet, which is what `filter({ d -> d != "" })` used to do by hand.
+pub fn declSheet(decls: string) -> Sheet {
+    val one = oneRule(
+        Rule(
+            layer: "utilities",
+            atRules: noAtRules(),
+            selector: "&",
+            declarations: decls,
+            important: false,
+        ),
+    );
+    val blocks: Block[] = [];
+    val out = if (decls == "")
+        emptySheet()
+    else
+        Sheet(rules: one, blocks: blocks);
+    return out;
+}
+
+// A rule whose selector is LITERAL — no `&`, so the class name never reaches
+// it. This is how the theme writes `:root` and how front 55 writes its reset.
+pub fn staticSheet(layer: string, selector: string, decls: string) -> Sheet {
+    val one = oneRule(
+        Rule(
+            layer: layer,
+            atRules: noAtRules(),
+            selector: selector,
+            declarations: decls,
+            important: false,
+        ),
+    );
+    val blocks: Block[] = [];
+    return Sheet(rules: one, blocks: blocks);
+}
+
+// A `@keyframes` sheet. A keyframes rule is not a style rule, so it cannot be
+// nested inside one and it carries no selector, no layer and no at-rules.
+pub fn blockSheet(header: string, body: string) -> Sheet {
+    val rules: Rule[] = [];
+    val blocks: Block[] = [Block(header: header, body: body)];
+    return Sheet(rules: rules, blocks: blocks);
+}
+
+// Rules then blocks, order preserved on both sides. Token order is class
+// identity, so this is the operation that keeps it.
+pub fn mergeSheet(a: Sheet, b: Sheet) -> Sheet {
+    return Sheet(
+        rules: a.rules.append(b.rules),
+        blocks: a.blocks.append(b.blocks),
+    );
+}
+
+// Every rule's declaration string, in order. The dispatcher-output check of
+// step 4 walks this, and a test that only cares about what a token declares
+// reads it instead of rendering the sheet.
+pub fn declarationsOf(s: Sheet) -> string[] {
+    return s.rules.map({ r -> r.declarations });
+}
+
+fn noAtRules() -> string[] {
+    val out: string[] = [];
+    return out;
+}
+
+fn oneRule(r: Rule) -> Rule[] {
+    val out: Rule[] = [r];
+    return out;
+}
+
+fn oneBlock(b: Block) -> Block[] {
+    val out: Block[] = [b];
+    return out;
+}
+
+// ── variant nesting ──────────────────────────────────────────────────────────
+
+fn ampCount(selector: string) -> i32 {
+    return selector.split("&").length - 1;
+}
+
+// Substitute `inner` for the single `&` of `template`. A template with no `&`
+// is returned unchanged, which is what makes a literal selector immune to a
+// variant's selector half (its at-rule half still applies).
+fn substituteAmp(template: string, inner: string) -> string {
+    return template.split("&").join(inner);
+}
+
+// REFUSE a variant selector that does not carry exactly one `&`. There is no
+// permissive mode and no argument that relaxes it: with none the variant
+// REPLACES the rule it was meant to wrap, and with two it duplicates it —
+// both produce a stylesheet that is silently wrong in a browser, days later.
+fn checkVariantSelector(selector: string) -> string {
+    val n = ampCount(selector);
+    if (n != 1)
+        @panic(
+            "emilia output: a variant selector carries exactly one `&`, and '"
+                + selector
+                + "' carries "
+                + n.toString()
+                + " — the `&` is where the rule being wrapped goes, so a selector without one replaces that rule and a selector with two duplicates it",
+        );
+    return selector;
+}
+
+// CSS nesting semantics, and the direction matters. The INNER rule's `&` is
+// what the OUTER variant's selector replaces — `&:hover { &::before { … } }`
+// flattens to `&:hover::before`, not to `&::before:hover`. Writing it the
+// other way round (substituting the rule's selector into the variant's
+// template) renders every nested pair backwards; the two nesting tests below
+// pin both orders so it cannot drift back.
+fn nestRule(r: Rule, v: Variant) -> Rule {
+    val selector = substituteAmp(r.selector, v.selector);
+    val atRules = if (v.atRule == "")
+        r.atRules
+    else
+        r.atRules.prepend(v.atRule);
+    return Rule(
+        layer: r.layer,
+        atRules: atRules,
+        selector: selector,
+        declarations: r.declarations,
+        important: r.important,
+    );
+}
+
+// Wrap a sheet in a variant. The OUTER variant is outermost, in the selector
+// and in the at-rule list alike. Blocks pass through untouched — an at-rule
+// does not wrap a keyframes rule.
+pub fn nestVariant(s: Sheet, v: Variant) -> Sheet {
+    val _checked = checkVariantSelector(v.selector);
+    val rules = s.rules.map({ r -> nestRule(r, v) });
+    return Sheet(rules: rules, blocks: s.blocks);
+}
+
+// ── the important flag ───────────────────────────────────────────────────────
+
+fn importantRule(r: Rule) -> Rule {
+    return Rule(
+        layer: r.layer,
+        atRules: r.atRules,
+        selector: r.selector,
+        declarations: r.declarations,
+        important: true,
+    );
+}
+
+// Front 34's `Important(inner)` modifier is one line on top of this, and
+// `Options.important` applies the same thing to everything at render time.
+pub fn markImportant(s: Sheet) -> Sheet {
+    val rules = s.rules.map({ r -> importantRule(r) });
+    return Sheet(rules: rules, blocks: s.blocks);
+}
+
+// ── the codec ────────────────────────────────────────────────────────────────
+//
+// A host cell stores one string per class, so a `Sheet` — a record tree — is
+// encoded into one. Records are joined by `"\n"` and tagged `R`/`B`, fields by
+// `"\t"`, and the `atRules` list by `"\r"`. None of the three can appear in a
+// rendered declaration; that is an assumption, so it is CHECKED (see the
+// separator test below and the dispatcher walk in `emilia.bp`) rather than
+// assumed. The encoding is also what gets hashed, so the class name is a pure
+// function of the sheet.
+
+fn field(fs: string[], i: i32) -> string {
+    val v = fs.at(i) ?? "";
+    return v;
+}
+
+fn isRuleRecord(rec: string) -> bool {
+    return rec.startsWith("R\t");
+}
+
+fn isBlockRecord(rec: string) -> bool {
+    return rec.startsWith("B\t");
+}
+
+fn encodeRule(r: Rule) -> string {
+    val flag = if (r.important) "1" else "0";
+    val fs: string[] = [
+        "R",
+        r.layer,
+        r.atRules.join("\r"),
+        r.selector,
+        r.declarations,
+        flag,
+    ];
+    return fs.join("\t");
+}
+
+fn encodeBlock(b: Block) -> string {
+    val fs: string[] = ["B", b.header, b.body];
+    return fs.join("\t");
+}
+
+fn decodeRule(rec: string) -> Rule {
+    val fs = rec.split("\t");
+    val atRules = field(fs, 2).split("\r").filter({ a -> a != "" });
+    return Rule(
+        layer: field(fs, 1),
+        atRules: atRules,
+        selector: field(fs, 3),
+        declarations: field(fs, 4),
+        important: field(fs, 5) == "1",
+    );
+}
+
+fn decodeBlock(rec: string) -> Block {
+    val fs = rec.split("\t");
+    return Block(header: field(fs, 1), body: field(fs, 2));
+}
+
+pub fn encodeSheet(s: Sheet) -> string {
+    val rs = s.rules.map({ r -> encodeRule(r) });
+    val bs = s.blocks.map({ b -> encodeBlock(b) });
+    return rs.append(bs).join("\n");
+}
+
+pub fn decodeSheet(raw: string) -> Sheet {
+    val records = raw.split("\n").filter({ rec -> rec != "" });
+    val rules = records
+        .filter({ rec -> isRuleRecord(rec) })
+        .map({ rec -> decodeRule(rec) });
+    val blocks = records
+        .filter({ rec -> isBlockRecord(rec) })
+        .map({ rec -> decodeBlock(rec) });
+    return Sheet(rules: rules, blocks: blocks);
+}
+
+// True when a string carries a codec separator. A declaration that does is a
+// declaration the codec cannot carry, so the check is a value a test can read
+// rather than a comment nobody runs.
+pub fn carriesSeparator(s: string) -> bool {
+    return s.indexOf("\t") != -1
+        || s.indexOf("\n") != -1
+        || s.indexOf("\r") != -1;
+}
+
+// ── options ──────────────────────────────────────────────────────────────────
+
+// The build-level knobs. `important` and `prefix` are the reference's two
+// build options; `base` is how front 55 turns preflight ON — the opt-OUT the
+// reference describes is `withBase(o, [])`, which is the default, so preflight
+// is opt-in here rather than opt-out, a deliberate inversion front 55 states
+// in its own README.
+//
+// emilia's class names are content hashes over `[a-z0-9_]`, so a prefix is a
+// plain concatenation: upstream's escaped `.tw\:text-red-500` form has no
+// analogue here because emilia has no literal class names to escape. That
+// divergence is intentional and written here rather than hidden in the
+// renderer.
+pub type Options(
+    theme: Theme,
+    base: Rule[],
+    prefix: string,
+    important: bool,
+    layers: bool,
+)
+
+pub fn defaultOptions() -> Options {
+    val base: Rule[] = [];
+    return Options(
+        theme: defaultTheme(),
+        base: base,
+        prefix: "",
+        important: false,
+        layers: true,
+    );
+}
+
+pub fn withTheme(o: Options, th: Theme) -> Options {
+    return Options(
+        theme: th,
+        base: o.base,
+        prefix: o.prefix,
+        important: o.important,
+        layers: o.layers,
+    );
+}
+
+pub fn withBase(o: Options, base: Rule[]) -> Options {
+    return Options(
+        theme: o.theme,
+        base: base,
+        prefix: o.prefix,
+        important: o.important,
+        layers: o.layers,
+    );
+}
+
+pub fn withPrefix(o: Options, prefix: string) -> Options {
+    return Options(
+        theme: o.theme,
+        base: o.base,
+        prefix: prefix,
+        important: o.important,
+        layers: o.layers,
+    );
+}
+
+pub fn withImportant(o: Options, important: bool) -> Options {
+    return Options(
+        theme: o.theme,
+        base: o.base,
+        prefix: o.prefix,
+        important: important,
+        layers: o.layers,
+    );
+}
+
+pub fn withLayers(o: Options, layers: bool) -> Options {
+    return Options(
+        theme: o.theme,
+        base: o.base,
+        prefix: o.prefix,
+        important: o.important,
+        layers: layers,
+    );
+}
+
+// ── rendering one rule ───────────────────────────────────────────────────────
+
+// `Array.reverse()` MUTATES its receiver on commonJS and returns a fresh list
+// on erlang, so folding a reversed at-rule list is a target divergence waiting
+// to happen. Two maps over the same list cost nothing and answer the same on
+// both: the opening braces in order, the closing braces after the body.
+fn wrapAtRules(atRules: string[], inner: string) -> string {
+    val open = atRules.map({ a -> a + "{" }).join("");
+    val close = atRules.map({ a -> "}" }).join("");
+    return open + inner + close;
+}
+
+fn renderDeclarations(decls: string, important: bool) -> string {
+    val marked = decls
+        .split(";")
+        .filter({ d -> d != "" })
+        .map({ d -> d + "!important" })
+        .join(";");
+    val out = if (important) marked else decls;
+    return out;
+}
+
+// Substitute the (prefixed) class name for the rule's `&`, wrap the
+// declarations in the rule's at-rules outermost-first, and append `!important`
+// PER DECLARATION when either the rule or the options say so. A rule whose
+// selector carries no `&` is literal: the class name — and therefore the
+// prefix — never reaches it.
+pub fn renderRule(className: string, r: Rule, o: Options) -> string {
+    return ruleText("." + o.prefix + className, r, o.important);
+}
+
+// One rule with `classSelector` standing for its `&`.
+fn ruleText(classSelector: string, r: Rule, important: bool) -> string {
+    val selector = substituteAmp(r.selector, classSelector);
+    val decls = renderDeclarations(r.declarations, r.important || important);
+    return wrapAtRules(r.atRules, selector + "{" + decls + "}");
+}
+
+// ── rendering the document ───────────────────────────────────────────────────
+//
+// One registered rule, still carrying the class it was registered under.
+type Placed(className: string, rule: Rule)
+
+// The drained cell, decoded. `className` is the entry the walk is currently
+// inside — the drain stream interleaves the two layers of separator (see
+// `drain` below), so the parser carries it.
+type Drained(className: string, rules: Placed[], blocks: Block[])
+
+fn onePlaced(className: string, r: Rule) -> Placed[] {
+    val out: Placed[] = [Placed(className: className, rule: r)];
+    return out;
+}
+
+// Split on the separator; the `String.slice` ban this once worked around (C-37) is closed.
+fn firstField(line: string) -> string {
+    return field(line.split("\t"), 0);
+}
+
+fn afterFirstField(line: string) -> string {
+    return line.split("\t").drop(1).join("\t");
+}
+
+// THE DRAIN STREAM IS TWO LAYERS OF SEPARATOR SHARING ONE CHARACTER. The cell
+// hands back `name + "\t" + payload` records joined by `"\n"`, and a payload is
+// itself records joined by `"\n"`. The two are still unambiguous, because a
+// payload record is tagged: a line whose first field is `R` or `B` CONTINUES
+// the entry above it, and any other line OPENS a new entry whose first payload
+// record is the rest of the line. A registered name is always `e_<hex>`, so it
+// is never `R` or `B` and the rule never becomes a guess. (The spec of this
+// front writes the two layers without noticing they collide; this is the
+// disambiguation, written down so it is not rediscovered.)
+fn drainStep(acc: Drained, line: string) -> Drained {
+    val continues = isRuleRecord(line) || isBlockRecord(line);
+    val className = if (continues) acc.className else firstField(line);
+    val rec = if (continues) line else afterFirstField(line);
+    val rules = if (isRuleRecord(rec))
+        acc.rules.append(onePlaced(className, decodeRule(rec)))
+    else
+        acc.rules;
+    val blocks = if (isBlockRecord(rec))
+        acc.blocks.append(oneBlock(decodeBlock(rec)))
+    else
+        acc.blocks;
+    return Drained(className: className, rules: rules, blocks: blocks);
+}
+
+fn drain(raw: string) -> Drained {
+    val lines = raw.split("\n").filter({ line -> line != "" });
+    val rules: Placed[] = [];
+    val blocks: Block[] = [];
+    val seed = Drained(className: "", rules: rules, blocks: blocks);
+    return lines.fold(seed, { acc, line -> drainStep(acc, line) });
+}
+
+fn pushDistinct(acc: string[], name: string) -> string[] {
+    val present = acc.any({ x -> x == name });
+    val one: string[] = [name];
+    val out = if (present) acc else acc.append(one);
+    return out;
+}
+
+// The registered class names, in REGISTRATION order, each once.
+fn classNames(ps: Placed[]) -> string[] {
+    val seed: string[] = [];
+    return ps.fold(seed, { acc, p -> pushDistinct(acc, p.className) });
+}
+
+// Within one class: the tokens in the order they were listed, then — the one
+// reordering this front performs — the rules with no at-rules before the rules
+// with at-rules, so a `md:` override beats the unconditioned utility on a
+// mobile-first read.
+fn orderedClassRules(ps: Placed[], className: string) -> Placed[] {
+    val mine = ps.filter({ p -> p.className == className });
+    val plain = mine.filter({ p -> p.rule.atRules.length == 0 });
+    val conditioned = mine.filter({ p -> p.rule.atRules.length > 0 });
+    return plain.append(conditioned);
+}
+
+fn placedOfLayer(ps: Placed[], layer: string) -> Placed[] {
+    return ps.filter({ p -> p.rule.layer == layer });
+}
+
+// Two rules of one class are INTERCHANGEABLE WITH ONE when they sit in the
+// same context — same at-rules, same selector, same `important`. Every token
+// of a list produces its own rule, so without this a five-token class renders
+// as five `.e_1{…}` rules where one would do, which is a document several times
+// larger than the one emilia emitted before this front for exactly the same
+// input. Only CONSECUTIVE rules are folded, so `display:grid` followed by
+// `display:flex` keeps its order and the last one still wins.
+fn sameContext(a: Rule, b: Rule) -> bool {
+    val sameAtRules = a.atRules.join("\r") == b.atRules.join("\r");
+    return a.selector == b.selector
+        && a.important == b.important
+        && sameAtRules;
+}
+
+fn joinedRule(a: Rule, b: Rule) -> Rule {
+    val sep = if (a.declarations == "") "" else ";";
+    return Rule(
+        layer: a.layer,
+        atRules: a.atRules,
+        selector: a.selector,
+        declarations: a.declarations + sep + b.declarations,
+        important: a.important,
+    );
+}
+
+fn mergeLast(acc: Placed[], last: Placed, p: Placed) -> Placed[] {
+    return acc
+        .take(acc.length - 1)
+        .append(onePlaced(p.className, joinedRule(last.rule, p.rule)));
+}
+
+fn coalesceStep(acc: Placed[], p: Placed) -> Placed[] {
+    val last = acc.at(acc.length - 1);
+    if (last != null)
+        if (last.className == p.className && sameContext(last.rule, p.rule))
+            return mergeLast(acc, last, p);
+    return acc.append(onePlaced(p.className, p.rule));
+}
+
+fn coalesce(ps: Placed[]) -> Placed[] {
+    val seed: Placed[] = [];
+    return ps.fold(seed, { acc, p -> coalesceStep(acc, p) });
+}
+
+// ── the class's rules: what its name hashes (decision 367) ───────────────────
+//
+// The class is `"e_" + hash.contentHash(classRules(sheet))` (`contracts.md`
+// § 4): the class's rules as the document writes them — layer by layer in
+// `layerNames()` order, the plain rules before the conditioned ones, runs of
+// one context folded — with `classMark()` written where the class goes. That
+// is the text `styled` hashes for a component (its reader writes the class
+// `\u{1}` while it hashes), so emilia and `styled` name a class by one rule.
+// No option enters it: a `prefix` renames the rendered class, never its hash,
+// and `important` is the rule's own flag only.
+fn classMark() -> string {
+    return "\u{1}";
+}
+
+pub fn classRules(s: Sheet) -> string {
+    val placed = s.rules.map({ r -> Placed(className: classMark(), rule: r) });
+    return layerNames()
+        .map({ n ->
+            coalesce(orderedClassRules(placedOfLayer(placed, n), classMark()))
+                .map({ p -> ruleText(classMark(), p.rule, false) })
+                .join("");
+        })
+        .join("");
+}
+
+// What a layer carries besides the registered rules: the theme's
+// custom-property block in `theme`, front 55's reset in `base`.
+fn layerExtraRules(layer: string, o: Options) -> Rule[] {
+    val none: Rule[] = [];
+    val themeRules = if (themeCss(o.theme) == "")
+        none
+    else
+        oneRule(
+            Rule(
+                layer: "theme",
+                atRules: noAtRules(),
+                selector: ":root",
+                declarations: themeCss(o.theme),
+                important: false,
+            ),
+        );
+    val baseOrNone = if (layer == "base") o.base else none;
+    val out = if (layer == "theme") themeRules else baseOrNone;
+    return out;
+}
+
+fn renderPlaced(ps: Placed[], o: Options) -> string {
+    return ps.map({ p -> renderRule(p.className, p.rule, o) }).join("");
+}
+
+fn layerBody(layer: string, d: Drained, o: Options) -> string {
+    val extras = layerExtraRules(layer, o)
+        .map({ r -> renderRule("", r, o) })
+        .join("");
+    val own = placedOfLayer(d.rules, layer);
+    val bodies = classNames(own)
+        .map({ c -> renderPlaced(coalesce(orderedClassRules(own, c)), o) })
+        .join("");
+    return extras + bodies;
+}
+
+fn wrapLayer(layer: string, body: string, o: Options) -> string {
+    val layered = if (o.layers) "@layer " + layer + "{" + body + "}" else body;
+    val out = if (body == "") "" else layered;
+    return out;
+}
+
+fn dedupeBlocks(bs: Block[]) -> Block[] {
+    val seed: Block[] = [];
+    return bs.fold(seed, { acc, b -> pushDistinctBlock(acc, b) });
+}
+
+fn pushDistinctBlock(acc: Block[], b: Block) -> Block[] {
+    val present = acc.any({ x -> x.header == b.header });
+    val out = if (present) acc else acc.append(oneBlock(b));
+    return out;
+}
+
+// The theme's `@keyframes` bodies, as blocks. The custom-property block is
+// always emitted in full (`@theme static` semantics — `theme.bp` says why), and
+// the keyframes that go with it are emitted on the same terms.
+fn themeBlocks(th: Theme) -> Block[] {
+    return keyframeCss(th).map(
+        { e -> Block(header: nsPrefix(Ns.Keyframes) + e.name, body: e.value) },
+    );
+}
+
+// Keyframes LAST, outside every layer, deduplicated by header. A keyframes rule
+// is not subject to the cascade, so its placement is a formatting choice and
+// the reference does not specify one; it is written down here so it is not
+// re-litigated.
+fn renderBlocks(bs: Block[]) -> string {
+    return dedupeBlocks(bs).map({ b -> b.header + b.body }).join("");
+}
+
+// ── the `@property` fallback ─────────────────────────────────────────────────
+//
+// Upstream Tailwind v4 registers the `--tw-*` variables its utilities write with
+// `@property`, and for an engine that parses no `@property` it also writes the
+// initial values onto every element, in a `properties` layer declared BEFORE
+// every other one (so a utility that sets the variable always wins), behind the
+// `@supports` test that selects exactly those engines. Front 45's translate and
+// skew sheets carry `@property` blocks; this is the rest of upstream's output.
+
+fn isPropertyBlock(b: Block) -> bool {
+    return b.header.startsWith("@property ");
+}
+
+// `--tw-translate-x:0`, or `--tw-skew-x:initial` for a registration with no
+// initial value — upstream's two spellings.
+fn propertyDefault(b: Block) -> string {
+    val name = field(b.header.split(" "), 1);
+    val parts = b.body.split("initial-value:");
+    val initial = if (parts.length < 2)
+        "initial"
+    else
+        field(field(parts, 1).split("}"), 0);
+    return name + ":" + initial;
+}
+
+fn propertiesSupports() -> string {
+    return "@supports ((-webkit-hyphens:none) and (not (margin-trim:inline))) or ((-moz-orient:inline) and (not (color:rgb(from red r g b))))";
+}
+
+pub fn propertiesFallback(bs: Block[], o: Options) -> string {
+    val props = dedupeBlocks(bs).filter({ b -> isPropertyBlock(b) });
+    val decls = props.map({ b -> propertyDefault(b) }).join(";");
+    val inner = propertiesSupports()
+        + "{*,::before,::after,::backdrop{"
+        + decls
+        + "}}";
+    val wrapped = if (o.layers) "@layer properties{" + inner + "}" else inner;
+    val out = if (props.length == 0) "" else wrapped;
+    return out;
+}
+
+// The whole document, from the raw cell payload. Layer order is
+// `layerNames()`, preceded by `properties` when a `@property` block is present;
+// a layer with an empty body emits nothing at all; with `layers == false` no
+// `@layer` token is emitted anywhere and the same rules come out in the same
+// order, so the cascade then rests on document order alone (the fallback's
+// `*` selector loses to every class on specificity).
+pub fn renderDocument(raw: string, o: Options) -> string {
+    val d = drain(raw);
+    val fallback = propertiesFallback(d.blocks, o);
+    val propertiesHead = if (o.layers && fallback != "")
+        "@layer properties;"
+    else
+        "";
+    val head = if (o.layers) "@layer " + layerNames().join(", ") + ";" else "";
+    val body = layerNames()
+        .map({ n -> wrapLayer(n, layerBody(n, d, o), o) })
+        .join("");
+    val keyframes = renderBlocks(themeBlocks(o.theme).append(d.blocks));
+    return "<style>"
+        + propertiesHead
+        + head
+        + body
+        + keyframes
+        + fallback
+        + "</style>";
+}
+
+// ── tests · the model and its constructors ───────────────────────────────────
+// Track D is target-independent: this module produces only strings, so a string
+// that differs by backend is a defect. Every assertion below runs on
+// `--target commonJS` and on `--target erlang`.
+
+fn firstRule(s: Sheet) -> Rule {
+    val r = s.rules.at(0);
+    if (r == null) @panic("firstRule: the sheet has no rule");
+    return r;
+}
+
+test "declSheet — one utilities rule, no at-rules, the bare ampersand, not important" {
+    val s = declSheet("color:red");
+    assert s.rules.length == 1;
+    assert s.blocks.length == 0;
+    val r = firstRule(s);
+    assert r.layer == "utilities";
+    assert r.atRules.length == 0;
+    assert r.selector == "&";
+    assert r.declarations == "color:red";
+    assert r.important == false;
+}
+
+test "declSheet — an empty declaration is an empty sheet, not an empty rule" {
+    val s = declSheet("");
+    assert s.rules.length == 0;
+    assert s.blocks.length == 0;
+}
+
+test "staticSheet — a literal selector carries no ampersand" {
+    val s = staticSheet("theme", ":root", "--spacing:4px");
+    assert firstRule(s).selector == ":root";
+    assert firstRule(s).layer == "theme";
+    assert ampCount(firstRule(s).selector) == 0;
+}
+
+test "blockSheet — a keyframes rule is a block, with no rule beside it" {
+    val s = blockSheet("@keyframes spin", "{to{transform:rotate(360deg)}}");
+    assert s.rules.length == 0;
+    assert s.blocks.length == 1;
+}
+
+test "mergeSheet — rules then blocks, order preserved" {
+    val a = mergeSheet(
+        declSheet("color:red"),
+        blockSheet("@keyframes spin", "{a}"),
+    );
+    val b = mergeSheet(
+        declSheet("color:blue"),
+        blockSheet("@keyframes ping", "{b}"),
+    );
+    val m = mergeSheet(a, b);
+    assert m.rules.length == 2;
+    assert m.blocks.length == 2;
+    assert declarationsOf(m).join(";") == "color:red;color:blue";
+    assert m.blocks.map({ x -> x.header }).join(",")
+        == "@keyframes spin,@keyframes ping";
+}
+
+test "mergeSheet — associative on rule order, so the rendered string is the same" {
+    val a = declSheet("color:red");
+    val b = declSheet("color:blue");
+    val c = declSheet("color:green");
+    val left = mergeSheet(mergeSheet(a, b), c);
+    val right = mergeSheet(a, mergeSheet(b, c));
+    assert encodeSheet(left) == encodeSheet(right);
+    assert renderDocument("e_1\t" + encodeSheet(left), defaultOptions())
+        == renderDocument("e_1\t" + encodeSheet(right), defaultOptions());
+}
+
+test "layerNames — four layers, and the cascade order is written once" {
+    assert layerNames().join(",") == "theme,base,components,utilities";
+}
+
+// ── tests · variant nesting ──────────────────────────────────────────────────
+//
+// THE REFUSAL PATH IS NOT ASSERTED HERE. A `Variant` whose selector holds zero
+// or two `&` aborts with a message naming the selector, and an abort is not a
+// value a test can read — the same reason `theme.bp` records `extendTheme`'s
+// refusal in prose. Asserting some fallback would assert exactly the
+// accept-and-carry-on behaviour the refusal exists to forbid. The two cases
+// (`Variant(atRule: "", selector: "div")` and `Variant(atRule: "", selector:
+// "& &")`) belong in the compiler's own suite.
+
+test "nestVariant — a selector-only variant rewrites the selector and adds no at-rule" {
+    val s = nestVariant(
+        declSheet("color:red"),
+        Variant(atRule: "", selector: "&:hover"),
+    );
+    assert firstRule(s).selector == "&:hover";
+    assert firstRule(s).atRules.length == 0;
+    assert firstRule(s).declarations == "color:red";
+}
+
+test "nestVariant — hover outside before is `&:hover::before`" {
+    val before = Variant(atRule: "", selector: "&::before");
+    val hover = Variant(atRule: "", selector: "&:hover");
+    val s = nestVariant(nestVariant(declSheet("content:\"\""), before), hover);
+    assert firstRule(s).selector == "&:hover::before";
+}
+
+test "nestVariant — before outside hover is `&::before:hover`, the other order" {
+    val before = Variant(atRule: "", selector: "&::before");
+    val hover = Variant(atRule: "", selector: "&:hover");
+    val s = nestVariant(nestVariant(declSheet("content:\"\""), hover), before);
+    assert firstRule(s).selector == "&::before:hover";
+}
+
+test "nestVariant — a breakpoint variant prepends its at-rule and leaves the selector alone" {
+    val md = Variant(atRule: "@media (width >= 48rem)", selector: "&");
+    val s = nestVariant(declSheet("color:red"), md);
+    assert firstRule(s).selector == "&";
+    assert firstRule(s).atRules.join("|") == "@media (width >= 48rem)";
+}
+
+test "nestVariant — the outer variant is outermost in the at-rule list too" {
+    val md = Variant(atRule: "@media (width >= 48rem)", selector: "&");
+    val hover = Variant(atRule: "@media (hover: hover)", selector: "&:hover");
+    val s = nestVariant(nestVariant(declSheet("color:red"), md), hover);
+    assert firstRule(s).atRules.join("|")
+        == "@media (hover: hover)|@media (width >= 48rem)";
+    assert firstRule(s).selector == "&:hover";
+}
+
+test "nestVariant — a literal selector is immune to the selector half, not to the at-rule" {
+    val md = Variant(atRule: "@media (width >= 48rem)", selector: "&");
+    val s = nestVariant(staticSheet("base", "html", "margin:0"), md);
+    assert firstRule(s).selector == "html";
+    assert firstRule(s).atRules.length == 1;
+}
+
+test "nestVariant — blocks are byte-identical through the nesting" {
+    val s = mergeSheet(
+        declSheet("color:red"),
+        blockSheet("@keyframes spin", "{to{opacity:0}}"),
+    );
+    val n = nestVariant(
+        s,
+        Variant(atRule: "@media (hover: hover)", selector: "&:hover"),
+    );
+    assert n.blocks.length == 1;
+    assert encodeSheet(Sheet(rules: noRules(), blocks: n.blocks))
+        == encodeSheet(Sheet(rules: noRules(), blocks: s.blocks));
+}
+
+fn noRules() -> Rule[] {
+    val out: Rule[] = [];
+    return out;
+}
+
+test "nestVariant — an empty sheet stays empty and still checks its variant" {
+    val s = nestVariant(emptySheet(), Variant(atRule: "", selector: "&:hover"));
+    assert s.rules.length == 0;
+    assert s.blocks.length == 0;
+}
+
+// ── tests · the important flag ───────────────────────────────────────────────
+
+test "markImportant — every declaration of the rule, not the rule" {
+    val s = markImportant(declSheet("color:red;font-weight:700"));
+    assert firstRule(s).important == true;
+    assert renderRule("e_1", firstRule(s), defaultOptions())
+        == ".e_1{color:red!important;font-weight:700!important}";
+}
+
+test "markImportant — an empty sheet is a no-op" {
+    val s = markImportant(emptySheet());
+    assert s.rules.length == 0;
+    assert s.blocks.length == 0;
+}
+
+test "Options.important — applies the same thing to a rule that did not ask" {
+    val o = withImportant(defaultOptions(), true);
+    assert renderRule("e_1", firstRule(declSheet("color:red")), o)
+        == ".e_1{color:red!important}";
+}
+
+// ── tests · the codec ────────────────────────────────────────────────────────
+
+test "codec — an empty sheet encodes to the empty string and back" {
+    assert encodeSheet(emptySheet()) == "";
+    assert decodeSheet("").rules.length == 0;
+    assert decodeSheet("").blocks.length == 0;
+}
+
+test "codec — a round trip preserves two at-rules, a non-ampersand selector, important, and a block" {
+    val hover = Variant(atRule: "@media (hover: hover)", selector: "&:hover");
+    val md = Variant(atRule: "@media (width >= 48rem)", selector: "&");
+    val styled = nestVariant(
+        nestVariant(markImportant(declSheet("color:red")), md),
+        hover,
+    );
+    val s = mergeSheet(
+        mergeSheet(styled, staticSheet("base", "html", "margin:0")),
+        blockSheet("@keyframes spin", "{to{transform:rotate(360deg)}}"),
+    );
+    val raw = encodeSheet(s);
+    assert decodeSheet(raw).rules.length == 2;
+    assert decodeSheet(raw).blocks.length == 1;
+    assert encodeSheet(decodeSheet(raw)) == raw;
+    assert renderDocument(
+        "e_1\t" + encodeSheet(decodeSheet(raw)),
+        defaultOptions(),
+    )
+        == renderDocument("e_1\t" + raw, defaultOptions());
+}
+
+test "codec — the at-rule list survives empty, singular and plural" {
+    val none = decodeSheet(encodeSheet(declSheet("color:red")));
+    assert firstRule(none).atRules.length == 0;
+    val one = decodeSheet(
+        encodeSheet(
+            nestVariant(
+                declSheet("color:red"),
+                Variant(atRule: "@media a", selector: "&"),
+            ),
+        ),
+    );
+    assert firstRule(one).atRules.join("|") == "@media a";
+    val two = decodeSheet(
+        encodeSheet(
+            nestVariant(
+                nestVariant(
+                    declSheet("color:red"),
+                    Variant(atRule: "@media a", selector: "&"),
+                ),
+                Variant(atRule: "@media b", selector: "&"),
+            ),
+        ),
+    );
+    assert firstRule(two).atRules.join("|") == "@media b|@media a";
+}
+
+test "codec — the three separators are the assumption the codec rests on, so they are checked" {
+    assert carriesSeparator("color:red") == false;
+    assert carriesSeparator("a\tb") == true;
+    assert carriesSeparator("a\nb") == true;
+    assert carriesSeparator("a\rb") == true;
+    assert declarationsOf(declSheet("color:red")).any(
+        { d -> carriesSeparator(d) },
+    )
+        == false;
+}
+
+test "codec — the theme's own strings carry no separator either" {
+    assert carriesSeparator(themeCss(defaultTheme())) == false;
+    assert keyframeCss(defaultTheme()).any({ e -> carriesSeparator(e.value) })
+        == false;
+}
+
+// ── tests · renderRule ───────────────────────────────────────────────────────
+
+test "renderRule — a bare utility is a class and a brace pair" {
+    assert renderRule(
+        "e_1",
+        firstRule(declSheet("color:red")),
+        defaultOptions(),
+    )
+        == ".e_1{color:red}";
+}
+
+test "renderRule — the prefix is a plain concatenation, emilia having no name to escape" {
+    val o = withPrefix(defaultOptions(), "tw_");
+    assert renderRule("e_1", firstRule(declSheet("color:red")), o)
+        == ".tw_e_1{color:red}";
+}
+
+test "renderRule — one at-rule wraps the rule" {
+    val md = Variant(atRule: "@media (width >= 48rem)", selector: "&");
+    val s = nestVariant(declSheet("color:red"), md);
+    assert renderRule("e_1", firstRule(s), defaultOptions())
+        == "@media (width >= 48rem){.e_1{color:red}}";
+}
+
+test "renderRule — two at-rules nest outermost-first" {
+    val md = Variant(atRule: "@media (width >= 48rem)", selector: "&");
+    val hover = Variant(atRule: "@media (hover: hover)", selector: "&:hover");
+    val s = nestVariant(nestVariant(declSheet("color:red"), md), hover);
+    assert renderRule("e_1", firstRule(s), defaultOptions())
+        == "@media (hover: hover){@media (width >= 48rem){.e_1:hover{color:red}}}";
+}
+
+test "renderRule — a literal selector renders literally and ignores the prefix" {
+    val o = withPrefix(defaultOptions(), "tw_");
+    assert renderRule(
+        "e_1",
+        firstRule(staticSheet("base", "html", "margin:0")),
+        o,
+    )
+        == "html{margin:0}";
+}
+
+test "renderRule — a variant that puts the class in the middle of the selector" {
+    val group = Variant(atRule: "", selector: "&:is(:where(.group):hover *)");
+    val trailing = Variant(atRule: "", selector: ".dark &");
+    val g = nestVariant(declSheet("color:red"), group);
+    assert renderRule("e_1", firstRule(g), defaultOptions())
+        == ".e_1:is(:where(.group):hover *){color:red}";
+    val r = nestVariant(declSheet("color:red"), trailing);
+    assert renderRule("e_1", firstRule(r), defaultOptions())
+        == ".dark .e_1{color:red}";
+}
+
+// ── tests · renderDocument ───────────────────────────────────────────────────
+
+fn barePayload(className: string, s: Sheet) -> string {
+    return className + "\t" + encodeSheet(s);
+}
+
+// A document with no theme in it, so a cascade assertion is about the rules
+// the test registered and not about the stock theme's hundred variables.
+fn bareOptions() -> Options {
+    return withTheme(defaultOptions(), emptyTheme());
+}
+
+test "classRules — the class's rules, the class written \\u{1}, in document order" {
+    val plain = Rule(
+        layer: "utilities",
+        atRules: noAtRules(),
+        selector: "&",
+        declarations: "padding:1px",
+        important: false,
+    );
+    val hover = Rule(
+        layer: "utilities",
+        atRules: ["@media (hover: hover)"],
+        selector: "&:hover",
+        declarations: "color:red",
+        important: false,
+    );
+    val focus = Rule(
+        layer: "utilities",
+        atRules: noAtRules(),
+        selector: "&:focus",
+        declarations: "color:blue",
+        important: false,
+    );
+    val more = Rule(
+        layer: "utilities",
+        atRules: noAtRules(),
+        selector: "&",
+        declarations: "margin:0",
+        important: true,
+    );
+    val s = Sheet(
+        rules: [hover, plain, focus, more],
+        blocks: emptySheet().blocks,
+    );
+    assert classRules(s)
+        == "\u{1}{padding:1px}\u{1}:focus{color:blue}\u{1}{margin:0!important}@media (hover: hover){\u{1}:hover{color:red}}";
+    val doc = renderDocument(barePayload("e_1", s), bareOptions());
+    assert doc
+        == "<style>@layer theme, base, components, utilities;@layer utilities{"
+            + classRules(s).split("\u{1}").join(".e_1")
+            + "}</style>";
+}
+
+test "renderDocument — the layer statement comes first when layers are on" {
+    val doc = renderDocument(
+        barePayload("e_1", declSheet("color:red")),
+        bareOptions(),
+    );
+    assert doc
+        == "<style>@layer theme, base, components, utilities;@layer utilities{.e_1{color:red}}</style>";
+}
+
+test "renderDocument — no @layer token at all when layers are off" {
+    val o = withLayers(bareOptions(), false);
+    val doc = renderDocument(barePayload("e_1", declSheet("color:red")), o);
+    assert doc == "<style>.e_1{color:red}</style>";
+    assert doc.indexOf("@layer") == -1;
+}
+
+test "renderDocument — the theme is the first layer, as a :root rule" {
+    val doc = renderDocument("", defaultOptions());
+    assert doc.startsWith(
+        "<style>@layer theme, base, components, utilities;@layer theme{:root{--spacing:0.25rem;",
+    );
+}
+
+test "renderDocument — front 55's reset is the base layer, and it is opt-in" {
+    val reset = staticSheet("base", "html", "margin:0").rules;
+    val o = withBase(bareOptions(), reset);
+    val doc = renderDocument(barePayload("e_1", declSheet("color:red")), o);
+    assert doc
+        == "<style>@layer theme, base, components, utilities;@layer base{html{margin:0}}@layer utilities{.e_1{color:red}}</style>";
+    assert renderDocument(
+        barePayload("e_1", declSheet("color:red")),
+        bareOptions(),
+    ).indexOf("@layer base")
+        == -1;
+}
+
+test "renderDocument — a components rule sits between base and utilities" {
+    val comp = staticSheet("components", "&", "display:flex");
+    val payload = barePayload("e_1", mergeSheet(comp, declSheet("color:red")));
+    val doc = renderDocument(payload, bareOptions());
+    assert doc.indexOf("@layer components") < doc.indexOf("@layer utilities");
+    assert doc.indexOf("@layer components{.e_1{display:flex}}") != -1;
+}
+
+test "renderDocument — an empty layer emits nothing at all" {
+    val doc = renderDocument("", bareOptions());
+    assert doc == "<style>@layer theme, base, components, utilities;</style>";
+}
+
+test "renderDocument — a keyframes block appears once however many classes registered it" {
+    val kf = blockSheet("@keyframes spin", "{to{transform:rotate(360deg)}}");
+    val payload = barePayload(
+        "e_1",
+        mergeSheet(declSheet("animation:spin 1s"), kf),
+    )
+        + "\n"
+        + barePayload("e_2", mergeSheet(declSheet("animation:spin 2s"), kf))
+        + "\n"
+        + barePayload("e_3", mergeSheet(declSheet("animation:spin 3s"), kf));
+    val doc = renderDocument(payload, bareOptions());
+    assert doc.split("@keyframes spin").length == 2;
+    assert doc.endsWith(
+        "@keyframes spin{to{transform:rotate(360deg)}}</style>",
+    );
+}
+
+test "renderDocument — keyframes come after every layer" {
+    val kf = blockSheet("@keyframes spin", "{to{opacity:0}}");
+    val doc = renderDocument(
+        barePayload("e_1", mergeSheet(declSheet("color:red"), kf)),
+        bareOptions(),
+    );
+    assert doc.indexOf("@layer utilities") < doc.indexOf("@keyframes spin");
+}
+
+test "renderDocument — the stock theme's four keyframes ride with its custom-property block" {
+    val doc = renderDocument("", defaultOptions());
+    assert doc.indexOf("@keyframes spin{to{transform:rotate(360deg)}}") != -1;
+    assert doc.indexOf("@keyframes bounce{") != -1;
+    assert doc.endsWith("</style>");
+}
+
+test "renderDocument — within one class, an unconditioned rule precedes a conditioned one" {
+    val md = Variant(atRule: "@media (width >= 48rem)", selector: "&");
+    val conditioned = nestVariant(declSheet("font-size:1.125rem"), md);
+    val s = mergeSheet(conditioned, declSheet("font-size:1rem"));
+    val doc = renderDocument(barePayload("e_1", s), bareOptions());
+    assert doc
+        == "<style>@layer theme, base, components, utilities;@layer utilities{.e_1{font-size:1rem}@media (width >= 48rem){.e_1{font-size:1.125rem}}}</style>";
+}
+
+test "renderDocument — two classes keep registration order, each with its own rules" {
+    val payload = barePayload("e_1", declSheet("color:red"))
+        + "\n"
+        + barePayload("e_2", declSheet("color:blue"));
+    val doc = renderDocument(payload, bareOptions());
+    assert doc
+        == "<style>@layer theme, base, components, utilities;@layer utilities{.e_1{color:red}.e_2{color:blue}}</style>";
+}
+
+test "renderDocument — a class whose sheet is empty contributes no rule" {
+    val payload = barePayload("e_1", emptySheet())
+        + "\n"
+        + barePayload("e_2", declSheet("color:red"));
+    val doc = renderDocument(payload, bareOptions());
+    assert doc
+        == "<style>@layer theme, base, components, utilities;@layer utilities{.e_2{color:red}}</style>";
+}
+
+test "renderDocument — consecutive rules of one class in one context fold into one" {
+    val s = mergeSheet(
+        mergeSheet(declSheet("display:grid"), declSheet("display:flex")),
+        declSheet("color:red"),
+    );
+    val doc = renderDocument(barePayload("e_1", s), bareOptions());
+    assert doc
+        == "<style>@layer theme, base, components, utilities;@layer utilities{.e_1{display:grid;display:flex;color:red}}</style>";
+}
+
+test "renderDocument — folding stops at a context change and at a class boundary" {
+    val md = Variant(atRule: "@media (width >= 48rem)", selector: "&");
+    val s = mergeSheet(
+        declSheet("color:red"),
+        nestVariant(declSheet("color:blue"), md),
+    );
+    val payload = barePayload("e_1", s)
+        + "\n"
+        + barePayload("e_2", declSheet("color:green"));
+    val doc = renderDocument(payload, bareOptions());
+    assert doc
+        == "<style>@layer theme, base, components, utilities;@layer utilities{.e_1{color:red}@media (width >= 48rem){.e_1{color:blue}}.e_2{color:green}}</style>";
+}
+
+test "renderDocument — an important rule does not fold into the plain rule beside it" {
+    val s = mergeSheet(
+        declSheet("color:red"),
+        markImportant(declSheet("color:blue")),
+    );
+    val doc = renderDocument(barePayload("e_1", s), bareOptions());
+    assert doc
+        == "<style>@layer theme, base, components, utilities;@layer utilities{.e_1{color:red}.e_1{color:blue!important}}</style>";
+}
+
+test "renderDocument — the prefix reaches every registered class and no literal selector" {
+    val reset = staticSheet("base", "html", "margin:0").rules;
+    val o = withPrefix(withBase(bareOptions(), reset), "tw_");
+    val doc = renderDocument(barePayload("e_1", declSheet("color:red")), o);
+    assert doc.indexOf(".tw_e_1{color:red}") != -1;
+    assert doc.indexOf("html{margin:0}") != -1;
+}
+
+// Upstream v4's whole `@property` output for `translate-x-1/2` and `skew-x-3`
+// in one class: the registrations once each, after the layers, and the
+// `properties` layer declared first and written last, behind upstream's
+// `@supports` test, with the translate axes at `0` and the chain at `initial`.
+test "renderDocument — `@property` blocks bring upstream's `properties` layer" {
+    val x = blockSheet(
+        "@property --tw-translate-x",
+        "{syntax:\"*\";inherits:false;initial-value:0}",
+    );
+    val skew = blockSheet(
+        "@property --tw-skew-x",
+        "{syntax:\"*\";inherits:false}",
+    );
+    val s = mergeSheet(
+        mergeSheet(declSheet("--tw-translate-x:50%"), x),
+        mergeSheet(skew, x),
+    );
+    val doc = renderDocument(barePayload("e_1", s), bareOptions());
+    assert doc
+        == "<style>@layer properties;@layer theme, base, components, utilities;@layer utilities{.e_1{--tw-translate-x:50%}}"
+            + "@property --tw-translate-x{syntax:\"*\";inherits:false;initial-value:0}@property --tw-skew-x{syntax:\"*\";inherits:false}"
+            + "@layer properties{@supports ((-webkit-hyphens:none) and (not (margin-trim:inline))) or ((-moz-orient:inline) and (not (color:rgb(from red r g b)))){*,::before,::after,::backdrop{--tw-translate-x:0;--tw-skew-x:initial}}}</style>";
+}
+
+test "renderDocument — no `@property` block, no `properties` layer" {
+    val doc = renderDocument(
+        barePayload("e_1", declSheet("color:red")),
+        bareOptions(),
+    );
+    assert doc.indexOf("properties") == -1;
+}

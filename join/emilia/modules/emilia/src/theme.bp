@@ -1,0 +1,784 @@
+//// emilia/theme — the theme: a flat entry list, its namespaces, and the
+//// operations that extend, override, clear and read it.
+////
+//// A Tailwind theme is a flat set of CSS custom properties declared inside
+//// `@theme { … }`. The PREFIX of a property name selects its namespace
+//// (`--color-*`, `--font-*`, … — eighteen families plus the `@keyframes`
+//// bodies an `@theme` block may carry, which makes nineteen). Adding a name
+//// extends the theme; reusing one overrides it; dropping a namespace clears
+//// it; dropping everything empties it.
+////
+//// THE THEME IS A FLAT ENTRY LIST, NOT NINETEEN RECORD FIELDS. A
+//// nineteen-field record cannot express `--color-*: initial` or `--*: initial`
+//// without nineteen more functions, and every extension point would have to
+//// name its field. The flat set is what CSS actually has, so it delivers all
+//// nineteen namespaces AND the three reset forms with five functions.
+//// Namespaces stay typed through the `Ns` enum, which maps to its prefix, so
+//// no caller writes a prefix string by hand.
+////
+//// `extendTheme` REFUSES an entry whose name matches no known prefix. There is no
+//// permissive mode and no argument that relaxes it: an unknown prefix is a
+//// typo or a namespace this library does not have, and both are errors.
+////
+//// emilia NEVER RESOLVES A SPACING VALUE — see `spacing.bp`. Every spacing
+//// utility emits `calc(var(--spacing) * n)`, so a consumer's `--spacing`
+//// override is what decides the rendered length.
+////
+//// The custom-property block is ALWAYS emitted in full (`@theme static`
+//// semantics). Tree-shaking the unused variables needs a whole-program pass
+//// over every `emilia()` call site, which emilia cannot do — it hashes per
+//// call site — so the tree-shaken form is out of scope.
+////
+//// FRONT 33 INTERFACE: the 26 colour families x 11 shades are front 33's
+//// data, handed over as `paletteEntries() -> ThemeEntry[]`; the composed
+//// theme is `extendTheme(defaultTheme(), paletteEntries())`. This module does not
+//// import front 33, and front 33 does not edit this file — that is the whole
+//// interface between them.
+
+// One custom property. `name` carries its `--` prefix (or the bare animation
+// name, for a `keyframes` entry); `value` is the declaration's value (or the
+// brace-balanced rule body, for a `keyframes` entry).
+pub type ThemeEntry(name: string, value: string)
+
+// The dark-mode strategy, chosen once per project. `Media` follows the
+// operating system, `Class` a class on an ancestor, `Attribute` a data
+// attribute. Front 34 reads both `darkAtRule` and `darkSelector` and builds
+// the `Dark` variant; this module does not own that token.
+pub type DarkMode {
+    Media,
+    Class(name: string),
+    Attribute(name: string, value: string),
+}
+
+// The theme. `entries` is the flat custom-property set, in declaration order;
+// `keyframes` is separate because a keyframes value is a rule body, not a
+// property value, and so cannot live inside the `:root` block.
+pub type Theme(
+    entries: ThemeEntry[],
+    keyframes: ThemeEntry[],
+    darkMode: DarkMode,
+)
+
+// The nineteen namespaces a theme carries.
+pub type Ns {
+    Color,
+    Font,
+    Text,
+    FontWeight,
+    Tracking,
+    Leading,
+    Breakpoint,
+    Container,
+    Spacing,
+    Radius,
+    Shadow,
+    InsetShadow,
+    DropShadow,
+    Blur,
+    Perspective,
+    Aspect,
+    Ease,
+    Animate,
+    Keyframes,
+}
+
+// The ONLY place a namespace prefix string is written. `--spacing` carries no
+// trailing `-` because it is a single variable, not a family.
+pub fn nsPrefix(ns: Ns) -> string {
+    val out = case ns {
+        Color -> "--color-";
+        Font -> "--font-";
+        Text -> "--text-";
+        FontWeight -> "--font-weight-";
+        Tracking -> "--tracking-";
+        Leading -> "--leading-";
+        Breakpoint -> "--breakpoint-";
+        Container -> "--container-";
+        Spacing -> "--spacing";
+        Radius -> "--radius-";
+        Shadow -> "--shadow-";
+        InsetShadow -> "--inset-shadow-";
+        DropShadow -> "--drop-shadow-";
+        Blur -> "--blur-";
+        Perspective -> "--perspective-";
+        Aspect -> "--aspect-";
+        Ease -> "--ease-";
+        Animate -> "--animate-";
+        Keyframes -> "@keyframes ";
+    };
+    return out;
+}
+
+// Every namespace, in the order `Ns` declares them. `knownPrefixes` folds this
+// through `nsPrefix`, so the prefix table has exactly one author.
+pub fn allNamespaces() -> Ns[] {
+    val out: Ns[] = [
+        Ns.Color,
+        Ns.Font,
+        Ns.Text,
+        Ns.FontWeight,
+        Ns.Tracking,
+        Ns.Leading,
+        Ns.Breakpoint,
+        Ns.Container,
+        Ns.Spacing,
+        Ns.Radius,
+        Ns.Shadow,
+        Ns.InsetShadow,
+        Ns.DropShadow,
+        Ns.Blur,
+        Ns.Perspective,
+        Ns.Aspect,
+        Ns.Ease,
+        Ns.Animate,
+        Ns.Keyframes,
+    ];
+    return out;
+}
+
+fn knownPrefixes() -> string[] {
+    return allNamespaces().map({ ns -> nsPrefix(ns) });
+}
+
+// ── the default theme ────────────────────────────────────────────────────────
+
+// The thirteen font sizes, each paired with its line height. The paired
+// property is `--text-<size>--line-height`, which is why the two live in one
+// flat list rather than in a record with two fields.
+fn textEntries() -> ThemeEntry[] {
+    val out: ThemeEntry[] = [
+        ThemeEntry(name: "--text-xs", value: "0.75rem"),
+        ThemeEntry(name: "--text-xs--line-height", value: "calc(1 / 0.75)"),
+        ThemeEntry(name: "--text-sm", value: "0.875rem"),
+        ThemeEntry(name: "--text-sm--line-height", value: "calc(1.25 / 0.875)"),
+        ThemeEntry(name: "--text-base", value: "1rem"),
+        ThemeEntry(name: "--text-base--line-height", value: "calc(1.5 / 1)"),
+        ThemeEntry(name: "--text-lg", value: "1.125rem"),
+        ThemeEntry(name: "--text-lg--line-height", value: "calc(1.75 / 1.125)"),
+        ThemeEntry(name: "--text-xl", value: "1.25rem"),
+        ThemeEntry(name: "--text-xl--line-height", value: "calc(1.75 / 1.25)"),
+        ThemeEntry(name: "--text-2xl", value: "1.5rem"),
+        ThemeEntry(name: "--text-2xl--line-height", value: "calc(2 / 1.5)"),
+        ThemeEntry(name: "--text-3xl", value: "1.875rem"),
+        ThemeEntry(name: "--text-3xl--line-height", value: "calc(2.25 / 1.875)"),
+        ThemeEntry(name: "--text-4xl", value: "2.25rem"),
+        ThemeEntry(name: "--text-4xl--line-height", value: "calc(2.5 / 2.25)"),
+        ThemeEntry(name: "--text-5xl", value: "3rem"),
+        ThemeEntry(name: "--text-5xl--line-height", value: "1"),
+        ThemeEntry(name: "--text-6xl", value: "3.75rem"),
+        ThemeEntry(name: "--text-6xl--line-height", value: "1"),
+        ThemeEntry(name: "--text-7xl", value: "4.5rem"),
+        ThemeEntry(name: "--text-7xl--line-height", value: "1"),
+        ThemeEntry(name: "--text-8xl", value: "6rem"),
+        ThemeEntry(name: "--text-8xl--line-height", value: "1"),
+        ThemeEntry(name: "--text-9xl", value: "8rem"),
+        ThemeEntry(name: "--text-9xl--line-height", value: "1"),
+    ];
+    return out;
+}
+
+// The seven box shadows. `sm`, `md`, `lg` and `xl` are two-shadow values; the
+// comma inside the value is part of the declaration, not a separator emilia
+// may normalise away.
+fn shadowEntries() -> ThemeEntry[] {
+    val out: ThemeEntry[] = [
+        ThemeEntry(name: "--shadow-2xs", value: "0 1px rgb(0 0 0 / 0.05)"),
+        ThemeEntry(name: "--shadow-xs", value: "0 1px 2px 0 rgb(0 0 0 / 0.05)"),
+        ThemeEntry(name: "--shadow-sm", value: "0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1)"),
+        ThemeEntry(name: "--shadow-md", value: "0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1)"),
+        ThemeEntry(name: "--shadow-lg", value: "0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1)"),
+        ThemeEntry(name: "--shadow-xl", value: "0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1)"),
+        ThemeEntry(name: "--shadow-2xl", value: "0 25px 50px -12px rgb(0 0 0 / 0.25)"),
+    ];
+    return out;
+}
+
+// The thirteen container sizes.
+fn containerEntries() -> ThemeEntry[] {
+    val out: ThemeEntry[] = [
+        ThemeEntry(name: "--container-3xs", value: "16rem"),
+        ThemeEntry(name: "--container-2xs", value: "18rem"),
+        ThemeEntry(name: "--container-xs", value: "20rem"),
+        ThemeEntry(name: "--container-sm", value: "24rem"),
+        ThemeEntry(name: "--container-md", value: "28rem"),
+        ThemeEntry(name: "--container-lg", value: "32rem"),
+        ThemeEntry(name: "--container-xl", value: "36rem"),
+        ThemeEntry(name: "--container-2xl", value: "42rem"),
+        ThemeEntry(name: "--container-3xl", value: "48rem"),
+        ThemeEntry(name: "--container-4xl", value: "56rem"),
+        ThemeEntry(name: "--container-5xl", value: "64rem"),
+        ThemeEntry(name: "--container-6xl", value: "72rem"),
+        ThemeEntry(name: "--container-7xl", value: "80rem"),
+    ];
+    return out;
+}
+
+// The four stock animations. Each names a keyframes block of `keyframeEntries`.
+fn animateEntries() -> ThemeEntry[] {
+    val out: ThemeEntry[] = [
+        ThemeEntry(name: "--animate-spin", value: "spin 1s linear infinite"),
+        ThemeEntry(name: "--animate-ping", value: "ping 1s cubic-bezier(0, 0, 0.2, 1) infinite"),
+        ThemeEntry(name: "--animate-pulse", value: "pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite"),
+        ThemeEntry(name: "--animate-bounce", value: "bounce 1s infinite"),
+    ];
+    return out;
+}
+
+// The four keyframes bodies. `name` is the bare animation name — the
+// `@keyframes ` prefix is `nsPrefix(Ns.Keyframes)`, written once — and `value`
+// is the brace-balanced rule body, which is why these cannot live inside the
+// `:root` block with the rest.
+//
+// FRONT 44'S KEYFRAMES GATE, CLOSED BY READING UPSTREAM: the reference prints
+// the four `--animate-*` shorthands and no body. Read on 2026-09-26 from
+// https://github.com/tailwindlabs/tailwindcss/blob/main/packages/tailwindcss/theme.css
+// — the four bodies below are upstream's, whitespace removed, byte for byte
+// otherwise (including `cubic-bezier(0.8,0,1,1)`'s commas without spaces).
+fn keyframeEntries() -> ThemeEntry[] {
+    val out: ThemeEntry[] = [
+        ThemeEntry(name: "spin", value: "{to{transform:rotate(360deg)}}"),
+        ThemeEntry(name: "ping", value: "{75%,100%{transform:scale(2);opacity:0}}"),
+        ThemeEntry(name: "pulse", value: "{50%{opacity:0.5}}"),
+        ThemeEntry(name: "bounce", value: "{0%,100%{transform:translateY(-25%);animation-timing-function:cubic-bezier(0.8,0,1,1)}50%{transform:none;animation-timing-function:cubic-bezier(0,0,0.2,1)}}"),
+    ];
+    return out;
+}
+
+// emilia's stock theme. The entry ORDER is the contract: the class names
+// emilia hands out are content hashes, so a reordered theme would produce a
+// different document for the same input.
+//
+// `--color-*` carries only `black` and `white`. The 26 families x 11 shades
+// are front 33's data, handed over as `paletteEntries() -> ThemeEntry[]`; the
+// composed theme is `extendTheme(defaultTheme(), paletteEntries())`.
+pub fn defaultTheme() -> Theme {
+    val base: ThemeEntry[] = [
+        ThemeEntry(name: "--spacing", value: "0.25rem"),
+        ThemeEntry(name: "--breakpoint-sm", value: "40rem"),
+        ThemeEntry(name: "--breakpoint-md", value: "48rem"),
+        ThemeEntry(name: "--breakpoint-lg", value: "64rem"),
+        ThemeEntry(name: "--breakpoint-xl", value: "80rem"),
+        ThemeEntry(name: "--breakpoint-2xl", value: "96rem"),
+        ThemeEntry(name: "--radius-xs", value: "0.125rem"),
+        ThemeEntry(name: "--radius-sm", value: "0.25rem"),
+        ThemeEntry(name: "--radius-md", value: "0.375rem"),
+        ThemeEntry(name: "--radius-lg", value: "0.5rem"),
+        ThemeEntry(name: "--radius-xl", value: "0.75rem"),
+        ThemeEntry(name: "--radius-2xl", value: "1rem"),
+        ThemeEntry(name: "--radius-3xl", value: "1.5rem"),
+        ThemeEntry(name: "--radius-4xl", value: "2rem"),
+        ThemeEntry(name: "--color-black", value: "#000"),
+        ThemeEntry(name: "--color-white", value: "#fff"),
+    ];
+    val more = base
+        .append(textEntries())
+        .append(shadowEntries())
+        .append(containerEntries())
+        .append(animateEntries());
+    return Theme(entries: more, keyframes: keyframeEntries(), darkMode: DarkMode.Media);
+}
+
+// ── extend · override · clear · empty · read ─────────────────────────────────
+
+// A theme with nothing in it. `--*: initial` — the reset that clears every
+// namespace at once — is this, not a flag on `defaultTheme()`.
+pub fn emptyTheme() -> Theme {
+    val entries: ThemeEntry[] = [];
+    val keyframes: ThemeEntry[] = [];
+    return Theme(entries: entries, keyframes: keyframes, darkMode: DarkMode.Media);
+}
+
+// The reference form every utility emits: `var(--color-brand)`. A front that
+// wants byte-parity with upstream emits this; a front that wants a value at
+// authoring time calls `themeValue`.
+pub fn themeVar(name: string) -> string {
+    return "var(" + name + ")";
+}
+
+// Resolve a name to its literal value, or `""` when the theme does not carry
+// it. This is the `theme()` function: a read, never a reference.
+pub fn themeValue(th: Theme, name: string) -> string {
+    return entryValue(th.entries, name);
+}
+
+// Every entry of one namespace, in the theme's own order.
+pub fn namespace(th: Theme, ns: Ns) -> ThemeEntry[] {
+    val prefix = nsPrefix(ns);
+    return th.entries.filter({ e -> e.name.startsWith(prefix) });
+}
+
+// Drop a whole namespace — `--color-*: initial`. Every other namespace is
+// untouched, entry for entry and in order.
+pub fn clearNamespace(th: Theme, ns: Ns) -> Theme {
+    val prefix = nsPrefix(ns);
+    val kept = th.entries.filter({ e -> !e.name.startsWith(prefix) });
+    return Theme(entries: kept, keyframes: th.keyframes, darkMode: th.darkMode);
+}
+
+// REFUSE an entry whose name matches no known prefix. There is no permissive
+// mode and no argument that relaxes this: an unknown prefix is a typo or a
+// namespace this library does not have, and both are errors. Accepting the
+// entry and quietly dropping it is the one outcome that is not allowed —
+// a variable that is silently absent is debugged as a cascade bug, days later,
+// in a browser.
+fn checkEntry(e: ThemeEntry) -> ThemeEntry {
+    val known = knownPrefixes().any({ p -> e.name.startsWith(p) });
+    if (!known)
+        @panic("emilia theme: '"
+            + e.name
+            + "' is in no known namespace — a theme entry must start with one of the nineteen prefixes of `Ns` (--color-, --font-, --text-, --font-weight-, --tracking-, --leading-, --breakpoint-, --container-, --spacing, --radius-, --shadow-, --inset-shadow-, --drop-shadow-, --blur-, --perspective-, --aspect-, --ease-, --animate-, '@keyframes ')");
+    return e;
+}
+
+// Replace the entry of the same name IN PLACE, or append when the name is new.
+// In place, because re-declaring a variable inside `@theme` overrides it rather
+// than adding a second declaration — and because the entry order is a contract.
+// The tail `val out = …; out;` is not a flourish: a lambda whose whole body is
+// an `if` expression lowers on commonJS to `(x) => { (() => { … })(); }` — the
+// IIFE is emitted as a statement and its value never returned, so every element
+// becomes `undefined`. Binding the branch to a `val` and yielding that is the
+// shape that lowers on both targets.
+fn replaceNamed(entries: ThemeEntry[], e: ThemeEntry) -> ThemeEntry[] {
+    return entries.map({ x ->
+        val hit = x.name == e.name;
+        val out = if (hit) e else x;
+        out;
+    });
+}
+
+fn upsert(entries: ThemeEntry[], e: ThemeEntry) -> ThemeEntry[] {
+    val present = entries.any({ x -> x.name == e.name });
+    val one: ThemeEntry[] = [e];
+    val out = if (present) replaceNamed(entries, e) else entries.append(one);
+    return out;
+}
+
+// Add entries to a theme; a name already present is OVERRIDDEN in place. This
+// is both of the doc's first two headings — extending and overriding are the
+// same operation on a flat set, exactly as they are inside `@theme`.
+//
+// Records are immutable, so this returns a new `Theme` rather than mutating
+// one; there is no module-level mutable state in botopink, which is why a
+// theme is threaded as an argument instead of read from a global.
+pub fn extendTheme(th: Theme, entries: ThemeEntry[]) -> Theme {
+    val checked = entries.map({ e -> checkEntry(e) });
+    val merged = checked.fold(th.entries, { acc, e -> upsert(acc, e) });
+    return Theme(entries: merged, keyframes: th.keyframes, darkMode: th.darkMode);
+}
+
+// ── the static custom-property block ─────────────────────────────────────────
+
+// Render the theme as the BODY of a `:root` rule — `name:value` joined with
+// `;`. Front 56 wraps it; this module produces strings and imports nothing.
+//
+// The block is ALWAYS the whole theme. Upstream's default emits only the
+// variables the build actually used and `@theme static` emits all of them;
+// emilia's behaviour is the second, because tree-shaking needs a whole-program
+// pass over every `emilia()` call site and emilia hashes per call site. Saying
+// so here means nobody files it later as a bug.
+//
+// The order is the theme's own — `defaultTheme()`'s declaration order followed
+// by the order each `extendTheme` added to it. Deterministic order matters:
+// emilia's class names are content hashes, so a reordered theme would produce
+// a different document for the same input.
+pub fn themeCss(th: Theme) -> string {
+    return th.entries.map({ e -> e.name + ":" + e.value }).join(";");
+}
+
+// The `@keyframes` bodies, which cannot live inside `:root`. Each entry's
+// `name` is the bare animation name and its `value` the brace-balanced rule
+// body, so front 56 writes one block as `nsPrefix(Ns.Keyframes) + name + value`
+// and never spells `@keyframes` itself.
+pub fn keyframeCss(th: Theme) -> ThemeEntry[] {
+    return th.keyframes;
+}
+
+// ── the dark-mode strategy ───────────────────────────────────────────────────
+
+// The at-rule a dark rule is nested inside — non-empty only for `Media`, where
+// the strategy IS an at-rule. `Class` and `Attribute` carry the whole strategy
+// in their selector, so their at-rule is empty.
+pub fn darkAtRule(th: Theme) -> string {
+    val out = case th.darkMode {
+        Media -> "@media (prefers-color-scheme: dark)";
+        Class(name) -> "";
+        Attribute(name, value) -> "";
+    };
+    return out;
+}
+
+// The selector a dark rule is written against. `&` under `Media`, because the
+// at-rule already narrows it; a `:where()` pair under the other two, so the
+// variant costs no specificity and still matches the marked element itself as
+// well as its descendants.
+pub fn darkSelector(th: Theme) -> string {
+    val out = case th.darkMode {
+        Media -> "&";
+        Class(name) -> "&:where(." + name + ", ." + name + " *)";
+        Attribute(name, value) -> "&:where(["
+            + name
+            + "="
+            + value
+            + "], ["
+            + name
+            + "="
+            + value
+            + "] *)";
+    };
+    return out;
+}
+
+// Swap a theme's dark-mode strategy and change nothing else about it.
+pub fn withDarkMode(th: Theme, mode: DarkMode) -> Theme {
+    return Theme(entries: th.entries, keyframes: th.keyframes, darkMode: mode);
+}
+
+// ── tests ────────────────────────────────────────────────────────────────────
+
+test "nsPrefix — the eighteen custom-property namespaces" {
+    assert nsPrefix(Ns.Color) == "--color-";
+    assert nsPrefix(Ns.Font) == "--font-";
+    assert nsPrefix(Ns.Text) == "--text-";
+    assert nsPrefix(Ns.FontWeight) == "--font-weight-";
+    assert nsPrefix(Ns.Tracking) == "--tracking-";
+    assert nsPrefix(Ns.Leading) == "--leading-";
+    assert nsPrefix(Ns.Breakpoint) == "--breakpoint-";
+    assert nsPrefix(Ns.Container) == "--container-";
+    assert nsPrefix(Ns.Radius) == "--radius-";
+    assert nsPrefix(Ns.Shadow) == "--shadow-";
+    assert nsPrefix(Ns.InsetShadow) == "--inset-shadow-";
+    assert nsPrefix(Ns.DropShadow) == "--drop-shadow-";
+    assert nsPrefix(Ns.Blur) == "--blur-";
+    assert nsPrefix(Ns.Perspective) == "--perspective-";
+    assert nsPrefix(Ns.Aspect) == "--aspect-";
+    assert nsPrefix(Ns.Ease) == "--ease-";
+    assert nsPrefix(Ns.Animate) == "--animate-";
+}
+
+test "nsPrefix — --spacing is a single variable, so it carries no trailing dash" {
+    assert nsPrefix(Ns.Spacing) == "--spacing";
+}
+
+test "nsPrefix — the nineteenth namespace is the keyframes at-rule" {
+    assert nsPrefix(Ns.Keyframes) == "@keyframes ";
+}
+
+test "allNamespaces — nineteen namespaces, nineteen distinct prefixes" {
+    assert allNamespaces().length == 19;
+    assert knownPrefixes().length == 19;
+    val distinct = knownPrefixes().filter({ p -> p.startsWith("--") });
+    assert distinct.length == 18;
+}
+
+test "Theme — constructed by named arguments only" {
+    val entries: ThemeEntry[] = [ThemeEntry(name: "--spacing", value: "4px")];
+    val keyframes: ThemeEntry[] = [];
+    val th = Theme(entries: entries, keyframes: keyframes, darkMode: DarkMode.Media);
+    assert th.entries.length == 1;
+    assert th.keyframes.length == 0;
+}
+
+// ── tests · the default theme ────────────────────────────────────────────────
+
+fn entryValue(entries: ThemeEntry[], name: string) -> string {
+    return entries
+        .filter({ e -> e.name == name })
+        .map({ e -> e.value })
+        .join("");
+}
+
+test "defaultTheme — the spacing base is one variable, not a family" {
+    assert entryValue(defaultTheme().entries, "--spacing") == "0.25rem";
+}
+
+test "defaultTheme — the five breakpoints are rem, not px" {
+    val es = defaultTheme().entries;
+    assert entryValue(es, "--breakpoint-sm") == "40rem";
+    assert entryValue(es, "--breakpoint-md") == "48rem";
+    assert entryValue(es, "--breakpoint-lg") == "64rem";
+    assert entryValue(es, "--breakpoint-xl") == "80rem";
+    assert entryValue(es, "--breakpoint-2xl") == "96rem";
+}
+
+test "defaultTheme — the eight radii" {
+    val es = defaultTheme().entries;
+    assert entryValue(es, "--radius-xs") == "0.125rem";
+    assert entryValue(es, "--radius-sm") == "0.25rem";
+    assert entryValue(es, "--radius-md") == "0.375rem";
+    assert entryValue(es, "--radius-lg") == "0.5rem";
+    assert entryValue(es, "--radius-xl") == "0.75rem";
+    assert entryValue(es, "--radius-2xl") == "1rem";
+    assert entryValue(es, "--radius-3xl") == "1.5rem";
+    assert entryValue(es, "--radius-4xl") == "2rem";
+}
+
+test "defaultTheme — thirteen sizes, twenty-six text entries, each paired with a line height" {
+    val es = defaultTheme().entries;
+    val text = es.filter({ e -> e.name.startsWith("--text-") });
+    assert text.length == 26;
+    val heights = text.filter({ e -> e.name.endsWith("--line-height") });
+    assert heights.length == 13;
+    assert entryValue(es, "--text-xs") == "0.75rem";
+    assert entryValue(es, "--text-xs--line-height") == "calc(1 / 0.75)";
+    assert entryValue(es, "--text-base") == "1rem";
+    assert entryValue(es, "--text-base--line-height") == "calc(1.5 / 1)";
+    assert entryValue(es, "--text-4xl") == "2.25rem";
+    assert entryValue(es, "--text-4xl--line-height") == "calc(2.5 / 2.25)";
+    assert entryValue(es, "--text-5xl--line-height") == "1";
+    assert entryValue(es, "--text-9xl") == "8rem";
+    assert entryValue(es, "--text-9xl--line-height") == "1";
+}
+
+test "defaultTheme — the seven shadows, sm through xl carrying two shadows each" {
+    val es = defaultTheme().entries;
+    assert es.filter({ e -> e.name.startsWith("--shadow-") }).length == 7;
+    assert entryValue(es, "--shadow-2xs") == "0 1px rgb(0 0 0 / 0.05)";
+    assert entryValue(es, "--shadow-xs") == "0 1px 2px 0 rgb(0 0 0 / 0.05)";
+    assert entryValue(es, "--shadow-sm")
+        == "0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1)";
+    assert entryValue(es, "--shadow-md")
+        == "0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1)";
+    assert entryValue(es, "--shadow-lg")
+        == "0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1)";
+    assert entryValue(es, "--shadow-xl")
+        == "0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1)";
+    assert entryValue(es, "--shadow-2xl")
+        == "0 25px 50px -12px rgb(0 0 0 / 0.25)";
+}
+
+test "defaultTheme — the thirteen container sizes" {
+    val es = defaultTheme().entries;
+    assert es.filter({ e -> e.name.startsWith("--container-") }).length == 13;
+    assert entryValue(es, "--container-3xs") == "16rem";
+    assert entryValue(es, "--container-2xs") == "18rem";
+    assert entryValue(es, "--container-xs") == "20rem";
+    assert entryValue(es, "--container-sm") == "24rem";
+    assert entryValue(es, "--container-md") == "28rem";
+    assert entryValue(es, "--container-lg") == "32rem";
+    assert entryValue(es, "--container-xl") == "36rem";
+    assert entryValue(es, "--container-2xl") == "42rem";
+    assert entryValue(es, "--container-3xl") == "48rem";
+    assert entryValue(es, "--container-4xl") == "56rem";
+    assert entryValue(es, "--container-5xl") == "64rem";
+    assert entryValue(es, "--container-6xl") == "72rem";
+    assert entryValue(es, "--container-7xl") == "80rem";
+}
+
+test "defaultTheme — the four animations and their four keyframes bodies" {
+    val th = defaultTheme();
+    assert th.entries.filter({ e -> e.name.startsWith("--animate-") }).length
+        == 4;
+    assert entryValue(th.entries, "--animate-spin")
+        == "spin 1s linear infinite";
+    assert entryValue(th.entries, "--animate-ping")
+        == "ping 1s cubic-bezier(0, 0, 0.2, 1) infinite";
+    assert entryValue(th.entries, "--animate-pulse")
+        == "pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite";
+    assert entryValue(th.entries, "--animate-bounce") == "bounce 1s infinite";
+    assert th.keyframes.length == 4;
+    assert th.keyframes.map({ e -> e.name }).join(",")
+        == "spin,ping,pulse,bounce";
+}
+
+test "defaultTheme — the palette is front 33's, so only black and white ship here" {
+    val colors = defaultTheme().entries.filter({ e -> e.name.startsWith("--color-") });
+    assert colors.length == 2;
+    assert entryValue(defaultTheme().entries, "--color-black") == "#000";
+    assert entryValue(defaultTheme().entries, "--color-white") == "#fff";
+}
+
+test "defaultTheme — every entry sits in a known namespace, and the order is stable" {
+    val a = defaultTheme().entries;
+    val b = defaultTheme().entries;
+    assert a.length == b.length;
+    assert a.map({ e -> e.name }).join(";") == b.map({ e -> e.name }).join(";");
+    assert a.all({ e -> knownPrefixes().any({ p -> e.name.startsWith(p) }) });
+    assert defaultTheme().darkMode == DarkMode.Media;
+}
+
+// ── tests · extend · override · clear · empty · read ─────────────────────────
+//
+// THE REFUSAL PATH IS ASSERTED IN `emilia.bp` ("front 54 — an entry in no
+// namespace aborts…"): `extendTheme(th, [ThemeEntry(name: "--gutter", value:
+// "1rem")])` aborts with a message naming `--gutter`, and the test reads that
+// message through `arbitrary`'s `panicMessage`, which this module cannot import
+// (05emilia-h). It asserts the REFUSAL, never the entry's absence — absence is
+// what accept-and-ignore would also produce.
+
+test "emptyTheme — zero entries, zero keyframes, and themeValue reads nothing" {
+    val th = emptyTheme();
+    assert th.entries.length == 0;
+    assert th.keyframes.length == 0;
+    assert themeValue(th, "--spacing") == "";
+    assert themeValue(th, "--color-white") == "";
+    assert themeValue(th, "--animate-spin") == "";
+}
+
+test "themeValue — a name the theme does not carry reads as the empty string" {
+    assert themeValue(defaultTheme(), "--spacing") == "0.25rem";
+    assert themeValue(defaultTheme(), "--color-lagoon") == "";
+}
+
+test "themeVar — the reference form a utility emits" {
+    assert themeVar("--color-lagoon") == "var(--color-lagoon)";
+    assert themeVar("--spacing") == "var(--spacing)";
+}
+
+test "extendTheme — a new name is added and reads back" {
+    val brand: ThemeEntry[] = [ThemeEntry(name: "--color-brand", value: "oklch(0.72 0.11 178)")];
+    val th = extendTheme(defaultTheme(), brand);
+    assert themeValue(th, "--color-brand") == "oklch(0.72 0.11 178)";
+}
+
+test "extendTheme — a name already present is overridden in place, not appended" {
+    val before = namespace(defaultTheme(), Ns.Color);
+    val override: ThemeEntry[] = [ThemeEntry(name: "--color-white", value: "#fefefe")];
+    val th = extendTheme(defaultTheme(), override);
+    assert themeValue(th, "--color-white") == "#fefefe";
+    assert namespace(th, Ns.Color).length == before.length;
+    assert th.entries.length == defaultTheme().entries.length;
+}
+
+test "extendTheme — the override keeps the entry where it was" {
+    val override: ThemeEntry[] = [ThemeEntry(name: "--spacing", value: "4px")];
+    val th = extendTheme(defaultTheme(), override);
+    assert th.entries.map({ e -> e.name }).join(";")
+        == defaultTheme().entries.map({ e -> e.name }).join(";");
+    assert themeValue(th, "--spacing") == "4px";
+}
+
+test "extendTheme — keyframes and the dark strategy ride through untouched" {
+    val brand: ThemeEntry[] = [ThemeEntry(name: "--color-brand", value: "#abc")];
+    val th = extendTheme(defaultTheme(), brand);
+    assert th.keyframes.length == 4;
+    assert th.darkMode == DarkMode.Media;
+}
+
+test "clearNamespace — the colour namespace goes, every other one stays" {
+    val base = defaultTheme();
+    val th = clearNamespace(base, Ns.Color);
+    assert namespace(th, Ns.Color).length == 0;
+    assert namespace(th, Ns.Radius).length == namespace(base, Ns.Radius).length;
+    assert namespace(th, Ns.Text).length == namespace(base, Ns.Text).length;
+    assert namespace(th, Ns.Shadow).length == namespace(base, Ns.Shadow).length;
+    assert namespace(th, Ns.Container).length
+        == namespace(base, Ns.Container).length;
+    assert namespace(th, Ns.Animate).length
+        == namespace(base, Ns.Animate).length;
+    assert namespace(th, Ns.Breakpoint).length
+        == namespace(base, Ns.Breakpoint).length;
+    assert th.keyframes.length == 4;
+}
+
+test "clearNamespace — clearing then re-declaring is how a project replaces a namespace" {
+    val stripped = clearNamespace(defaultTheme(), Ns.Color);
+    val brand: ThemeEntry[] = [
+        ThemeEntry(name: "--color-lagoon", value: "oklch(0.72 0.11 221.19)"),
+        ThemeEntry(name: "--color-coral", value: "oklch(0.74 0.17 40.24)"),
+    ];
+    val th = extendTheme(stripped, brand);
+    assert namespace(th, Ns.Color).length == 2;
+    assert themeValue(th, "--color-lagoon") == "oklch(0.72 0.11 221.19)";
+    assert themeValue(th, "--color-white") == "";
+}
+
+test "namespace — --spacing is read back through its own namespace" {
+    assert namespace(defaultTheme(), Ns.Spacing).length == 1;
+    assert namespace(emptyTheme(), Ns.Spacing).length == 0;
+}
+
+// ── tests · the custom-property block and the dark strategy ──────────────────
+
+test "themeCss — the block opens with the spacing base" {
+    assert themeCss(defaultTheme()).startsWith("--spacing:0.25rem;");
+}
+
+test "themeCss — an empty theme renders nothing at all" {
+    assert themeCss(emptyTheme()) == "";
+}
+
+test "themeCss — two calls on the same theme return the same string" {
+    val th = defaultTheme();
+    assert themeCss(th) == themeCss(th);
+    assert themeCss(defaultTheme()) == themeCss(defaultTheme());
+}
+
+test "themeCss — an extended theme carries the new value, in place" {
+    val brand: ThemeEntry[] = [ThemeEntry(name: "--spacing", value: "4px")];
+    val css = themeCss(extendTheme(defaultTheme(), brand));
+    assert css.startsWith("--spacing:4px;");
+    assert css.length == themeCss(defaultTheme()).length - 4;
+}
+
+test "themeCss — declarations are joined with a single semicolon" {
+    val two: ThemeEntry[] = [
+        ThemeEntry(name: "--spacing", value: "4px"),
+        ThemeEntry(name: "--color-lagoon", value: "oklch(0.72 0.11 221.19)"),
+    ];
+    assert themeCss(extendTheme(emptyTheme(), two))
+        == "--spacing:4px;--color-lagoon:oklch(0.72 0.11 221.19)";
+}
+
+test "keyframeCss — four bodies, named, and every one brace-balanced" {
+    val kf = keyframeCss(defaultTheme());
+    assert kf.length == 4;
+    assert kf.map({ e -> e.name }).join(",") == "spin,ping,pulse,bounce";
+    assert kf.all({ e -> e.value.startsWith("{") });
+    assert kf.all({ e -> e.value.endsWith("}") });
+    assert kf.all({ e -> e.value.split("{").length == e.value.split("}").length });
+}
+
+test "keyframeCss — front 56 writes a block without spelling the at-rule" {
+    val first = keyframeCss(defaultTheme()).at(0);
+    if (first == null) {
+        assert false;
+        return;
+    }
+    assert nsPrefix(Ns.Keyframes) + first.name + first.value
+        == "@keyframes spin{to{transform:rotate(360deg)}}";
+}
+
+test "keyframeCss — an empty theme carries no keyframes" {
+    assert keyframeCss(emptyTheme()).length == 0;
+}
+
+test "darkMode — Media is an at-rule, so its selector is the bare ampersand" {
+    assert darkAtRule(defaultTheme()) == "@media (prefers-color-scheme: dark)";
+    assert darkSelector(defaultTheme()) == "&";
+}
+
+test "darkMode — Class carries the whole strategy in its selector" {
+    val byClass = withDarkMode(defaultTheme(), DarkMode.Class(name: "dark"));
+    assert darkAtRule(byClass) == "";
+    assert darkSelector(byClass) == "&:where(.dark, .dark *)";
+}
+
+test "darkMode — Attribute carries the whole strategy in its selector" {
+    val byAttr = withDarkMode(defaultTheme(), DarkMode.Attribute(name: "data-theme", value: "dark"));
+    assert darkAtRule(byAttr) == "";
+    assert darkSelector(byAttr)
+        == "&:where([data-theme=dark], [data-theme=dark] *)";
+}
+
+test "darkMode — switching the strategy changes nothing else about the theme" {
+    val base = defaultTheme();
+    val byClass = withDarkMode(base, DarkMode.Class(name: "dark"));
+    assert themeCss(byClass) == themeCss(base);
+    assert keyframeCss(byClass).length == keyframeCss(base).length;
+    assert byClass.entries.length == base.entries.length;
+}
+
+test "a theme is a module — a second package's entries compose with the default" {
+    val vendor: ThemeEntry[] = [
+        ThemeEntry(name: "--radius-pill", value: "9999px"),
+        ThemeEntry(name: "--shadow-card", value: "0 1px 3px 0 rgb(0 0 0 / 0.1)"),
+    ];
+    val composed = extendTheme(defaultTheme(), vendor);
+    assert themeValue(composed, "--radius-pill") == "9999px";
+    assert themeValue(composed, "--shadow-card")
+        == "0 1px 3px 0 rgb(0 0 0 / 0.1)";
+    assert themeValue(composed, "--radius-lg") == "0.5rem";
+    assert themeValue(composed, "--spacing") == "0.25rem";
+    assert themeValue(composed, "--animate-spin") == "spin 1s linear infinite";
+    assert composed.entries.length == defaultTheme().entries.length + 2;
+}

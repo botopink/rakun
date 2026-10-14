@@ -1,0 +1,115 @@
+//// emilia/spacing — the spacing ladder, as a reference rather than a value.
+////
+//// EMILIA NEVER RESOLVES A SPACING VALUE. Every spacing utility upstream is a
+//// multiplier of `var(--spacing)`, resolved by the browser: `p-4` is
+//// `padding: calc(var(--spacing) * 4)`, not `padding: 1rem`. Emitting the
+//// `rem` literal would be byte-different from upstream for every spacing
+//// utility in the library, and it would make a consumer's `--spacing: 4px`
+//// override silently ineffective — the override would be emitted into the
+//// custom-property block and then ignored by every rule that matters.
+////
+//// This module is the whole spacing ladder. Fronts 35 and after call it
+//// instead of writing a `case` of `rem` literals; `emilia.bp`'s seven
+//// hand-written ladders — which had already drifted apart, one of them
+//// emitting `m-0.25` (a class name, not a CSS value) under a `margin-x:`
+//// property that does not exist — were SIX front 35's and ONE front 37's.
+//// Front 35 deleted `padScaleX/Y/All` and `marginScaleX/Y/All`; the seventh,
+//// `flexGapScale`, was `Flex.Gap`'s and `Gap` is front 37's section under this
+//// milestone's ownership rule, so front 35 said so rather than reaching across
+//// the boundary. Front 37 deleted it with the rest of `§ 6`. ALL SEVEN ARE
+//// GONE and no literal `rem` ladder is left in `emilia.bp`.
+////
+//// `spacing` takes an `i32` rather than an `f64` because the ladder's
+//// fractional steps are a closed set (0.5, 1.5, 2.5, 3.5) that `spacingHalf`
+//// covers exactly, while an `f64` parameter would make the emitted string
+//// depend on the backend's float formatting, which this milestone does not
+//// pin down. Negative steps need no second function: `spacing(-4)` is
+//// `calc(var(--spacing) * -4)`, the `-mt-4` row.
+
+// `spacing(4)` is `calc(var(--spacing) * 4)`; `spacing(0)` is `0`, because the
+// `p-0` row is `padding: 0` and not a `calc` of zero.
+pub fn spacing(n: i32) -> string {
+    val step = n.toString();
+    val out = if (n == 0) "0" else "calc(var(--spacing) * " + step + ")";
+    return out;
+}
+
+// The half steps: `spacingHalf(0)` is `calc(var(--spacing) * 0.5)`,
+// `spacingHalf(1)` is `calc(var(--spacing) * 1.5)`. There is no zero special
+// case here — `p-0.5` is a real utility with a real multiplier.
+//
+// `n` is the WHOLE PART and is never negative: `spacingHalf(-0)` would be
+// `spacingHalf(0)` (an `i32` has no negative zero), so a signed whole part
+// cannot spell `-0.5`. The negative half steps are `spacingNegHalf`, and a
+// negative `n` here is refused rather than read as one of them.
+pub fn spacingHalf(n: i32) -> string {
+    if (n < 0)
+        @panic("emilia spacing: spacingHalf("
+            + n.toString()
+            + ") — the whole part of a half step is never negative; `-"
+            + (0 - n).toString()
+            + ".5` is spacingNegHalf("
+            + (0 - n).toString()
+            + ")");
+    val step = n.toString();
+    return "calc(var(--spacing) * " + step + ".5)";
+}
+
+// The negative half steps, by the magnitude's whole part: `spacingNegHalf(0)`
+// is `calc(var(--spacing) * -0.5)` — the `-mt-0.5` row — and
+// `spacingNegHalf(1)` is `calc(var(--spacing) * -1.5)`. The sign is in the
+// name, so `-0.5` has a spelling.
+pub fn spacingNegHalf(n: i32) -> string {
+    if (n < 0)
+        @panic("emilia spacing: spacingNegHalf("
+            + n.toString()
+            + ") — pass the magnitude's whole part, never negative");
+    val step = n.toString();
+    return "calc(var(--spacing) * -" + step + ".5)";
+}
+
+// ── tests ────────────────────────────────────────────────────────────────────
+// Track D is target-independent: the only thing this module produces is
+// strings, so a string that differs by backend is a defect. Every assertion
+// below runs on `--target commonJS` and on `--target erlang`.
+
+test "spacing — zero is the literal 0, not a calc" {
+    assert spacing(0) == "0";
+}
+
+test "spacing — a whole step references the theme instead of resolving it" {
+    assert spacing(1) == "calc(var(--spacing) * 1)";
+    assert spacing(2) == "calc(var(--spacing) * 2)";
+    assert spacing(3) == "calc(var(--spacing) * 3)";
+    assert spacing(4) == "calc(var(--spacing) * 4)";
+    assert spacing(8) == "calc(var(--spacing) * 8)";
+    assert spacing(12) == "calc(var(--spacing) * 12)";
+    assert spacing(16) == "calc(var(--spacing) * 16)";
+    assert spacing(96) == "calc(var(--spacing) * 96)";
+}
+
+test "spacing — a negative step needs no second function" {
+    assert spacing(-1) == "calc(var(--spacing) * -1)";
+    assert spacing(-4) == "calc(var(--spacing) * -4)";
+    assert spacing(-12) == "calc(var(--spacing) * -12)";
+}
+
+test "spacingHalf — the four fractional steps of the ladder" {
+    assert spacingHalf(0) == "calc(var(--spacing) * 0.5)";
+    assert spacingHalf(1) == "calc(var(--spacing) * 1.5)";
+    assert spacingHalf(2) == "calc(var(--spacing) * 2.5)";
+    assert spacingHalf(3) == "calc(var(--spacing) * 3.5)";
+}
+
+test "spacingNegHalf — the negative half steps, -0.5 included" {
+    assert spacingNegHalf(0) == "calc(var(--spacing) * -0.5)";
+    assert spacingNegHalf(1) == "calc(var(--spacing) * -1.5)";
+    assert spacingNegHalf(3) == "calc(var(--spacing) * -3.5)";
+    assert spacingNegHalf(0) != spacingHalf(0);
+}
+
+test "spacing — the string is the same on every call, so class hashes are stable" {
+    assert spacing(4) == spacing(4);
+    assert spacing(4) != spacing(8);
+    assert spacing(4) != spacingHalf(4);
+}
