@@ -1,0 +1,105 @@
+//// styled: the theme mechanism — entries typed by namespace, cleared names
+//// remembered, and what `@variant <name>` reads from a theme.
+
+import {testing.asserts} from "std";
+import {theme.Theme, theme.Ns, theme.ThemeValue, theme.entry, theme.clear, theme.clearNs, theme.clearAll};
+import {theme.extendTheme, theme.baseTheme, theme.themeValue, theme.wasCleared, theme.valueText};
+import {variants.readVariant};
+
+fn names(th: Theme) -> string {
+    return th.entries.map({ e -> e.name + "=" + e.value }).join(" ");
+}
+
+test "the base theme: the spacing unit and the five breakpoints" {
+    try asserts.equals(
+        names(baseTheme()),
+        "--spacing=0.25rem --breakpoint-sm=40rem --breakpoint-md=48rem --breakpoint-lg=64rem --breakpoint-xl=80rem --breakpoint-2xl=96rem",
+    );
+}
+
+test "entry overrides in place and appends a new name; the value renders by its type" {
+    val th = extendTheme(
+        baseTheme(),
+        [
+            entry(Ns.Breakpoint, "md", ThemeValue.Rem(52.0)),
+            entry(Ns.Breakpoint, "3xl", ThemeValue.Px(1920.0)),
+            entry(Ns.Color, "mint-500", ThemeValue.Raw("oklch(0.72 0.11 178)")),
+            entry(Ns.Spacing, "", ThemeValue.Rem(0.3)),
+        ],
+    );
+    try asserts.equals(themeValue(th, "--breakpoint-md"), "52rem");
+    try asserts.equals(themeValue(th, "--breakpoint-3xl"), "1920px");
+    try asserts.equals(
+        themeValue(th, "--color-mint-500"),
+        "oklch(0.72 0.11 178)",
+    );
+    try asserts.equals(themeValue(th, "--spacing"), "0.3rem");
+    try asserts.equals(
+        names(th),
+        "--spacing=0.3rem --breakpoint-sm=40rem --breakpoint-md=52rem --breakpoint-lg=64rem --breakpoint-xl=80rem --breakpoint-2xl=96rem --breakpoint-3xl=1920px --color-mint-500=oklch(0.72 0.11 178)",
+    );
+}
+
+test "a value renders the same on both targets" {
+    try asserts.equals(valueText(ThemeValue.Rem(52.0)), "52rem");
+    try asserts.equals(valueText(ThemeValue.Rem(0.125)), "0.125rem");
+    try asserts.equals(valueText(ThemeValue.Em(-0.025)), "-0.025em");
+    try asserts.equals(valueText(ThemeValue.Number(1.5)), "1.5");
+}
+
+test "clear, clearNs and clearAll drop entries and remember the names" {
+    val one = extendTheme(baseTheme(), [clear(Ns.Breakpoint, "2xl")]);
+    try asserts.equals(themeValue(one, "--breakpoint-2xl"), "");
+    try asserts.isTrue(wasCleared(one, "--breakpoint-2xl"));
+    try asserts.isFalse(wasCleared(one, "--breakpoint-xl"));
+    val ns = extendTheme(baseTheme(), [clearNs(Ns.Breakpoint)]);
+    try asserts.equals(names(ns), "--spacing=0.25rem");
+    try asserts.isTrue(wasCleared(ns, "--breakpoint-sm"));
+    val all = extendTheme(baseTheme(), [clearAll()]);
+    try asserts.equals(names(all), "");
+    try asserts.isTrue(wasCleared(all, "--spacing"));
+}
+
+test "a cleared name put back is no longer cleared" {
+    val th = extendTheme(
+        baseTheme(),
+        [
+            clear(Ns.Breakpoint, "md"),
+            entry(Ns.Breakpoint, "md", ThemeValue.Rem(50.0)),
+        ],
+    );
+    try asserts.equals(themeValue(th, "--breakpoint-md"), "50rem");
+    try asserts.isFalse(wasCleared(th, "--breakpoint-md"));
+}
+
+test "@variant reads a breakpoint, a pseudo-class or a media condition from the theme" {
+    val th = extendTheme(
+        baseTheme(),
+        [entry(Ns.Breakpoint, "md", ThemeValue.Rem(52.0))],
+    );
+    try asserts.equals(readVariant(th, "md").media, "(width >= 52rem)");
+    try asserts.equals(readVariant(th, "max-md").media, "(width < 52rem)");
+    try asserts.equals(readVariant(th, "hover").suffix, ":hover");
+    try asserts.equals(readVariant(th, "first").suffix, ":first-child");
+    try asserts.equals(readVariant(th, "after").suffix, "::after");
+    try asserts.equals(
+        readVariant(th, "dark").media,
+        "(prefers-color-scheme: dark)",
+    );
+}
+
+test "a cleared breakpoint is refused with its reason; an absent one as no variant" {
+    val th = extendTheme(baseTheme(), [clear(Ns.Breakpoint, "2xl")]);
+    try asserts.equals(
+        readVariant(th, "2xl").problem,
+        "breakpoint `2xl` was cleared from the theme",
+    );
+    try asserts.equals(
+        readVariant(th, "max-2xl").problem,
+        "breakpoint `2xl` was cleared from the theme",
+    );
+    try asserts.equals(
+        readVariant(th, "3xl").problem,
+        "`3xl` is no variant: a pseudo-class, a media condition or a breakpoint of the theme",
+    );
+}

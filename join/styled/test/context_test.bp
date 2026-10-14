@@ -1,0 +1,113 @@
+//// styled: a component computed at render registers its class and rules in
+//// the sheet its render provides through `StyledSheet`'s context (decisions 352,
+//// 354). The provider's writer is a mock here, so each registration is a
+//// recorded call: a `${p}` splice registers nothing, a literal computed at
+//// build registers nothing, a property standing on its own registers itself.
+
+import {testing.asserts, testing.mocks, context.createContext, context.provide} from "std";
+import {styled.styled, styled.styledProperty, styled.StyledView, styled.StyledPropertyView, styled.StyledSheet, styled.Styled, styled.StyledProperty};
+
+#[mocks.mock]
+pub behavior Writer {
+    fn add(self: Self, layer: string, className: string, rules: string) -> i32;
+}
+
+fn record(w: Writer, layer: string, item: Styled) -> void {
+    val _n = w.add(layer, item.className, item.rules);
+}
+
+fn sheetOf(w: Writer) -> StyledSheet {
+    return StyledSheet(
+        layer: "components",
+        add: { layer, item -> record(w, layer, item) },
+    );
+}
+
+// The render's root: it provides the sheet, then renders `view`.
+fn Render(w: Writer, view: fn() -> StyledView) -> @Component<Styled> {
+    use provide(createContext(sheetOf(w)));
+    val out = await view();
+    return out;
+}
+
+fn RenderProperty(
+    w: Writer,
+    view: fn() -> StyledPropertyView,
+) -> @Component<StyledProperty> {
+    use provide(createContext(sheetOf(w)));
+    val out = await view();
+    return out;
+}
+
+fn padAll(n: i32) -> StyledPropertyView {
+    return styledProperty "padding: --spacing(${n});";
+}
+
+fn badge(c: string) -> StyledView {
+    return styled "color: ${c}; ${padAll(2)}";
+}
+
+pub val tab4 = styledProperty "tab-size: 4;";
+
+fn tabbed() -> StyledView {
+    return styled "${tab4} color: red;";
+}
+
+test "a literal computed at render registers its class and rules in the provided sheet" {
+    val w = Writer.mock();
+    val b = await Render(w, { -> badge("red") });
+    try asserts.equals(b.className, "s_3af29e17");
+    val _v = mocks
+        .verify(w, mocks.times(1))
+        .add(
+            mocks.eq("components"),
+            mocks.eq("s_3af29e17"),
+            mocks.eq(".s_3af29e17{color:red;padding:calc(var(--spacing) * 2)}"),
+        );
+}
+
+test "a ${p} splice registers nothing of its own" {
+    val w = Writer.mock();
+    val _b = await Render(w, { -> badge("red") });
+    val _v = mocks
+        .verify(w, mocks.never())
+        .add(mocks.anyString(), mocks.eq("s_a7916e48"), mocks.anyString());
+    val _all = mocks
+        .verify(w, mocks.times(1))
+        .add(mocks.anyString(), mocks.anyString(), mocks.anyString());
+}
+
+test "a literal computed at build registers nothing" {
+    val w = Writer.mock();
+    val t = await Render(w, { -> tabbed() });
+    try asserts.equals(t.className, "s_b480a37a");
+    val _v = mocks
+        .verify(w, mocks.never())
+        .add(mocks.anyString(), mocks.anyString(), mocks.anyString());
+}
+
+test "a property standing on its own registers itself" {
+    val w = Writer.mock();
+    val p = await RenderProperty(w, { -> padAll(4) });
+    try asserts.equals(p.className, "s_a79176ca");
+    val _v = mocks
+        .verify(w, mocks.times(1))
+        .add(
+            mocks.eq("components"),
+            mocks.eq("s_a79176ca"),
+            mocks.eq(".s_a79176ca{padding:calc(var(--spacing) * 4)}"),
+        );
+}
+
+test "each run registers: the provider's sheet keeps a component once" {
+    val w = Writer.mock();
+    val _a = await Render(w, { -> badge("red") });
+    val _b = await Render(w, { -> badge("red") });
+    val _c = await Render(w, { -> badge("blue") });
+    val _v = mocks
+        .verify(w, mocks.times(2))
+        .add(mocks.eq("components"), mocks.eq("s_3af29e17"), mocks.anyString());
+    val _o = mocks
+        .verify(w, mocks.times(1))
+        .add(mocks.eq("components"), mocks.eq("s_a9a59a44"), mocks.anyString());
+}

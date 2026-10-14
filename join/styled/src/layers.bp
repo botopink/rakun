@@ -1,0 +1,103 @@
+//// styled/layers — the layered sheet: components in `@layer`s, each once.
+////
+//// A `Sheet` declares its layers in cascade order; `add` puts a component in
+//// one of them (a component already there is not added again), under the
+//// layer's class prefix — `s_` by default, any other (`e_`) renaming the
+//// class's prefix and keeping its hash. `render` writes each layer that holds
+//// a component, in declaration order. A sheet is a value: `add` answers the
+//// sheet with the component in it (a record has no assignable field).
+
+import {styled.Styled};
+
+// A layer: its name and the class prefix of the components it holds.
+pub type Layer(name: string, prefix: string)
+
+// A layer whose classes keep `s_`.
+pub fn layer(name: string) -> Layer {
+    return Layer(name: name, prefix: "s_");
+}
+
+// One component in a layer, under the class the layer gives it.
+pub type SheetEntry(layer: string, className: string, rules: string)
+
+fn validLayerName(name: string) -> bool {
+    val allowed = "abcdefghijklmnopqrstuvwxyz0123456789-";
+    return name != "" && name.chars().all({ c -> allowed.contains(c) });
+}
+
+fn validPrefix(prefix: string) -> bool {
+    val body = prefix.slice(0, prefix.length - 1);
+    return prefix.endsWith("_")
+        && body != ""
+        && body.chars().all({ c -> "abcdefghijklmnopqrstuvwxyz".contains(c) });
+}
+
+pub type Sheet(layers: Layer[], entries: SheetEntry[]) {
+    // A sheet with `layers`, in cascade order, and nothing in them.
+    pub fn of(layers: Layer[]) -> Sheet {
+        var seen: string[] = [];
+        for (layers) { l ->
+            if (!validLayerName(l.name))
+                @panic(
+                    "styled sheet: a layer name is lowercase letters, digits and -: '"
+                        + l.name
+                        + "'",
+                );
+            if (!validPrefix(l.prefix))
+                @panic(
+                    "styled sheet: a layer prefix is lowercase letters and _: '"
+                        + l.prefix
+                        + "'",
+                );
+            if (seen.contains(l.name))
+                @panic(
+                    "styled sheet: layer '" + l.name + "' is declared twice",
+                );
+            seen = seen.append([l.name]);
+        }
+        val entries: SheetEntry[] = [];
+        return Sheet(layers: layers, entries: entries);
+    }
+
+    // The class `item` carries in `layerName`: the layer's prefix, the hash kept.
+    pub fn classIn(self: Self, layerName: string, item: Styled) -> string {
+        val found = self.layers.filter({ l -> l.name == layerName });
+        if (found.length == 0)
+            @panic("styled sheet: no layer '" + layerName + "'");
+        val prefix = found.map({ l -> l.prefix }).join("");
+        val cut = item.className.indexOf("_");
+        return prefix + item.className.slice(cut + 1, item.className.length);
+    }
+
+    // The sheet with `item` in `layerName`. A property goes in as its
+    // `toStyled()`.
+    // LANGUAGE GAP: a method's behavior-typed parameter refuses an implementer (a free function's takes it), so `add` takes the `Styled` a `Styleable` answers, not the `Styleable`.
+    pub fn add(self: Self, layerName: string, styled: Styled) -> Sheet {
+        val className = self.classIn(layerName, styled);
+        val present = self.entries.any(
+            { e -> e.layer == layerName && e.className == className },
+        );
+        if (present) return self;
+        val rules = styled.rules
+            .split("." + styled.className)
+            .join("." + className);
+        val one: SheetEntry[] = [
+            SheetEntry(layer: layerName, className: className, rules: rules),
+        ];
+        return Sheet(layers: self.layers, entries: self.entries.append(one));
+    }
+
+    // `@layer <name>{…}` for each layer holding a component, in declaration
+    // order; each layer's components in the order they were added.
+    pub fn render(self: Self) -> string {
+        var out = "";
+        for (self.layers) { l ->
+            val held = self.entries
+                .filter({ e -> e.layer == l.name })
+                .map({ e -> e.rules })
+                .join("");
+            if (held != "") out = out + "@layer " + l.name + "{" + held + "}";
+        }
+        return out;
+    }
+}

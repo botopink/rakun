@@ -1,0 +1,176 @@
+//// styled: the reader keeps source order (decision 368 (1)). A declaration
+//// written after a nested rule opens a new rule of the class, as CSS
+//// Nesting's nested-declarations rule does in a browser; the class is `s_`
+//// and std's `contentHash` of the rules as rendered, so an order is a class.
+//// Every expected text is a literal.
+
+import {testing.asserts, hash, context.createContext, context.provide} from "std";
+import {styled.styled, styled.styledProperty, styled.StyledView, styled.StyledPropertyView, styled.StyledSheet, styled.Styled};
+
+pub val bg = styledProperty "background: #ffffff;";
+
+pub val gray = styledProperty "background: var(--color-gray-100);";
+
+pub val pad = styledProperty "padding: --spacing(4);";
+
+fn padAll(n: i32) -> StyledPropertyView {
+    return styledProperty "padding: --spacing(${n});";
+}
+
+// Decision 368's literal: every hole known at build, so computed at build.
+pub val focusPad = styled "${bg} &:focus { ${gray} } ${pad}";
+
+// The same declarations, the padding before the nested rule: another order,
+// another class.
+pub val padFocus = styled "${bg} ${pad} &:focus { ${gray} }";
+
+pub val alternating = styled """
+  color: red;
+  &:hover { color: blue; }
+  margin: 0;
+  .icon { margin: 1px; }
+  padding: 0;
+  &:focus { outline: none; }
+  gap: 1rem;
+""";
+
+pub val nestedAlternating = styled """
+  &:hover {
+    color: blue;
+    &::after { content: ""; }
+    opacity: 1;
+  }
+""";
+
+pub val variantBetween = styled """
+  color: red;
+  @variant md { gap: 0; }
+  margin: 0;
+  @variant hover { color: blue; }
+  padding: 0;
+  @media print { display: none; }
+  border: 0;
+""";
+
+// A splice after a nested rule, computed at render (`${padAll(n)}` is a call).
+fn spliceAfter(n: i32) -> StyledView {
+    return styled "color: red; &:hover { color: blue; } ${padAll(n)}";
+}
+
+pub val pad2 = styledProperty "padding: --spacing(2);";
+
+// The same literal with the splice known at build: computed at build.
+pub val spliceAfterAtBuild = styled "color: red; &:hover { color: blue; } ${pad2}";
+
+fn Render(view: fn() -> StyledView) -> @Component<Styled> {
+    use provide(createContext(StyledSheet(layer: "components", add: dropped)));
+    val out = await view();
+    return out;
+}
+
+fn dropped(layer: string, item: Styled) -> void {}
+
+test "a declaration after a nested rule opens a new rule of the class" {
+    val s = await focusPad;
+    try asserts.equals(s.className, "s_b2548ea2");
+    try asserts.equals(
+        s.rules,
+        ".s_b2548ea2{background:#ffffff}.s_b2548ea2:focus{background:var(--color-gray-100)}.s_b2548ea2{padding:calc(var(--spacing) * 4)}",
+    );
+    try asserts.equals(
+        s.className,
+        "s_"
+            + hash.contentHash(
+                "\u{1}{background:#ffffff}\u{1}:focus{background:var(--color-gray-100)}\u{1}{padding:calc(var(--spacing) * 4)}",
+            ),
+    );
+}
+
+test "the order is the class: the padding before the nested rule is another class" {
+    val before = await padFocus;
+    val after = await focusPad;
+    try asserts.equals(
+        before.rules,
+        "."
+            + before.className
+            + "{background:#ffffff;padding:calc(var(--spacing) * 4)}."
+            + before.className
+            + ":focus{background:var(--color-gray-100)}",
+    );
+    try asserts.notEquals(before.className, after.className);
+}
+
+test "several alternations: each run of declarations is a rule, in order" {
+    val a = await alternating;
+    val k = "." + a.className;
+    try asserts.equals(
+        a.rules,
+        k
+            + "{color:red}"
+            + k
+            + ":hover{color:blue}"
+            + k
+            + "{margin:0}"
+            + k
+            + " .icon{margin:1px}"
+            + k
+            + "{padding:0}"
+            + k
+            + ":focus{outline:none}"
+            + k
+            + "{gap:1rem}",
+    );
+}
+
+test "a nested block keeps its own order" {
+    val n = await nestedAlternating;
+    val k = "." + n.className;
+    try asserts.equals(
+        n.rules,
+        k
+            + ":hover{color:blue}"
+            + k
+            + ":hover::after{content:\"\"}"
+            + k
+            + ":hover{opacity:1}",
+    );
+}
+
+test "a variant or an at-rule between declarations stays between them" {
+    val v = await variantBetween;
+    val k = "." + v.className;
+    try asserts.equals(
+        v.rules,
+        k
+            + "{color:red}@media (width >= 48rem){"
+            + k
+            + "{gap:0}}"
+            + k
+            + "{margin:0}"
+            + k
+            + ":hover{color:blue}"
+            + k
+            + "{padding:0}@media print{"
+            + k
+            + "{display:none}}"
+            + k
+            + "{border:0}",
+    );
+}
+
+test "a splice after a nested rule opens a new rule, computed at render as at build" {
+    val r = await Render({ -> spliceAfter(2) });
+    val k = "." + r.className;
+    try asserts.equals(
+        r.rules,
+        k
+            + "{color:red}"
+            + k
+            + ":hover{color:blue}"
+            + k
+            + "{padding:calc(var(--spacing) * 2)}",
+    );
+    val b = await spliceAfterAtBuild;
+    try asserts.equals(b.className, r.className);
+    try asserts.equals(b.rules, r.rules);
+}

@@ -1,0 +1,540 @@
+//// styled/reader — the literal of `styled "…"` and `styledProperty "…"`,
+//// read inside the template function into the component's rules.
+////
+//// The literal is a rule body: declarations (`prop: value;`, the `;`
+//// required), `${p}` holes standing for the declarations of a
+//// `StyledPropertyView` (Tailwind's `@apply`), nested rules (`&:hover { … }`,
+//// CSS nesting: a selector without `&` is a descendant), `@variant <name>
+//// { … }`, and the rule-holding at-rules `@media`, `@supports`,
+//// `@container`, `@starting-style`. A `${…}` hole inside a value is a value.
+//// `--spacing(n)`, `--alpha(c / p)` and `--theme(--name)` are expanded;
+//// `@utility`, `@theme`, `@apply`, `@custom-variant` and `--value()` are
+//// refused, each naming the botopink form.
+////
+//// The source is the literal's characters (`String.chars()`), a hole one
+//// element `\u{2}<k>\u{3}` (`k` its index in `codes`). The rules come out as
+//// one text where `\u{1}` stands for the component's class selector and
+//// `\u{4}<k>\u{3}` for the declarations a hole splices in. The rules keep
+//// source order (decision 368): a declaration written after a nested rule
+//// opens a new rule of the class, as CSS Nesting's nested-declarations rule
+//// does in a browser — `${bg} &:focus { ${gray} } ${pad}` is
+//// `.k{bg}.k:focus{gray}.k{pad}`, never `.k{bg;pad}.k:focus{gray}`. Every
+//// refusal names the character index it is read at.
+////
+//// This module runs inside the template function (decision 331): it names
+//// no enum variant (a function the comptime runtime runs cannot, see
+//// `language-gaps.md`).
+
+import {chars.charAt, chars.textOf, chars.isSpace, chars.isNameChar, chars.skipString} from "css";
+import {theme.Theme, theme.themeValue, theme.wasCleared};
+import {variants.readVariant};
+
+// The literal: its characters (a hole is one element), each element's
+// offsets in the template text, and each hole's code.
+pub type Source(cs: string[], starts: i32[], ends: i32[], codes: string[])
+
+// A block read: the index after it, its rules, its own declarations, or the
+// refusal and the index it names.
+pub type Block(next: i32, rules: string, decls: string, problem: string, at: i32)
+
+// A value read: its text and the index after it, or the refusal.
+pub type Value(text: string, next: i32, problem: string, at: i32)
+
+pub fn classMark() -> string {
+    return "\u{1}";
+}
+
+pub fn isHole(c: string) -> bool {
+    return c.startsWith("\u{2}");
+}
+
+// The splice marker of the hole element `c`.
+fn spliceOf(c: string) -> string {
+    return "\u{4}" + c.slice(1, c.length);
+}
+
+fn fail(at: i32, problem: string) -> Block {
+    return Block(next: at, rules: "", decls: "", problem: problem, at: at);
+}
+
+fn failValue(at: i32, problem: string) -> Value {
+    return Value(text: "", next: at, problem: problem, at: at);
+}
+
+// Past the whitespace and comments at `i`; `-1 - i` for a comment opening at
+// `i` that is not closed.
+fn skipBlank(cs: string[], i0: i32) -> i32 {
+    var i = i0;
+    var done = false;
+    while (!done) {
+        val c = charAt(cs, i);
+        if (isSpace(c)) i = i + 1 else if (c == "/"
+            && charAt(cs, i + 1) == "*") {
+            var j = i + 2;
+            var closed = false;
+            while (!closed && j < cs.length) {
+                if (charAt(cs, j) == "*" && charAt(cs, j + 1) == "/") {
+                    closed = true;
+                    j = j + 2;
+                } else j = j + 1;
+            }
+            if (closed) i = j else {
+                i = -1 - i;
+                done = true;
+            }
+        } else done = true;
+    }
+    return i;
+}
+
+// Runs of whitespace as one space, trimmed.
+fn squeeze(text: string) -> string {
+    var out = "";
+    var gap = false;
+    for (text.chars()) { c ->
+        if (isSpace(c)) gap = true else {
+            if (gap && out != "") out = out + " ";
+            gap = false;
+            out = out + c;
+        }
+    }
+    return out;
+}
+
+// `needle` is written at `i`.
+fn writtenAt(cs: string[], i: i32, needle: string) -> bool {
+    val ns = needle.chars();
+    var k = 0;
+    var same = true;
+    while (same && k < ns.length) {
+        if (charAt(cs, i + k) != ns.at(k) ?? "") same = false;
+        k = k + 1;
+    }
+    return same;
+}
+
+// The first of `{`, `;` or `}` from `i` at depth zero (strings, parentheses
+// and brackets skipped); `cs.length` when there is none, `-1 - j` for a string
+// opening at `j` that is not closed.
+fn statementEnd(cs: string[], i0: i32) -> i32 {
+    var i = i0;
+    var depth = 0;
+    var end = -2;
+    while (end == -2) {
+        val c = charAt(cs, i);
+        if (i >= cs.length) end = cs.length else if (c == "\"" || c == "'") {
+            val j = skipString(cs, i);
+            if (j < 0) end = -1 - i else i = j;
+        } else if (c == "(" || c == "[") {
+            depth = depth + 1;
+            i = i + 1;
+        } else if (c == ")" || c == "]") {
+            depth = depth - 1;
+            i = i + 1;
+        } else if (depth <= 0 && (c == "{" || c == ";" || c == "}"))
+            end = i
+        else
+            i = i + 1;
+    }
+    return end;
+}
+
+// The at-keyword's name at `i` (the `@` excluded).
+fn atName(cs: string[], i: i32) -> string {
+    var j = i + 1;
+    while (isNameChar(charAt(cs, j)) && !isHole(charAt(cs, j))) {
+        j = j + 1;
+    }
+    return textOf(cs, i + 1, j);
+}
+
+// One selector of a nested rule under its parents: `&` names the parent; a
+// selector without one is the parent's descendant.
+fn nestUnder(parents: string[], selector: string) -> string[] {
+    val parts = selector.split(",").map({ p -> squeeze(p) });
+    var out: string[] = [];
+    for (parents) { parent ->
+        for (parts) { part ->
+            val one = if (part.contains("&"))
+                part.split("&").join(parent)
+            else
+                parent + " " + part;
+            out = out.append([one]);
+        }
+    }
+    return out;
+}
+
+// A value from `i` up to the `)` that closes it (`closing`) or the end of the
+// text: `--spacing()`, `--alpha()` and `--theme()` expanded, whitespace
+// squeezed by the caller.
+fn readValue(cs: string[], i0: i32, closing: bool, th: Theme) -> Value {
+    var out = "";
+    var i = i0;
+    var problem = "";
+    var at = 0;
+    var done = false;
+    while (!done && problem == "") {
+        val c = charAt(cs, i);
+        if (i >= cs.length) {
+            if (closing) {
+                problem = "unclosed (";
+                at = i0 - 1;
+            }
+            done = true;
+        } else if (c == ")" && closing) done = true else if (c == "\""
+            || c == "'") {
+            val j = skipString(cs, i);
+            if (j < 0) {
+                problem = "unterminated string";
+                at = i;
+            } else {
+                out = out + textOf(cs, i, j);
+                i = j;
+            }
+        } else if (writtenAt(cs, i, "--spacing(")) {
+            val inner = readValue(cs, i + 10, true, th);
+            if (inner.problem != "") {
+                problem = inner.problem;
+                at = inner.at;
+            } else {
+                out = out
+                    + "calc(var(--spacing) * "
+                    + squeeze(inner.text)
+                    + ")";
+                i = inner.next + 1;
+            }
+        } else if (writtenAt(cs, i, "--alpha(")) {
+            val inner = readValue(cs, i + 8, true, th);
+            val halves = inner.text.split("/");
+            if (inner.problem != "") {
+                problem = inner.problem;
+                at = inner.at;
+            } else if (halves.length != 2) {
+                problem = "--alpha() takes a colour and an opacity: --alpha(var(--color-blue-500) / 50%)";
+                at = i;
+            } else {
+                val colour = squeeze(halves.at(0) ?? "");
+                val alpha = squeeze(halves.at(1) ?? "");
+                out = out
+                    + "color-mix(in oklab, "
+                    + colour
+                    + " "
+                    + alpha
+                    + ", transparent)";
+                i = inner.next + 1;
+            }
+        } else if (writtenAt(cs, i, "--theme(")) {
+            val inner = readValue(cs, i + 8, true, th);
+            val name = squeeze(inner.text);
+            val value = themeValue(th, name);
+            if (inner.problem != "") {
+                problem = inner.problem;
+                at = inner.at;
+            } else if (value != "") {
+                out = out + value;
+                i = inner.next + 1;
+            } else if (wasCleared(th, name)) {
+                problem = "`" + name + "` was cleared from the theme";
+                at = i + 8;
+            } else {
+                problem = "`" + name + "` is not in the theme";
+                at = i + 8;
+            }
+        } else if (writtenAt(cs, i, "--value(")) {
+            problem = "--value() is a parameter: write the family as a function, fn tab(n: i32) -> StyledPropertyView";
+            at = i;
+        } else if (c == "(") {
+            val inner = readValue(cs, i + 1, true, th);
+            if (inner.problem != "") {
+                problem = inner.problem;
+                at = inner.at;
+            } else {
+                out = out + "(" + inner.text + ")";
+                i = inner.next + 1;
+            }
+        } else {
+            out = out + c;
+            i = i + 1;
+        }
+    }
+    if (problem != "") return failValue(at, problem);
+    return Value(text: out, next: i, problem: "", at: 0);
+}
+
+// The declaration `prop: value` written in `cs[i..end)`.
+fn readDeclaration(cs: string[], i: i32, end: i32, th: Theme) -> Value {
+    var colon = -1;
+    var j = i;
+    while (colon < 0 && j < end) {
+        if (charAt(cs, j) == ":") colon = j;
+        j = j + 1;
+    }
+    if (colon < 0) return failValue(i, "a declaration is `property: value;`");
+    val prop = squeeze(textOf(cs, i, colon));
+    val propOk = prop != ""
+        && prop.chars().all({ c -> isNameChar(c) && !isHole(c) });
+    if (!propOk) return failValue(i, "`" + prop + "` is not a property name");
+    val value = readValue(cs.slice(0, end), colon + 1, false, th);
+    if (value.problem != "") return value;
+    val text = squeeze(value.text);
+    if (text == "") return failValue(colon, "`" + prop + "` has no value");
+    return Value(text: prop + ":" + text, next: end + 1, problem: "", at: 0);
+}
+
+fn rulesOf(
+    sels: string[],
+    decls: string[],
+    open: string,
+    close: string,
+) -> string {
+    if (decls.length == 0) return "";
+    return open + sels.join(",") + "{" + decls.join(";") + "}" + close;
+}
+
+// A block's body from `i0`, in source order (decision 368): each run of
+// declarations is a rule of `sels`, inside `open` / `close` (the at-rules
+// around it), and each nested rule follows the run before it — a declaration
+// written after a nested rule opens a new rule of `sels`, as CSS Nesting's
+// nested-declarations rule does in a browser. `top`: the literal itself,
+// which ends at the end of the text; any other block ends at its `}` (opened
+// at `openAt`). `Block.decls` is every declaration of the block itself, in
+// order — what a `styledProperty` literal, which nests nothing, holds.
+pub fn readBlock(
+    src: Source,
+    i0: i32,
+    sels: string[],
+    open: string,
+    close: string,
+    th: Theme,
+    top: bool,
+    openAt: i32,
+) -> Block {
+    val cs = src.cs;
+    var i = i0;
+    var decls: string[] = [];
+    var run: string[] = [];
+    var rules = "";
+    var problem = "";
+    var at = 0;
+    var done = false;
+    while (!done && problem == "") {
+        val b = skipBlank(cs, i);
+        val c = charAt(cs, b);
+        if (b < 0) {
+            problem = "unterminated comment";
+            at = -1 - b;
+        } else if (b >= cs.length) {
+            if (!top) {
+                problem = "unclosed {";
+                at = openAt;
+            }
+            i = b;
+            done = true;
+        } else if (c == "}") {
+            if (top) {
+                problem = "unexpected }";
+                at = b;
+            }
+            i = b + 1;
+            done = true;
+        } else if (c == ";") i = b + 1 else if (isHole(c)) {
+            val after = skipBlank(cs, b + 1);
+            val next = charAt(cs, after);
+            if (next == ":") {
+                problem = "a property name is written, never a \${…} hole";
+                at = b;
+            } else if (next == "{") {
+                problem = "a selector is written, never a \${…} hole";
+                at = b;
+            } else {
+                decls = decls.append([spliceOf(c)]);
+                run = run.append([spliceOf(c)]);
+                i = if (next == ";") after + 1 else b + 1;
+            }
+        } else if (c == "@") {
+            val name = atName(cs, b);
+            val nameEnd = b + 1 + name.chars().length;
+            val stop = statementEnd(cs, nameEnd);
+            val opens = charAt(cs, stop) == "{";
+            if (name == "utility") {
+                problem = "name a component with a val or a function";
+                at = b;
+            } else if (name == "theme") {
+                problem = "the theme is the typed #[theme] (extendTheme, entry)";
+                at = b;
+            } else if (name == "apply") {
+                problem = "@apply is a \${…} hole of a StyledPropertyView: \${padAll(4)}";
+                at = b;
+            } else if (name == "custom-variant") {
+                // LANGUAGE GAP: a template function cannot read another expansion's result, so a variant declared in one literal cannot be read in another; the variant is a function: fn hocus(inner: StyledPropertyView) -> StyledView.
+                problem = "a custom variant is a function: fn hocus(inner: StyledPropertyView) -> StyledView { return styled \"&:hover, &:focus { \${inner} }\"; }";
+                at = b;
+            } else if (stop < 0) {
+                problem = "unterminated string";
+                at = -1 - stop;
+            } else if (!opens) {
+                problem = "@"
+                    + name
+                    + " in a component holds a block: @"
+                    + name
+                    + " … { … }";
+                at = b;
+            } else if (name == "variant") {
+                val vname = squeeze(textOf(cs, nameEnd, stop));
+                val v = readVariant(th, vname);
+                if (v.problem != "") {
+                    problem = v.problem;
+                    at = skipBlank(cs, nameEnd);
+                } else {
+                    val inner = if (v.media != "")
+                        readBlock(
+                            src,
+                            stop + 1,
+                            sels,
+                            open + "@media " + v.media + "{",
+                            "}" + close,
+                            th,
+                            false,
+                            stop,
+                        )
+                    else
+                        readBlock(
+                            src,
+                            stop + 1,
+                            sels.map({ s -> s + v.suffix }),
+                            open,
+                            close,
+                            th,
+                            false,
+                            stop,
+                        );
+                    if (inner.problem != "") {
+                        problem = inner.problem;
+                        at = inner.at;
+                    } else {
+                        rules = rules
+                            + rulesOf(sels, run, open, close)
+                            + inner.rules;
+                        run = [];
+                        i = inner.next;
+                    }
+                }
+            } else if (name == "media"
+                || name == "supports"
+                || name == "container"
+                || name == "starting-style") {
+                val prelude = readValue(cs.slice(0, stop), nameEnd, false, th);
+                if (prelude.problem != "") {
+                    problem = prelude.problem;
+                    at = prelude.at;
+                } else {
+                    val head = squeeze(prelude.text);
+                    val opening = if (head == "")
+                        "@" + name + "{"
+                    else
+                        "@" + name + " " + head + "{";
+                    val inner = readBlock(
+                        src,
+                        stop + 1,
+                        sels,
+                        open + opening,
+                        "}" + close,
+                        th,
+                        false,
+                        stop,
+                    );
+                    if (inner.problem != "") {
+                        problem = inner.problem;
+                        at = inner.at;
+                    } else {
+                        rules = rules
+                            + rulesOf(sels, run, open, close)
+                            + inner.rules;
+                        run = [];
+                        i = inner.next;
+                    }
+                }
+            } else {
+                problem = "@"
+                    + name
+                    + " is not an at-rule of a component: @variant, @media, @supports, @container, @starting-style";
+                at = b;
+            }
+        } else {
+            val stop = statementEnd(cs, b);
+            val ch = charAt(cs, stop);
+            if (stop < 0) {
+                problem = "unterminated string";
+                at = -1 - stop;
+            } else if (ch == "{") {
+                val selector = squeeze(textOf(cs, b, stop));
+                val holed = cs.slice(b, stop).any({ x -> isHole(x) });
+                if (selector.endsWith(":")) {
+                    problem = "a value goes in a \${…} hole; { opens a CSS block";
+                    at = stop;
+                } else if (holed) {
+                    problem = "a selector is written, never a \${…} hole";
+                    at = b;
+                } else {
+                    val inner = readBlock(
+                        src,
+                        stop + 1,
+                        nestUnder(sels, selector),
+                        open,
+                        close,
+                        th,
+                        false,
+                        stop,
+                    );
+                    if (inner.problem != "") {
+                        problem = inner.problem;
+                        at = inner.at;
+                    } else {
+                        rules = rules
+                            + rulesOf(sels, run, open, close)
+                            + inner.rules;
+                        run = [];
+                        i = inner.next;
+                    }
+                }
+            } else if (ch == ";") {
+                val d = readDeclaration(cs, b, stop, th);
+                if (d.problem != "") {
+                    problem = d.problem;
+                    at = d.at;
+                } else {
+                    decls = decls.append([d.text]);
+                    run = run.append([d.text]);
+                    i = d.next;
+                }
+            } else {
+                problem = "a declaration ends with ;";
+                at = b;
+            }
+        }
+    }
+    if (problem != "") return fail(at, problem);
+    return Block(
+        next: i,
+        rules: rules + rulesOf(sels, run, open, close),
+        decls: decls.join(";"),
+        problem: "",
+        at: 0,
+    );
+}
+
+// The first `{`, `&` or `@` of a `styledProperty` literal (strings skipped),
+// `-1` when it holds none: it holds declarations only.
+pub fn firstNonDeclaration(cs: string[]) -> i32 {
+    var i = 0;
+    var found = -1;
+    while (found < 0 && i < cs.length) {
+        val c = charAt(cs, i);
+        if (c == "\"" || c == "'") {
+            val j = skipString(cs, i);
+            i = if (j < 0) cs.length else j;
+        } else if (c == "{" || c == "&" || c == "@") found = i else i = i + 1;
+    }
+    return found;
+}

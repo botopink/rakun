@@ -1,0 +1,64 @@
+//// styled: the layered sheet — layers in declaration order, each component
+//// once, a layer's prefix on its classes.
+
+import {testing.asserts, context.createContext, context.provide} from "std";
+import {styled.styled, styled.styledProperty, styled.StyledPropertyView, styled.StyledSheet, styled.Styled, styled.StyledProperty};
+import {layers.Sheet, layers.Layer, layers.layer};
+
+pub val code = styled """
+  font-family: var(--font-mono);
+  &:hover { color: red; }
+""";
+
+fn padAll(n: i32) -> StyledPropertyView {
+    return styledProperty "padding: --spacing(${n});";
+}
+
+// The render's root a test renders under (decisions 352, 354): `padAll` is
+// computed at render and reads `StyledSheet`'s context. This sheet keeps nothing.
+fn RenderProperty(
+    view: fn() -> StyledPropertyView,
+) -> @Component<StyledProperty> {
+    use provide(createContext(StyledSheet(layer: "components", add: dropped)));
+    val out = await view();
+    return out;
+}
+
+fn dropped(layer: string, item: Styled) -> void {}
+
+test "a sheet renders its layers in declaration order, each component once" {
+    val c = await code;
+    val p = await RenderProperty({ -> padAll(2) });
+    val sheet = Sheet
+        .of([layer("base"), layer("components")])
+        .add("components", c)
+        .add("components", c)
+        .add("base", await p.toStyled());
+    val out = sheet.render();
+    try asserts.equals(
+        out,
+        "@layer base{" + p.rules + "}@layer components{" + c.rules + "}",
+    );
+    try asserts.isTrue(
+        out.indexOf("@layer base") < out.indexOf("@layer components"),
+    );
+    try asserts.equals(out.split("." + c.className + "{").length, 2);
+}
+
+test "a layer's prefix renames the class and keeps its hash" {
+    val p = await RenderProperty({ -> padAll(4) });
+    val hashed = p.className.slice(2, p.className.length);
+    val s = await p.toStyled();
+    val sheet = Sheet
+        .of([Layer(name: "utilities", prefix: "e_")])
+        .add("utilities", s);
+    try asserts.equals(sheet.classIn("utilities", s), "e_" + hashed);
+    try asserts.equals(
+        sheet.render(),
+        "@layer utilities{.e_" + hashed + "{padding:calc(var(--spacing) * 4)}}",
+    );
+}
+
+test "an empty sheet renders nothing" {
+    try asserts.equals(Sheet.of([layer("base")]).render(), "");
+}
