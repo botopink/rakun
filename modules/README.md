@@ -12,9 +12,9 @@ to a sibling or to the umbrella is a located error.
 
 ## Members today
 
-Twenty-two members (front 165 s2): the 17 packages of the table in
-[`../AGENTS.md`](../AGENTS.md) § The workspace and its layers, `rakun-cli` (the `rakun` command line), and the three
-that wait on a later step or a question — `erika` and `erika-test` (s6 renames erika `query`), `jhonstart-dom-test` (the
+Twenty members (front 165 s2): the 17 packages of the table in
+[`../AGENTS.md`](../AGENTS.md) § The workspace and its layers, `rakun-cli` (the `rakun` command line), and the two
+that wait on a later step or a question — `jhonstart-dom-test` (the
 commonJS-only half of the bpp render tests, which cannot join a package that builds for erlang) and `onze-server` (the
 erlang-only half of `rakun-ssr`'s boot, which cannot join a package that builds for commonJS). Front 128 merged
 nine members into the member that needs them and front 165 folded the rest the same way: a folded package's files sit
@@ -24,7 +24,7 @@ absorber's in `src/sidecars/`, its names are imported by their path from the pac
 | Package | Absorbs (sub-folder of `src/` and `test/`) | `targets` | State |
 |---|---|---|---|
 | [rakun](./rakun/) (core) | `rakun` · `testing/` (was `rakun-test`: FakeRequest, assertions, MockMvc, context control) · `actuator_api/` · `logging/` | erlang | real code |
-| [rakun-data](./rakun-data/) | `rakun-data` · `sql/` · `orm/` · `migration/` · `tx/` · `devtools/` (dbcontext joins at s3) | erlang | real code |
+| [rakun-data](./rakun-data/) | `rakun-data` · `sql/` · `orm/` · `migration/` · `tx/` · `devtools/` (dbcontext folded in, s3) | erlang | real code |
 | [rakun-restclient](./rakun-restclient/) | was `rakun-client` · `ws/` (SOAP) | erlang | real code |
 | [rakun-style](./rakun-style/) | was `styled` | erlang, commonJS | real code |
 | [rakun-bpp](./rakun-bpp/) | was `jhonstart` · `html/` · `link/` · `forms/` · `testing/` | commonJS, erlang | real code |
@@ -41,7 +41,6 @@ absorber's in `src/sidecars/`, its names are imported by their path from the pac
 | [rakun-app](./rakun-app/) | `rakun-app` (the `app/` router, SSR, actions) | erlang | real code |
 | [rakun-ssr](./rakun-ssr/) | was `onze` · `cli/` · `server/` · `bundler/` · `assets/` · `content/` · `og/` · `release/` · `testing/` | commonJS, erlang | real code |
 | [rakun-cli](./rakun-cli/) | `rakun-cli` · `release/` | erlang | real code |
-| [erika](./erika/), [erika-test](./erika-test/) | outside rakun until s6 | commonJS, erlang | real code |
 | [jhonstart-dom-test](./jhonstart-dom-test/) | the bpp render's browser half, run on node | commonJS | real code |
 | [onze-server](./onze-server/) | the rakun half of `rakun-ssr`'s boot (`Onze.run`) — erlang-only, so it cannot join the commonJS-built `rakun-ssr` | erlang | real code |
 
