@@ -35,7 +35,7 @@ Three named imports from `from "rakun-stylesheet"`:
    Sections: Text, Font, List, Color, Bg, Pad, Margin, Size, Space, Layout, Flex,
    Grid, Gap, Border, Outline, Ring, Divide,
    Effect, Blend, Mask, Filter, BackdropFilter, Transition, Animate, Transform, Gradient + the 83 modifier variants of front 34, each carrying a nested
-   `Token[]` (see below and `conformance/docs.md` § Modifiers). Front 41 rebuilt **`Effect`**
+   `Token[]` (see below and `conformance/rakun-stylesheet/modifiers/docs.md`). Front 41 rebuilt **`Effect`**
    (Shadow, InsetShadow, TextShadow, Opacity) and added **`Blend`** and
    **`Mask`**, plus three top-level arbitrary-value variants
    `EffectShadowRaw(value)` / `EffectTextShadowRaw(value)` /
@@ -55,8 +55,7 @@ Front 54 adds the **theme** and the **spacing ladder** (`theme.bp`,
 `spacing.bp`): `ThemeEntry`, `Theme`, `DarkMode`, `Ns`, `nsPrefix`,
 `allNamespaces`, `defaultTheme`, `emptyTheme`, `extendTheme`, `clearNamespace`,
 `namespace`, `themeValue`, `themeVar`, `themeCss`, `keyframeCss`, `darkAtRule`,
-`darkSelector`, `withDarkMode`, `spacing`, `spacingHalf`, `spacingNegHalf` — see `conformance/docs.md`
-§ The theme. Rewiring `tokenToCss` to `spacing()` and to the theme is fronts
+`darkSelector`, `withDarkMode`, `spacing`, `spacingHalf`, `spacingNegHalf` — see `conformance/rakun-stylesheet/theme/docs.md`. Rewiring `tokenToCss` to `spacing()` and to the theme is fronts
 33–47's work. Front 35 took **six** of the seven drifted `rem` ladders front 54
 found in `emilia.bp` — `padScaleX/Y/All` and `marginScaleX/Y/All`; the seventh,
 `flexGapScale`, was `Flex.Gap`'s and belonged to front 37, which owns that
@@ -65,7 +64,7 @@ ladder is left in `emilia.bp`; `spacing.bp`'s docblock, which still claimed all
 seven for front 35, was corrected in the same commit.
 
 Front 56 adds the **rule model, the codec and the renderer** (`output.bp`) —
-see `conformance/docs.md` § The cascade and the output. It is the interface fronts 33, 34
+see `conformance/rakun-stylesheet/output/docs.md` § The cascade and the output. It is the interface fronts 33, 34
 and 35 consume, so it is stated here in one line each:
 
 | Name | What 33/34/35 see |
@@ -1647,19 +1646,18 @@ fronts.
 
 ## Conformance
 
-`conformance/docs.md` is the reference and `conformance/modules/<example>/` holds
-its examples, one cell per example (decision 463). A reference line
-`<!-- example: <cell> -->` names the cell that stands for the example; the cell's
-own `docs.md` carries the paragraph that explains it. Add an example with
-`botopink cell new conformance/modules/<name>`, give it the `botopink.json` of its
-neighbours (`{ "name": "<name>" }`), write
-`src/main.bp`, run `botopink cell check conformance/modules/<name>` from this
-directory and accept a candidate only after reading it, by renaming
-`*.snap.new` — the tool never writes an accepted `.snap`. A reference sentence
-and its cell must agree: when `botopink cell check` answers something the text
-does not say, the text is wrong, never the cell edited to match.
-
-`conformance/modules/botopink.json` is a workspace whose members are the cells (`"workspaces": ["*"]`, decision 512 of the compiler): it declares what every cell shares — emilia as the path dependency `../../modules/rakun-stylesheet`, the targets commonJS, erlang and beam, the version — so a cell's own `botopink.json` holds its name alone, and the cells' dependencies share one code cache, `conformance/modules/.botopinkbuild/cache/` (decision 509; `botopink cell check --cold` reads none of it).
+The package's reference and cells are the workspace's `conformance/rakun-stylesheet/` (decision 548, root
+`AGENTS.md` § Conformance layout): `docs.md` maps the features, each feature directory
+(`getting-started/`, `reset/`, `containers/`, `escape-hatches/`, `typography/`, `color/`, `spacing/`,
+`sizing/`, `layout/`, `borders/`, `effects/`, `motion/`, `modifiers/`, `theme/`, `output/`) holds its
+`docs.md`, its workspace `botopink.json` (rakun-stylesheet as `../../../modules/rakun-stylesheet`, the
+targets commonJS, erlang and beam) and its cells. A feature's `docs.md` links each cell as
+`{<cell>/src/main.bp}`, never copying its code. Add a cell with
+`botopink cell new conformance/rakun-stylesheet/<feature>/<name>` (from the repository root), a
+`botopink.json` of `{ "name": "<name>" }`, the program, `botopink cell check` on it, and accept a candidate
+only after reading it, by renaming `*.snap.new` — the tool never writes an accepted `.snap`. A reference
+sentence and its cell must agree: when `botopink cell check` answers something the text does not say, the
+text is wrong, never the cell edited to match.
 
 Emilia's targets are commonJS and erlang, declared in each cell's `botopink.json`
 `"targets"` (decision 475). The `botopink cell check` of today still reads a

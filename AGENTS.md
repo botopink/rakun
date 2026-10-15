@@ -37,7 +37,7 @@ value types + the `Request` behavior are real emitted code (`http.bp`);
 
 `botopink/rakun` is one repository and one botopink workspace: `modules/<package>/` — one directory per package, the
 package's name the directory's name, each with its own `botopink.json`, `src/`, tests and `AGENTS.md` — the cells under
-`conformance/<package>/`, the examples under `examples/<package>/<example>/`, the refusals under
+`conformance/<package>/<feature>/`, the examples under `examples/<package>/<example>/`, the refusals under
 `refusals/<package>/<case>/`. One version, one tag, one release; one gate (`scripts/gate.sh`), one hook, one CI. The
 repositories erika (now `query`, since moved out), dbcontext, emilia, styled, jhonstart and onze joined this one by `git subtree add`, history kept
 (front 165 s1); s2 renamed them to the layers below (a folded package is a sub-folder module of its new package:
@@ -84,7 +84,7 @@ module (`rakun/src/testing/` was `rakun-test`, `rakun-bpp/src/testing/` was `jho
 `rakun-starter-*` packages are gone — `examples/` shows the combinations. The workspace's root `botopink.json` lists
 `modules/*`, `examples/*` and one `examples/<package>/*` per package that has examples. The gate
 (`scripts/git-hooks/lib/runner-standalone.sh`) walks `examples/*/` and `examples/*/*/` (and `refusals/` the same), and
-`botopink cell check conformance/` finds `conformance/<package>/` workspaces by itself. `rakun-ssr`'s command line is
+`botopink cell check conformance/` finds the `conformance/<package>/<feature>/` workspaces by itself (§ Conformance layout). `rakun-ssr`'s command line is
 `rakun-ssr create|build|start|info|create-key`, its configuration `rakun-ssr.json`, its key `RAKUN_SSR_KEY`.
 
 ## Tree
@@ -98,17 +98,18 @@ named by its own manifest. The **core is the member `modules/rakun/`**; `from "r
 ```text
 rakun/
 ├── AGENTS.md          ← you are here
-├── conformance/       ← the reference and its examples (decision 463): `docs.md` (what this lib
-│                        provides + Spring mapping + loading notes) and `<package>/<cell>/` cells
-│                        (`conformance/rakun/` is this package's; emilia, rakun-bpp each have theirs)
-│                        in the language suite's shape — `botopink.json` (the members it adds
-│                        beside rakun as path dependencies, through the symlinks of the cell's
-│                        `deps/`; rakun itself, the targets [erlang, beam] and the version are the
-│                        workspace's, `conformance/rakun/botopink.json`, decision 512), `src/main.bp`, `snapshot/output/main.snap`, its
-│                        `"targets"` in `botopink.json` (erlang beam; the web cells erlang only) and the `docs.md` paragraph that
-│                        explains it. Every bp fence of `docs.md` is `<!-- example: <cell> -->` or a
-│                        text fence. `conformance/<package>/botopink.json` is a workspace whose members are the cells (`"workspaces": ["*"]`, decision 512 of the compiler): it declares what every cell shares — rakun as the path dependency `../../modules/rakun`, the targets erlang and beam, the version — so a cell's own `botopink.json` holds its name and what it adds, and the cells' dependencies share one code cache, `conformance/modules/.botopinkbuild/cache/` (decision 509; `botopink cell check --cold` reads none of it).
-│                        `botopink cell check conformance/` is green
+├── conformance/       ← the reference and its cells (decisions 463, 548), grouped for reading:
+│                        `docs.md` indexes the packages; `<package>/docs.md` is the package's
+│                        map, one line per feature linking `<feature>/docs.md`; a feature's
+│                        `docs.md` says what it does and links the cells beside it,
+│                        `{<cell>/src/main.bp}`; `<package>/<feature>/<cell>/` is a cell in the
+│                        language suite's shape (`botopink.json` with its name and what it adds,
+│                        `src/main.bp`, `snapshot/`, a `docs.md` linking `{src/main.bp}`). The
+│                        feature directory is the workspace: its `botopink.json` lists its cells
+│                        (`"workspaces": ["*"]`, decision 512 of the compiler) and declares the
+│                        package as `../../../modules/<package>`, the targets and the version;
+│                        its cells share one code cache under it. See § Conformance layout.
+│                        `botopink cell check conformance/` is green but for the known reds
 ├── botopink.json      ← WORKSPACE: name rakun · version · targets [commonJS, erlang] (the joined
 │                        packages build on both; the rakun packages declare [erlang] themselves) · workspaces
 │                        ["modules/*", "examples/*", "examples/<package>/*" …]. Nothing importable from it.
@@ -328,6 +329,55 @@ rakun/
                          workspace member, `botopink build` per example) and
                          `repository-stages.sh` (rakun's own stage: the refusal greps)
 ```
+
+## Conformance layout (decision 548)
+
+`conformance/` is grouped for reading, not in one running order: a package's cells sit under the feature
+they show, the feature chosen from what `modules/<package>/src` exposes.
+
+```text
+conformance/
+├── docs.md                         the index: one row per package (version_set.bp order), its features
+└── <package>/
+    ├── docs.md                     the package's map: one line per feature → <feature>/docs.md,
+    │                               plus the text no feature owns (overview, loading notes, limits)
+    └── <feature>/
+        ├── botopink.json           the feature's workspace: "workspaces": ["*"], the package as
+        │                           ../../../modules/<package>, the targets, the version
+        ├── docs.md                 what the feature does; links the cells beside it
+        └── <cell>/                 botopink.json · src/main.bp · snapshot/ · docs.md ({src/main.bp})
+```
+
+The groupings: `rakun` — `web`, `configuration`, `request-context`, `container`, `auto-configuration`,
+`validation`, `ssl-bundles`; `rakun-service` — `filter-chain`, `tls` (the six cells that need `rakun-service`
+keep it in their own `deps/`, the feature's workspace declaring `rakun`); `rakun-bpp` — `components`, `hooks`,
+`html-dsl`, `router`, `server-components`, `client-navigation`, `client-boundary`, `streaming`, `forms`,
+`error-boundaries`, `metadata`; `rakun-stylesheet` — `getting-started`, `reset`, `containers`,
+`escape-hatches`, `typography`, `color`, `spacing`, `sizing`, `layout`, `borders`, `effects`, `motion`,
+`modifiers`, `theme`, `output`; `rakun-app` (`file-routing`, `ssr`) and `rakun-ssr` (`project`, `seams`,
+`client-bundle`, `styles`, `release`, `fonts`, `images`, `social-cards`, `commands`) have feature `docs.md`
+and no cells yet.
+
+**Why the feature is the workspace.** `botopink cell check` builds a cell as the one member of a copy of its
+workspace, the copy at `<scratch>/<cell>`, so the workspace must list its cells with `"*"` from the directory
+right above them; a workspace one or two levels up (`"rakun/*"`, `"rakun/container/*"`) lists the cell in place
+but not its copy, and the cell then builds without its package. One `conformance/botopink.json` over every cell
+waits on the cell tool keeping the cell's path inside the copy.
+
+**Code is linked, never copied.** A path in braces is a link: relative to the directory of the `docs.md` that
+holds it, it names the file to show — `{src/main.bp}` in a cell's `docs.md`, `{<cell>/src/main.bp}` in a
+feature's. A `docs.md` links into its own folder or one level down; a `{../…}` link means the text sits in the
+wrong place. A fence is never a program: a grammar, a table, a layout, a configuration or an output is fenced
+as `text` (or its format); a program is a cell. `scripts/check-doc-links.sh` (run by
+`scripts/git-hooks/repository-stages.sh`) fails when a `{<path>}` or a relative markdown link names nothing, a
+cell's `docs.md` does not link `{src/main.bp}`, no feature `docs.md` links a cell, or a ```` ```bp ```` fence
+or an `<!-- example: … -->` marker remains.
+
+**A new cell**: `botopink cell new conformance/<package>/<feature>/<name>`, a `botopink.json` of `{ "name":
+"<name>" }` (plus a `"targets"` narrowing or its own `deps/`), the program, `botopink cell check` on it, a
+candidate accepted only after reading it (rename `*.snap.new`); then the line in the feature's `docs.md`
+that links `{<name>/src/main.bp}`. A new feature is a directory with that `botopink.json`, its `docs.md` and a
+line in the package's map.
 
 ## Module tree (`root.bp`)
 
@@ -977,7 +1027,7 @@ own `examples/` directory, which lives in the meta repository's `specs/` tree
 and is not this worktree's to write. The developer's view — a layout auth guard,
 a server action writing a cookie and deferring an analytics write, a route
 handler reading a header, and one `getPost` shared by `generateMetadata` and the
-page — is in `conformance/docs.md` instead. `examples/` here is a workspace of buildable
+page — is in `conformance/rakun-app/docs.md` instead. `examples/` here is a workspace of buildable
 members, and a member exercising a layout or a server action needs fronts 23 and
 24, neither of which has landed.
 

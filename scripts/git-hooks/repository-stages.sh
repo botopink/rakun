@@ -61,3 +61,12 @@ for voidtag in area base col embed hr img input link meta source track wbr; do
     fi
 done
 pass "front 22/23 greps: no renderToString, no rakun-ssr or rakun-bpp, no UI type, no tag list"
+
+# Decision 548: the conformance reference links its code, never copies it — every
+# `{<path>}` of a `conformance/**/docs.md` names a file relative to that docs.md,
+# every cell is linked by its feature's docs.md, and no ```bp fence remains.
+if scripts/check-doc-links.sh; then
+    pass "conformance docs: every {<path>} link names a file"
+else
+    fail "conformance docs: a link names no file (scripts/check-doc-links.sh)"
+fi
