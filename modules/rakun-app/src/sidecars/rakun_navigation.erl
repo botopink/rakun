@@ -27,6 +27,11 @@ try_body(Body) ->
         V -> put(?VALUE, {ok, V}), <<>>
     catch
         throw:Reason when is_binary(Reason) -> erase(?VALUE), Reason;
+        error:{bp_host, Text} = Err:Stack ->
+            case unmark(Text) of
+                {ok, Reason} when is_binary(Reason) -> erase(?VALUE), Reason;
+                _ -> erlang:raise(error, Err, Stack)
+            end;
         Class:Reason:Stack -> erlang:raise(Class, Reason, Stack)
     end.
 
@@ -38,3 +43,16 @@ value(Fallback) ->
 
 rethrow(Reason) ->
     erlang:throw(Reason).
+
+%% Decision 546: a library binding without `result: true` has its calls wrapped, so a
+%% `throw(Term)` raised inside one reaches its caller as `error:{bp_host, Text}`, `Text`
+%% the term by `~tp` without the stack (compiler-core `erl_template.host_mark_tail`;
+%% decisions 527 (4), 546). `unmark/1` reads the term back from that text.
+unmark(Text) when is_binary(Text) ->
+    try
+        {ok, Toks, _} = erl_scan:string(unicode:characters_to_list(Text) ++ "."),
+        {ok, Term} = erl_parse:parse_term(Toks),
+        {ok, Term}
+    catch _:_ -> error
+    end;
+unmark(_) -> error.

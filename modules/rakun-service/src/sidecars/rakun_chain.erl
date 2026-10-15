@@ -451,12 +451,31 @@ run_guarded(Work, OnProblem) ->
         throw:{rakun_problem, Tag, Detail} -> OnProblem(Tag, Detail);
         error:{rakun_problem, Tag, Detail} -> OnProblem(Tag, Detail);
         Class:Reason:Stack ->
-            Digest = digest({Class, Reason}),
-            log(<<Digest/binary, " ",
-                  (iolist_to_binary(io_lib:format("~p:~p", [Class, Reason])))/binary, " ",
-                  (iolist_to_binary(io_lib:format("~p", [Stack])))/binary>>),
-            OnProblem(<<>>, Digest)
+            case marked_problem(Reason) of
+                {ok, Tag, Detail} -> OnProblem(Tag, Detail);
+                error -> guarded_other(Class, Reason, Stack, OnProblem)
+            end
     end.
+
+guarded_other(Class, Reason, Stack, OnProblem) ->
+    Digest = digest({Class, Reason}),
+    log(<<Digest/binary, " ",
+          (iolist_to_binary(io_lib:format("~p:~p", [Class, Reason])))/binary, " ",
+          (iolist_to_binary(io_lib:format("~p", [Stack])))/binary>>),
+    OnProblem(<<>>, Digest).
+
+%% Decision 546: a `throw({rakun_problem, Tag, Detail})` raised inside a wrapped library
+%% binding reaches here as `error:{bp_host, Text}`, `Text` the term by `~tp` (compiler-core
+%% `erl_template.host_mark_tail`; decisions 527 (4), 546).
+marked_problem({bp_host, Text}) when is_binary(Text) ->
+    try
+        {ok, Toks, _} = erl_scan:string(unicode:characters_to_list(Text) ++ "."),
+        {ok, {rakun_problem, Tag, Detail}} = erl_parse:parse_term(Toks),
+        {ok, Tag, Detail}
+    catch _:_ -> error
+    end;
+marked_problem(_) -> error.
+
 
 digest(Term) ->
     list_to_binary(string:to_lower(integer_to_list(erlang:phash2(Term, 4294967296), 16))).

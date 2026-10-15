@@ -114,7 +114,12 @@ guard(Work, OnDenied) ->
         throw:{rakun_problem, <<"rakun.security.", _/binary>> = Tag, Detail} ->
             OnDenied(Tag, Detail);
         error:{rakun_problem, <<"rakun.security.", _/binary>> = Tag, Detail} ->
-            OnDenied(Tag, Detail)
+            OnDenied(Tag, Detail);
+        error:{bp_host, Text} = Err:Stack ->
+            case unmark(Text) of
+                {ok, {rakun_problem, <<"rakun.security.", _/binary>> = Tag, Detail}} -> OnDenied(Tag, Detail);
+                _ -> erlang:raise(error, Err, Stack)
+            end
     end.
 
 %% `{ok, Work()}`, or `{error, Text}` for a raise — the text is the raise's
@@ -171,3 +176,16 @@ owner_loop() ->
         stop -> ok;
         _ -> owner_loop()
     end.
+
+%% Decision 546: a library binding without `result: true` has its calls wrapped, so a
+%% `throw(Term)` raised inside one reaches its caller as `error:{bp_host, Text}`, `Text`
+%% the term by `~tp` without the stack (compiler-core `erl_template.host_mark_tail`;
+%% decisions 527 (4), 546). `unmark/1` reads the term back from that text.
+unmark(Text) when is_binary(Text) ->
+    try
+        {ok, Toks, _} = erl_scan:string(unicode:characters_to_list(Text) ++ "."),
+        {ok, Term} = erl_parse:parse_term(Toks),
+        {ok, Term}
+    catch _:_ -> error
+    end;
+unmark(_) -> error.

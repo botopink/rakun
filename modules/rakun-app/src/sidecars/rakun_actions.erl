@@ -53,6 +53,11 @@ call(Run, Form) ->
         Other -> put(rakun_actions_failure, iolist_to_binary(io_lib:format("the action returned ~0p, not an ActionResult", [Other]))), <<"failed">>
     catch
         throw:<<"nav:", _/binary>> = Signal -> erlang:throw(Signal);
+        error:{bp_host, Text} = Err:Stack when is_binary(Text) ->
+            case unmark(Text) of
+                {ok, <<"nav:", _/binary>>} -> erlang:raise(error, Err, Stack);
+                _ -> put(rakun_actions_failure, text(Err)), <<"failed">>
+            end;
         error:{panic, Msg} -> put(rakun_actions_failure, text(Msg)), <<"failed">>;
         _:Reason -> put(rakun_actions_failure, text(Reason)), <<"failed">>
     end.
@@ -122,3 +127,16 @@ ensure() ->
             end;
         _ -> ok
     end.
+
+%% Decision 546: a library binding without `result: true` has its calls wrapped, so a
+%% `throw(Term)` raised inside one reaches its caller as `error:{bp_host, Text}`, `Text`
+%% the term by `~tp` without the stack (compiler-core `erl_template.host_mark_tail`;
+%% decisions 527 (4), 546). `unmark/1` reads the term back from that text.
+unmark(Text) when is_binary(Text) ->
+    try
+        {ok, Toks, _} = erl_scan:string(unicode:characters_to_list(Text) ++ "."),
+        {ok, Term} = erl_parse:parse_term(Toks),
+        {ok, Term}
+    catch _:_ -> error
+    end;
+unmark(_) -> error.

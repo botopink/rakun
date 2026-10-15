@@ -162,7 +162,7 @@ fn loadGlob(
             + ": "
             + pattern
             + ": cannot be listed - "
-            + errorText(listed);
+            + fsErrorText(listed);
     val found = try listed;
     var out: Array<RawEntry> = [];
     var problems: Array<string> = [];
@@ -220,6 +220,28 @@ fn decodeFile(file: string, text: string) -> @Result<Json, string> {
     if (decoded.isError())
         throw file + ": not a JSON document - " + errorText(decoded);
     return try decoded;
+}
+
+// An `io.fs` error as the text this module's `string` errors carry.
+fn fsText(e: fs.FsError) -> string {
+    return case e {
+        NotFound(path) -> ["not found: ", path].join("");
+        PermissionDenied(path) -> ["permission denied: ", path].join("");
+        IsDirectory(path) -> ["is a directory: ", path].join("");
+        NotDirectory(path) -> ["not a directory: ", path].join("");
+        AlreadyExists(path) -> ["already exists: ", path].join("");
+        InvalidUtf8(path, offset) -> ["not UTF-8: ", path, " at byte ", offset.toString()].join("");
+        Other(path, message) -> [path, ": ", message].join("");
+    };
+}
+
+// The `FsError` text of an `io.fs` result, `""` for `Ok`.
+fn fsErrorText<T>(r: @Result<T, fs.FsError>) -> string {
+    val text = case r {
+        Ok(v) -> "";
+        Error(e) -> fsText(e);
+    };
+    return text;
 }
 
 fn errorText<T>(r: @Result<T, string>) -> string {
@@ -595,7 +617,8 @@ fn makeDirs(dir: string) -> @Result<i32, string> {
     if (fs.exists(dir)) return 0;
     try makeDirs(path.dirname(dir));
     val made = fs.mkdir(dir);
-    if (made.isError()) throw dir + ": cannot be created - " + errorText(made);
+    if (made.isError())
+        throw dir + ": cannot be created - " + fsErrorText(made);
     return 0;
 }
 
