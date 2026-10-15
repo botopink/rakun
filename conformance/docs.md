@@ -54,15 +54,16 @@ conformance/
             └── snapshot/         what it answers (output/, targets/<t>/)
 ```
 
-A feature's `botopink.json` declares what every cell of it shares — the
-package as a path dependency (`../../../modules/<package>`), the targets and
-the version — and its cells' dependencies share one code cache under the
-feature's `.botopinkbuild/`. The feature directory is the workspace because
-`botopink cell check` builds a cell as the one member of a copy of its
-workspace, and a member is listed by a children glob (`"*"`) of the directory
-right above it; a workspace one or two levels further up would not list the
-copy. A cell that needs a package its feature does not declare keeps it in
-its own `deps/` (the `rakun-service` cells).
+`conformance/botopink.json` declares what every cell shares — the targets and
+the version — and lists each feature's cells (`"<package>/<feature>/*"`); the
+cells' dependencies share one code cache under `conformance/.botopinkbuild/`.
+Each cell declares the package it consumes
+(`../../../../modules/<package>`), never the root: a workspace's dependencies
+reach every member, and a commonJS cell must not load `rakun`. A cell that
+runs on fewer targets narrows `"targets"` in its own `botopink.json` (the
+`rakun` and `rakun-service` cells: erlang and beam), and a cell that needs a
+package the root does not declare keeps it in its own `deps/` (the
+`rakun-service` cells).
 
 `botopink cell check conformance/` checks every cell; `scripts/gate.sh` runs it
 as the gate's conformance stage.

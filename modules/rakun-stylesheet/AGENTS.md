@@ -1650,11 +1650,11 @@ The package's reference and cells are the workspace's `conformance/rakun-stylesh
 `AGENTS.md` § Conformance layout): `docs.md` maps the features, each feature directory
 (`getting-started/`, `reset/`, `containers/`, `escape-hatches/`, `typography/`, `color/`, `spacing/`,
 `sizing/`, `layout/`, `borders/`, `effects/`, `motion/`, `modifiers/`, `theme/`, `output/`) holds its
-`docs.md`, its workspace `botopink.json` (rakun-stylesheet as `../../../modules/rakun-stylesheet`, the
-targets commonJS, erlang and beam) and its cells. A feature's `docs.md` links each cell as
+`docs.md` and its cells, members of the one workspace `conformance/botopink.json` (the targets commonJS, erlang and beam), each
+cell declaring rakun-stylesheet as `../../../../modules/rakun-stylesheet`. A feature's `docs.md` links each cell as
 `{<cell>/src/main.bp}`, never copying its code. Add a cell with
 `botopink cell new conformance/rakun-stylesheet/<feature>/<name>` (from the repository root), a
-`botopink.json` of `{ "name": "<name>" }`, the program, `botopink cell check` on it, and accept a candidate
+`botopink.json` naming the cell and its dependency on rakun-stylesheet, the program, `botopink cell check` on it, and accept a candidate
 only after reading it, by renaming `*.snap.new` — the tool never writes an accepted `.snap`. A reference
 sentence and its cell must agree: when `botopink cell check` answers something the text does not say, the
 text is wrong, never the cell edited to match.
