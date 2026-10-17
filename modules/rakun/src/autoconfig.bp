@@ -399,7 +399,7 @@ pub fn isAutoConfigured(name: string) -> bool {
 // ── `#[autoConfiguration]` ──────────────────────────────────────────────────
 //
 // Placement is a record-shaped `type` — `DeclKind.Type` with no `variants` —
-// the same rule the six stereotypes enforce. The body emits four kinds of line:
+// the same rule the six stereotypes enforce. The body contributes four things:
 //
 //   1. the registration, carrying the serialised condition blob and the two
 //      order lists;
@@ -410,7 +410,12 @@ pub fn isAutoConfigured(name: string) -> bool {
 //      field behave the same way in both;
 //   4. per `#[bean]` method, its own registration under `Type.method` and a
 //      context-table registration of its return type whose factory passes
-//      through `rkAutoGate` first (`rkResolve` falls back to that table).
+//      through `rkAutoGate` first (`rkResolve` falls back to that table) — the
+//      calls of a member `Type.rkAutoBeans()`, text because they call methods
+//      named at build, run by an executor.
+//
+// 1 and 2 are executors (`compiler.compile`), run before `main` in the init
+// list; their names resolve here, where they are written.
 //
 // The condition serialisation is INLINED here rather than shared with
 // `conditions.bp`: `decorator_eval` emits only the decorator function into the
@@ -465,29 +470,13 @@ pub fn autoConfiguration(expr decl: unknown) {
         else if (aft != "")
             after.push(aft);
     });
-    @emit(
-        "val __rkAuto_"
-            + compiler.name(decl)!
-            + " = rkAutoRegister(\""
-            + compiler.name(decl)!
-            + "\", \""
-            + conds.join(";")
-            + "\", \""
-            + before.join(",")
-            + "\", \""
-            + after.join(",")
-            + "\");",
-    );
-    @emit(
-        "val __rkAutoQ_"
-            + compiler.name(decl)!
-            + " = rkAutoProvides(\""
-            + compiler.name(decl)!
-            + "\", \""
-            + compiler.name(decl)!
-            + "\");",
-    );
-    @emit("val __rkScan_" + compiler.name(decl)! + " = rkScan(\"" + compiler.name(decl)! + "\");");
+    val declName = compiler.name(decl)!;
+    val condBlob = conds.join(";");
+    val beforeList = before.join(",");
+    val afterList = after.join(",");
+    compiler.compile({ -> rkAutoRegister(declName, condBlob, beforeList, afterList); });
+    compiler.compile({ -> rkAutoProvides(declName, declName); });
+    compiler.compile({ -> rkScan(declName); });
     var gargs: Array<string> = [];
     compiler.fields(decl).forEach({ f ->
         var valKey = "";
@@ -517,6 +506,7 @@ pub fn autoConfiguration(expr decl: unknown) {
             + compiler.name(decl)!
             + "\"); v }); }",
     );
+    var beans: Array<string> = [];
     compiler.methods(decl).forEach({ m ->
         var isBean = false;
         var mc: Array<string> = [];
@@ -548,54 +538,42 @@ pub fn autoConfiguration(expr decl: unknown) {
         val carried = if (mbad != "") mbad else bad;
         bad = carried;
         val full = compiler.name(decl)! + "." + m.name;
-        val regLine = if (isBean)
-            "val __rkAutoB_"
-                + compiler.name(decl)!
-                + "_"
-                + m.name
-                + " = rkAutoRegister(\""
-                + full
-                + "\", \""
-                + mc.join(";")
-                + "\", \"\", \"\");"
-        else
-            "";
-        @emit(regLine);
-        val provLine = if (isBean)
-            "val __rkAutoR_"
-                + compiler.name(decl)!
-                + "_"
-                + m.name
-                + " = rkAutoProvides(\""
-                + full
-                + "\", \""
-                + m.returnType
-                + "\");"
-        else
-            "";
-        @emit(provLine);
-        val facLine = if (isBean)
-            "val __rkBeanM_"
-                + compiler.name(decl)!
-                + "_"
-                + m.name
-                + " = rkRegisterBean(\""
-                + m.returnType
-                + "\", \"\", \"singleton\", false, false, \""
-                + full
-                + "\", { -> rkSingleton(\""
-                + m.returnType
-                + "\", { -> val _g = rkAutoGate(\""
-                + full
-                + "\"); "
-                + compiler.name(decl)!
-                + ".make()."
-                + m.name
-                + "() }) });"
-        else
-            "";
-        @emit(facLine);
+        if (isBean) {
+            beans.push(
+                "rkAutoRegister(\""
+                    + full
+                    + "\", \""
+                    + mc.join(";")
+                    + "\", \"\", \"\");",
+            );
+            beans.push(
+                "rkAutoProvides(\""
+                    + full
+                    + "\", \""
+                    + m.returnType
+                    + "\");",
+            );
+            beans.push(
+                "rkRegisterBean(\""
+                    + m.returnType
+                    + "\", \"\", \"singleton\", false, false, \""
+                    + full
+                    + "\", { -> rkSingleton(\""
+                    + m.returnType
+                    + "\", { -> val _g = rkAutoGate(\""
+                    + full
+                    + "\"); "
+                    + compiler.name(decl)!
+                    + ".make()."
+                    + m.name
+                    + "() }) });",
+            );
+        }
     });
+    if (beans.length > 0) {
+        compiler.addMember("pub fn rkAutoBeans() { " + beans.join(" ") + " }");
+        compiler.compile({ -> decl.rkAutoBeans(); });
+    }
     if (compiler.kind(decl) != DeclKind.Type)
         compiler.fail("#[autoConfiguration] must annotate a type", at: decl);
     if (compiler.variants(decl).length > 0)

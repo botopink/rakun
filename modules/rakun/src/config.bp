@@ -29,7 +29,8 @@
 
 import {io.fs, io.env, io.random, json, json.Json, compiler, compiler.DeclKind} from "std";
 import {decorators.validated, derived, report.ValidationReport, report.Violation, table.constraintTableJson} from "validation";
-import {runtime.rkSetProp, runtime.rkProp};
+import {runtime.rkSetProp, runtime.rkProp, runtime.rkScan, runtime.rkConfigCheckRegister};
+import {config_check.configProblemOf};
 import {profiles.matches, profiles.expand, profiles.setResolved};
 
 // ── a flat key/value pair, the only shape a source ever yields ──────────────
@@ -1934,18 +1935,19 @@ pub fn registerRakunKeys() -> i32 {
 
 // ── step 7: `#[configurationProperties("prefix")]` ──────────────────────────
 //
-// A type-level decorator that emits a function, a member and one registration:
+// A type-level decorator that adds two members and compiles one registration:
 //
-//   pub fn __rkBind_<Name>(prefix: string) -> <Name>   — prefix is a PARAMETER,
+//   <Name>.bind(prefix: string) -> <Name>               — prefix is a PARAMETER,
 //       which is what makes `#[nested]` compose: a nested field calls the nested
 //       type's own binder with `prefix + "." + <field>`, and neither decorator
-//       has to know the other exists. A rakun decorator body cannot call a
-//       sibling function, so composition has to happen in the EMITTED code.
+//       has to know the other exists. Its body is a constructor over the
+//       fields, computed at build, so it is a string member until B-140.
 //   <Name>.make() -> <Name>                             — the stereotype's DI
 //       factory member (decision 234), so a bound record enters the entry
 //       point's catalogue and is injectable by type into any `#[service]` with
 //       no further wiring.
-//   val __rkCat_<Name> = rkRegisterConfigKeys(...)      — the run-time catalogue.
+//   rkRegisterConfigKeys(prefix, …)                     — the run-time catalogue,
+//       an executor (`compiler.compile`) run before `main`.
 //
 // A LIST FIELD IS `string[]` OR `Array<string>`. `@Decl` spells a field's type
 // as written, so both spellings bind through `rkPropList`; a list of anything
@@ -1983,7 +1985,7 @@ pub fn configurationProperties(
         val intDefault = if (fallback == "") "0" else fallback;
         val floatDefault = if (fallback == "") "0.0" else fallback;
         val reader = if (nested)
-            "__rkBind_" + f.typeName + "(" + key + ")"
+            f.typeName + ".bind(" + key + ")"
         else if (f.typeName == "bool")
             "rkPropBool(" + key + ", " + boolDefault + ")"
         else if (f.typeName == "i32")
@@ -2007,37 +2009,29 @@ pub fn configurationProperties(
         args.push(f.name + ": " + reader);
         catalogue.push(f.name + ":" + f.typeName + ":" + fallback);
     });
-    @emit(
-        "pub fn __rkBind_"
-            + compiler.name(decl)!
-            + "(prefix: string) -> "
-            + compiler.name(decl)!
+    val declName = compiler.name(decl)!;
+    val catalogueLine = catalogue.join("|");
+    compiler.addMember(
+        "pub fn bind(prefix: string) -> "
+            + declName
             + " { return "
-            + compiler.name(decl)!
+            + declName
             + "("
             + args.join(", ")
             + "); }",
     );
     compiler.addMember(
         "pub fn make() -> "
-            + compiler.name(decl)!
+            + declName
             + " { return rkSingleton(\""
-            + compiler.name(decl)!
-            + "\", { -> __rkBind_"
-            + compiler.name(decl)!
-            + "(\""
+            + declName
+            + "\", { -> "
+            + declName
+            + ".bind(\""
             + prefix
             + "\") }); }",
     );
-    @emit(
-        "val __rkCat_"
-            + compiler.name(decl)!
-            + " = rkRegisterConfigKeys(\""
-            + prefix
-            + "\", \""
-            + catalogue.join("|")
-            + "\");",
-    );
+    compiler.compile({ -> rkRegisterConfigKeys(prefix, catalogueLine); });
     // `#[validated]` beside it (the shared `validation` library's, which gives
     // the record the member `validate()`) makes the record a BOOT check: bound and validated after
     // the property sources are loaded and before the first component is
@@ -2047,28 +2041,8 @@ pub fn configurationProperties(
         if (a.name == "validated") validated = true;
     });
     if (validated) {
-        @emit(
-            "pub fn __rkCheck_"
-                + compiler.name(decl)!
-                + "() -> string { return configProblemOf(\""
-                + compiler.name(decl)!
-                + "\", \""
-                + prefix
-                + "\", __rkBind_"
-                + compiler.name(decl)!
-                + "(\""
-                + prefix
-                + "\").validate()); }",
-        );
-        @emit(
-            "val __rkChk_"
-                + compiler.name(decl)!
-                + " = rkConfigCheckRegister(\""
-                + compiler.name(decl)!
-                + "\", { -> __rkCheck_"
-                + compiler.name(decl)!
-                + "() });",
-        );
+        compiler.addMember("check", { -> configProblemOf(declName, prefix, decl.bind(prefix).validate()) });
+        compiler.compile({ -> rkConfigCheckRegister(declName, { -> decl.check() }); });
     }
     if (compiler.kind(decl) != DeclKind.Type)
         compiler.fail("#[configurationProperties] must annotate a type", at: decl);
@@ -2127,9 +2101,10 @@ pub fn enableConfigurationProperties(
 ) {
     var registrations: Array<string> = [];
     types.split(",").forEach({ t -> registrations.push(t.trim()) });
-    registrations.forEach(
-        { name -> @emit("val __rkEnable_" + name + " = rkScan(\"" + name + "\");") },
-    );
+    registrations.forEach({ name ->
+        val enabled = name;
+        compiler.compile({ -> rkScan(enabled); });
+    });
     if (compiler.kind(decl) != DeclKind.Type)
         compiler.fail("#[enableConfigurationProperties] must annotate a type", at: decl);
 }

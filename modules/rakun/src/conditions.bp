@@ -3,7 +3,7 @@
 ////
 //// ── THE CONDITION BLOB ──────────────────────────────────────────────────────
 ////
-//// A decorator body can emit one string literal per `@emit`, and `json.bp` is
+//// A decorator hands its executor literals (`compiler.compile`), and `json.bp` is
 //// `string -> @Result<string, string>` with no structured walker, so JSON would
 //// have to be re-parsed by hand on the far side. The conditions therefore
 //// travel as a line-oriented blob — the same choice front 22 made for the route
@@ -62,7 +62,7 @@
 import {runtime.rkProp, runtime.rkScannedNames};
 import {profiles.active};
 import {context.rkBeanNames};
-import {autoconfig_registry.moduleList};
+import {autoconfig_registry.moduleList, autoconfig_registry.rkAutoRegister, autoconfig_registry.rkAutoProvides};
 import {compiler, compiler.DeclKind} from "std";
 
 // ── the record letters ──────────────────────────────────────────────────────
@@ -478,9 +478,9 @@ pub fn conditionalOnMissingBean(
 // answer one question.
 //
 // WHO EMITS WHAT. On an `#[autoConfiguration]` or a `#[bean]` method this
-// marker emits NOTHING: that body already reads every condition off the
+// marker contributes NOTHING: that body already reads every condition off the
 // declaration and serialises one registration, and a second one would double
-// the row. On an ordinary stereotype it emits both halves itself — the
+// the row. On an ordinary stereotype it compiles both halves itself — the
 // registration (`F|<name>` plus the `V|<Type>` saying what the component
 // contributes when it is applied) and a GATED accessor.
 //
@@ -489,7 +489,7 @@ pub fn conditionalOnMissingBean(
 // so this marker cannot put the gate inside the factory the way
 // `#[autoConfiguration]` does for its `#[bean]` methods. What it can do is
 // leave the component UNBUILT — the factory is lazy, nothing calls it at module
-// load, and `rkBuildCount` stays 0 — and offer `__rkAutoGated_<Type>()`, which
+// load, and `rkBuildCount` stays 0 — and offer the member `<Type>.gated()`, which
 // raises with the diagnosis instead of building when the profile is not active.
 // When `decorators.bp` unfreezes the gate moves into the factory and this
 // accessor goes away. The narrowing is recorded in ../AGENTS.md rather than
@@ -535,41 +535,21 @@ pub fn profile(expr decl: unknown, comptime name: string) {
         && seen < 2
         && dirty == false
         && name != "";
-    val regLine = if (mine)
-        "val __rkAutoP_"
-            + compiler.name(decl)!
-            + " = rkAutoRegister(\""
-            + compiler.name(decl)!
-            + "\", \"F|"
-            + name
-            + "\", \"\", \"\");"
-    else
-        "";
-    @emit(regLine);
-    val provLine = if (mine)
-        "val __rkAutoQ_"
-            + compiler.name(decl)!
-            + " = rkAutoProvides(\""
-            + compiler.name(decl)!
-            + "\", \""
-            + compiler.name(decl)!
-            + "\");"
-    else
-        "";
-    @emit(provLine);
-    val gateLine = if (mine)
-        "pub fn __rkAutoGated_"
-            + compiler.name(decl)!
-            + "() -> "
-            + compiler.name(decl)!
-            + " { val _g = rkAutoGate(\""
-            + compiler.name(decl)!
-            + "\"); return "
-            + compiler.name(decl)!
-            + ".make(); }"
-    else
-        "";
-    @emit(gateLine);
+    val declName = compiler.name(decl)!;
+    val condBlob = "F|" + name;
+    if (mine) {
+        compiler.compile({ -> rkAutoRegister(declName, condBlob, "", ""); });
+        compiler.compile({ -> rkAutoProvides(declName, declName); });
+        compiler.addMember(
+            "pub fn gated() -> "
+                + declName
+                + " { val _g = rkAutoGate(\""
+                + declName
+                + "\"); return "
+                + declName
+                + ".make(); }",
+        );
+    }
     if (onType == false && onMethod == false)
         compiler.fail(
             "#[profile] must annotate a type (an #[autoConfiguration] or a stereotype) or a #[bean] method",

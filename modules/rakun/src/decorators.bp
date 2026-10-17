@@ -13,11 +13,13 @@
 //// method, `#[value]` on a field. Argument arity /
 //// type checking is automatic from the signatures (e.g. `getMapping(path:
 //// string)` rejects `#[getMapping()]` and `#[getMapping(1)]`). The DI/router
-//// WIRING the same decorators contribute (F2/F4) is layered on via `@emit`.
+//// WIRING the same decorators contribute (F2/F4) is layered on through
+//// `compiler.compile` (run-time registrations) and `compiler.addMember`.
 ////
 //// Reached via `from "rakun"`; see ./AGENTS.md and ./conformance/docs.md.
 
 import {compiler, compiler.DeclKind} from "std";
+import {runtime.rkScan};
 
 // ---- component markers (annotate a record-shaped type) ----
 //
@@ -27,8 +29,9 @@ import {compiler, compiler.DeclKind} from "std";
 
 // Each component marker contributes the IoC wiring on top of its placement rule.
 // In order, the body:
-//   1. `@emit`s `rkScan("Name")` — module-load self-registration into the scan
-//      registry (F2: the scan discovers every component, no shared comptime state);
+//   1. compiles `rkScan("Name")` into the init list (`compiler.compile`) —
+//      self-registration into the scan registry before `main` (F2: the scan
+//      discovers every component, no shared comptime state);
 //   2. adds the member `Name.make()` (decision 234), the SINGLETON factory that
 //      constructs the value once and caches it (`rkSingleton`), injecting each
 //      field by type through `rkResolve("<FieldType>")` — the catalogue the
@@ -38,19 +41,23 @@ import {compiler, compiler.DeclKind} from "std";
 //      raises at first construction;
 //   3. enforces placement (must annotate a `type` with fields: `DeclKind.Type` and
 //      no `variants`, so an enum-shaped `type` is rejected).
-// The `@emit`s run before the placement `fail`, and a failed outcome discards the
-// contributions — so only correctly placed types wire up. The emitted code and
-// the member call `rkScan`/`rkSingleton`/`rkEnter`/`rkDone`/`rkResolve`/
-// `rkProp(Int)`, which are in scope at the application site (`import {service,
-// rkScan, rkSingleton, rkEnter, rkDone, rkResolve, …} from "rakun"`); a
-// configuration's `#[bean]` also needs `rkRegisterBean`.
+// The outputs run before the placement `fail`, and a failed outcome discards the
+// contributions — so only correctly placed types wire up. An executor's names
+// resolve here, where it is written (`rkScan` is imported above); the string
+// members (`make()`, a controller's `rkRoutes()`, a configuration's `rkBeans()`
+// — their code is computed from the fields and methods, so it is text until
+// B-140) call `rkSingleton`/`rkEnter`/`rkDone`/`rkResolve`/`rkProp(Int)`/
+// `rkRegisterRoute`/`rkRegisterBean`, which are in scope at the application
+// site (`import {service, rkSingleton, rkEnter, rkDone, rkResolve, …} from
+// "rakun"`).
 //
 // Decorator-body constraints (see ../AGENTS.md): the body can't call sibling fns
 // (each is lowered alone into the eval script), so the per-field injection rule
 // and the factory builder are inlined in every component marker rather than shared.
 
 pub fn component(expr decl: unknown) {
-    @emit("val __rkScan_" + compiler.name(decl)! + " = rkScan(\"" + compiler.name(decl)! + "\");");
+    val declName = compiler.name(decl)!;
+    compiler.compile({ -> rkScan(declName); });
     var args: Array<string> = [];
     compiler.fields(decl).forEach({ f ->
         var valKey = "";
@@ -87,7 +94,8 @@ pub fn component(expr decl: unknown) {
 }
 
 pub fn service(expr decl: unknown) {
-    @emit("val __rkScan_" + compiler.name(decl)! + " = rkScan(\"" + compiler.name(decl)! + "\");");
+    val declName = compiler.name(decl)!;
+    compiler.compile({ -> rkScan(declName); });
     var args: Array<string> = [];
     compiler.fields(decl).forEach({ f ->
         var valKey = "";
@@ -124,7 +132,8 @@ pub fn service(expr decl: unknown) {
 }
 
 pub fn repository(expr decl: unknown) {
-    @emit("val __rkScan_" + compiler.name(decl)! + " = rkScan(\"" + compiler.name(decl)! + "\");");
+    val declName = compiler.name(decl)!;
+    compiler.compile({ -> rkScan(declName); });
     var args: Array<string> = [];
     compiler.fields(decl).forEach({ f ->
         var valKey = "";
@@ -164,13 +173,15 @@ pub fn repository(expr decl: unknown) {
 }
 
 // A controller is a component (scan + singleton factory) that ALSO contributes
-// routes: for every method carrying a `#[getMapping(path)]`/… annotation, `@emit`
-// a `rkRegisterRoute(verb, prefix + path, handler)` whose handler builds the
-// controller via its factory and calls the method. The `#[route("/prefix")]` on
+// routes: for every method carrying a `#[getMapping(path)]`/… annotation, its
+// member `rkRoutes()` calls `rkRegisterRoute(verb, prefix + path, handler)`,
+// whose handler builds the controller via its factory and calls the method;
+// the executor `decl.rkRoutes()` runs it before `main`. The `#[route("/prefix")]` on
 // the type (if any) is the path prefix.
 
 pub fn controller(expr decl: unknown) {
-    @emit("val __rkScan_" + compiler.name(decl)! + " = rkScan(\"" + compiler.name(decl)! + "\");");
+    val declName = compiler.name(decl)!;
+    compiler.compile({ -> rkScan(declName); });
     var cargs: Array<string> = [];
     compiler.fields(decl).forEach({ f ->
         var valKey = "";
@@ -204,6 +215,7 @@ pub fn controller(expr decl: unknown) {
     compiler.annotations(decl).forEach(
         { a -> if (a.name == "route") prefix = a.args.join("") },
     );
+    var routes: Array<string> = [];
     compiler.methods(decl).forEach({ m ->
         m.annotations.forEach({ a ->
             val verb = if (a.name == "getMapping")
@@ -219,12 +231,8 @@ pub fn controller(expr decl: unknown) {
             else
                 "";
             if (verb != "")
-                @emit(
-                    "val __rkRoute_"
-                        + compiler.name(decl)!
-                        + "_"
-                        + m.name
-                        + " = rkRegisterRoute(\""
+                routes.push(
+                    "rkRegisterRoute(\""
                         + verb
                         + "\", "
                         + prefix
@@ -238,6 +246,10 @@ pub fn controller(expr decl: unknown) {
                 );
         });
     });
+    if (routes.length > 0) {
+        compiler.addMember("pub fn rkRoutes() { " + routes.join(" ") + " }");
+        compiler.compile({ -> decl.rkRoutes(); });
+    }
     if (compiler.kind(decl) != DeclKind.Type)
         compiler.fail("#[controller] must annotate a type", at: decl);
     if (compiler.variants(decl).length > 0)
@@ -248,7 +260,8 @@ pub fn controller(expr decl: unknown) {
 }
 
 pub fn restController(expr decl: unknown) {
-    @emit("val __rkScan_" + compiler.name(decl)! + " = rkScan(\"" + compiler.name(decl)! + "\");");
+    val declName = compiler.name(decl)!;
+    compiler.compile({ -> rkScan(declName); });
     var rargs: Array<string> = [];
     compiler.fields(decl).forEach({ f ->
         var valKey = "";
@@ -282,6 +295,7 @@ pub fn restController(expr decl: unknown) {
     compiler.annotations(decl).forEach(
         { a -> if (a.name == "route") rprefix = a.args.join("") },
     );
+    var routes: Array<string> = [];
     compiler.methods(decl).forEach({ m ->
         m.annotations.forEach({ a ->
             val verb = if (a.name == "getMapping")
@@ -297,12 +311,8 @@ pub fn restController(expr decl: unknown) {
             else
                 "";
             if (verb != "")
-                @emit(
-                    "val __rkRoute_"
-                        + compiler.name(decl)!
-                        + "_"
-                        + m.name
-                        + " = rkRegisterRoute(\""
+                routes.push(
+                    "rkRegisterRoute(\""
                         + verb
                         + "\", "
                         + rprefix
@@ -316,6 +326,10 @@ pub fn restController(expr decl: unknown) {
                 );
         });
     });
+    if (routes.length > 0) {
+        compiler.addMember("pub fn rkRoutes() { " + routes.join(" ") + " }");
+        compiler.compile({ -> decl.rkRoutes(); });
+    }
     if (compiler.kind(decl) != DeclKind.Type)
         compiler.fail("#[restController] must annotate a type", at: decl);
     if (compiler.variants(decl).length > 0)
@@ -336,7 +350,8 @@ pub fn restController(expr decl: unknown) {
 // output is a singleton too (cached by its return-type name). How a `#[bean]`
 // reaches the entry point's catalogue instead is question `130-c`.
 pub fn configuration(expr decl: unknown) {
-    @emit("val __rkScan_" + compiler.name(decl)! + " = rkScan(\"" + compiler.name(decl)! + "\");");
+    val declName = compiler.name(decl)!;
+    compiler.compile({ -> rkScan(declName); });
     var gargs: Array<string> = [];
     compiler.fields(decl).forEach({ f ->
         var valKey = "";
@@ -366,16 +381,13 @@ pub fn configuration(expr decl: unknown) {
             + compiler.name(decl)!
             + "\"); v }); }",
     );
+    var beans: Array<string> = [];
     compiler.methods(decl).forEach({ m ->
         var isBean = false;
         m.annotations.forEach({ a -> if (a.name == "bean") isBean = true });
         if (isBean)
-            @emit(
-                "val __rkBeanM_"
-                    + compiler.name(decl)!
-                    + "_"
-                    + m.name
-                    + " = rkRegisterBean(\""
+            beans.push(
+                "rkRegisterBean(\""
                     + m.returnType
                     + "\", \"\", \"singleton\", false, false, \""
                     + compiler.name(decl)!
@@ -388,6 +400,10 @@ pub fn configuration(expr decl: unknown) {
                     + "() }) });",
             );
     });
+    if (beans.length > 0) {
+        compiler.addMember("pub fn rkBeans() { " + beans.join(" ") + " }");
+        compiler.compile({ -> decl.rkBeans(); });
+    }
     if (compiler.kind(decl) != DeclKind.Type)
         compiler.fail("#[configuration] must annotate a type", at: decl);
     if (compiler.variants(decl).length > 0)

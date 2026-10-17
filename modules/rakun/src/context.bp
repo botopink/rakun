@@ -34,7 +34,7 @@
 //// into the six stereotypes and the extra line goes away.
 
 import {collections.Dict, compiler, compiler.DeclKind} from "std";
-import {runtime.rkSingleton, runtime.rkProp, runtime.rkConfigCheckRun};
+import {runtime.rkScan, runtime.rkSingleton, runtime.rkProp, runtime.rkConfigCheckRun};
 import {events.Event, events.event, events.publishEvent, events.bootEventNames, events.bootEventPayloads, events.applicationFailedEvent};
 import {lifecycle.postConstructFailure, lifecycle.postConstructProblem};
 import {config_check.installMessageSource};
@@ -821,7 +821,7 @@ fn bootFailure(source: string, reason: string, published: i32) -> i32 {
 // SCOPE CHANGES WHAT THE REGISTERED FACTORY IS. `Singleton` registers
 // `{ -> <Type>.make() }`, the stereotype's cached factory (its `make()`
 // member, decision 234), and that is what constructor injection always gets. `Prototype` and `Request` register a FRESH
-// constructor `__rkNew_<Type>()` that `#[managed]` emits itself, with the same
+// constructor, the member `<Type>.new()` that `#[managed]` adds itself, with the same
 // per-field injection rule the stereotypes use (a `#[value]` field comes from
 // the property table and is not a DI edge) — `Request` wrapped in
 // `rkRequestScoped`, which is `rkSingleton` one scope down.
@@ -839,18 +839,15 @@ fn bootFailure(source: string, reason: string, published: i32) -> i32 {
 // the passes run once at boot and once at shutdown, over an instance nobody
 // kept.
 //
-// WHAT IT EMITS. One `rkRegisterBean` line; one `rkRegisterLifecycle` line per
-// method carrying `#[postConstruct]` or `#[preDestroy]`; one
-// `rkRegisterListener` line per method carrying `#[eventListener("Name")]`.
+// WHAT IT COMPILES. One `rkRegisterBean` executor (`compiler.compile`, run
+// before `main`); and a member `rkHooks()` — run by a second executor — holding
+// one `rkRegisterLifecycle` call per method carrying `#[postConstruct]` or
+// `#[preDestroy]` and one `rkRegisterListener` call per method carrying
+// `#[eventListener("Name")]`. The member is text (`compiler.addMember(source)`)
+// because it calls methods named at build, which a tree cannot write.
 // `#[managed]` is the only decl that sees BOTH a method and its owner: a
 // method-level `@Decl` has no owner and no parameter list, so the method markers
 // can only check placement.
-//
-// THE LIFECYCLE AND LISTENER WALKS ARE TWO SEPARATE `forEach`es over
-// `decl.methods`, not one. Each ends in a CONDITIONAL `@emit`, and a bare `if`
-// may only be the last statement of a comptime block — two of them in one body
-// would need a dummy emission in the else branch, which is noise in every
-// consumer's output.
 //
 // THE FACTORY IS A LAMBDA, NOT A BARE NAME: `{ -> X.make() }`, because an
 // associated fn read as a value is an unbound variable on erlang (front 130's
@@ -896,51 +893,46 @@ pub fn managed(expr decl: unknown) {
         } else "rkResolve(\"" + f.typeName + "\")";
         args.push(f.name + ": " + expr);
     });
-    val scanLine = if (singleton)
-        ""
+    val declName = compiler.name(decl)!;
+    val qualName = qual.replaceAll("\"", "");
+    val scopeName = scopeLit.replaceAll("\"", "");
+    val primaryOn = isPrimary == "true";
+    val lazyOn = isLazy == "true";
+    if (!singleton) {
+        compiler.compile({ -> rkScan(declName); });
+        compiler.addMember(
+            "pub fn new() -> "
+                + declName
+                + " { return "
+                + declName
+                + "("
+                + args.join(", ")
+                + "); }",
+        );
+    }
+    if (singleton)
+        compiler.compile({ ->
+            rkRegisterBean(declName, qualName, scopeName, primaryOn, lazyOn, declName, { -> decl.make() });
+        })
+    else if (request)
+        compiler.compile({ ->
+            rkRegisterBean(
+                declName,
+                qualName,
+                scopeName,
+                primaryOn,
+                lazyOn,
+                declName,
+                { -> rkRequestScoped(declName, { -> decl.new() }) },
+            );
+        })
     else
-        "val __rkScan_" + compiler.name(decl)! + " = rkScan(\"" + compiler.name(decl)! + "\");";
-    @emit(scanLine);
-    val newLine = if (singleton)
-        ""
-    else
-        "pub fn __rkNew_"
-            + compiler.name(decl)!
-            + "() -> "
-            + compiler.name(decl)!
-            + " { return "
-            + compiler.name(decl)!
-            + "("
-            + args.join(", ")
-            + "); }";
-    @emit(newLine);
-    val fresh = "__rkNew_" + compiler.name(decl)! + "()";
-    val scoped = if (request)
-        "{ -> rkRequestScoped(\"" + compiler.name(decl)! + "\", { -> " + fresh + " }) }"
-    else
-        "{ -> " + fresh + " }";
-    val factory = if (singleton) "{ -> " + compiler.name(decl)! + ".make() }" else scoped;
-    @emit(
-        "val __rkBean_"
-            + compiler.name(decl)!
-            + " = rkRegisterBean(\""
-            + compiler.name(decl)!
-            + "\", "
-            + qual
-            + ", "
-            + scopeLit
-            + ", "
-            + isPrimary
-            + ", "
-            + isLazy
-            + ", \""
-            + compiler.name(decl)!
-            + "\", "
-            + factory
-            + ");",
-    );
-    val instance = if (singleton) compiler.name(decl)! + ".make()" else fresh;
+        compiler.compile({ ->
+            rkRegisterBean(declName, qualName, scopeName, primaryOn, lazyOn, declName, { -> decl.new() });
+        });
+    val instance = if (singleton) declName + ".make()" else declName + ".new()";
     var hooked = "";
+    var hooks: Array<string> = [];
     compiler.methods(decl).forEach({ m ->
         var phase = "";
         m.annotations.forEach({ a ->
@@ -955,13 +947,9 @@ pub fn managed(expr decl: unknown) {
         val seen = if (phase != "") m.name else hooked;
         hooked = seen;
         if (phase != "")
-            @emit(
-                "val __rkLc_"
-                    + compiler.name(decl)!
-                    + "_"
-                    + m.name
-                    + " = rkRegisterLifecycle(\""
-                    + compiler.name(decl)!
+            hooks.push(
+                "rkRegisterLifecycle(\""
+                    + declName
                     + "\", \""
                     + m.name
                     + "\", \""
@@ -980,15 +968,11 @@ pub fn managed(expr decl: unknown) {
             evName = en;
         });
         if (evName != "")
-            @emit(
-                "val __rkEv_"
-                    + compiler.name(decl)!
-                    + "_"
-                    + m.name
-                    + " = rkRegisterListener("
+            hooks.push(
+                "rkRegisterListener("
                     + evName
                     + ", \""
-                    + compiler.name(decl)!
+                    + declName
                     + "\", { ev -> "
                     + instance
                     + "."
@@ -996,6 +980,10 @@ pub fn managed(expr decl: unknown) {
                     + "(ev) });",
             );
     });
+    if (hooks.length > 0) {
+        compiler.addMember("pub fn rkHooks() { " + hooks.join(" ") + " }");
+        compiler.compile({ -> decl.rkHooks(); });
+    }
     if (compiler.kind(decl) != DeclKind.Type)
         compiler.fail("#[managed] must annotate a type", at: decl);
     if (compiler.variants(decl).length > 0)
@@ -1069,43 +1057,41 @@ pub fn provides(expr decl: unknown) {
         isLazy = l;
     });
     val t = compiler.returnType(decl);
-    val call = compiler.name(decl)! + "()";
-    val keyExpr = "\"" + t + "@\" + " + qual;
+    val declName = compiler.name(decl)!;
+    val qualName = qual.replaceAll("\"", "");
+    val scopeName = scopeLit.replaceAll("\"", "");
+    val primaryOn = isPrimary == "true";
+    val lazyOn = isLazy == "true";
+    val key = t + "@" + qualName;
     val singleton = scopeLit == "\"singleton\"";
     val request = scopeLit == "\"request\"";
     val unqualified = qual == "\"\"";
-    val marked = isPrimary == "true";
-    val owns = unqualified || marked;
+    val owns = unqualified || primaryOn;
     val ownsName = owns && singleton;
-    val scoped = if (request)
-        "rkRequestScoped(" + keyExpr + ", { -> " + call + " })"
-    else
-        call;
-    val cached = if (ownsName)
-        "rkSingleton(\"" + t + "\", { -> " + call + " })"
+    if (ownsName)
+        compiler.compile({ ->
+            rkRegisterBean(t, qualName, scopeName, primaryOn, lazyOn, declName, { -> rkSingleton(t, { -> decl() }) });
+        })
     else if (singleton)
-        "rkSingleton(" + keyExpr + ", { -> " + call + " })"
+        compiler.compile({ ->
+            rkRegisterBean(t, qualName, scopeName, primaryOn, lazyOn, declName, { -> rkSingleton(key, { -> decl() }) });
+        })
+    else if (request)
+        compiler.compile({ ->
+            rkRegisterBean(
+                t,
+                qualName,
+                scopeName,
+                primaryOn,
+                lazyOn,
+                declName,
+                { -> rkRequestScoped(key, { -> decl() }) },
+            );
+        })
     else
-        scoped;
-    @emit(
-        "val __rkBean_"
-            + compiler.name(decl)!
-            + " = rkRegisterBean(\""
-            + t
-            + "\", "
-            + qual
-            + ", "
-            + scopeLit
-            + ", "
-            + isPrimary
-            + ", "
-            + isLazy
-            + ", \""
-            + compiler.name(decl)!
-            + "\", { -> "
-            + cached
-            + " });",
-    );
+        compiler.compile({ ->
+            rkRegisterBean(t, qualName, scopeName, primaryOn, lazyOn, declName, { -> decl() });
+        });
     if (compiler.kind(decl) != DeclKind.Fn)
         compiler.fail("#[provides] must annotate a function", at: decl);
     if (compiler.returnType(decl) == "")
@@ -1160,17 +1146,14 @@ pub fn lazy(expr decl: unknown) {
 // registered factory. A name that has none is `unknown-associated-fn` at the
 // import site, which names the type and the configuration that asked for it.
 pub fn imports(expr decl: unknown, comptime names: string) {
+    var registrations: Array<string> = [];
     names
         .split(",")
         .forEach({ raw ->
             val name = raw.replaceAll(" ", "");
             if (name != "")
-                @emit(
-                    "val __rkImp_"
-                        + compiler.name(decl)!
-                        + "_"
-                        + name
-                        + " = rkRegisterBean(\""
+                registrations.push(
+                    "rkRegisterBean(\""
                         + name
                         + "\", \"\", \"singleton\", false, false, \""
                         + compiler.name(decl)!
@@ -1179,6 +1162,10 @@ pub fn imports(expr decl: unknown, comptime names: string) {
                         + ".make() });",
                 );
         });
+    if (registrations.length > 0) {
+        compiler.addMember("pub fn rkImports() { " + registrations.join(" ") + " }");
+        compiler.compile({ -> decl.rkImports(); });
+    }
     if (compiler.kind(decl) != DeclKind.Type)
         compiler.fail("#[imports] must annotate a type (a #[configuration])", at: decl);
     if (compiler.variants(decl).length > 0)

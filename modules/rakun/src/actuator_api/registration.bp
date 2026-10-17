@@ -239,8 +239,9 @@ pub fn registryListing() -> string {
 // is refused at comptime, naming the fix, rather than failing the build later
 // with `unknown-associated-fn` on `<Type>.make`.
 //
-// The emitted line runs at the APPLICATION site, so the consumer imports the
-// registration cell by name (`rkRegisterHealthIndicator`, …) beside the marker.
+// The registration is an executor (`compiler.compile`) run before `main`; its
+// names resolve here, where it is written, so the consumer imports only the
+// marker.
 // Decorator bodies are comment-free and call no sibling (the comptime rules
 // `context.bp`'s `#[managed]` docblock records).
 
@@ -261,17 +262,8 @@ pub fn healthIndicator(expr decl: unknown, comptime id: string) {
         val c = if (m.name == "check") true else hasCheck;
         hasCheck = c;
     });
-    @emit(
-        "val __rkHi_"
-            + compiler.name(decl)!
-            + " = rkRegisterHealthIndicator(\""
-            + id
-            + "\", \""
-            + compiler.name(decl)!
-            + "\", { -> "
-            + compiler.name(decl)!
-            + ".make().check() });",
-    );
+    val declName = compiler.name(decl)!;
+    compiler.compile({ -> rkRegisterHealthIndicator(id, declName, { -> decl.make().check() }); });
     if (compiler.kind(decl) != DeclKind.Type)
         compiler.fail("#[healthIndicator] must annotate a type", at: decl);
     if (stereotype == "")
@@ -303,17 +295,8 @@ pub fn infoContributor(expr decl: unknown, comptime id: string) {
         val c = if (m.name == "contribute") true else hasContribute;
         hasContribute = c;
     });
-    @emit(
-        "val __rkIc_"
-            + compiler.name(decl)!
-            + " = rkRegisterInfoContributor(\""
-            + id
-            + "\", \""
-            + compiler.name(decl)!
-            + "\", { -> "
-            + compiler.name(decl)!
-            + ".make().contribute() });",
-    );
+    val declName = compiler.name(decl)!;
+    compiler.compile({ -> rkRegisterInfoContributor(id, declName, { -> decl.make().contribute() }); });
     if (compiler.kind(decl) != DeclKind.Type)
         compiler.fail("#[infoContributor] must annotate a type", at: decl);
     if (stereotype == "")
@@ -345,19 +328,9 @@ pub fn endpoint(expr decl: unknown, comptime id: string) {
         if (m.name == "read" || m.name == "write" || m.name == "delete")
             ops.push(m.name);
     });
-    @emit(
-        "val __rkEp_"
-            + compiler.name(decl)!
-            + " = rkRegisterEndpoint(\""
-            + id
-            + "\", \""
-            + compiler.name(decl)!
-            + "\", \""
-            + ops.join(",")
-            + "\", { req -> "
-            + compiler.name(decl)!
-            + ".make().read(req) });",
-    );
+    val declName = compiler.name(decl)!;
+    val opList = ops.join(",");
+    compiler.compile({ -> rkRegisterEndpoint(id, declName, opList, { req -> decl.make().read(req) }); });
     if (compiler.kind(decl) != DeclKind.Type)
         compiler.fail("#[endpoint] must annotate a type", at: decl);
     if (stereotype == "")
@@ -373,15 +346,8 @@ pub fn endpoint(expr decl: unknown, comptime id: string) {
 }
 
 pub fn instrumentation(expr decl: unknown) {
-    @emit(
-        "val __rkInstr_"
-            + compiler.name(decl)!
-            + " = rkRegisterInstrumentation(\""
-            + compiler.name(decl)!
-            + "\", { -> "
-            + compiler.name(decl)!
-            + "() });",
-    );
+    val declName = compiler.name(decl)!;
+    compiler.compile({ -> rkRegisterInstrumentation(declName, { -> decl() }); });
     if (compiler.kind(decl) != DeclKind.Fn)
         compiler.fail("#[instrumentation] must annotate a function", at: decl);
 }
