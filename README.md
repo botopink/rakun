@@ -8,7 +8,7 @@
 `rakun` is **opt-in**, never auto-loaded: it enters a module's scope only via
 `from "rakun"`. The compiler core knows nothing about rakun — every behaviour is
 plain botopink + a host runtime, on the generic annotation-processor mechanism
-(`@Decl` reflection, comptime decorator bodies, `@emit`).
+(the declaration handle read through `compiler.*`, comptime decorator bodies, `compiler.compile`).
 
 ## Install
 
@@ -88,7 +88,7 @@ fn main() {
 
 ## Docs
 
-- [AGENTS.md](AGENTS.md) — how the wiring works (singleton factories, `@emit`).
+- [AGENTS.md](AGENTS.md) — how the wiring works (singleton factories, `compiler.compile`).
 - [conformance/docs.md](conformance/docs.md) — full reference; every example is a checked cell in [conformance/rakun/](conformance/rakun/).
 - [examples/](examples/) — runnable demos.
 

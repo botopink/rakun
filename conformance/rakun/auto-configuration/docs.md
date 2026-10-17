@@ -68,6 +68,6 @@ observed. The profile SET itself is the configuration layer's
 `#[profile]` markers on one declaration are conjunctive and therefore
 unsatisfiable, and are refused at compile time.
 
-Because the stereotypes' `__rkMake_<Type>()` is frozen for this milestone, a
-profile-gated component is reached through the emitted `__rkAutoGated_<Type>()`
+Because the stereotypes' `<Type>.make()` is frozen for this milestone, a
+profile-gated component is reached through the member `<Type>.gated()`
 when you want the refusal rather than the value.

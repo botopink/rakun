@@ -11,16 +11,16 @@ constructor dependency injection plus a declarative web layer (`#[restController
 + route annotations). **Opt-in, never auto-loaded:** it enters a module's scope
 only via `from "rakun"`. **The compiler core knows nothing about rakun** — every
 behaviour is plain botopink + a host runtime, on the generic annotation-processor
-mechanism (the declaration handle `expr decl: unknown` read through `compiler.*`, comptime decorator bodies, `@emit`).
+mechanism (the declaration handle `expr decl: unknown` read through `compiler.*`, comptime decorator bodies, `compiler.compile` executors and `compiler.addMember`).
 
 How the wiring works: each component decorator (`decorators.bp`) is a comptime fn
-over the annotated `type` (`DeclKind.Type` with no `variants` — an enum-shaped `type` is rejected). It `@emit`s, at the application site, (1) a scan
-self-registration and (2) the member `<Type>.make()` (decision 234), a SINGLETON
+over the annotated `type` (`DeclKind.Type` with no `variants` — an enum-shaped `type` is rejected). It contributes (1) a scan
+self-registration, an executor (`compiler.compile`) run before `main`, and (2) the member `<Type>.make()` (decision 234), a SINGLETON
 factory that constructs the value once (`rkSingleton`) and caches it, injecting
 each field through `rkResolve("<FieldType>")` (§ The catalogue and constructor
 injection) — except a `#[value("key")]` field, filled from config (`rkProp`/
-`rkPropInt`) and kept OFF the DI graph. A controller additionally `@emit`s one
-route registration per mapped method (reading `compiler.methods(decl)` + the `#[route]`
+`rkPropInt`) and kept OFF the DI graph. A controller additionally registers one
+route per mapped method (its member `<Type>.rkRoutes()`, text because it calls methods named at build, run by an executor) (reading `compiler.methods(decl)` + the `#[route]`
 prefix); a `#[configuration]` registers each `#[bean]` method's return type in
 the context table (`rkRegisterBean`). botopink has no top-level mutable state, so the registries those calls
 feed — the scan list, the singleton cache, the cycle guard, the config props, the
@@ -144,7 +144,7 @@ rakun/
 │   │   │   │                    `ssl:listen/2` option list decoder front 04's
 │   │   │   │                    acceptor takes
 │   │   │   ├── decorators.bp  ← the markers AS comptime decorator fns: placement rules +
-│   │   │   │                    the DI/router/scope/bean wiring they `@emit`
+│   │   │   │                    the DI/router/scope/bean wiring they compile
 │   │   │   ├── request_context.bp ← THE REQUEST CONTEXT (§ The request context):
 │   │   │   │                    the frame, its epoch, the five phases and the
 │   │   │   │                    refusal texts. Every accessor raises outside a
@@ -389,8 +389,8 @@ that links `{<name>/src/main.bp}`. A new feature is a directory with its `docs.m
 `modules/rakun/src/root.bp` is the explicit module-tree root — the core builds from it, not
 a deprecated blind `src/` scan. It declares the four compiled modules
 `pub mod decorators; pub mod http; pub mod runtime; pub mod bootstrap;` (all
-public surface, reached via `from "rakun"`; the `@emit`ted wiring imports the
-runtime fns by name). The declaration module `rakun.d.bp` (the future `Context`
+public surface, reached via `from "rakun"`; an executor's names resolve in the
+decorator's module, a string member's at the application site). The declaration module `rakun.d.bp` (the future `Context`
 behavior) is **not** in the tree: it is wired through the core's `botopink.json` `files`
 (`modules/rakun/botopink.json`), which also lists `root.bp` first — decision 75's rule that a
 library member lists every module a consumer may import, or it `ships nothing`.
@@ -679,9 +679,9 @@ modules carrying all sixteen `rakun_runtime:<fn>` qualifiers, ships no
 HTTP on the BEAM until the `build` path ships and loads the sidecar too.
 
 1. **A module-level `val` with a side effect never runs.** The component
-   decorators `@emit` `val __rkScan_<Type> = rkScan("<Type>");` and
+   decorators used to emit `val __rkScan_<Type> = rkScan("<Type>");` and
    `val __rkRoute_<Type>_<m> = rkRegisterRoute(…);` — module-load
-   self-registration, which is what the node row does. On the erlang row a named
+   self-registration (now executors in the init list, `compiler.compile`), which is what the node row does. On the erlang row a named
    module-level `val` is emitted as a 0-arity function that is called on each
    READ (`codegen/erlang.zig`, `topValForms`), and nothing reads these; the
    `'_botopink_main'/0` wrapper that would evaluate `_`-named top-level
@@ -1240,18 +1240,18 @@ number on the node row and a BEAM integer on the erlang one, so `10GB`
 ### `#[configurationProperties("prefix")]`
 
 A type-level decorator in `src/config.bp` (`decorators.bp` is frozen for the
-milestone). It emits three things into the module that declares the record:
+milestone). It contributes three things to the record:
 
 ```bp
-pub fn __rkBind_MyService(prefix: string) -> MyService { … }   // prefix is a PARAMETER
-MyService.make() -> MyService                                  // the stereotype's DI factory member
-val __rkCat_MyService = rkRegisterConfigKeys("my.service", "…"); // the run-time catalogue
+MyService.bind(prefix: string) -> MyService   // prefix is a PARAMETER
+MyService.make() -> MyService                 // the stereotype's DI factory member
+rkRegisterConfigKeys("my.service", "…")      // the run-time catalogue, an executor
 ```
 
 The prefix being a parameter is what makes `#[nested]` compose: a nested field
 calls the nested type's own binder with `prefix + "." + <field>`, and neither
-decorator has to know the other exists. A rakun decorator body cannot call a
-sibling function, so composition has to happen in the EMITTED code — which is
+decorator has to know the other exists. `bind` is a constructor over the
+fields, computed at build, so it is a string member until B-140 — which is
 also why two levels of nesting work with no extra machinery. `<Name>.make()` is
 the stereotype's factory member, so a bound record enters the entry point's
 catalogue (`with: […, configurationProperties]`) and is injectable by type into
@@ -1612,7 +1612,7 @@ either sentence would be a one-row test.
 
 `Singleton` registers `{ -> <Type>.make() }`, the stereotype's cached
 factory, and that is what constructor injection always gets. `Prototype` and
-`Request` register a FRESH constructor `__rkNew_<Type>()` that `#[managed]` emits
+`Request` register a FRESH constructor, the member `<Type>.new()` that `#[managed]` adds
 itself, with the same per-field injection rule the stereotypes use; `Request`
 wraps it in `rkRequestScoped`, which is `rkSingleton` one scope down — the
 process dictionary on the BEAM, so two concurrent requests are two processes and
@@ -1632,11 +1632,11 @@ with.
 bean: both passes run once, over an instance nobody kept.
 
 **A non-singleton `#[managed]` type carries its own `rkScan`**, because no
-stereotype scanned it. Its module therefore imports `rkScan` and, for a request
-bean, `rkRequestScoped`.
+stereotype scanned it — an executor, as is the `rkRequestScoped` wrapper of a
+request bean, so its module imports neither.
 
 **`rkBuildCount` does not count a prototype.** It counts what `rkEnter`/`rkDone`
-bracket, and `__rkNew_<Type>` is deliberately unbracketed — a fresh construction
+bracket, and `<Type>.new()` is deliberately unbracketed — a fresh construction
 per resolve is not a cycle. A prototype test observes the constructor through its
 own counter instead.
 
@@ -2123,7 +2123,7 @@ inside them. `#[profile]` on an ordinary `#[service]` cannot do that:
 `decorators.bp` is frozen and its stereotypes add `<Type>.make()`
 unconditionally. **The narrowing:** the marker leaves the component UNBUILT — the
 factory is lazy, nothing calls it at module load and `rkBuildCount` stays 0 — and
-emits `__rkAutoGated_<Type>()` beside it, which raises with the diagnosis instead
+adds the member `<Type>.gated()`, which raises with the diagnosis instead
 of building. When `decorators.bp` unfreezes the gate moves into the factory and
 the accessor goes away.
 
@@ -2244,9 +2244,9 @@ rows.
   (`.at(i)` returns `?T` and is undefined in the eval script), and the "two
   `#[profile]` markers on one type" check counts every `profile` on the
   declaration.
-- **`@emit("")` emits nothing**, which is what makes a conditional contribution
-  expressible without a dummy line in the `else` branch. `#[managed]` relies on
-  the same.
+- **An output inside an `if` is a conditional contribution**: `compiler.compile`
+  and `compiler.addMember` are calls of the body, so a branch that does not run
+  contributes nothing. `#[managed]` relies on the same.
 - **A nested closure may write a `var` of the enclosing decorator body**, two
   levels deep — the method walk accumulates a separator violation from inside
   `m.annotations.forEach` into the body's own `bad`.
@@ -2481,8 +2481,8 @@ quietly matches nothing is the failure mode decision 67 exists to prevent.
   compile of `test/decorators_test.bp` IS the placement assertion, exactly as
   `modules/rakun/test/di_test.bp` records for the stereotypes.
 - **A registration emitted by a marker cannot be snapshotted in a file that also
-  rebuilds the table.** An `@emit`ted module-load `val` lands at the END of the
-  emitted module, so `test/decorators_test.bp` never resets the chain and the
+  rebuilds the table.** A marker's executor runs before `main` in the init list,
+  ahead of every test, so `test/decorators_test.bp` never resets the chain and the
   ordering cells live next door. `botopink test` runs each test FILE in its own
   process, which is what makes the split work.
 
@@ -4110,7 +4110,7 @@ Findings 1–3 are fixed in the compiler (the rakun language-gaps sweep): two
 shapes below still build; `UserStore` and the flat imports stay as the seam.
 
 1. **A decorator-emitted type's `self.inner.m()` lowers to the wrong type** when the
-   module has two decorated types: `LedgerSec.status` becomes
+   module has two decorated types: `Ledger.Sec.status` becomes
    `…@@Runbook:status(element(2, Self))` → `undef` (`repro_proxy_dispatch/`). The same
    proxies written by hand lower correctly. `#[transactional]` emits the same shape
    (not measured here). Workaround: one `#[methodSecurity]` type per module.
@@ -4599,10 +4599,9 @@ other half of the seam — `configProblem` / `refuseInvalidConfig`, which render
 refusal naming property KEYS rather than field names.
 
 **The boot call site.** `#[configurationProperties]` on a record that also
-carries `#[validated]` emits, beside its binder, `__rkCheck_<Name>() -> string`
+carries `#[validated]` adds, beside its binder, the member `<Name>.check() -> string`
 (bind with the record's prefix, `.validate()`, `configProblemOf` — `""` when
-valid) and `val __rkChk_<Name> = rkConfigCheckRegister("<Name>", …)` at module
-load. `bootSequenceFor` installs the message source and runs every registered
+valid) and compiles `rkConfigCheckRegister("<Name>", …)` into the init list. `bootSequenceFor` installs the message source and runs every registered
 check (`rkConfigCheckRun`, the refusals `\n`-joined, in registration order)
 after event 3 and BEFORE the eager pass — with lazy initialization too — and an
 invalid configuration is `bootFailure`: `ApplicationFailedEvent`, then the

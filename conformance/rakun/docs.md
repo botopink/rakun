@@ -6,8 +6,8 @@
 injection container paired with a declarative web layer, plus a real bootstrap
 that starts an HTTP server. It is **opt-in** — reached via `from "rakun"` and
 never auto-loaded into the type environment. **The compiler core knows nothing
-about rakun** — every behaviour is plain botopink (`@Decl` reflection + comptime
-decorator bodies + `@emit`) over a host runtime, which also carries the HTTP
+about rakun** — every behaviour is plain botopink (declaration handles read
+through `compiler.*` + comptime decorator bodies + `compiler.compile`) over a host runtime, which also carries the HTTP
 transport.
 
 There are **two host runtimes and one contract**. `src/runtime.mjs` answers the

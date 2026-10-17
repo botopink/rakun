@@ -154,7 +154,7 @@ rakun-<name>/
 1. Create `modules/rakun-<name>/` with `botopink.json` (`name`, `files`, `targets`, `dependencies`
    in the workspace form), `src/root.bp`, `test/`. The glob `modules/*` picks it up; nothing else to register.
 2. Depend on siblings with `{ "workspace": true }`; never `path`, never the umbrella.
-3. Implement with the `#[decorator]` pattern + `@emit` + a host sidecar under `src/sidecars/`.
+3. Implement with the `#[decorator]` pattern + `compiler.compile` + a host sidecar under `src/sidecars/`.
 4. Update this README and the member row above in the same commit.
 
 ## Conventions
