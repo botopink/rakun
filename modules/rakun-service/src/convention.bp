@@ -16,17 +16,18 @@
 //// call a sibling function — each is lowered alone into the eval script — so
 //// the per-field injection rule and the factory builder are inlined in every
 //// marker here exactly as `decorators.bp` inlines them in every stereotype. The
-//// `@emit`s run BEFORE the placement `fail`, and a failed outcome discards the
+//// outputs (`compiler.compile` executors, members) run BEFORE the placement `fail`, and a failed outcome discards the
 //// contributions, so only correctly placed declarations wire up.
 
 import {Response} from "rakun";
-import {rkProp, toI32} from "rakun";
+import {rkProp, rkScan, toI32} from "rakun";
 import {filter.WebRequest, filter.Chain, filter.withHeader, filter.registerFilter, filter.runChain};
 import {filter.orderRequestId, filter.orderCors, filter.orderProblem, filter.orderCompression, filter.orderNegotiation, filter.orderServerId, filter.orderApiVersion, filter.rkFreshId, filter.rkChainSetRunner};
-import {negotiation.negotiationEntry, negotiation.installConverters};
-import {customizer.runCustomizers};
+import {negotiation.negotiationEntry, negotiation.installConverters, negotiation.registerConverter};
+import {middleware.registerMiddleware, middleware.gateByMatcher, middleware.skip};
+import {customizer.runCustomizers, customizer.rkCustomizerRegister};
 import {apiversion.apiVersionEntry};
-import {cors.corsEntry, cors.globalPolicy, cors.validatePolicy};
+import {cors.corsEntry, cors.globalPolicy, cors.validatePolicy, cors.registerCorsMapping};
 import {error.errorEntry};
 import {compression.compressionEntry, compression.serverIdEntry, compression.validateCompression};
 import {compiler, compiler.DeclKind} from "std";
@@ -38,7 +39,8 @@ import {compiler, compiler.DeclKind} from "std";
 // it belongs to. It contributes the component wiring a stereotype does — scan
 // plus a singleton factory — and then one chain entry calling `handle`.
 pub fn filter(expr decl: unknown) {
-    @emit("val __rkScan_" + compiler.name(decl)! + " = rkScan(\"" + compiler.name(decl)! + "\");");
+    val declName = compiler.name(decl)!;
+    compiler.compile({ -> rkScan(declName); });
     var args: Array<string> = [];
     compiler.fields(decl).forEach({ f ->
         var valKey = "";
@@ -72,17 +74,8 @@ pub fn filter(expr decl: unknown) {
     compiler.annotations(decl).forEach(
         { a -> if (a.name == "order") ord = a.args.join("") },
     );
-    @emit(
-        "val __rkFilter_"
-            + compiler.name(decl)!
-            + " = registerFilter(\""
-            + compiler.name(decl)!
-            + "\", toI32("
-            + ord
-            + "), { req, chain -> "
-            + compiler.name(decl)!
-            + ".make().handle(req, chain) });",
-    );
+    val ordText = ord.replaceAll("\"", "");
+    compiler.compile({ -> registerFilter(declName, toI32(ordText), { req, chain -> decl.make().handle(req, chain) }); });
     if (compiler.kind(decl) != DeclKind.Type) compiler.fail("#[filter] must annotate a type", at: decl);
     if (compiler.variants(decl).length > 0)
         compiler.fail("#[filter] must annotate a type with fields, not an enum", at: decl);
@@ -95,7 +88,8 @@ pub fn filter(expr decl: unknown) {
 // A later registration for the same media type replaces the built-in one, so
 // an application's converter wins for its type.
 pub fn messageConverter(expr decl: unknown, comptime media: string) {
-    @emit("val __rkScan_" + compiler.name(decl)! + " = rkScan(\"" + compiler.name(decl)! + "\");");
+    val declName = compiler.name(decl)!;
+    compiler.compile({ -> rkScan(declName); });
     var args: Array<string> = [];
     compiler.fields(decl).forEach({ f ->
         var valKey = "";
@@ -125,17 +119,7 @@ pub fn messageConverter(expr decl: unknown, comptime media: string) {
             + compiler.name(decl)!
             + "\"); v }); }",
     );
-    @emit(
-        "val __rkConverter_"
-            + compiler.name(decl)!
-            + " = registerConverter(\""
-            + media
-            + "\", { v -> "
-            + compiler.name(decl)!
-            + ".make().write(v) }, { b -> "
-            + compiler.name(decl)!
-            + ".make().read(b) });",
-    );
+    compiler.compile({ -> registerConverter(media, { v -> decl.make().write(v) }, { b -> decl.make().read(b) }); });
     if (compiler.kind(decl) != DeclKind.Type)
         compiler.fail("#[messageConverter] must annotate a type", at: decl);
     if (compiler.variants(decl).length > 0)
@@ -152,7 +136,8 @@ pub fn messageConverter(expr decl: unknown, comptime media: string) {
 // customizer registration at its `#[order("N")]` (default 0). `bootWeb()` runs
 // every customizer once, in that order.
 pub fn webCustomizer(expr decl: unknown) {
-    @emit("val __rkScan_" + compiler.name(decl)! + " = rkScan(\"" + compiler.name(decl)! + "\");");
+    val declName = compiler.name(decl)!;
+    compiler.compile({ -> rkScan(declName); });
     var args: Array<string> = [];
     compiler.fields(decl).forEach({ f ->
         var valKey = "";
@@ -186,17 +171,8 @@ pub fn webCustomizer(expr decl: unknown) {
     compiler.annotations(decl).forEach(
         { a -> if (a.name == "order") ord = a.args.join("") },
     );
-    @emit(
-        "val __rkCustomizer_"
-            + compiler.name(decl)!
-            + " = rkCustomizerRegister(\""
-            + compiler.name(decl)!
-            + "\", toI32("
-            + ord
-            + "), { reg -> "
-            + compiler.name(decl)!
-            + ".make().customize(reg) });",
-    );
+    val ordText = ord.replaceAll("\"", "");
+    compiler.compile({ -> rkCustomizerRegister(declName, toI32(ordText), { reg -> decl.make().customize(reg) }); });
     if (compiler.kind(decl) != DeclKind.Type)
         compiler.fail("#[webCustomizer] must annotate a type", at: decl);
     if (compiler.variants(decl).length > 0)
@@ -234,19 +210,15 @@ pub fn middleware(expr decl: unknown) {
     compiler.annotations(decl).forEach(
         { a -> if (a.name == "matcher") pattern = a.args.join("") },
     );
-    @emit(
-        "val __rkMiddleware_"
-            + compiler.name(decl)!
-            + " = registerMiddleware(\""
-            + compiler.name(decl)!
-            + "\", "
-            + pattern
-            + ", { req, chain -> if (gateByMatcher(req, "
-            + pattern
-            + ")) "
-            + compiler.name(decl)!
-            + "(req, chain) else skip() });",
-    );
+    val declName = compiler.name(decl)!;
+    val patternText = pattern.replaceAll("\"", "");
+    compiler.compile({ ->
+        registerMiddleware(
+            declName,
+            patternText,
+            { req, chain -> if (gateByMatcher(req, patternText)) decl(req, chain) else skip() },
+        );
+    });
     if (compiler.kind(decl) != DeclKind.Fn)
         compiler.fail("#[middleware] must annotate a function", at: decl);
 }
@@ -270,17 +242,8 @@ pub fn crossOrigin(
     compiler.annotations(decl).forEach(
         { a -> if (a.name == "route") prefix = a.args.join("") },
     );
-    @emit(
-        "val __rkCors_"
-            + compiler.name(decl)!
-            + " = registerCorsMapping("
-            + prefix
-            + ", \""
-            + origins
-            + "\", \""
-            + methods
-            + "\");",
-    );
+    val prefixText = prefix.replaceAll("\"", "");
+    compiler.compile({ -> registerCorsMapping(prefixText, origins, methods); });
     if (compiler.kind(decl) != DeclKind.Type)
         compiler.fail("#[crossOrigin] must annotate a controller type", at: decl);
     if (prefix == "")
@@ -295,7 +258,8 @@ pub fn crossOrigin(
 // advice does the wiring: it walks its own methods and registers one handler
 // per tag.
 pub fn controllerAdvice(expr decl: unknown) {
-    @emit("val __rkScan_" + compiler.name(decl)! + " = rkScan(\"" + compiler.name(decl)! + "\");");
+    val declName = compiler.name(decl)!;
+    compiler.compile({ -> rkScan(declName); });
     var aargs: Array<string> = [];
     compiler.fields(decl).forEach({ f ->
         var valKey = "";
@@ -325,15 +289,12 @@ pub fn controllerAdvice(expr decl: unknown) {
             + compiler.name(decl)!
             + "\"); v }); }",
     );
+    var handlers: Array<string> = [];
     compiler.methods(decl).forEach({ m ->
         m.annotations.forEach({ a ->
             if (a.name == "exceptionHandler")
-                @emit(
-                    "val __rkAdvice_"
-                        + compiler.name(decl)!
-                        + "_"
-                        + m.name
-                        + " = registerAdvice("
+                handlers.push(
+                    "registerAdvice("
                         + a.args.join("")
                         + ", \""
                         + compiler.name(decl)!
@@ -347,6 +308,10 @@ pub fn controllerAdvice(expr decl: unknown) {
                 );
         });
     });
+    if (handlers.length > 0) {
+        compiler.addMember("pub fn rkAdvice() { " + handlers.join(" ") + " }");
+        compiler.compile({ -> decl.rkAdvice(); });
+    }
     if (compiler.kind(decl) != DeclKind.Type)
         compiler.fail("#[controllerAdvice] must annotate a type", at: decl);
     if (compiler.variants(decl).length > 0)
