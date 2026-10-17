@@ -2,10 +2,12 @@
 ////
 //// `#[listener]` on a component type walks its methods the way
 //// `#[restController]` walks `#[getMapping]`, reads each one's broker marker
-//// and emits one registration per annotated method, spliced into the type's
-//// module (which imports `rkRegisterListenerAs`):
+//// and registers one listener per annotated method: the calls of a member
+//// `<Type>.rkListeners()` (text, as they call methods named at build; the
+//// type's module imports `rkRegisterListenerAs`), run before `main` by an
+//// executor:
 ////
-////     val __rkListener_OrderListeners_onOrderPlaced = rkRegisterListenerAs(
+////     rkRegisterListenerAs(
 ////         "OrderListeners.onOrderPlaced", "amqp", "orders", "", "orders",
 ////         { msg -> OrderListeners.make().onOrderPlaced(msg) });
 ////
@@ -105,11 +107,7 @@ pub fn listener(expr decl: unknown) {
                 + "` - a handler returns i32";
         if (markers.length == 1)
             regs.push(
-                "val __rkListener_"
-                    + compiler.name(decl)!
-                    + "_"
-                    + m.name
-                    + " = rkRegisterListenerAs(\""
+                "rkRegisterListenerAs(\""
                     + compiler.name(decl)!
                     + "."
                     + m.name
@@ -148,7 +146,10 @@ pub fn listener(expr decl: unknown) {
                 + " finds no method carrying #[amqpListener], #[kafkaListener], #[redisListener] or #[streamListener] - it would register nothing",
             at: decl,
         );
-    @emit(regs.join("\n"));
+    if (regs.length > 0) {
+        compiler.addMember("pub fn rkListeners() { " + regs.join(" ") + " }");
+        compiler.compile({ -> decl.rkListeners(); });
+    }
 }
 
 pub fn amqpListener(expr decl: unknown, comptime queue: string) {
