@@ -1,20 +1,21 @@
 //// rakun-websocket — `#[wsEndpoint(path)]`. Front 20 step 2.
 ////
 //// On a stereotyped record type, it reads the type's `onOpen` / `onMessage` /
-//// `onClose` and emits ONE registration into the type's module (which imports
-//// `rkRegisterWsEndpoint` and `WsSession`):
+//// `onClose` and compiles ONE registration (`compiler.compile`, run before
+//// `main`; its names resolve here):
 ////
-////     val __rkWs_ChatEndpoint = rkRegisterWsEndpoint("/ws/chat", "ChatEndpoint",
-////         { id, principal, path -> ChatEndpoint.make().onOpen(WsSession(id: id, principal: principal, path: path)) },
-////         { id, principal, path, message -> ChatEndpoint.make().onMessage(WsSession(…), message) },
-////         { id, principal, path, code, reason -> 0 });
+////     rkRegisterWsEndpoint("/ws/chat", "ChatEndpoint",
+////         { id, principal, at -> ChatEndpoint.make().onOpen(WsSession(id: id, principal: principal, path: at)) },
+////         { id, principal, at, message -> ChatEndpoint.make().onMessage(WsSession(…), message) },
+////         { id, principal, at, code, reason -> 0 });
 ////
 //// `onMessage(self, session: WsSession, message: string) -> i32` is required;
-//// a missing `onOpen` / `onClose` is emitted as a no-op. Every connection is
+//// a missing `onOpen` / `onClose` is registered as a no-op. Every connection is
 //// served by the one instance `<Type>.make()` keeps. Decorator bodies are
 //// comment-free and call no function.
 
 import {compiler, compiler.DeclKind} from "std";
+import {ws.WsSession, ws.rkRegisterWsEndpoint};
 
 pub fn wsEndpoint(expr decl: unknown, comptime path: string) {
     var stereotype = "";
@@ -34,25 +35,6 @@ pub fn wsEndpoint(expr decl: unknown, comptime path: string) {
         if (m.name == "onMessage") hasMessage = true;
         if (m.name == "onClose") hasClose = true;
     });
-    val make = compiler.name(decl)! + ".make()";
-    val session = "WsSession(id: id, principal: principal, path: path)";
-    val open = if (hasOpen)
-        "{ id, principal, path -> " + make + ".onOpen(" + session + ") }"
-    else
-        "{ id, principal, path -> 0 }";
-    val message = "{ id, principal, path, message -> "
-        + make
-        + ".onMessage("
-        + session
-        + ", message) }";
-    val close = if (hasClose)
-        "{ id, principal, path, code, reason -> "
-            + make
-            + ".onClose("
-            + session
-            + ", code, reason) }"
-    else
-        "{ id, principal, path, code, reason -> 0 }";
     if (compiler.kind(decl) != DeclKind.Type || compiler.variants(decl).length > 0)
         compiler.fail(
             "#[wsEndpoint] must annotate a record-shaped type holding onOpen / onMessage / onClose",
@@ -74,19 +56,45 @@ pub fn wsEndpoint(expr decl: unknown, comptime path: string) {
         );
     if (path.startsWith("/") == false)
         compiler.fail("#[wsEndpoint] path `" + path + "` must start with /", at: decl);
-    @emit(
-        "val __rkWs_"
-            + compiler.name(decl)!
-            + " = rkRegisterWsEndpoint(\""
-            + path
-            + "\", \""
-            + compiler.name(decl)!
-            + "\", "
-            + open
-            + ", "
-            + message
-            + ", "
-            + close
-            + ");",
-    );
+    val declName = compiler.name(decl)!;
+    if (hasOpen && hasClose)
+        compiler.compile({ ->
+            rkRegisterWsEndpoint(
+                path,
+                declName,
+                { id, principal, at -> decl.make().onOpen(WsSession(id: id, principal: principal, path: at)) },
+                { id, principal, at, message -> decl.make().onMessage(WsSession(id: id, principal: principal, path: at), message) },
+                { id, principal, at, code, reason -> decl.make().onClose(WsSession(id: id, principal: principal, path: at), code, reason) },
+            );
+        })
+    else if (hasOpen)
+        compiler.compile({ ->
+            rkRegisterWsEndpoint(
+                path,
+                declName,
+                { id, principal, at -> decl.make().onOpen(WsSession(id: id, principal: principal, path: at)) },
+                { id, principal, at, message -> decl.make().onMessage(WsSession(id: id, principal: principal, path: at), message) },
+                { id, principal, at, code, reason -> 0 },
+            );
+        })
+    else if (hasClose)
+        compiler.compile({ ->
+            rkRegisterWsEndpoint(
+                path,
+                declName,
+                { id, principal, at -> 0 },
+                { id, principal, at, message -> decl.make().onMessage(WsSession(id: id, principal: principal, path: at), message) },
+                { id, principal, at, code, reason -> decl.make().onClose(WsSession(id: id, principal: principal, path: at), code, reason) },
+            );
+        })
+    else
+        compiler.compile({ ->
+            rkRegisterWsEndpoint(
+                path,
+                declName,
+                { id, principal, at -> 0 },
+                { id, principal, at, message -> decl.make().onMessage(WsSession(id: id, principal: principal, path: at), message) },
+                { id, principal, at, code, reason -> 0 },
+            );
+        });
 }
