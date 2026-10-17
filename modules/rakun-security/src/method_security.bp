@@ -4,23 +4,26 @@
 //// `#[secured("ROLE_ADMIN")]` on a method cannot insert a check into it. The
 //// answer is front 08's `#[transactional]` answer and what Spring does at run
 //// time — a proxy. `#[methodSecurity]` is TYPE-level, sees `decl.methods` with
-//// their params, return types and own annotations, and emits
+//// their params, return types and own annotations, and adds the associated
+//// type `AdminService.Sec` (`compiler.addType` over `compiler.buildType`)
 ////
-////     pub type AdminServiceSec(inner: AdminService) {
-////         pub fn make() -> AdminServiceSec { … rkSingleton … AdminService.make() … }
+////     AdminService.Sec(inner: AdminService) {
+////         pub fn make() -> AdminService.Sec { … rkSingleton … AdminService.make() … }
 ////         pub fn purge(self: Self, olderThanDays: i32) -> i32 {
 ////             val _sec = rkRequireAuthority("AdminService.purge", "ROLE_ADMIN");
 ////             return self.inner.purge(olderThanDays);
 ////         }
 ////     }
-////     val __rkSec_AdminService = rkRegisterBean("AdminServiceSec", …, { -> AdminServiceSec.make() });
 ////
-//// A caller injects `AdminServiceSec`; injecting `AdminService` gets the
+//// and compiles `rkRegisterBean("AdminService.Sec", …, { -> AdminService.Sec.make() })`
+//// into the init list (`compiler.compile`, run before `main`).
+////
+//// A caller injects `AdminService.Sec`; injecting `AdminService` gets the
 //// unchecked object, visible in the field declaration rather than hidden behind
 //// a proxy the container swapped in. The proxy enters the context table, so a
-//// field `svc: AdminServiceSec` resolves through `rkResolve`'s fallback. The
+//// field `svc: AdminService.Sec` resolves through `rkResolve`'s fallback. The
 //// application site imports `rkRequireAuthority` (this module) and the core's
-//// `rkSingleton` and `rkRegisterBean`, and the type carries a stereotype for
+//// `rkSingleton`, and the type carries a stereotype for
 //// `<Type>.make()`.
 ////
 //// THE SUPPORTED FORMS: `#[secured("ROLE")]`, `#[secured("ROLE_A,ROLE_B")]`
@@ -46,6 +49,7 @@
 import {raiseProblem} from "rakun-service";
 import {principal.Authentication, principal.currentAuthentication, principal.hasAuthority, principal.rkSecNoteDecision};
 import {compiler, compiler.DeclKind} from "std";
+import {rkRegisterBean} from "rakun";
 
 // ── the run-time check the proxy calls ──────────────────────────────────────
 
@@ -188,40 +192,35 @@ pub fn methodSecurity(expr decl: unknown) {
             guard + "\n        " + call + ";";
         methods.push(sig + " {\n        " + body + "\n    }");
     });
+    val declName = compiler.name(decl)!;
+    val secName = declName + ".Sec";
     val make = "pub fn make() -> "
-        + compiler.name(decl)!
-        + "Sec {\n        return rkSingleton(\""
-        + compiler.name(decl)!
-        + "Sec\", { -> "
-        + compiler.name(decl)!
-        + "Sec(inner: "
-        + compiler.name(decl)!
+        + secName
+        + " {\n        return rkSingleton(\""
+        + secName
+        + "\", { -> "
+        + secName
+        + "(inner: "
+        + declName
         + ".make()) });\n    }";
-    @emit(
-        "pub type "
-            + compiler.name(decl)!
-            + "Sec(inner: "
-            + compiler.name(decl)!
-            + ") {\n    "
-            + make
-            + "\n\n    "
-            + methods.join("\n\n    ")
-            + "\n}",
+    compiler.addType(
+        "Sec",
+        compiler.buildType(
+            "(inner: "
+                + declName
+                + ") {\n    "
+                + make
+                + "\n\n    "
+                + methods.join("\n\n    ")
+                + "\n}",
+        ),
     );
-    @emit(
-        "val __rkSec_"
-            + compiler.name(decl)!
-            + " = rkRegisterBean(\""
-            + compiler.name(decl)!
-            + "Sec\", \"\", \"singleton\", false, false, \""
-            + compiler.name(decl)!
-            + "\", { -> "
-            + compiler.name(decl)!
-            + "Sec.make() });",
-    );
+    compiler.compile({ ->
+        rkRegisterBean(secName, "", "singleton", false, false, declName, { -> decl.Sec.make() });
+    });
     if (compiler.kind(decl) != DeclKind.Type)
         compiler.fail(
-            "#[methodSecurity] must annotate a type - a decorator cannot wrap a method body, so the check lives on the <Type>Sec proxy the type-level marker emits",
+            "#[methodSecurity] must annotate a type - a decorator cannot wrap a method body, so the check lives on the <Type>.Sec proxy the type-level marker adds",
             at: decl,
         );
     if (compiler.variants(decl).length > 0)
