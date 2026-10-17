@@ -1,15 +1,16 @@
 //// rakun-scheduling — `#[scheduler]` and the three trigger markers (front 16 Step 2).
 ////
-//// `#[scheduler]` on a type walks its methods and emits one registration per
-//// trigger marker, the way `#[restController]` emits one route per
-//// `#[getMapping]`. The three markers each take the one argument their trigger
+//// `#[scheduler]` on a type walks its methods and registers one task per
+//// trigger marker, the way `#[restController]` registers one route per
+//// `#[getMapping]`: the calls of a member `<Type>.rkSchedules()` (text, as they
+//// call methods named at build), run before `main` by an executor. The three markers each take the one argument their trigger
 //// needs, positionally:
 ////
 ////   #[scheduled("<six-field cron>")]   at each matching instant
 ////   #[fixedRate(<millis>)]              every N ms from the previous START
 ////   #[fixedDelay(<millis>)]             N ms after the previous FINISH
 ////
-//// The emitted line runs at the APPLICATION site, so the consumer imports the
+//// The member's code runs at the APPLICATION site, so the consumer imports the
 //// seams by name beside the markers (`rkScheduleCron`, `rkScheduleFixedRate`,
 //// `rkScheduleFixedDelay` — only the ones its markers use). The closure builds
 //// the component through `<Type>.make()`, the singleton factory the
@@ -50,6 +51,7 @@ pub fn scheduler(expr decl: unknown) {
     });
     var tasks = 0;
     var problem = "";
+    var schedules: Array<string> = [];
     compiler.methods(decl).forEach({ m ->
         var kinds: Array<string> = [];
         var arg = "";
@@ -117,13 +119,8 @@ pub fn scheduler(expr decl: unknown) {
         else
             "rkScheduleFixedDelay";
         if (kinds.length == 1)
-            @emit(
-                "val __rkSched_"
-                    + compiler.name(decl)!
-                    + "_"
-                    + m.name
-                    + " = "
-                    + seam
+            schedules.push(
+                seam
                     + "(\""
                     + label
                     + "\", \""
@@ -137,6 +134,10 @@ pub fn scheduler(expr decl: unknown) {
                     + "() });",
             );
     });
+    if (schedules.length > 0) {
+        compiler.addMember("pub fn rkSchedules() { " + schedules.join(" ") + " }");
+        compiler.compile({ -> decl.rkSchedules(); });
+    }
     if (compiler.kind(decl) != DeclKind.Type)
         compiler.fail("#[scheduler] must annotate a type", at: decl);
     if (stereotype == "")

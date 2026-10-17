@@ -10,8 +10,8 @@
 //// `#[persistentJob(name, cron)]` takes front 16's six-field cron, positionally
 //// like every rakun decorator. It refuses, at the declaration, anything that is
 //// not a method and a method whose signature is not
-//// `(self: Self, data: string) -> string`. `#[jobs]` on the type emits, per
-//// such method, `rkPersistentJob("<name>", "<cron>", { data ->
+//// `(self: Self, data: string) -> string`. `#[jobs]` on the type adds a member
+//// `<Type>.rkJobs()` (run before `main` by an executor) calling, per such method, `rkPersistentJob("<name>", "<cron>", { data ->
 //// <Type>.make().<fn>(data) })` — the handler registration — so the
 //// consumer imports `rkPersistentJob` beside the markers. A method `@Decl`
 //// carries no parameter list, so the parameter half of the signature rule is
@@ -63,6 +63,7 @@ pub fn jobs(expr decl: unknown) {
     });
     var found = 0;
     var problem = "";
+    var handlers: Array<string> = [];
     compiler.methods(decl).forEach({ m ->
         var args = "";
         var marked = false;
@@ -98,12 +99,8 @@ pub fn jobs(expr decl: unknown) {
             problem;
         problem = withSig;
         if (marked && (problem == ""))
-            @emit(
-                "val __rkJob_"
-                    + compiler.name(decl)!
-                    + "_"
-                    + m.name
-                    + " = rkPersistentJob("
+            handlers.push(
+                "rkPersistentJob("
                     + args
                     + ", { data -> "
                     + compiler.name(decl)!
@@ -112,6 +109,10 @@ pub fn jobs(expr decl: unknown) {
                     + "(data) });",
             );
     });
+    if (handlers.length > 0) {
+        compiler.addMember("pub fn rkJobs() { " + handlers.join(" ") + " }");
+        compiler.compile({ -> decl.rkJobs(); });
+    }
     if (compiler.kind(decl) != DeclKind.Type) compiler.fail("#[jobs] must annotate a type", at: decl);
     if (stereotype == "")
         compiler.fail(
