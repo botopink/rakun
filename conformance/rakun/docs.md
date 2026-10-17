@@ -126,7 +126,7 @@ and is **not** wired into `build.zig`. It is an **application-level** lib reache
 via `from "rakun"`, opted into per project. the repository's root
 `botopink.json` is a **workspace** (decision 75): `from "rakun"` resolves to the member
 `modules/rakun/` — whose `files` (`root`, `http`, `runtime`, `decorators`,
-`bootstrap`, `rakun.d`, …, `ssl_bundle`) is exactly what a consumer sees — and never to the
+`bootstrap`, …, `ssl_bundle`) is exactly what a consumer sees — and never to the
 umbrella, which ships nothing. A sibling member or an example inside the
 workspace depends on it with `{ "rakun": { "workspace": true } }`; a project
 elsewhere in the ecosystem with `{ "path": "…/modules/rakun" }`; a consumer

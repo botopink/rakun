@@ -120,7 +120,7 @@ rakun/
 │   ├── rakun/         ← THE CORE — what `from "rakun"` gives a consumer
 │   │   ├── botopink.json  name rakun · entry root.bp · target erlang · targets [erlang]
 │   │   │                    (front 04 Step 10, decision 113) · files: root · http ·
-│   │   │                    runtime · decorators · bootstrap · rakun.d · no dependencies.
+│   │   │                    runtime · decorators · bootstrap · … · no dependencies.
 │   │   │                    The `.erl` sidecar is NOT a `files` entry: `shipErlSidecars`
 │   │   │                    finds it under the package's `src/sidecars/`
 │   │   ├── src/
@@ -179,10 +179,7 @@ rakun/
 │   │   │   │                    apply pass, the gate and the four application calls
 │   │   │   ├── condition_report.bp ← the three-block render: applied, not applied,
 │   │   │   │                    excluded, each failure naming the value observed
-│   │   │   ├── bootstrap.bp   ← `Rakun` (concrete type): `Rakun.run(app)` starts `rkServe`
-│   │   │   └── rakun.d.bp     ← the declaration module. EMPTY since front 06: it
-│   │   │                        carried a declaration-only `behavior Context`,
-│   │   │                        which the concrete `context.bp` one replaced
+│   │   │   └── bootstrap.bp   ← `Rakun` (concrete type): `Rakun.run(app)` starts `rkServe`
 │   │   └── test/
 │   │       ├── di_test.bp     ← placement + component scan
 │   │       ├── router_test.bp ← DI chain + router dispatch (200 / 404) end to end
@@ -390,10 +387,10 @@ that links `{<name>/src/main.bp}`. A new feature is a directory with its `docs.m
 a deprecated blind `src/` scan. It declares the four compiled modules
 `pub mod decorators; pub mod http; pub mod runtime; pub mod bootstrap;` (all
 public surface, reached via `from "rakun"`; an executor's names resolve in the
-decorator's module, a string member's at the application site). The declaration module `rakun.d.bp` (the future `Context`
-behavior) is **not** in the tree: it is wired through the core's `botopink.json` `files`
-(`modules/rakun/botopink.json`), which also lists `root.bp` first — decision 75's rule that a
-library member lists every module a consumer may import, or it `ships nothing`.
+decorator's module, a string member's at the application site). The core's `botopink.json` `files`
+(`modules/rakun/botopink.json`) lists `root.bp` first — decision 75's rule that a
+library member lists every module a consumer may import, or it `ships nothing`. There is
+no declaration module (decision 575 (1): no `.d.bp`).
 `.d.bp` modules are not resolved by `mod` paths (the resolver follows only
 `<name>.bp` / `<name>/mod.bp`), mirroring how `libs/std` keeps its ambient `.d.bp`
 out of `root.bp`. Since front 06 that declaration module declares NOTHING — its
@@ -4994,8 +4991,7 @@ completed handshake.
 
 - **`.bp` over `.d.bp`.** Logic lands in real emitted `.bp` (`http.bp` incl. the
   `Request` behavior, `runtime.bp`'s `declare fn`s, `decorators.bp` bodies,
-  `bootstrap.bp`). Only the future `Context` behavior stays declaration-only in
-  `rakun.d.bp`. `Request.param`/`query`/`header` return a plain `string` (`""` when
+  `bootstrap.bp`). Nothing is declaration-only (decision 575 (1)). `Request.param`/`query`/`header` return a plain `string` (`""` when
   absent), not `?string` — behavior-method optional returns don't yet get the
   `@Option` lowering, and a required path var / empty default is the cleaner contract.
 - **Host state behind `#[@External.Node]`.** The one mutable seam is `runtime.mjs`; the
