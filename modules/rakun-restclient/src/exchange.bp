@@ -2,7 +2,9 @@
 ////
 //// Spring's `@HttpExchange` turns an interface into a generated client. Here
 //// the same comptime twin-type mechanism `rakun-ssr`'s `#[mock]` uses: the decorator
-//// reflects a `behavior` and `@emit`s a type implementing it plus a factory.
+//// reflects a `behavior` and adds an associated type implementing it
+//// (`compiler.addType` over `compiler.buildType`) plus a static factory member
+//// (`compiler.addMember`).
 ////
 ////     #[httpExchange("echo")]
 ////     pub behavior EchoService {
@@ -13,9 +15,9 @@
 ////         fn echo(self: Self, body: string) -> string;
 ////     }
 ////
-//// emits
+//// adds
 ////
-////     pub type HttpEchoService(client: RestClient) implement EchoService {
+////     EchoService.Http(client: RestClient) implement EchoService {
 ////         fn user(self: Self, id: string) -> string {
 ////             return self.client.exchange("GET", "/users/:id", ["id"], [id], "");
 ////         }
@@ -23,11 +25,9 @@
 ////             return self.client.exchange("POST", "/echo", [], [], body);
 ////         }
 ////     }
-////     pub fn httpEchoService() -> EchoService {
-////         return HttpEchoService(client: RestClient.forGroup("echo"));
-////     }
+////     EchoService.http()    — { -> EchoService.Http(client: RestClient.forGroup("echo")) }
 ////
-//// The emission names only `RestClient` (a method call and a static call on
+//// The type names only `RestClient` (a method call and a static call on
 //// it), so the application site imports `RestClient` — with its type closure,
 //// `HttpClientSettings`, `CacheLife` and `ClientResponse`, because importing a
 //// type re-checks its declaration at the importing site (rakun AGENTS.md,
@@ -36,7 +36,7 @@
 //// timeouts, redirects and bundle, each falling back to the global key; two
 //// groups never share settings.
 ////
-//// THE RULES, each a located build failure (never an emitted type that cannot
+//// THE RULES, each a located build failure (never a generated type that cannot
 //// work):
 ////   * `:name` in a path must be a parameter of the method — both names are in
 ////     the message;
@@ -55,6 +55,7 @@
 //// why `httpExchange` is one long function.
 
 import {compiler, compiler.DeclKind} from "std";
+import {client.RestClient};
 
 pub fn httpExchange(expr decl: unknown, comptime group: string) {
     val g = group.replaceAll("\"", "").trim();
@@ -218,26 +219,17 @@ pub fn httpExchange(expr decl: unknown, comptime group: string) {
                 + problems.join("; "),
             at: decl,
         );
-    @emit(
-        "pub type Http"
-            + compiler.name(decl)!
-            + "(client: RestClient) implement "
-            + compiler.name(decl)!
-            + " {\n    "
-            + methods.join("\n\n    ")
-            + "\n}",
+    compiler.addType(
+        "Http",
+        compiler.buildType(
+            "(client: RestClient) implement "
+                + compiler.name(decl)!
+                + " {\n    "
+                + methods.join("\n\n    ")
+                + "\n}",
+        ),
     );
-    @emit(
-        "pub fn http"
-            + compiler.name(decl)!
-            + "() -> "
-            + compiler.name(decl)!
-            + " { return Http"
-            + compiler.name(decl)!
-            + "(client: RestClient.forGroup(\""
-            + g
-            + "\")); }",
-    );
+    compiler.addMember("http", { -> decl.Http(client: RestClient.forGroup(g)) });
 }
 
 pub fn getExchange(expr decl: unknown, comptime path: string) {
