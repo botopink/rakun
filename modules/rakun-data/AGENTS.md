@@ -13,7 +13,7 @@ s48–s51 (`steps-dbcontext.md`). Folded here (front 165 s3), the layer will liv
 
 The persistence layer over `query` (decision 398) — botopink's JPA: `#[entity(…)]` (it
 records query's `QueryTable`), `DbContext` (query's `QueryContext`, over a `Driver` behavior),
-`#[repository]` on a `behavior`, `#[query "…"]` (query's grammar) and
+`#[repository]` on a `behavior`, `` #[query @`…`] `` (query's grammar) and
 `#[nativeQuery(…)]` (the driver's SQL), rows decoded into the declared answer by column
 name. It depends on `query` and std and names no framework (113): the drivers, the container registration and the
 transactions are this package's own. Until the steps land this package holds none of it.

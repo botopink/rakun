@@ -11,7 +11,7 @@ constructor dependency injection plus a declarative web layer (`#[restController
 + route annotations). **Opt-in, never auto-loaded:** it enters a module's scope
 only via `from "rakun"`. **The compiler core knows nothing about rakun** — every
 behaviour is plain botopink + a host runtime, on the generic annotation-processor
-mechanism (`@Decl` reflection, comptime decorator bodies, `@emit`).
+mechanism (the declaration handle `expr decl: unknown` read through `compiler.*`, comptime decorator bodies, `@emit`).
 
 How the wiring works: each component decorator (`decorators.bp`) is a comptime fn
 over the annotated `type` (`DeclKind.Type` with no `variants` — an enum-shaped `type` is rejected). It `@emit`s, at the application site, (1) a scan
@@ -20,7 +20,7 @@ factory that constructs the value once (`rkSingleton`) and caches it, injecting
 each field through `rkResolve("<FieldType>")` (§ The catalogue and constructor
 injection) — except a `#[value("key")]` field, filled from config (`rkProp`/
 `rkPropInt`) and kept OFF the DI graph. A controller additionally `@emit`s one
-route registration per mapped method (reading `decl.methods` + the `#[route]`
+route registration per mapped method (reading `compiler.methods(decl)` + the `#[route]`
 prefix); a `#[configuration]` registers each `#[bean]` method's return type in
 the context table (`rkRegisterBean`). botopink has no top-level mutable state, so the registries those calls
 feed — the scan list, the singleton cache, the cycle guard, the config props, the
@@ -1070,9 +1070,9 @@ members, and a member exercising a layout or a server action needs fronts 23 and
   case of the non-ASCII cookie refusal is not expressible as a cell at all; the
   guard, its text and the negative case are asserted instead, and the gap is
   listed here rather than quietly dropped.
-- **A decorator parameter is `comptime x: @Expr<T>`** (decision 364): every marker body reads
-  its argument as `x.value`, known at build; a marker that never reads a parameter (the route
-  markers read their lexemes from `decl.annotations`) accepts any expression of its type.
+- **A decorator's first parameter is `expr decl: unknown` and each argument parameter is `comptime x: T`** (decisions 575, 576): every marker body reads
+  its argument as `x`, the value itself, known at build; a marker that never reads a parameter (the route
+  markers read their lexemes from `compiler.annotations(decl)`) still takes a value of its type.
 - **A refusal is a function.** `noFrameProblem` / `nestedFrameProblem` /
   `staleEpochProblem` are `pub fn`s returning the text, for the reason
   `durationProblem` is one: a test reads the words without the halt taking the
@@ -1260,7 +1260,7 @@ any `#[service]` with no further wiring.
 The field markers are `#[nested]`, `#[unit("seconds")]` (the unit a BARE number
 is read in) and `#[defaultValue("guest")]` (row 8, written where the catalogue
 can report it — a default written on the field itself is not visible through
-`@Decl.fields`). `#[validated]` marks a record whose constraints run at boot;
+`compiler.fields(decl)`). `#[validated]` marks a record whose constraints run at boot;
 front 14 owns the constraints and until it lands the marker is placement only.
 `#[enableConfigurationProperties("A,B")]` is the explicit-registration form.
 
@@ -1272,7 +1272,7 @@ Two deliberate departures from the spec, both arguable and both here:
   the `SCREAMING_SNAKE` one. A decorator body cannot call a helper, so the
   emitter would have to inline the string surgery in every marker; and the
   reader covers three spellings where the emitter would have produced one.
-- **A list field is `string[]` or `Array<string>`.** `@Decl` spells a field's
+- **A list field is `string[]` or `Array<string>`.** The declaration handle spells a field's
   type as written, so both bind through `rkPropList` and the catalogue shows the
   spelling. A list of anything else (`i32[]`, `Array<Duration>`) has no reader
   and is refused at the annotation (`cannot bind the list field …`), never
@@ -1360,8 +1360,8 @@ existing stereotype, exactly the way `#[route]` already stacks under
 pub type UserService(repo: UserRepository) { … }
 ```
 
-`#[managed]` is type-level, so it sees `decl.name`, `decl.annotations` and
-`decl.methods` with each method's own annotations — which is everything the bean
+`#[managed]` is type-level, so it sees `compiler.name(decl)`, `compiler.annotations(decl)` and
+`compiler.methods(decl)` with each method's own annotations — which is everything the bean
 registration, the lifecycle hooks and the listener bindings need, emitted in one
 pass. When `decorators.bp` unfreezes, this body folds into the six stereotypes
 and the extra line goes away. Until then the extra line is the honest price.
@@ -1488,11 +1488,11 @@ receiver). Every call site in `test/context_test.bp` writes
 
 ### Lifecycle: the markers check placement, `#[managed]` does the wiring
 
-`#[postConstruct]` and `#[preDestroy]` emit NOTHING. A method-level `@Decl`
-carries no owner and no parameter list — `Decl` exposes `kind`, `name`,
+`#[postConstruct]` and `#[preDestroy]` emit NOTHING. A method-level declaration handle
+carries no owner and no parameter list — it exposes `kind`, `name`,
 `returnType` and `annotations`, and `Param` lives only on the `Method` entries of
 a TYPE decl — so a method marker cannot name the factory of the type it sits in.
-The 1.0.6-beta draft's `rkRegisterLifecycle("<decl.name>", …)` inside a
+The 1.0.6-beta draft's `rkRegisterLifecycle("<name of decl>", …)` inside a
 `#[postConstruct]` body would have registered the METHOD's name as the
 component's. `#[managed]` is the only decl that sees both a method and its owner,
 so it emits the registrations, exactly as `#[restController]` does for
@@ -1514,9 +1514,9 @@ keep the ones after it open.
 
 ### Events: one record, string-named
 
-Spring dispatches by the listener parameter's TYPE. A method-level `@Decl`
+Spring dispatches by the listener parameter's TYPE. A method-level declaration handle
 carries no parameter list, so an `#[eventListener]` body cannot read
-`decl.parameters[0].typeName` — which is exactly what the 1.0.6-beta draft's
+`compiler.params(decl)[0].typeName` — which is exactly what the 1.0.6-beta draft's
 step 5 was written around. So there is one `Event(name, source, payload,
 timestampMillis)` record and the event is named by a STRING, which is also what
 the boundary can carry: a fun in an ETS table handed a record it never inspects.
@@ -1562,7 +1562,7 @@ callback pass and the number. A test calls it directly rather than sending a rea
 once, in front 07's graceful-shutdown tests.
 
 `#[exitCode]` is the ONE marker in `lifecycle.bp` that emits: a module-level
-function has its own name and its return type, where a method `@Decl` has neither
+function has its own name and its return type, where a method's declaration handle has neither
 an owner nor a parameter list. The highest value any generator answers is the
 status; with none registered a clean stop is 0, and a FAILED boot never reaches
 `shutdown` at all — `bootSequence` halts, and a halt is a non-zero process status
@@ -2236,7 +2236,7 @@ rows.
   print. Until it is closed the report prints through `rkAutoPrint`, a cell of
   this front's own with both forms.
 - **`a.args` carries the SOURCE TEXT of a decorator argument, quotes included,
-  and `decl.annotations` includes the marker's own annotation.** Measured with a
+  and `compiler.annotations(decl)` includes the marker's own annotation.** Measured with a
   throwaway marker: a type carrying `#[probe] #[probeArg("rakun.mail.host", "*")]
   #[probeMark]` reflects `probe,probeArg,probeMark` and args
   `["rakun.mail.host"~"*"]`. So a literal is unwrapped with
@@ -2436,7 +2436,7 @@ and not `typeUri`. `jsonEscape` is asserted against a detail carrying a quote
 and a newline, so a raise cannot break the document.
 
 `#[controllerAdvice]` is type-level and `#[exceptionHandler("tag")]` a
-method-level placement marker: a method `@Decl` carries no owner, so the advice
+method-level placement marker: a method's declaration handle carries no owner, so the advice
 walks its own methods and does the wiring. A tag registered twice fails at boot
 naming both owners.
 
@@ -2454,7 +2454,7 @@ quietly matches nothing is the failure mode decision 67 exists to prevent.
 - **A negative integer literal in a decorator argument does not parse.**
   `#[mark(-20)]` is `error: this token cannot appear here … unexpected 20`, on
   BOTH targets, while `#[mark(20)]` compiles. Measured against `2e6bb4ac` with
-  the smallest program there is (a `pub fn mark(comptime decl: @Decl, comptime n: i32)`
+  the smallest program there is (a `pub fn mark(expr decl: unknown, comptime n: i32)`
   and two one-type test files). Every order in the band below zero is therefore
   unwritable as an integer, so **`#[order]` takes a STRING** — `#[order("-100")]`
   — parsed with front 05's `toI32`, and the emitted line is
@@ -3151,7 +3151,7 @@ policy, HS256 and Basic; front 79 plugs in only through
 ## Entities and derived queries — `modules/rakun-data/src/orm/` (front 78)
 
 - **`#[entity("table")]`** (`orm/entity.bp`) on a record gives it (decision 216
-  of 1.0.11-beta) the meta `@typeInfo(T).meta.entity.table` / `.columns`, the
+  of 1.0.11-beta) the typed meta record `EntityMapping(table, columns)`, read `@typeInfo(T).meta(EntityMapping)?.table` / `.columns`, the
   associated type `T.Columns` with `T.columns()` (column-name constants), and
   the members `T.fromRow(r)`, `T.params(c)`, the writes
   `T.insert/update/delete(sql, c)` (each in a transaction; `…In(tx, …)` twins),
@@ -3328,7 +3328,7 @@ linter read), and it is checked at comptime: empty, a leading keyword outside
 `SELECT / INSERT / UPDATE / DELETE / WITH / CALL`, and a `'` next to a placeholder
 (`':id`, `'$1`, `'?`; `'…'::type` is a cast and passes) each fail the build at the
 method. Not checked: the placeholder count against the parameters — a method-level
-`@Decl` has no parameter list. Two `#[query]` methods of one name on two types of
+declaration handle has no parameter list. Two `#[query]` methods of one name on two types of
 one module are two members (`A.findSql()`, `B.findSql()`) and both statements are
 registered under the method's name. A call to a member a type does not have —
 `City.revisionsOf(…)` on an entity without `#[revisions]`, `Ghost.entityMeta()` in a
@@ -4578,7 +4578,7 @@ its own half of a two-test pair.
 ### The naming contract with front 05
 
 `#[validated]` on a record-shaped `type` gives it exactly two members
-(`decl.addMember`, decision 216 of 1.0.11-beta):
+(`compiler.addMember`, decision 216 of 1.0.11-beta):
 
 ```
 pub fn validate(self: Self) -> ValidationReport     // bound.validate()

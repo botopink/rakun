@@ -548,7 +548,7 @@ nine properties, because upstream leaves `border-width` alone. Colours carry
 front 33's `paletteVar`, never a hex.
 
 The spec authors a richer surface (a `#[emilia(...)]` decorator on a
-builder call + a `[emilia]={...}` attribute inside the `html """…"""`
+builder call + a `[emilia]={...}` attribute inside the `` html @`…` ``
 DSL); both forms need the two generic rakun-bpp hooks (`F0` second
 half — deferred). v0 ships the underlying mechanism without the two
 attachment syntaxes.
@@ -557,13 +557,13 @@ attachment syntaxes.
 
 - **Walk at runtime, not comptime.** v0's `emilia(tokens)` is an
   ordinary `pub fn`: the token array reaches the body as a runtime
-  value (not an `@Expr<Token[]>`); the `case t { … }` dispatcher fires
+  value (not a `comptime` argument); the `case t { … }` dispatcher fires
   per element. Promoting to comptime — so the consumer writes
   `#[emilia([.Bg.White])] div([])` and the class name + registration
   side-effect lower at compile time — needs the rakun-bpp
   annotation-on-builder hook (a generic mechanism) and the decorator
   body must be one of the new "call-site decorator" shapes that pass
-  the call's argument list as `@Expr<Token[]>`.
+  the call's argument list as a `comptime` value.
 - **`Token[]` for the modifier payload.** The modifier variants
   (`Hover([Token]), Md([Token])`, …) recurse through `tokensToSheet` and
   wrap the inner sheet in a `Variant` (`nestVariant`): a selector template

@@ -2,8 +2,8 @@
 
 > Package `rakun-style` (was `styled`; front 165 s2) of the rakun workspace — `repository/rakun/modules/rakun-style/` · workspace rules: [`../../AGENTS.md`](../../AGENTS.md) · refusals: `../../refusals/rakun-style/` · examples: `../../examples/rakun-style/`
 
-The `rakun-style` package (decision 338; its `styled "…"` template function keeps its name): the base for building CSS components. `styled "…"` and
-`styledProperty "…"` are template functions that read a CSS rule body at build and answer a
+The `rakun-style` package (decision 338; its `` styled @`…` `` template function keeps its name): the base for building CSS components. `` styled @`…` `` and
+`` styledProperty @`…` `` are template functions (over the template text, `expr css: string`) that read a CSS rule body at build and answer a
 component in the language's model — `@Component<Styled>` (`StyledView`) and
 `@Component<StyledProperty>` (`StyledPropertyView`); the layered `Sheet` holds
 components in `@layer`s; the theme mechanism (`Theme`, `entry`, `clear`, `clearNs`, `clearAll`,
@@ -14,18 +14,18 @@ markup, no manifest and no framework.
 ```bp
 import styled, {styledProperty, StyledView, StyledPropertyView} from "rakun-style";
 
-pub val tab4 = styledProperty "tab-size: 4;";
-fn padAll(n: i32) -> StyledPropertyView { return styledProperty "padding: --spacing(${n});"; }
+pub val tab4 = styledProperty @`tab-size: 4;`;
+fn padAll(n: i32) -> StyledPropertyView { return styledProperty @`padding: --spacing(${n});`; }
 
 // `${padAll(2)}` is a call: computed at render, so a function run below the
 // render's `StyledSheet` provider (a `val` is evaluated outside every render).
 fn code() -> StyledView {
-    return styled """
+    return styled @`
   ${tab4}
   font-family: var(--font-mono);
   &:hover { ${padAll(2)} }
   @variant md { max-width: --theme(--breakpoint-md); }
-""";
+`;
 }
 // (await code()).rules, under a provider ==
 //   .s_<h>{tab-size:4;font-family:var(--font-mono)}.s_<h>:hover{padding:calc(var(--spacing) * 2)}
@@ -93,7 +93,7 @@ A rule body, read at build (`reader.bp`):
 Rules come out in source order (decision 368): each run of a block's declarations is a rule of
 the block's selector, and each nested rule, variant or at-rule follows the run before it — a
 declaration written after a nested rule opens a new rule of the class, as CSS Nesting's
-nested-declarations rule does in a browser. `styled "${bg} &:focus { ${gray} } ${pad}"` renders
+nested-declarations rule does in a browser. `` styled @`${bg} &:focus { ${gray} } ${pad}` `` renders
 `.k{background:#ffffff}.k:focus{…}.k{padding:…}`, never `.k{background:…;padding:…}.k:focus{…}`;
 the class hashes the rules as rendered, so an order is a class (`reader.bp` `readBlock`, the
 `run` it closes at each nested block; `test/source_order_test.bp`). Refused, each at
@@ -104,20 +104,21 @@ property name or a selector, a breakpoint the theme cleared or lacks, an unclose
 or comment; in `styledProperty`, any `{`, `&` or `@`.
 
 **The class.** `s_` and std's `contentHash` of the rules (the class selector written `\u{1}`
-while hashed), so the same rules are the same class. A literal whose every hole is known at build
-— no hole, or holes whose values are literals, `comptime` values or `val`s known at build
-(decision 355: each `Interp` part's `known` / `value`, `styled.bp` `withHole` and `atBuild`; a value
-hole's text through `holeText`, a splice's `declarations`) — is computed at build: `styled "${tab4}
-color: red;"` with `tab4 = styledProperty "tab-size: 4;"` emits `styledConstant("s_b480a37a",
-".s_b480a37a{tab-size:4;color:red}")`. A known value that does not fit where it stands (a record in a
-value, a string where a declaration stands) leaves the literal computed, so the computed call's
-types refuse it as before. The constant path emits `styledConstant("s_…", ".s_…{…}")` /
+while hashed), so the same rules are the same class. A literal with no hole is computed at build: `` styled @`color: red;` `` emits
+`styledConstant("s_…", ".s_…{color:red}")`. A literal with a hole is computed when the component runs,
+even when every hole is known at build (`` styled @`${tab4} color: red;` `` with
+``tab4 = styledProperty @`tab-size: 4;` ``): the template parses the `${…}` holes from its raw text and
+splices each hole's expression into the code it builds, and it never reads a hole's value (decisions
+577 (5), 578). The computed literal's class is the same as a build-time one's for the same text
+(`s_b480a37a`, `.s_b480a37a{tab-size:4;color:red}` for that example; `test/styled_test.bp`), and a
+value that does not fit where it stands (a record in a value, a string where a declaration stands) is
+refused by the computed call's types. The constant path emits `styledConstant("s_…", ".s_…{…}")` /
 `propertyConstant(…)` with literals
 (`hash.bp`'s fold, held equal to `contentHash`; `repository-stages.sh` reads the emitted module
 on both targets — the call's arguments are the class and the rules as literals, no hidden context
 argument (decision 388 replaced 354 (8)'s map; a component is a lambda over its `RenderScope`); it
-also reads `tabRed`'s constant and `code`'s computed call, its splice through `splice`). A literal with a hole computed at render (a
-parameter, a call such as `${padAll(2)}`, a `val` another module exports) emits `styledComputed` /
+also reads `code`'s computed call, its splice through `splice`). A literal with a hole (a
+parameter, a call such as `${padAll(2)}`, a `val`, a splice) emits `styledComputed` /
 `propertyComputed`, which build the text when the component runs (an `async function` on commonJS,
 decision 338 p9).
 
@@ -133,7 +134,7 @@ splice as `splice({ -> <hole> })`, which runs the hole under a provider that kee
 literal computed at build registers nothing (its constructor reads no context). With no provider
 above, a computed literal reads the declared default, whose writer aborts naming the missing
 provider (378 (3)) — so a `val` whose literal is computed
-at render (`pub val code = styled "${padAll(2)}"`) fails when it is first read, being evaluated
+at render (`` pub val code = styled @`${padAll(2)}` ``) fails when it is first read, being evaluated
 outside every render (`119-f`); such a component is a function.
 
 **The sheet** is a value: `Sheet.of([layer("base"), Layer(name: "utilities", prefix: "e_")])`,

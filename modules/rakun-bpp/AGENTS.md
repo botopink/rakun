@@ -11,7 +11,7 @@ capability, activated by the `use` keyword (decision 88 of 1.0.10-beta:
 loads data is `fn … -> @Task<Element>` (the return type is the effect — botopink
 decisions 118–128, front 24; the `#[@<effect>]` annotations and `@Future` left, and
 `*fn` before them); the JSX-like
-`html """…"""` DSL reuses `expr-templates` (`@Expr<Element>`), expanding markup
+`` html @`…` `` DSL is a template function over the template text (`expr template: string`, `-> Element`), expanding markup
 to the builder pipeline at comptime. The compiler is **unaware** of rakun-bpp (hard rule + `grep -riE
 "rakun|rakun-bpp" modules/compiler-core/src` gate); the framework is a pure
 client, reached with `from "rakun-bpp"`, never embedded.
@@ -21,7 +21,7 @@ botopink** (`modules/rakun-bpp/src/{element,hooks,elements}.bp` in the core
 member's compiled set, `modules/rakun-bpp/src/html/html.bp` in the
 `rakun-bpp` member's — front 95 cut the DSL out of the core): an
 `Element` tree, builders, a synchronous SSR renderer, the hook family, and the
-`html """…"""` comptime expander — no host intrinsics, no async. Since fronts 26
+`` html @`…` `` comptime expander — no host intrinsics, no async. Since fronts 26
 and 28 there is **no `.d.bp` module left**: the route snapshot and the request
 are compiled and each ships its own host half on both rows
 (`router_runtime.mjs` / `sidecars/jhonstart_router.erl`, `server_runtime.mjs` /
@@ -113,15 +113,15 @@ repository/rakun-bpp/
 │   │   ├── botopink.json  ← name rakun-bpp, files [root.bp, form.bp], dependencies { rakun-bpp, rakun-bpp: { workspace: true } }
 │   │   ├── src/{root.bp, form.bp, form_runtime.mjs, sidecars/jhonstart_forms.erl} ← the six browser cells, dual-target (the erlang twin answers the server's quiet truth and records the call for the test)
 │   │   └── test/form_test.bp ← `botopink test`: the binding's markup, the body handed to the cell and the state read back, the hooks' server pass, the search form (front 67) — both rows
-│   ├── rakun-bpp/ ← MEMBER (front 95): the `html """…"""` DSL — what `from "rakun-bpp"` gives a consumer; the core does not depend on it
+│   ├── rakun-bpp/ ← MEMBER (front 95): the `` html @`…` `` DSL — what `from "rakun-bpp"` gives a consumer; the core does not depend on it
 │   │   ├── botopink.json  ← name rakun-bpp, src src/, entry root.bp, target commonJS, files [root.bp, html.bp], dependencies { rakun-bpp: { workspace: true } }
 │   │   ├── src/
 │   │   │   ├── AGENTS.md
 │   │   │   ├── root.bp    ← `pub mod html;`
-│   │   │   └── html.bp    ← COMPILED (front 118): the `html """…"""` template language — elements, components (a tag is a call with its attributes as labelled arguments, its content `children`), fragments, `{expr}` holes over core `Node`, rendering attributes, markup inside `if` / `case` / lambdas, slots, comments, raw-text bodies, `#[isRaw]`; one loop over the literal with an explicit frame stack, lowered twice (builder code + `CustomNode` overlay) → `@ExprCustom<Element>`; plus `isRaw`, `classList`, `classIf`, `hasContent`
+│   │   │   └── html.bp    ← COMPILED (front 118): the `` html @`…` `` template language — elements, components (a tag is a call with its attributes as labelled arguments, its content `children`), fragments, `{expr}` holes over core `Node`, rendering attributes, markup inside `if` / `case` / lambdas, slots, comments, raw-text bodies, `#[isRaw]`; one loop over the literal with an explicit frame stack, lowered twice (builder code + `CustomNode` overlay) → `Element`; plus `isRaw`, `classList`, `classIf`, `hasContent`
 │   │   └── test/
 │   │       ├── html_test.bp     ← `botopink test` flat suite: markup lowers to the builders and renders — builders from "rakun-bpp"
-│   │       ├── elements_test.bp ← `botopink test` flat suite: a tag from `elements.bp` resolves inside `html """…"""` (the DSL resolves in the CALLER's scope, so the only honest test is written from a consumer's position)
+│   │       ├── elements_test.bp ← `botopink test` flat suite: a tag from `elements.bp` resolves inside `` html @`…` `` (the DSL resolves in the CALLER's scope, so the only honest test is written from a consumer's position)
 │   │       ├── template_test.bp ← front 118 steps 1–5 through `renderNode`: attributes, holes, void/self-closing tags, fragments, comments, raw-text bodies, markup in `if`/`case`/lambdas, components and slots, `raw`, `classList`, `#[isRaw]`
 │   │       ├── template_expressions_example_test.bp · components_and_slots_example_test.bp · directives_example_test.bp ← the front's three spec examples, landed
 │   │       ├── defects_test.bp  ← the four defects front 118 measured (static attribute, spaced value, nested self-closing tag, Element hole)
@@ -145,7 +145,7 @@ repository/rakun-bpp/
 │       └── test/helpers_test.bp + test/__snapshots__/ ← every twin against `test-snap.md`'s literal, and one accepted snapshot per helper family — both rows
 ├── examples/
 │   ├── jhonstart-counter/  ← MEMBER: `use state` + the client runtime under node; both rows
-│   ├── jhonstart-markup/   ← MEMBER: the `html """…"""` DSL cross-module (inherits [commonJS, erlang]) — was `examples/rakun-bpp/`, renamed by front 95 because a member name is unique in the workspace and the DSL member took it
+│   ├── jhonstart-markup/   ← MEMBER: the `` html @`…` `` DSL cross-module (inherits [commonJS, erlang]) — was `examples/rakun-bpp/`, renamed by front 95 because a member name is unique in the workspace and the DSL member took it
 │   ├── jhonstart-todo/     ← MEMBER: builders + hooks + SSR; both rows
 │   ├── blog-ssr/           ← MEMBER (`modules.md` § 8, targets [commonJS, erlang]): `src/repo.bp` fixtures; `src/app/` — `layout` (RootLayout, metadata, viewport), `loading`, `error`, `not_found`, `global_error`, `blog/slug/{page,metadata}` (PostPage with two sequential loaders, postPanel, generateMetadata) — a module name is an identifier, so Next's `not-found` / `[slug]` are `not_found` / `slug`; `test/blog_test.bp` 10 snapshots
 │   ├── nav-shell/          ← MEMBER (targets [commonJS, erlang]): `Sidebar`, `DocsIndex` (prefetch off per row), `CheckoutLink` (LinkStatus); `test/nav_test.bp` 6 snapshots
@@ -156,7 +156,7 @@ repository/rakun-bpp/
 │   ├── layout_plain_element/   ← `#[layout]` on `-> Element` (decision 117; the guide's `OldLayout`)
 │   ├── page_plain_element/     ← `#[page]` on `-> Element`
 │   ├── template_task_element/  ← `#[template]` on `-> @Task<Element>`
-│   └── html_*/                 ← front 118: the `html """…"""` refusals — a `?T`, a record, a function in a hole; markup as an operand; `[name]={…}`; `class:list`; `set:html`; `slot="…"`; an unbound component and an unbound annotation; content to a component without `children`; a narrower `children`; two `#[isRaw]`; a mismatched closing tag; a kebab-case attribute but `data-*`, an event attribute, a spread on an element and a non-`string` `data-*` value (decision 351); `<style>` in markup (decision 338)
+│   └── html_*/                 ← front 118: the `` html @`…` `` refusals — a `?T`, a record, a function in a hole; markup as an operand; `[name]={…}`; `class:list`; `set:html`; `slot="…"`; an unbound component and an unbound annotation; content to a component without `children`; a narrower `children`; two `#[isRaw]`; a mismatched closing tag; a kebab-case attribute but `data-*`, an event attribute, a spread on an element and a non-`string` `data-*` value (decision 351); `<style>` in markup (decision 338)
 ```
 
 `modules/rakun-bpp/` is the `<lib>-test` member
@@ -187,11 +187,11 @@ A tree holding untrusted text is snapshotted through front 30's `renderNode`
 (the one escaping point), not the frozen `renderToString`.
 
 `refusals/` is outside both globs too: each subdirectory is a project that
-must NOT compile — a decorator's `decl.fail`, which no `test { }` block can
+must NOT compile — a decorator's `compiler.fail(message, at: decl)`, which no `test { }` block can
 hold — depending on the core by `{ "path": "../../modules/rakun-bpp" }`. Its
 `expect.txt` lists the lines `botopink check` must print, verbatim: the message
 and its ` --> src/main.bp:<line>:<col>` location. A new refusal of the library
-adds a directory here in the commit that adds the `decl.fail`.
+adds a directory here in the commit that adds the `compiler.fail`.
 
 A compiler defect this library hits is handed to its owning front as a
 `tests/language` cell filed to `01-compiler/12-language-tests`, or as a cell in
@@ -267,8 +267,8 @@ were promoted rather than filled in. A host-bound module here is now an ordinary
   surface is flat and a second `state` shadows `hooks.state` for every consumer
   (last module wins, silently, even from a non-`pub` `mod` — measured).
 - `renderToString` is **synchronous** (`.bp`); SSR needs no async.
-- A decorator's parameters are `comptime x: @Expr<T>` (decision 364) and the body reads
-  `x.value` — `#[page("blog/[slug]")]`'s `seg.value` in `routes.bp`.
+- A decorator's first parameter is `expr decl: unknown` and each argument parameter is `comptime x: T`
+  (decisions 575, 576); the body reads the argument as `x` — `#[page("blog/[slug]")]`'s `seg` in `routes.bp`.
 - Components are PascalCase (`Counter`, `Page`); fns/builders camelCase.
 - Not embedded: do **not** wire rakun-bpp into `comptime/stdlib/prelude.zig` or
   `build.zig`.
@@ -277,16 +277,16 @@ were promoted rather than filled in. A host-bound module here is now an ordinary
 
 rakun-bpp is a *consumer*. What it relies on:
 
-- **Landed**: `context-inference` (`@Context`/`use`), `expr-templates` (`@Expr`),
+- **Landed**: `context-inference` (`@Context`/`use`), `expr-templates` (`expr` parameters),
   the G1–G4 gaps (fn-typed fields, labeled tuple types, `fn() -> T[]`, `Children`
   coercion), the generic `from "<lib>"` loader, and — new in this port — generic
   **cross-module nominal-type resolution** (a local component `fn … -> Element`
   whose result feeds an imported `renderToString`/`use` now type-checks; see
   `modules/compiler-core/src/comptime` `type_decl_registry` + `resolveTypeName`).
-- **Landed** (markup front-end): `expr-custom` (`@ExprCustom<T>` + `CustomNode` +
-  `q.custom`) now backs `html` — its body lexes/parses the markup into a token
+- **Landed** (markup front-end): `expr-custom` (`CustomNode` +
+  `compiler.custom(node)`) now backs `html` — its body lexes/parses the markup into a token
   stream and lowers it twice (builder code + a `CustomNode` reference overlay the
-  LSP reads), the sibling of query's `query "…"` SQL front-end. The comptime
+  LSP reads), the sibling of query's `` query @`…` `` SQL front-end. The comptime
   template body still sees only a native-JS prelude (no Option/`unwrapOr`), so the
   walk uses a stack + `indexOf` span recovery rather than a recursive descent —
   see `html.bp`'s header.
@@ -598,8 +598,8 @@ server pass exactly as it renders in the browser.
 
 | What | Where | Shape |
 |---|---|---|
-| The marker | `#[client]` | a `@Decl`-first comptime fn. Records the meta `component` (`@typeInfo(<Name>).meta.client.component`, decision 216) — a compile-time constant, never a call into a host registry, because a Node-only call would break the erlang server render |
-| The props rule | `#[clientProps]` | on the props RECORD, because `@Decl` does not expose a function's parameters. Whitelist: `string` · `i32` · `f64` · `bool` |
+| The marker | `#[client]` | an `expr decl: unknown`-first comptime fn. Records the meta `component` as a typed `ClientMark(component)` record (`@typeInfo(<Name>).meta(ClientMark)?.component`, decision 216) — a compile-time constant, never a call into a host registry, because a Node-only call would break the erlang server render |
+| The props rule | `#[clientProps]` | on the props RECORD, because the declaration handle (`expr decl: unknown`) does not expose a function's parameters. Whitelist: `string` · `i32` · `f64` · `bool` |
 | The island marker | `islandId(n)` · `islandAttrOf(id)` · `islandAttr(n)` | decision 77: `islandAttrOf` is the ONE occurrence of `"data-jh-i"` in this tree. Front 23 fills `RenderHooks.islandAttr` from `islandAttr`; front 68's entry imports the same function |
 | The island | `Island(id, component, props)` · `clientMount(island, children)` | the placeholder carries the id and NOTHING else; the component name and encoded props go to the payload's `i` row |
 | The payload row | `islandEntry(island)` | `#(id, component, "k=v&k=v")`, encoded with std's `encoding.formStringify` (decision 116 rule 4) |
@@ -618,7 +618,7 @@ enum; a field outside the four-scalar whitelist.
 reason to exist, so it is written here rather than implied:
 
 - that a `#[client]` component's parameter record carries `#[clientProps]` at
-  all — `@Decl` has no parameters;
+  all — the declaration handle has no parameters;
 - that no module reachable from a `#[client]` component imports `serverOnly`, or
   `request`/`cookies`/`headers`;
 - that the props written into an island's `i` row are the ones the record
@@ -632,7 +632,7 @@ is written into an island's props, and nothing here notices.
 
 The spec's `string[]` and `i32[]` were left out while `Field.typeName` erased an
 array's element type (`Array<string>` and `Array<Element>` both reflected as
-`"Array"`, `string[]` as `""`). `@Decl` now spells every type as the source
+`"Array"`, `string[]` as `""`). The declaration handle now spells every type as the source
 writes it (`Array<string>`, `string[]`, `fn(i32) -> i32`), so the widening is
 this front's to make; until it lands an array-valued prop is an encoded
 `string`, and a refused field's message names its spelled type.
