@@ -10,9 +10,11 @@
 //// `#[cliCommand(name, summary)]` refuses anything but a method and a method
 //// that does not answer i32. `#[cliCommands]` on the type checks each marked
 //// method takes `(self: Self, args: Array<string>)`, refuses two markers of one
-//// name in the type (naming both methods), and emits
-//// `rkCliRegister(name, summary, { args -> <T>.make().<fn>(args) })` — the
-//// consumer imports `rkCliRegister` beside the markers. A name registered
+//// name in the type (naming both methods), and adds the member
+//// `<T>.rkCliCommands()` calling `rkCliRegister(name, summary, { args ->
+//// <T>.make().<fn>(args) })` per command (text, as it calls methods named at
+//// build), run before `main` by an executor — the consumer imports
+//// `rkCliRegister` beside the markers. A name registered
 //// twice across types is refused when the second registration runs, naming
 //// both. The command runs with the container wired (the component comes from
 //// its stereotype's factory) and no listener; its answer is the exit code, a
@@ -95,6 +97,7 @@ pub fn cliCommands(expr decl: unknown) {
     var owners: Array<string> = [];
     var problem = "";
     var found = 0;
+    var commands: Array<string> = [];
     compiler.methods(decl).forEach({ m ->
         var args = "";
         var cmd = "";
@@ -157,12 +160,8 @@ pub fn cliCommands(expr decl: unknown) {
             found = found + 1;
         }
         if (marked && (problem == ""))
-            @emit(
-                "val __rkCli_"
-                    + compiler.name(decl)!
-                    + "_"
-                    + m.name
-                    + " = rkCliRegister("
+            commands.push(
+                "rkCliRegister("
                     + args
                     + ", \""
                     + compiler.name(decl)!
@@ -175,6 +174,10 @@ pub fn cliCommands(expr decl: unknown) {
                     + "(args) });",
             );
     });
+    if (commands.length > 0) {
+        compiler.addMember("pub fn rkCliCommands() { " + commands.join(" ") + " }");
+        compiler.compile({ -> decl.rkCliCommands(); });
+    }
     if (compiler.kind(decl) != DeclKind.Type)
         compiler.fail("#[cliCommands] must annotate a type", at: decl);
     if (stereotype == "")
