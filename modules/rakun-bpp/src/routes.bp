@@ -27,13 +27,12 @@
 // Each decorator body records its segment as comptime meta (`seg`, decision
 // 216) — the program's entry point registers every marked function from
 // `@TypeInfo.all` with `jhRegisterRoutes` (below), no module registers itself
-// at load — then `#[page]` emits the per-route parameter accessor, then each
-// enforces placement with `decl.fail`. A decorator body cannot call a sibling
-// function and a `//` comment in it breaks the flattened emit, so `page` reads
-// a segment's parameters from `routing` — `segment.paramNamesOf` for the names,
-// `parseSegment` / `kindName` for which of them is a list (front 102) — and
-// stays comment-free. `routing` owns the segment grammar; `test/routes_test.bp`
-// round-trips `uiTable()` through its `parsePath`.
+// at load — then each enforces placement with `compiler.fail`. A page reads its
+// parameters at run time through `pageParams(route)` (below), against the
+// pattern its segment registered — `routing`'s `parseSegment` / `kindName` say
+// which segment binds a name and whether it is a list (front 102). `routing`
+// owns the segment grammar; `test/routes_test.bp` round-trips `uiTable()`
+// through its `parsePath`.
 //
 // The registration is a LAMBDA, never a bare function name: a named function
 // used as a value lowers to an unbound erlang variable.
@@ -46,7 +45,7 @@
 import {element.Element, element.ElementBase};
 import {router.pairValue};
 import {error_boundary.ErrorInfo};
-import {segment.kindName, segment.paramNamesOf, segment.parsePath, segment.parseSegment, segment.patternOf, segment.slotOf, table.RouteEntry, table.writeTable} from "routing";
+import {segment.kindName, segment.parsePath, segment.parseSegment, segment.patternOf, segment.slotOf, table.RouteEntry, table.writeTable} from "routing";
 import {compiler, compiler.DeclKind} from "std";
 
 // NO `query` FIELD. The query is per-request input, and reading it marks the
@@ -288,7 +287,7 @@ pub fn uiTable() -> string {
     return __jhRoutesTable();
 }
 
-// ── what an emitted accessor reads ──────────────────────────────────────────
+// ── a page's parameters ─────────────────────────────────────────────────────
 
 pub fn ctxParam(route: PageContext, name: string) -> string {
     return pairValue(route.params, name);
@@ -296,6 +295,53 @@ pub fn ctxParam(route: PageContext, name: string) -> string {
 
 pub fn ctxRest(route: PageContext) -> string[] {
     return route.rest;
+}
+
+// `pageParams(route)` reads a page's parameters against its schema: the
+// pattern `#[page]`'s segment registered (`route.pattern`, the bracket spelling
+// kept). `get("slug")` answers what a `[slug]` segment binds and `list("slug")`
+// what a `[...slug]` / `[[...slug]]` binds; a name the pattern does not bind
+// that way halts, naming the pattern — the run-time half of what the page's
+// former generated accessor checked by its type.
+pub type PageParams(route: PageContext) {
+    pub fn get(self: Self, name: string) -> string {
+        if (bindsAs(self.route.pattern, name) != "Dynamic")
+            @panic(paramProblem(self.route.pattern, name, "[" + name + "]"));
+        return pairValue(self.route.params, name);
+    }
+
+    pub fn list(self: Self, name: string) -> string[] {
+        val k = bindsAs(self.route.pattern, name);
+        if ((k != "CatchAll") && (k != "OptionalCatchAll"))
+            @panic(paramProblem(self.route.pattern, name, "[..." + name + "]"));
+        return self.route.rest;
+    }
+}
+
+pub fn pageParams(route: PageContext) -> PageParams {
+    return PageParams(route: route);
+}
+
+// The kind of the capturing segment of `pattern` that binds `name`, or `""`.
+fn bindsAs(pattern: string, name: string) -> string {
+    var kind = "";
+    for (pattern.split("/")) { raw ->
+        val s = parseSegment(raw);
+        val k = kindName(s.kind);
+        val capturing = (k == "Dynamic") || (k == "CatchAll") || (k == "OptionalCatchAll");
+        if ((s.name == name) && capturing) kind = k;
+    }
+    return kind;
+}
+
+fn paramProblem(pattern: string, name: string, wanted: string) -> string {
+    return "rakun-bpp: the page at `"
+        + pattern
+        + "` has no "
+        + wanted
+        + " segment - `"
+        + name
+        + "` is not one of its parameters";
 }
 
 // ── the four markers ────────────────────────────────────────────────────────
@@ -312,39 +358,6 @@ pub type RouteSegment(seg: string)
 
 pub fn page(expr decl: unknown, comptime seg: string) {
     compiler.setMeta(RouteSegment(seg: seg));
-    val kinds = seg
-        .split("/")
-        .map({ raw -> kindName(parseSegment(raw).kind) })
-        .filter(
-            { k -> k == "Dynamic" || k == "CatchAll" || k == "OptionalCatchAll" },
-        );
-    var lets: Array<string> = [];
-    var sigs: Array<string> = [];
-    var fields: Array<string> = [];
-    paramNamesOf(seg)
-        .zip(kinds)
-        .forEach({ p ->
-            val isList = p._1 != "Dynamic";
-            val reader = if (isList)
-                "ctxRest(route)"
-            else
-                "ctxParam(route, \"" + p._0 + "\")";
-            val shown = if (isList) "string[]" else "string";
-            lets.push("val " + p._0 + " = " + reader + ";");
-            sigs.push(p._0 + ": " + shown);
-            fields.push(p._0);
-        });
-    @emit(
-        "pub fn "
-            + compiler.name(decl)!
-            + "Params(route: PageContext) -> #("
-            + sigs.join(", ")
-            + ") { "
-            + lets.join(" ")
-            + " return #("
-            + fields.join(", ")
-            + "); }",
-    );
     if (compiler.kind(decl) != DeclKind.Fn) compiler.fail("#[page] must annotate a function", at: decl);
     if (compiler.returnType(decl) != "@Component<Element>")
         compiler.fail(

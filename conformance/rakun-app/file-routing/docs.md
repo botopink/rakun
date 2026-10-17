@@ -7,22 +7,24 @@
 the other model — a URL that comes from where a file sits:
 
 ```text
-import {layout, page, PageContext, LayoutProps, ctxParam, rkAppLayout, rkAppPage} from "rakun-app";
+import {layout, page, PageContext, LayoutProps, pageParams, rkAppLayout, rkAppPage} from "rakun-app";
 
 #[layout("")]
 pub fn rootLayout(props: LayoutProps<Element>) -> Element { … }
 
 #[page("blog/[slug]")]
 pub fn blogPostPage(route: PageContext) -> @Task<Element> {
-    return post(blogPostPageParams(route).slug);
+    return post(pageParams(route).get("slug"));
 }
 ```
 
 The argument is the APP-RELATIVE DIRECTORY of the file, not its URL: `@Decl`
 carries no source location, so a decorator cannot learn which file it was
 written in, and the CLI (front 50) checks the argument against the real tree
-under `rakun.appDir`. `blogPostPageParams` is emitted by `#[page]` — one field
-per bracket segment, `string[]` for a catch-all, `#()` for none.
+under `rakun.appDir`. `pageParams(route)` reads the page's parameters against
+the pattern its segment registered: `get(name)` for a `[name]` segment,
+`list(name)` (`string[]`) for a catch-all; a name the pattern does not bind
+halts, naming the pattern.
 
 The registered table crosses the boundary as `kind|pattern|slot|verb` lines in
 registration order — `L` layout, `T` template, `P` page, `D` default, `R` route

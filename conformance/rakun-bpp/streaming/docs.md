@@ -59,7 +59,7 @@ the library `routing`'s, and a consumer's flat `import {Segment} from
 |---|---|---|
 | `layout.bp` | `#[layout(seg)]` | `fn(props: LayoutProps) -> @Component<Element>` |
 | `template.bp` | `#[template(seg)]` | `fn(props: LayoutProps) -> @Component<Element>` |
-| `page.bp` | `#[page(seg)]` | `fn(route: PageContext) -> @Component<Element>` (+ `<name>Params(route)`) |
+| `page.bp` | `#[page(seg)]` | `fn(route: PageContext) -> @Component<Element>` (parameters: `pageParams(route)`) |
 | `default.bp` | `#[defaultView(seg)]` | `fn(props: LayoutProps) -> Element` |
 
 `#[page]`, `#[layout]` and `#[template]` refuse any other return, naming the

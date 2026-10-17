@@ -64,9 +64,9 @@ says what the feature does and links the cells beside it.
   slot. The table is `kind|pattern|slot|verb` lines — `parseTable` / `writeTable`
   — and `matchPath` / `layoutChain` read it, one implementation compiled to both
   targets. `#[layout]`, `#[template]`, `#[page]` and `#[defaultView]` register a
-  route from the app-relative directory they are given, and a `#[page]` also
-  gets an emitted `<name>Params(route)` accessor typed from its bracket
-  segments. Beside the decorator router, not instead of it.
+  route from the app-relative directory they are given, and a page reads its
+  parameters through `pageParams(route)` against the pattern its segment
+  registered. Beside the decorator router, not instead of it.
 - **Cycle detection** — `__rkMake_X` brackets construction with `rkEnter`/`rkDone`;
   a cycle A→B→A raises at first construction (runtime — a single decorator has no
   whole-graph view).
