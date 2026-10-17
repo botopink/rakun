@@ -14,7 +14,7 @@
 //// gives
 ////
 ////     UserRepository.findByIdSql() -> string     "SELECT id, name FROM users WHERE id = :id"
-////     val __rkQueryReg_UserRepository_findById = rkRegisterQuery("findById", "SELECT …");
+////     rkRegisterQuery("findById", "SELECT …")   — an executor, run before `main`
 ////
 //// What the decorator buys over an inline string:
 ////   1. the statement is a DECLARATION — a decorator argument is a literal, so
@@ -32,13 +32,12 @@
 //// NOT checked: the placeholder count against the method's parameters — a
 //// method-level `@Decl` exposes no parameter list (language gap, README).
 ////
-//// The registration is named by the declaration's identity,
-//// `__rkQueryReg_<Owner>_<method>` (`decl.owner`, botopink decision 526), so
-//// two `#[query]` methods of one name on two types of one module are two
-//// registrations and build.
+//// The registration is an executor compiled beside the annotated method
+//// (`compiler.compile`), so two `#[query]` methods of one name on two types of
+//// one module are two registrations and build.
 ////
 //// Decorator-body rules (see rakun's AGENTS.md): no sibling calls, no `//`
-//// comments inside the body, `@emit`s first and the placement checks last.
+//// comments inside the body, the outputs first and the placement checks last.
 
 import {compiler, compiler.DeclKind} from "std";
 
@@ -53,8 +52,6 @@ pub fn query(expr decl: unknown, comptime sql: string) {
         .replaceAll("\\", "\\\\")
         .replaceAll("\"", "\\\"")
         .replaceAll("\n", "\\n");
-    val owner = compiler.owner(decl);
-    val ownerName = if (owner == null) "module" else compiler.name(owner);
     compiler.addMember(
         "pub fn "
             + compiler.name(decl)!
@@ -62,17 +59,8 @@ pub fn query(expr decl: unknown, comptime sql: string) {
             + literal
             + "\"; }",
     );
-    @emit(
-        "val __rkQueryReg_"
-            + ownerName
-            + "_"
-            + compiler.name(decl)!
-            + " = rkRegisterQuery(\""
-            + compiler.name(decl)!
-            + "\", \""
-            + literal
-            + "\");",
-    );
+    val methodName = compiler.name(decl)!;
+    compiler.compile({ -> rkRegisterQuery(methodName, sql); });
     val trimmed = sql.trim();
     val head = (trimmed
         .replaceAll("\n", " ")

@@ -3,8 +3,8 @@
 ////
 //// WHY A PROXY. A decorator adds declarations; it cannot rewrite the body of
 //// the thing it annotates. So `#[transactional]` on a METHOD cannot open a
-//// transaction around it. What a TYPE-level decorator can do is emit a proxy,
-//// which is also what Spring does at run time:
+//// transaction around it. What a TYPE-level decorator can do is add a proxy
+//// type, which is also what Spring does at run time:
 ////
 ////     #[service]
 ////     #[transactional]
@@ -12,22 +12,25 @@
 ////         pub fn place(self: Self, userId: i32, total: i32) -> i32 { … }
 ////     }
 ////
-//// emits
+//// adds the associated type `OrderService.Tx` (`compiler.addType` over
+//// `compiler.buildType`, its text computed from the methods)
 ////
-////     pub type OrderServiceTx(inner: OrderService) {
-////         pub fn make() -> OrderServiceTx { … rkSingleton … OrderService.make() … }
+////     OrderService.Tx(inner: OrderService) {
+////         pub fn make() -> OrderService.Tx { … rkSingleton … OrderService.make() … }
 ////         pub fn place(self: Self, userId: i32, total: i32) -> i32 {
 ////             return rkTxRun("OrderService.place", "required", { -> self.inner.place(userId, total) });
 ////         }
 ////     }
-////     val __rkTx_OrderService = rkRegisterBean("OrderServiceTx", …, { -> OrderServiceTx.make() });
 ////
-//// A component injecting `OrderServiceTx` gets the transactional path;
+//// and compiles `rkRegisterBean("OrderService.Tx", …, { -> OrderService.Tx.make() })`
+//// into the init list (`compiler.compile`, run before `main`).
+////
+//// A component injecting `OrderService.Tx` gets the transactional path;
 //// injecting `OrderService` gets the bare one — the distinction Spring hides,
-//// made visible. `#[noTransaction]` on a method emits a plain forward.
-//// The proxy enters the context table, so a field `tx: OrderServiceTx`
+//// made visible. `#[noTransaction]` on a method gets a plain forward.
+//// The proxy enters the context table, so a field `tx: OrderService.Tx`
 //// resolves through `rkResolve`'s fallback. The application site imports
-//// `rkTxRun` (rakun-data) and `rkSingleton` and `rkRegisterBean` (rakun), and
+//// `rkTxRun` (rakun-data) and `rkSingleton` (rakun), and
 //// the type needs a stereotype for `<Type>.make()`.
 ////
 //// SIGNATURES ARE REDECLARED VERBATIM. `@Decl` spells every parameter and
@@ -42,6 +45,7 @@
 //// `rkTxRun` refuses any other value at run time — never accepted and ignored.
 
 import {compiler, compiler.DeclKind} from "std";
+import {rkRegisterBean} from "rakun";
 
 pub fn transactional(expr decl: unknown) {
     var methods: Array<string> = [];
@@ -94,40 +98,35 @@ pub fn transactional(expr decl: unknown) {
         } else if (ret != "") "return " + wrapped + ";" else voidWrapped;
         methods.push(sig + " {\n        " + body + "\n    }");
     });
+    val declName = compiler.name(decl)!;
+    val txName = declName + ".Tx";
     val make = "pub fn make() -> "
-        + compiler.name(decl)!
-        + "Tx {\n        return rkSingleton(\""
-        + compiler.name(decl)!
-        + "Tx\", { -> "
-        + compiler.name(decl)!
-        + "Tx(inner: "
-        + compiler.name(decl)!
+        + txName
+        + " {\n        return rkSingleton(\""
+        + txName
+        + "\", { -> "
+        + txName
+        + "(inner: "
+        + declName
         + ".make()) });\n    }";
-    @emit(
-        "pub type "
-            + compiler.name(decl)!
-            + "Tx(inner: "
-            + compiler.name(decl)!
-            + ") {\n    "
-            + make
-            + "\n\n    "
-            + methods.join("\n\n    ")
-            + "\n}",
+    compiler.addType(
+        "Tx",
+        compiler.buildType(
+            "(inner: "
+                + declName
+                + ") {\n    "
+                + make
+                + "\n\n    "
+                + methods.join("\n\n    ")
+                + "\n}",
+        ),
     );
-    @emit(
-        "val __rkTx_"
-            + compiler.name(decl)!
-            + " = rkRegisterBean(\""
-            + compiler.name(decl)!
-            + "Tx\", \"\", \"singleton\", false, false, \""
-            + compiler.name(decl)!
-            + "\", { -> "
-            + compiler.name(decl)!
-            + "Tx.make() });",
-    );
+    compiler.compile({ ->
+        rkRegisterBean(txName, "", "singleton", false, false, declName, { -> decl.Tx.make() });
+    });
     if (compiler.kind(decl) != DeclKind.Type)
         compiler.fail(
-            "#[transactional] must annotate a type - a decorator cannot wrap a method body, so the transaction lives on the <Type>Tx proxy the type-level marker emits",
+            "#[transactional] must annotate a type - a decorator cannot wrap a method body, so the transaction lives on the <Type>.Tx proxy the type-level marker adds",
             at: decl,
         );
     if (compiler.variants(decl).length > 0)

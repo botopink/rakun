@@ -167,7 +167,7 @@ pub type OrderService(
 // A consumer of both: the transactional proxy and the bare service.
 #[component]
 pub type OrderDesk(
-    tx: OrderServiceTx,
+    tx: OrderService.Tx,
     bare: OrderService,
 )
 
@@ -381,7 +381,7 @@ test "query: a transactional proxy call is wrapped in begin and commit" {
     val _beans = rkInstallBeans(beans());
     val _r = resetTables();
     val _i = UserRepository.make().insert(1, "ana", "a@example.com");
-    val id = OrderServiceTx.make().place(1, 250);
+    val id = OrderService.Tx.make().place(1, 250);
     assert id == 1;
     assert log()
         == "INSERT INTO users (id, name, email) VALUES (:id, :name, :email)  params=[id=1, name=ana, email=a@example.com]\nbegin\nSELECT id, name, email FROM users WHERE id = :id  params=[id=1]\nSELECT COUNT(*) AS n FROM orders  params=[]\nINSERT INTO orders (id, user_id, total, state) VALUES (:id, :userId, :total, 'placed')  params=[id=1, userId=1, total=250]\nINSERT INTO order_audit (order_id, action) VALUES (:orderId, :action)  params=[orderId=1, action=placed]\ncommit";
@@ -391,7 +391,7 @@ test "query: a raise inside the proxy rolls back and the raise propagates" {
     val _beans = rkInstallBeans(beans());
     val _r = resetTables();
     try asserts.throwsWith({ ->
-        val _id = OrderServiceTx.make().place(9, 10);
+        val _id = OrderService.Tx.make().place(9, 10);
         0;
     }, "no user 9");
     assert log()
@@ -406,7 +406,7 @@ test "query: a nested transaction inside the proxy joins it with a single commit
         [],
     );
     val _x = rkSqlLogReset();
-    assert OrderServiceTx.make().refund(1) == 1;
+    assert OrderService.Tx.make().refund(1) == 1;
     assert log()
         == "begin\nUPDATE orders SET state = 'refunded' WHERE id = :id  params=[id=1]\nINSERT INTO order_audit (order_id, action) VALUES (:id, 'refunded')  params=[id=1]\ncommit";
 }
@@ -419,7 +419,7 @@ test "query: noTransaction emits a plain forward" {
         [],
     );
     val _x = rkSqlLogReset();
-    assert OrderServiceTx.make().history(1) == "1:250";
+    assert OrderService.Tx.make().history(1) == "1:250";
     assert log()
         == "SELECT id, user_id, total, state FROM orders WHERE user_id = :userId ORDER BY id  params=[userId=1]";
 }
