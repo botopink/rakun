@@ -856,13 +856,13 @@ fn bootFailure(source: string, reason: string, published: i32) -> i32 {
 // associated fn read as a value is an unbound variable on erlang (front 130's
 // README, "Found during the migration").
 
-pub fn managed(comptime decl: @Decl) {
+pub fn managed(expr decl: unknown) {
     var qual = "\"\"";
     var scopeLit = "\"singleton\"";
     var isPrimary = "false";
     var isLazy = "false";
     var stereotype = "";
-    decl.annotations.forEach({ a ->
+    compiler.annotations(decl).forEach({ a ->
         val q = if (a.name == "qualifier") a.args.join("") else qual;
         qual = q;
         val s = if (a.name == "scope") a.args.join("") else scopeLit;
@@ -883,7 +883,7 @@ pub fn managed(comptime decl: @Decl) {
     val singleton = scopeLit == "\"singleton\"";
     val request = scopeLit == "\"request\"";
     var args: Array<string> = [];
-    decl.fields.forEach({ f ->
+    compiler.fields(decl).forEach({ f ->
         var valKey = "";
         f.annotations.forEach(
             { a -> if (a.name == "value") valKey = a.args.join("") },
@@ -899,32 +899,32 @@ pub fn managed(comptime decl: @Decl) {
     val scanLine = if (singleton)
         ""
     else
-        "val __rkScan_" + decl.name + " = rkScan(\"" + decl.name + "\");";
+        "val __rkScan_" + compiler.name(decl)! + " = rkScan(\"" + compiler.name(decl)! + "\");";
     @emit(scanLine);
     val newLine = if (singleton)
         ""
     else
         "pub fn __rkNew_"
-            + decl.name
+            + compiler.name(decl)!
             + "() -> "
-            + decl.name
+            + compiler.name(decl)!
             + " { return "
-            + decl.name
+            + compiler.name(decl)!
             + "("
             + args.join(", ")
             + "); }";
     @emit(newLine);
-    val fresh = "__rkNew_" + decl.name + "()";
+    val fresh = "__rkNew_" + compiler.name(decl)! + "()";
     val scoped = if (request)
-        "{ -> rkRequestScoped(\"" + decl.name + "\", { -> " + fresh + " }) }"
+        "{ -> rkRequestScoped(\"" + compiler.name(decl)! + "\", { -> " + fresh + " }) }"
     else
         "{ -> " + fresh + " }";
-    val factory = if (singleton) "{ -> " + decl.name + ".make() }" else scoped;
+    val factory = if (singleton) "{ -> " + compiler.name(decl)! + ".make() }" else scoped;
     @emit(
         "val __rkBean_"
-            + decl.name
+            + compiler.name(decl)!
             + " = rkRegisterBean(\""
-            + decl.name
+            + compiler.name(decl)!
             + "\", "
             + qual
             + ", "
@@ -934,14 +934,14 @@ pub fn managed(comptime decl: @Decl) {
             + ", "
             + isLazy
             + ", \""
-            + decl.name
+            + compiler.name(decl)!
             + "\", "
             + factory
             + ");",
     );
-    val instance = if (singleton) decl.name + ".make()" else fresh;
+    val instance = if (singleton) compiler.name(decl)! + ".make()" else fresh;
     var hooked = "";
-    decl.methods.forEach({ m ->
+    compiler.methods(decl).forEach({ m ->
         var phase = "";
         m.annotations.forEach({ a ->
             val ph = if (a.name == "postConstruct")
@@ -957,11 +957,11 @@ pub fn managed(comptime decl: @Decl) {
         if (phase != "")
             @emit(
                 "val __rkLc_"
-                    + decl.name
+                    + compiler.name(decl)!
                     + "_"
                     + m.name
                     + " = rkRegisterLifecycle(\""
-                    + decl.name
+                    + compiler.name(decl)!
                     + "\", \""
                     + m.name
                     + "\", \""
@@ -973,7 +973,7 @@ pub fn managed(comptime decl: @Decl) {
                     + "() });",
             );
     });
-    decl.methods.forEach({ m ->
+    compiler.methods(decl).forEach({ m ->
         var evName = "";
         m.annotations.forEach({ a ->
             val en = if (a.name == "eventListener") a.args.join("") else evName;
@@ -982,13 +982,13 @@ pub fn managed(comptime decl: @Decl) {
         if (evName != "")
             @emit(
                 "val __rkEv_"
-                    + decl.name
+                    + compiler.name(decl)!
                     + "_"
                     + m.name
                     + " = rkRegisterListener("
                     + evName
                     + ", \""
-                    + decl.name
+                    + compiler.name(decl)!
                     + "\", { ev -> "
                     + instance
                     + "."
@@ -996,17 +996,19 @@ pub fn managed(comptime decl: @Decl) {
                     + "(ev) });",
             );
     });
-    if (decl.kind != DeclKind.Type)
-        decl.fail("#[managed] must annotate a type");
-    if (decl.variants.length > 0)
-        decl.fail("#[managed] must annotate a type with fields, not an enum");
+    if (compiler.kind(decl) != DeclKind.Type)
+        compiler.fail("#[managed] must annotate a type", at: decl);
+    if (compiler.variants(decl).length > 0)
+        compiler.fail("#[managed] must annotate a type with fields, not an enum", at: decl);
     if ((!singleton && stereotype != ""))
-        decl.fail(
+        compiler.fail(
             "a #[managed] type with a non-singleton #[scope] may not also carry a stereotype - the stereotype gives the type the singleton make() the catalogue holds and constructor injection resolves a field through, so the bean would be REGISTERED as a prototype and INJECTED as a singleton. Drop the stereotype: a prototype or request bean is reached through ctx.resolve, and a field of it through the context table",
+            at: decl,
         );
     if ((!singleton && hooked != ""))
-        decl.fail(
+        compiler.fail(
             "a #[managed] type with a non-singleton #[scope] may not carry #[postConstruct] or #[preDestroy] - the passes run once at boot and once at shutdown, over an instance nobody kept, which is not what either marker means on a bean built afresh per resolve",
+            at: decl,
         );
 }
 
@@ -1051,12 +1053,12 @@ pub fn managed(comptime decl: @Decl) {
 // catalogue, keyed by their return type, is question `130-b`; until it is
 // answered they reach injection through the context table alone.)
 
-pub fn provides(comptime decl: @Decl) {
+pub fn provides(expr decl: unknown) {
     var qual = "\"\"";
     var scopeLit = "\"singleton\"";
     var isPrimary = "false";
     var isLazy = "false";
-    decl.annotations.forEach({ a ->
+    compiler.annotations(decl).forEach({ a ->
         val q = if (a.name == "qualifier") a.args.join("") else qual;
         qual = q;
         val s = if (a.name == "scope") a.args.join("") else scopeLit;
@@ -1066,8 +1068,8 @@ pub fn provides(comptime decl: @Decl) {
         val l = if (a.name == "lazy") "true" else isLazy;
         isLazy = l;
     });
-    val t = decl.returnType;
-    val call = decl.name + "()";
+    val t = compiler.returnType(decl);
+    val call = compiler.name(decl)! + "()";
     val keyExpr = "\"" + t + "@\" + " + qual;
     val singleton = scopeLit == "\"singleton\"";
     val request = scopeLit == "\"request\"";
@@ -1087,7 +1089,7 @@ pub fn provides(comptime decl: @Decl) {
         scoped;
     @emit(
         "val __rkBean_"
-            + decl.name
+            + compiler.name(decl)!
             + " = rkRegisterBean(\""
             + t
             + "\", "
@@ -1099,16 +1101,17 @@ pub fn provides(comptime decl: @Decl) {
             + ", "
             + isLazy
             + ", \""
-            + decl.name
+            + compiler.name(decl)!
             + "\", { -> "
             + cached
             + " });",
     );
-    if (decl.kind != DeclKind.Fn)
-        decl.fail("#[provides] must annotate a function");
-    if (decl.returnType == "")
-        decl.fail(
+    if (compiler.kind(decl) != DeclKind.Fn)
+        compiler.fail("#[provides] must annotate a function", at: decl);
+    if (compiler.returnType(decl) == "")
+        compiler.fail(
             "#[provides] must annotate a function that returns a value - a bean is what the function RETURNS, and a void function returns nothing to register",
+            at: decl,
         );
 }
 
@@ -1120,24 +1123,27 @@ pub fn provides(comptime decl: @Decl) {
 // already use. A marker that emitted its own line could not see the factory it
 // belongs to.
 
-pub fn qualifier(comptime decl: @Decl, comptime name: @Expr<string>) {
-    if (decl.kind == DeclKind.Field)
-        decl.fail(
+pub fn qualifier(expr decl: unknown, comptime name: string) {
+    if (compiler.kind(decl) == DeclKind.Field)
+        compiler.fail(
             "#[qualifier] must annotate a type or a #[provides] function, not a field",
+            at: decl,
         );
 }
 
-pub fn primary(comptime decl: @Decl) {
-    if (decl.kind == DeclKind.Field)
-        decl.fail(
+pub fn primary(expr decl: unknown) {
+    if (compiler.kind(decl) == DeclKind.Field)
+        compiler.fail(
             "#[primary] must annotate a type or a #[provides] function, not a field",
+            at: decl,
         );
 }
 
-pub fn lazy(comptime decl: @Decl) {
-    if (decl.kind == DeclKind.Field)
-        decl.fail(
+pub fn lazy(expr decl: unknown) {
+    if (compiler.kind(decl) == DeclKind.Field)
+        compiler.fail(
             "#[lazy] must annotate a type or a #[provides] function, not a field",
+            at: decl,
         );
 }
 
@@ -1153,35 +1159,36 @@ pub fn lazy(comptime decl: @Decl) {
 // Each named type must carry a stereotype — its `make()` member is the
 // registered factory. A name that has none is `unknown-associated-fn` at the
 // import site, which names the type and the configuration that asked for it.
-pub fn imports(comptime decl: @Decl, comptime names: @Expr<string>) {
-    names.value
+pub fn imports(expr decl: unknown, comptime names: string) {
+    names
         .split(",")
         .forEach({ raw ->
             val name = raw.replaceAll(" ", "");
             if (name != "")
                 @emit(
                     "val __rkImp_"
-                        + decl.name
+                        + compiler.name(decl)!
                         + "_"
                         + name
                         + " = rkRegisterBean(\""
                         + name
                         + "\", \"\", \"singleton\", false, false, \""
-                        + decl.name
+                        + compiler.name(decl)!
                         + "\", { -> "
                         + name
                         + ".make() });",
                 );
         });
-    if (decl.kind != DeclKind.Type)
-        decl.fail("#[imports] must annotate a type (a #[configuration])");
-    if (decl.variants.length > 0)
-        decl.fail("#[imports] must annotate a type with fields, not an enum");
+    if (compiler.kind(decl) != DeclKind.Type)
+        compiler.fail("#[imports] must annotate a type (a #[configuration])", at: decl);
+    if (compiler.variants(decl).length > 0)
+        compiler.fail("#[imports] must annotate a type with fields, not an enum", at: decl);
 }
 
-pub fn scope(comptime decl: @Decl, comptime name: @Expr<string>) {
-    if (decl.kind == DeclKind.Field)
-        decl.fail(
+pub fn scope(expr decl: unknown, comptime name: string) {
+    if (compiler.kind(decl) == DeclKind.Field)
+        compiler.fail(
             "#[scope] must annotate a type or a #[provides] function, not a field",
+            at: decl,
         );
 }

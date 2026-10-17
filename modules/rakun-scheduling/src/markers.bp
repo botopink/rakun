@@ -34,9 +34,9 @@
 //// are comment-free, use no `.at()` and no optional, and call no sibling (the
 //// comptime rules `context.bp`'s `#[managed]` docblock records).
 
-pub fn scheduler(comptime decl: @Decl) {
+pub fn scheduler(expr decl: unknown) {
     var stereotype = "";
-    decl.annotations.forEach({ a ->
+    compiler.annotations(decl).forEach({ a ->
         val isStereo = a.name == "component"
             || a.name == "service"
             || a.name == "repository"
@@ -48,7 +48,7 @@ pub fn scheduler(comptime decl: @Decl) {
     });
     var tasks = 0;
     var problem = "";
-    decl.methods.forEach({ m ->
+    compiler.methods(decl).forEach({ m ->
         var kinds: Array<string> = [];
         var arg = "";
         m.annotations.forEach({ a ->
@@ -59,7 +59,7 @@ pub fn scheduler(comptime decl: @Decl) {
             val nextArg = if (isTrigger) a.args.join("") else arg;
             arg = nextArg;
         });
-        val label = decl.name + "." + m.name;
+        val label = compiler.name(decl)! + "." + m.name;
         var extra = "";
         var count = 0;
         m.params.forEach({ p ->
@@ -117,7 +117,7 @@ pub fn scheduler(comptime decl: @Decl) {
         if (kinds.length == 1)
             @emit(
                 "val __rkSched_"
-                    + decl.name
+                    + compiler.name(decl)!
                     + "_"
                     + m.name
                     + " = "
@@ -129,61 +129,66 @@ pub fn scheduler(comptime decl: @Decl) {
                     + "\", "
                     + arg
                     + ", { -> "
-                    + decl.name
+                    + compiler.name(decl)!
                     + ".make()."
                     + m.name
                     + "() });",
             );
     });
-    if (decl.kind != DeclKind.Type)
-        decl.fail("#[scheduler] must annotate a type");
+    if (compiler.kind(decl) != DeclKind.Type)
+        compiler.fail("#[scheduler] must annotate a type", at: decl);
     if (stereotype == "")
-        decl.fail(
+        compiler.fail(
             "#[scheduler] needs a stereotype on the same type (#[component], #[service], …) - the stereotype emits the singleton factory each task's closure builds the component through",
+            at: decl,
         );
     if (tasks == 0)
-        decl.fail(
+        compiler.fail(
             "#[scheduler] on "
-                + decl.name
+                + compiler.name(decl)!
                 + " finds no method carrying #[scheduled], #[fixedRate] or #[fixedDelay] - a scheduler with no task is a mistake, not an empty schedule",
+            at: decl,
         );
-    if (problem != "") decl.fail(problem);
+    if (problem != "") compiler.fail(problem, at: decl);
 }
 
-pub fn fixedRate(comptime decl: @Decl, comptime millis: @Expr<i32>) {
-    if (decl.kind != DeclKind.Method)
-        decl.fail("#[fixedRate] must annotate a method of a #[scheduler] type");
-    if (millis.value <= 0)
-        decl.fail(
+pub fn fixedRate(expr decl: unknown, comptime millis: i32) {
+    if (compiler.kind(decl) != DeclKind.Method)
+        compiler.fail("#[fixedRate] must annotate a method of a #[scheduler] type", at: decl);
+    if (millis <= 0)
+        compiler.fail(
             "#[fixedRate("
-                + millis.value.toString()
+                + millis.toString()
                 + ")] - the interval is a positive number of milliseconds",
+            at: decl,
         );
 }
 
-pub fn fixedDelay(comptime decl: @Decl, comptime millis: @Expr<i32>) {
-    if (decl.kind != DeclKind.Method)
-        decl.fail(
+pub fn fixedDelay(expr decl: unknown, comptime millis: i32) {
+    if (compiler.kind(decl) != DeclKind.Method)
+        compiler.fail(
             "#[fixedDelay] must annotate a method of a #[scheduler] type",
+            at: decl,
         );
-    if (millis.value <= 0)
-        decl.fail(
+    if (millis <= 0)
+        compiler.fail(
             "#[fixedDelay("
-                + millis.value.toString()
+                + millis.toString()
                 + ")] - the interval is a positive number of milliseconds",
+            at: decl,
         );
 }
 
-pub fn scheduled(comptime decl: @Decl, comptime expr: @Expr<string>) {
+pub fn scheduled(expr decl: unknown, comptime expr: string) {
     var fields: Array<string> = [];
-    expr.value
+    expr
         .trim()
         .replaceAll("\t", " ")
         .split(" ")
         .forEach({ f ->
             if (f != "") fields.push(f);
         });
-    val shown = expr.value.trim();
+    val shown = expr.trim();
     var problem = if (fields.length != 6)
         "rakun-scheduling: a cron expression has six fields (second minute hour day-of-month month day-of-week) and `"
             + shown
@@ -403,7 +408,7 @@ pub fn scheduled(comptime decl: @Decl, comptime expr: @Expr<string>) {
                     problem = p2;
                 });
     });
-    if (decl.kind != DeclKind.Method)
-        decl.fail("#[scheduled] must annotate a method of a #[scheduler] type");
-    if (problem != "") decl.fail(problem);
+    if (compiler.kind(decl) != DeclKind.Method)
+        compiler.fail("#[scheduled] must annotate a method of a #[scheduler] type", at: decl);
+    if (problem != "") compiler.fail(problem, at: decl);
 }

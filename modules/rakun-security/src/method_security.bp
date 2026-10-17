@@ -92,42 +92,47 @@ pub fn rkRequireAuthority(label: string, required: string) -> i32 {
 
 // ── the markers ─────────────────────────────────────────────────────────────
 
-pub fn secured(comptime decl: @Decl, comptime authorities: @Expr<string>) {
-    val bare = authorities.value.replaceAll("\"", "").trim();
+pub fn secured(expr decl: unknown, comptime authorities: string) {
+    val bare = authorities.replaceAll("\"", "").trim();
     val odd = bare.contains("(")
         || bare.contains(" ")
         || bare.contains("'")
         || bare.contains("#");
-    if (decl.kind != DeclKind.Method && decl.kind != DeclKind.Type)
-        decl.fail(
+    if (compiler.kind(decl) != DeclKind.Method && compiler.kind(decl) != DeclKind.Type)
+        compiler.fail(
             "#[secured] must annotate a method, or the type, of a #[methodSecurity] type",
+            at: decl,
         );
     if (bare == "")
-        decl.fail(
+        compiler.fail(
             "#[secured] needs at least one authority - #[secured(\"ROLE_ADMIN\")] or #[secured(\"ROLE_A,ROLE_B\")]",
+            at: decl,
         );
     if (odd)
-        decl.fail(
+        compiler.fail(
             "#[secured] takes authority names, comma-separated (ROLE_A,ROLE_B) - an expression is #[preAuthorize], which is not ported",
+            at: decl,
         );
 }
 
-pub fn permitAll(comptime decl: @Decl) {
-    if (decl.kind != DeclKind.Method && decl.kind != DeclKind.Type)
-        decl.fail(
+pub fn permitAll(expr decl: unknown) {
+    if (compiler.kind(decl) != DeclKind.Method && compiler.kind(decl) != DeclKind.Type)
+        compiler.fail(
             "#[permitAll] must annotate a method, or the type, of a #[methodSecurity] type",
+            at: decl,
         );
 }
 
-pub fn preAuthorize(comptime decl: @Decl, comptime expression: @Expr<string>) {
-    decl.fail(
+pub fn preAuthorize(expr decl: unknown, comptime expression: string) {
+    compiler.fail(
         "#[preAuthorize] is not ported: expression-based security needs an expression language and botopink has none. Supported forms: #[secured(\"ROLE\")], #[secured(\"ROLE_A,ROLE_B\")] (any of) and #[permitAll]; write a subject check as ordinary code in the method",
+        at: decl,
     );
 }
 
-pub fn methodSecurity(comptime decl: @Decl) {
+pub fn methodSecurity(expr decl: unknown) {
     var typeRequirement = "authenticated";
-    decl.annotations.forEach({ a ->
+    compiler.annotations(decl).forEach({ a ->
         val s = if (a.name == "secured")
             a.args.join("").replaceAll("\"", "").replaceAll(" ", "")
         else
@@ -138,7 +143,7 @@ pub fn methodSecurity(comptime decl: @Decl) {
     });
     var methods: Array<string> = [];
     var expression = "";
-    decl.methods.forEach({ m ->
+    compiler.methods(decl).forEach({ m ->
         var required = typeRequirement;
         m.annotations.forEach({ a ->
             val s = if (a.name == "secured")
@@ -149,7 +154,7 @@ pub fn methodSecurity(comptime decl: @Decl) {
             val p = if (a.name == "permitAll") "permitAll" else required;
             required = p;
             val e = if (a.name == "preAuthorize" && expression == "")
-                decl.name + "." + m.name
+                compiler.name(decl)! + "." + m.name
             else
                 expression;
             expression = e;
@@ -170,7 +175,7 @@ pub fn methodSecurity(comptime decl: @Decl) {
             "pub fn " + m.name + "(self: Self)";
         val sig = if (ret != "") head + " -> " + ret else head;
         val guard = "val _sec = rkRequireAuthority(\""
-            + decl.name
+            + compiler.name(decl)!
             + "."
             + m.name
             + "\", \""
@@ -183,19 +188,19 @@ pub fn methodSecurity(comptime decl: @Decl) {
         methods.push(sig + " {\n        " + body + "\n    }");
     });
     val make = "pub fn make() -> "
-        + decl.name
+        + compiler.name(decl)!
         + "Sec {\n        return rkSingleton(\""
-        + decl.name
+        + compiler.name(decl)!
         + "Sec\", { -> "
-        + decl.name
+        + compiler.name(decl)!
         + "Sec(inner: "
-        + decl.name
+        + compiler.name(decl)!
         + ".make()) });\n    }";
     @emit(
         "pub type "
-            + decl.name
+            + compiler.name(decl)!
             + "Sec(inner: "
-            + decl.name
+            + compiler.name(decl)!
             + ") {\n    "
             + make
             + "\n\n    "
@@ -204,27 +209,30 @@ pub fn methodSecurity(comptime decl: @Decl) {
     );
     @emit(
         "val __rkSec_"
-            + decl.name
+            + compiler.name(decl)!
             + " = rkRegisterBean(\""
-            + decl.name
+            + compiler.name(decl)!
             + "Sec\", \"\", \"singleton\", false, false, \""
-            + decl.name
+            + compiler.name(decl)!
             + "\", { -> "
-            + decl.name
+            + compiler.name(decl)!
             + "Sec.make() });",
     );
-    if (decl.kind != DeclKind.Type)
-        decl.fail(
+    if (compiler.kind(decl) != DeclKind.Type)
+        compiler.fail(
             "#[methodSecurity] must annotate a type - a decorator cannot wrap a method body, so the check lives on the <Type>Sec proxy the type-level marker emits",
+            at: decl,
         );
-    if (decl.variants.length > 0)
-        decl.fail(
+    if (compiler.variants(decl).length > 0)
+        compiler.fail(
             "#[methodSecurity] must annotate a type with fields or methods, not an enum - an enum has no methods to secure",
+            at: decl,
         );
     if (expression != "")
-        decl.fail(
+        compiler.fail(
             "#[preAuthorize] is not ported: expression-based security needs an expression language and botopink has none ("
                 + expression
                 + "). Supported forms: #[secured(\"ROLE\")], #[secured(\"ROLE_A,ROLE_B\")] (any of) and #[permitAll]; write a subject check as ordinary code in the method",
+            at: decl,
         );
 }

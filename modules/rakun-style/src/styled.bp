@@ -376,13 +376,13 @@ fn propertyCode(decls: string, codes: string[], holes: Holes) -> string {
 
 // `styled "…"`: a component — declarations, nested rules, variants, at-rules.
 // LANGUAGE GAP: a library's template function cannot read the program's catalogue (`@TypeInfo.all(with: theme)` in an imported module), so both literals read `baseTheme()`, never the application's `#[theme]`.
-pub default fn styled(comptime css: @Expr<string>) -> @ExprCustom<StyledView> {
+pub default fn styled(expr css: string) -> StyledView {
     var cs: string[] = [];
     var starts: i32[] = [];
     var ends: i32[] = [];
     var codes: string[] = [];
     var holes = Holes(known: [], scalar: [], texts: [], properties: []);
-    for (css.parts()) { part ->
+    for (compiler.parts(css)) { part ->
         if (part.kind == "Interp") {
             cs = cs.append(["\u{2}" + codes.length.toString() + "\u{3}"]);
             starts = starts.append([part.span.start]);
@@ -405,10 +405,10 @@ pub default fn styled(comptime css: @Expr<string>) -> @ExprCustom<StyledView> {
     if (read.problem != "") {
         val a = starts.at(read.at) ?? 0;
         val b = ends.at(read.at) ?? a;
-        css.failAt(Span(a, b, 1), "styled: " + read.problem);
+        compiler.fail("styled: " + read.problem, at: css, span: Span(a, b, 1));
         text = "";
     } else if (text == "")
-        css.fail("styled: a component holds at least one declaration");
+        compiler.fail("styled: a component holds at least one declaration", at: css);
     val root = CustomNode(
         kind: "styled",
         span: Span(0, 0, 1),
@@ -416,20 +416,21 @@ pub default fn styled(comptime css: @Expr<string>) -> @ExprCustom<StyledView> {
         ref: null,
         children: [],
     );
-    return css.custom(root, css.build(styledCode(text, codes, holes)));
+    compiler.custom(root);
+    return compiler.build(styledCode(text, codes, holes));
 }
 
 // `styledProperty "…"`: declarations only — a `{`, `&` or `@` is refused at
 // the character.
 pub fn styledProperty(
-    comptime css: @Expr<string>,
-) -> @ExprCustom<StyledPropertyView> {
+    expr css: string,
+) -> StyledPropertyView {
     var cs: string[] = [];
     var starts: i32[] = [];
     var ends: i32[] = [];
     var codes: string[] = [];
     var holes = Holes(known: [], scalar: [], texts: [], properties: []);
-    for (css.parts()) { part ->
+    for (compiler.parts(css)) { part ->
         if (part.kind == "Interp") {
             cs = cs.append(["\u{2}" + codes.length.toString() + "\u{3}"]);
             starts = starts.append([part.span.start]);
@@ -452,18 +453,19 @@ pub fn styledProperty(
     var decls = read.decls;
     if (bad >= 0) {
         val a = starts.at(bad) ?? 0;
-        css.failAt(
-            Span(a, a + 1, 1),
+        compiler.fail(
             "styled: styledProperty holds declarations only — use styled for selectors, variants and at-rules",
+            at: css,
+            span: Span(a, a + 1, 1),
         );
         decls = "";
     } else if (read.problem != "") {
         val a = starts.at(read.at) ?? 0;
         val b = ends.at(read.at) ?? a;
-        css.failAt(Span(a, b, 1), "styled: " + read.problem);
+        compiler.fail("styled: " + read.problem, at: css, span: Span(a, b, 1));
         decls = "";
     } else if (decls == "")
-        css.fail("styled: styledProperty holds at least one declaration");
+        compiler.fail("styled: styledProperty holds at least one declaration", at: css);
     val root = CustomNode(
         kind: "styled",
         span: Span(0, 0, 1),
@@ -471,5 +473,6 @@ pub fn styledProperty(
         ref: null,
         children: [],
     );
-    return css.custom(root, css.build(propertyCode(decls, codes, holes)));
+    compiler.custom(root);
+    return compiler.build(propertyCode(decls, codes, holes));
 }

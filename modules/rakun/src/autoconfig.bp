@@ -430,12 +430,12 @@ pub fn isAutoConfigured(name: string) -> bool {
 // provides its return type, which is the one piece of the entry its NAME
 // cannot carry.
 
-pub fn autoConfiguration(comptime decl: @Decl) {
+pub fn autoConfiguration(expr decl: unknown) {
     var conds: Array<string> = [];
     var before: Array<string> = [];
     var after: Array<string> = [];
     var bad = "";
-    decl.annotations.forEach({ a ->
+    compiler.annotations(decl).forEach({ a ->
         val raw = a.args.join("").split("\"").join("");
         val a0 = a.args.slice(0, 1).join("").split("\"").join("");
         val a1 = a.args.slice(1, 2).join("").split("\"").join("");
@@ -466,9 +466,9 @@ pub fn autoConfiguration(comptime decl: @Decl) {
     });
     @emit(
         "val __rkAuto_"
-            + decl.name
+            + compiler.name(decl)!
             + " = rkAutoRegister(\""
-            + decl.name
+            + compiler.name(decl)!
             + "\", \""
             + conds.join(";")
             + "\", \""
@@ -479,16 +479,16 @@ pub fn autoConfiguration(comptime decl: @Decl) {
     );
     @emit(
         "val __rkAutoQ_"
-            + decl.name
+            + compiler.name(decl)!
             + " = rkAutoProvides(\""
-            + decl.name
+            + compiler.name(decl)!
             + "\", \""
-            + decl.name
+            + compiler.name(decl)!
             + "\");",
     );
-    @emit("val __rkScan_" + decl.name + " = rkScan(\"" + decl.name + "\");");
+    @emit("val __rkScan_" + compiler.name(decl)! + " = rkScan(\"" + compiler.name(decl)! + "\");");
     var gargs: Array<string> = [];
-    decl.fields.forEach({ f ->
+    compiler.fields(decl).forEach({ f ->
         var valKey = "";
         f.annotations.forEach(
             { a -> if (a.name == "value") valKey = a.args.join("") },
@@ -501,22 +501,22 @@ pub fn autoConfiguration(comptime decl: @Decl) {
         } else "rkResolve(\"" + f.typeName + "\")";
         gargs.push(f.name + ": " + expr);
     });
-    decl.addMember(
+    compiler.addMember(
         "pub fn make() -> "
-            + decl.name
+            + compiler.name(decl)!
             + " { return rkSingleton(\""
-            + decl.name
+            + compiler.name(decl)!
             + "\", { -> val _e = rkEnter(\""
-            + decl.name
+            + compiler.name(decl)!
             + "\"); val v = "
-            + decl.name
+            + compiler.name(decl)!
             + "("
             + gargs.join(", ")
             + "); val _d = rkDone(\""
-            + decl.name
+            + compiler.name(decl)!
             + "\"); v }); }",
     );
-    decl.methods.forEach({ m ->
+    compiler.methods(decl).forEach({ m ->
         var isBean = false;
         var mc: Array<string> = [];
         var mbad = "";
@@ -546,10 +546,10 @@ pub fn autoConfiguration(comptime decl: @Decl) {
         });
         val carried = if (mbad != "") mbad else bad;
         bad = carried;
-        val full = decl.name + "." + m.name;
+        val full = compiler.name(decl)! + "." + m.name;
         val regLine = if (isBean)
             "val __rkAutoB_"
-                + decl.name
+                + compiler.name(decl)!
                 + "_"
                 + m.name
                 + " = rkAutoRegister(\""
@@ -562,7 +562,7 @@ pub fn autoConfiguration(comptime decl: @Decl) {
         @emit(regLine);
         val provLine = if (isBean)
             "val __rkAutoR_"
-                + decl.name
+                + compiler.name(decl)!
                 + "_"
                 + m.name
                 + " = rkAutoProvides(\""
@@ -575,7 +575,7 @@ pub fn autoConfiguration(comptime decl: @Decl) {
         @emit(provLine);
         val facLine = if (isBean)
             "val __rkBeanM_"
-                + decl.name
+                + compiler.name(decl)!
                 + "_"
                 + m.name
                 + " = rkRegisterBean(\""
@@ -587,7 +587,7 @@ pub fn autoConfiguration(comptime decl: @Decl) {
                 + "\", { -> val _g = rkAutoGate(\""
                 + full
                 + "\"); "
-                + decl.name
+                + compiler.name(decl)!
                 + ".make()."
                 + m.name
                 + "() }) });"
@@ -595,16 +595,18 @@ pub fn autoConfiguration(comptime decl: @Decl) {
             "";
         @emit(facLine);
     });
-    if (decl.kind != DeclKind.Type)
-        decl.fail("#[autoConfiguration] must annotate a type");
-    if (decl.variants.length > 0)
-        decl.fail(
+    if (compiler.kind(decl) != DeclKind.Type)
+        compiler.fail("#[autoConfiguration] must annotate a type", at: decl);
+    if (compiler.variants(decl).length > 0)
+        compiler.fail(
             "#[autoConfiguration] must annotate a type with fields, not an enum",
+            at: decl,
         );
     if (bad != "")
-        decl.fail(
+        compiler.fail(
             "#[autoConfiguration]: '"
                 + bad
                 + "' contains ';' or '|' - those are the condition blob's record and field separators, and a name carrying one cannot be parsed back",
+            at: decl,
         );
 }

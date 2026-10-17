@@ -92,14 +92,15 @@ pub type RawBody(verbatim: bool)
 
 // `#[isRaw]` — a tag annotation (decision 302): on an element it records
 // `RawBody`; a component has no body of its own to keep as text.
-pub fn isRaw(comptime decl: @Decl) {
-    if (decl.kind != DeclKind.Element)
-        decl.fail(
+pub fn isRaw(expr decl: unknown) {
+    if (compiler.kind(decl) != DeclKind.Element)
+        compiler.fail(
             "`#[isRaw]` is written on an element — <"
-                + decl.name
+                + compiler.name(decl)!
                 + "> is a component",
+            at: decl,
         );
-    decl.setMeta(RawBody(verbatim: true));
+    compiler.setMeta(RawBody(verbatim: true));
 }
 
 // `class={classList(["box", classIf(isRed, "red"), extra])}` — Astro's
@@ -388,14 +389,14 @@ fn closeTagCode(
 // becomes the core's `pub default fn` at `05-jhonstart/26` step 0 (200); until
 // then the core marks no `#[bpp.html]`, and `"bpp": "rakun-bpp"` is refused.
 #[bpp.html]
-pub fn html(comptime template: @Expr<string>) -> @ExprCustom<Element> {
+pub fn html(expr template: string) -> Element {
     val interpMark = "@@interp@@";
     var chs: Array<string> = [];
     var poss: Array<i32> = [];
     var pend: Array<i32> = [];
     var codes: Array<string> = [];
     var srcEnd = 0;
-    for (template.parts()) { part ->
+    for (compiler.parts(template)) { part ->
         if (part.kind == "Interp") {
             chs = chs.append([interpMark]);
             poss = poss.append([part.span.start]);
@@ -439,7 +440,7 @@ pub fn html(comptime template: @Expr<string>) -> @ExprCustom<Element> {
 
     var failed = false;
     val failSpan = { a, b, msg ->
-        if (failed == false) template.failAt(Span(a, b, 1), "html: " + msg);
+        if (failed == false) compiler.fail("html: " + msg, at: template, span: Span(a, b, 1));
         failed = true;
     };
 
@@ -469,7 +470,7 @@ pub fn html(comptime template: @Expr<string>) -> @ExprCustom<Element> {
     var fFlag: Array<string> = [""];
     // Decision 302 — the `@Decl` of the tag whose attribute zone is open: its
     // annotations run over it in written order.
-    var tagDecl = template.tagDecl(DeclKind.Element, "", []);
+    var tagDecl = compiler.tagDecl(DeclKind.Element, "", []);
     var fStart: Array<i32> = [0];
     var fEnd: Array<i32> = [0];
     var fParen: Array<i32> = [0];
@@ -684,7 +685,7 @@ pub fn html(comptime template: @Expr<string>) -> @ExprCustom<Element> {
                     )
                 else {
                     if (name != "")
-                        mark("tag", a, b, "tag", template.lookup(name));
+                        mark("tag", a, b, "tag", compiler.lookup(template, name));
                     doClose = true;
                 }
                 i = j + 1;
@@ -716,7 +717,7 @@ pub fn html(comptime template: @Expr<string>) -> @ExprCustom<Element> {
                     mark("tag", a, b, "tag", null);
                     push("tag", name, a, b, "");
                 } else {
-                    val binding = template.lookup(name);
+                    val binding = compiler.lookup(template, name);
                     if (binding == null) {
                         val hint = if (comp)
                             "a component tag calls the function of that name in scope"
@@ -743,7 +744,7 @@ pub fn html(comptime template: @Expr<string>) -> @ExprCustom<Element> {
                             binding,
                         );
                         push("tag", name, a, b, if (comp) "comp" else "");
-                        tagDecl = template.tagDecl(
+                        tagDecl = compiler.tagDecl(
                             if (comp) DeclKind.Component else DeclKind.Element,
                             name,
                             [],
@@ -909,7 +910,7 @@ pub fn html(comptime template: @Expr<string>) -> @ExprCustom<Element> {
                             "an annotation `#[…]` names a function",
                         )
                     else {
-                        val binding = template.lookup(ann);
+                        val binding = compiler.lookup(template, ann);
                         if (binding == null)
                             failSpan(
                                 a,
@@ -924,7 +925,7 @@ pub fn html(comptime template: @Expr<string>) -> @ExprCustom<Element> {
                             // tag's `@Decl`; `html` reads back the meta it
                             // knows by type, and leaves any other to its
                             // reader.
-                            tagDecl = template.annotate(
+                            tagDecl = compiler.annotate(
                                 tagDecl,
                                 Span(a, if (e > j) endOf(e - 1) else b, 1),
                             );
@@ -1367,5 +1368,6 @@ pub fn html(comptime template: @Expr<string>) -> @ExprCustom<Element> {
         ref: null,
         children: nodes,
     );
-    return template.custom(root, template.build(code));
+    compiler.custom(root);
+    return compiler.build(code);
 }

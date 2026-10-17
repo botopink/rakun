@@ -1961,13 +1961,13 @@ pub fn registerRakunKeys() -> i32 {
 // produced.
 
 pub fn configurationProperties(
-    comptime decl: @Decl,
-    comptime prefix: @Expr<string>,
+    expr decl: unknown,
+    comptime prefix: string,
 ) {
     var args: Array<string> = [];
     var unbindable = "";
     var catalogue: Array<string> = [];
-    decl.fields.forEach({ f ->
+    compiler.fields(decl).forEach({ f ->
         var unit = "";
         var fallback = "";
         var nested = false;
@@ -2009,31 +2009,31 @@ pub fn configurationProperties(
     });
     @emit(
         "pub fn __rkBind_"
-            + decl.name
+            + compiler.name(decl)!
             + "(prefix: string) -> "
-            + decl.name
+            + compiler.name(decl)!
             + " { return "
-            + decl.name
+            + compiler.name(decl)!
             + "("
             + args.join(", ")
             + "); }",
     );
-    decl.addMember(
+    compiler.addMember(
         "pub fn make() -> "
-            + decl.name
+            + compiler.name(decl)!
             + " { return rkSingleton(\""
-            + decl.name
+            + compiler.name(decl)!
             + "\", { -> __rkBind_"
-            + decl.name
+            + compiler.name(decl)!
             + "(\""
-            + prefix.value
+            + prefix
             + "\") }); }",
     );
     @emit(
         "val __rkCat_"
-            + decl.name
+            + compiler.name(decl)!
             + " = rkRegisterConfigKeys(\""
-            + prefix.value
+            + prefix
             + "\", \""
             + catalogue.join("|")
             + "\");",
@@ -2043,68 +2043,70 @@ pub fn configurationProperties(
     // the property sources are loaded and before the first component is
     // constructed (`bootSequence`), not at its first injection.
     var validated = false;
-    decl.annotations.forEach({ a ->
+    compiler.annotations(decl).forEach({ a ->
         if (a.name == "validated") validated = true;
     });
     if (validated) {
         @emit(
             "pub fn __rkCheck_"
-                + decl.name
+                + compiler.name(decl)!
                 + "() -> string { return configProblemOf(\""
-                + decl.name
+                + compiler.name(decl)!
                 + "\", \""
-                + prefix.value
+                + prefix
                 + "\", __rkBind_"
-                + decl.name
+                + compiler.name(decl)!
                 + "(\""
-                + prefix.value
+                + prefix
                 + "\").validate()); }",
         );
         @emit(
             "val __rkChk_"
-                + decl.name
+                + compiler.name(decl)!
                 + " = rkConfigCheckRegister(\""
-                + decl.name
+                + compiler.name(decl)!
                 + "\", { -> __rkCheck_"
-                + decl.name
+                + compiler.name(decl)!
                 + "() });",
         );
     }
-    if (decl.kind != DeclKind.Type)
-        decl.fail("#[configurationProperties] must annotate a type");
-    if (decl.variants.length > 0)
-        decl.fail(
+    if (compiler.kind(decl) != DeclKind.Type)
+        compiler.fail("#[configurationProperties] must annotate a type", at: decl);
+    if (compiler.variants(decl).length > 0)
+        compiler.fail(
             "#[configurationProperties] must annotate a type with fields, not an enum",
+            at: decl,
         );
     if (unbindable != "")
-        decl.fail(
+        compiler.fail(
             "#[configurationProperties] cannot bind the list field "
                 + unbindable
                 + " - a list binds as string[] or Array<string>, one comma-separated property",
+            at: decl,
         );
 }
 
 // `#[nested]` marks a field bound under `<prefix>.<field>` by its own type's
 // binder. The `#[configurationProperties]` body does the wiring (it sees every
 // field); this marker enforces placement.
-pub fn nested(comptime decl: @Decl) {
-    if (decl.kind != DeclKind.Field)
-        decl.fail("#[nested] must annotate a field");
+pub fn nested(expr decl: unknown) {
+    if (compiler.kind(decl) != DeclKind.Field)
+        compiler.fail("#[nested] must annotate a field", at: decl);
 }
 
 // `#[unit("seconds")]` is the unit a BARE number is read in for a `Duration` or
 // a `DataSize` field. A suffixed value (`30s`, `10MB`) parses whatever it says.
-pub fn unit(comptime decl: @Decl, comptime name: @Expr<string>) {
-    if (decl.kind != DeclKind.Field) decl.fail("#[unit] must annotate a field");
+pub fn unit(expr decl: unknown, comptime name: string) {
+    if (compiler.kind(decl) != DeclKind.Field) compiler.fail("#[unit] must annotate a field", at: decl);
 }
 
 // `#[defaultValue("false")]` is row 8 — the declared field default — written
 // where the catalogue can report it. A default written on the field itself
 // (`enabled: bool = false`) is not visible through `@Decl.fields`, so the
 // annotation is the form that reaches both the reader and the dump.
-pub fn defaultValue(comptime decl: @Decl, comptime literal: @Expr<string>) {
-    if (decl.kind != DeclKind.Field)
-        decl.fail("#[defaultValue] must annotate a field");
+pub fn defaultValue(expr decl: unknown, comptime literal: string) {
+    if (compiler.kind(decl) != DeclKind.Field)
+        compiler.fail("#[defaultValue] must annotate a field", at: decl);
 }
 
 // `#[validated]` is NOT declared here any more. It is the shared `validation`
@@ -2120,14 +2122,14 @@ pub fn defaultValue(comptime decl: @Decl, comptime literal: @Expr<string>) {
 // otherwise import. It registers the same names the record's own decorator
 // would have.
 pub fn enableConfigurationProperties(
-    comptime decl: @Decl,
-    comptime types: @Expr<string>,
+    expr decl: unknown,
+    comptime types: string,
 ) {
     var registrations: Array<string> = [];
-    types.value.split(",").forEach({ t -> registrations.push(t.trim()) });
+    types.split(",").forEach({ t -> registrations.push(t.trim()) });
     registrations.forEach(
         { name -> @emit("val __rkEnable_" + name + " = rkScan(\"" + name + "\");") },
     );
-    if (decl.kind != DeclKind.Type)
-        decl.fail("#[enableConfigurationProperties] must annotate a type");
+    if (compiler.kind(decl) != DeclKind.Type)
+        compiler.fail("#[enableConfigurationProperties] must annotate a type", at: decl);
 }

@@ -41,10 +41,10 @@
 //// `("NESTED")` on a method fails the build saying it is not implemented, and
 //// `rkTxRun` refuses any other value at run time — never accepted and ignored.
 
-pub fn transactional(comptime decl: @Decl) {
+pub fn transactional(expr decl: unknown) {
     var methods: Array<string> = [];
     var refused = "";
-    decl.methods.forEach({ m ->
+    compiler.methods(decl).forEach({ m ->
         var plain = false;
         var prop = "REQUIRED";
         m.annotations.forEach({ a ->
@@ -57,7 +57,7 @@ pub fn transactional(comptime decl: @Decl) {
             prop = q;
         });
         val badProp = if (prop != "REQUIRED" && refused == "")
-            decl.name + "." + m.name + " asks for propagation " + prop
+            compiler.name(decl)! + "." + m.name + " asks for propagation " + prop
         else
             refused;
         refused = badProp;
@@ -71,7 +71,7 @@ pub fn transactional(comptime decl: @Decl) {
         });
         val ret = m.returnType;
         val call = "self.inner." + m.name + "(" + args.join(", ") + ")";
-        val label = decl.name + "." + m.name;
+        val label = compiler.name(decl)! + "." + m.name;
         val head = if (params.length > 0)
             "pub fn " + m.name + "(self: Self, " + params.join(", ") + ")"
         else
@@ -93,19 +93,19 @@ pub fn transactional(comptime decl: @Decl) {
         methods.push(sig + " {\n        " + body + "\n    }");
     });
     val make = "pub fn make() -> "
-        + decl.name
+        + compiler.name(decl)!
         + "Tx {\n        return rkSingleton(\""
-        + decl.name
+        + compiler.name(decl)!
         + "Tx\", { -> "
-        + decl.name
+        + compiler.name(decl)!
         + "Tx(inner: "
-        + decl.name
+        + compiler.name(decl)!
         + ".make()) });\n    }";
     @emit(
         "pub type "
-            + decl.name
+            + compiler.name(decl)!
             + "Tx(inner: "
-            + decl.name
+            + compiler.name(decl)!
             + ") {\n    "
             + make
             + "\n\n    "
@@ -114,41 +114,46 @@ pub fn transactional(comptime decl: @Decl) {
     );
     @emit(
         "val __rkTx_"
-            + decl.name
+            + compiler.name(decl)!
             + " = rkRegisterBean(\""
-            + decl.name
+            + compiler.name(decl)!
             + "Tx\", \"\", \"singleton\", false, false, \""
-            + decl.name
+            + compiler.name(decl)!
             + "\", { -> "
-            + decl.name
+            + compiler.name(decl)!
             + "Tx.make() });",
     );
-    if (decl.kind != DeclKind.Type)
-        decl.fail(
+    if (compiler.kind(decl) != DeclKind.Type)
+        compiler.fail(
             "#[transactional] must annotate a type - a decorator cannot wrap a method body, so the transaction lives on the <Type>Tx proxy the type-level marker emits",
+            at: decl,
         );
-    if (decl.variants.length > 0)
-        decl.fail(
+    if (compiler.variants(decl).length > 0)
+        compiler.fail(
             "#[transactional] must annotate a type with fields, not an enum",
+            at: decl,
         );
     if (refused != "")
-        decl.fail(
+        compiler.fail(
             "#[transactional]: "
                 + refused
                 + " - only REQUIRED is implemented (a nested call joins the open transaction); REQUIRES_NEW and NESTED (savepoints) are not implemented and are refused rather than ignored",
+            at: decl,
         );
 }
 
-pub fn noTransaction(comptime decl: @Decl) {
-    if (decl.kind != DeclKind.Method)
-        decl.fail(
+pub fn noTransaction(expr decl: unknown) {
+    if (compiler.kind(decl) != DeclKind.Method)
+        compiler.fail(
             "#[noTransaction] must annotate a method of a #[transactional] type",
+            at: decl,
         );
 }
 
-pub fn propagation(comptime decl: @Decl, comptime name: @Expr<string>) {
-    if (decl.kind != DeclKind.Method)
-        decl.fail(
+pub fn propagation(expr decl: unknown, comptime name: string) {
+    if (compiler.kind(decl) != DeclKind.Method)
+        compiler.fail(
             "#[propagation] must annotate a method of a #[transactional] type",
+            at: decl,
         );
 }

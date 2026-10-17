@@ -216,16 +216,16 @@ fn paramExpr(op: string, name: string, typeName: string) -> string {
 
 // ── the decorators ──────────────────────────────────────────────────────────
 
-pub fn derived(comptime decl: @Decl) {
-    if (decl.kind != DeclKind.Method)
-        decl.fail("#[derived] marks a method of an #[entityRepository] type");
+pub fn derived(expr decl: unknown) {
+    if (compiler.kind(decl) != DeclKind.Method)
+        compiler.fail("#[derived] marks a method of an #[entityRepository] type", at: decl);
 }
 
-pub fn entityRepository(comptime decl: @Decl, comptime entity: @Expr<string>) {
-    val e = entity.value;
-    val repo = decl.name;
+pub fn entityRepository(expr decl: unknown, comptime entity: string) {
+    val e = entity;
+    val repo = compiler.name(decl)!;
     var problem = "";
-    for (decl.methods.filter(
+    for (compiler.methods(decl).filter(
         { m -> m.annotations.filter({ a -> a.name == "derived" }).length > 0 },
     )) { m ->
         val prefix = prefixOf(m.name);
@@ -374,11 +374,11 @@ pub fn entityRepository(comptime decl: @Decl, comptime entity: @Expr<string>) {
                 + ", ps).toList().map("
                 + mapper
                 + ");";
-        decl.addMember(
+        compiler.addMember(
             "pub fn " + m.name + "Sql() -> string { return \"" + body + "\"; }",
         );
         if (pageRet)
-            decl.addMember(
+            compiler.addMember(
                 "pub fn "
                     + m.name
                     + "CountSql() -> string { return \"select count(*) as n from "
@@ -386,7 +386,7 @@ pub fn entityRepository(comptime decl: @Decl, comptime entity: @Expr<string>) {
                     + whereText
                     + "\"; }",
             );
-        decl.addMember(head + " {\n    " + impl + "\n}");
+        compiler.addMember(head + " {\n    " + impl + "\n}");
         val want = if (prefix == "count" || prefix == "delete")
             "i32"
         else if (prefix == "exists")
@@ -442,9 +442,9 @@ pub fn entityRepository(comptime decl: @Decl, comptime entity: @Expr<string>) {
                 + e
                 + ">";
     }
-    if (decl.kind != DeclKind.Type)
-        decl.fail("#[entityRepository] must annotate a repository type");
-    if (problem != "") decl.fail(problem);
+    if (compiler.kind(decl) != DeclKind.Type)
+        compiler.fail("#[entityRepository] must annotate a repository type", at: decl);
+    if (problem != "") compiler.fail(problem, at: decl);
 }
 
 // ── relations ───────────────────────────────────────────────────────────────
@@ -456,62 +456,62 @@ pub fn entityRepository(comptime decl: @Decl, comptime entity: @Expr<string>) {
 // field and both entities are read through their `<Entity>.columns()` /
 // `<Entity>.entityMeta()`, so a typo is a compile error there.
 pub fn belongsTo(
-    comptime decl: @Decl,
-    comptime owner: @Expr<string>,
-    comptime ownerField: @Expr<string>,
-    comptime target: @Expr<string>,
-    comptime targetField: @Expr<string>,
+    expr decl: unknown,
+    comptime owner: string,
+    comptime ownerField: string,
+    comptime target: string,
+    comptime targetField: string,
 ) {
-    val n = decl.name;
-    val ownerName = decl.fields
-        .filter({ f -> f.typeName == owner.value })
+    val n = compiler.name(decl)!;
+    val ownerName = compiler.fields(decl)
+        .filter({ f -> f.typeName == owner })
         .map({ f -> f.name })
         .at(0) ?? "";
-    val targets = decl.fields.filter(
-        { f -> f.typeName == target.value || f.typeName == "?" + target.value },
+    val targets = compiler.fields(decl).filter(
+        { f -> f.typeName == target || f.typeName == "?" + target },
     );
     val targetName = targets.map({ f -> f.name }).at(0) ?? "";
     val left = (targets.map({ f -> f.typeName }).at(0) ?? "").startsWith("?");
     val join = if (left) " left join " else " join ";
     val cols = "\" + joinColumns("
-        + owner.value
+        + owner
         + ".entityMeta(), \"a\") + \", \" + joinColumns("
-        + target.value
+        + target
         + ".entityMeta(), \"b\") + \"";
-    decl.addMember(
+    compiler.addMember(
         "pub fn sql() -> string { return \"select "
             + cols
             + " from \" + "
-            + owner.value
+            + owner
             + ".entityMeta().table + \" a"
             + join
             + "\" + "
-            + target.value
+            + target
             + ".entityMeta().table + \" b on a.\" + "
-            + owner.value
+            + owner
             + ".columns()."
-            + ownerField.value
+            + ownerField
             + " + \" = b.\" + "
-            + target.value
+            + target
             + ".columns()."
-            + targetField.value
+            + targetField
             + "; }",
     );
     val bindTarget = if (left)
         "val present = r.get(\"b__\" + "
-            + target.value
+            + target
             + ".entityMeta().idColumn) != \"\";\n    val b: ?"
-            + target.value
+            + target
             + " = if (present) "
-            + target.value
+            + target
             + ".fromRow(unprefixed(r, \"b\")) else null;"
     else
-        "val b = " + target.value + ".fromRow(unprefixed(r, \"b\"));";
-    decl.addMember(
+        "val b = " + target + ".fromRow(unprefixed(r, \"b\"));";
+    compiler.addMember(
         "pub fn fromRow(r: Row) -> "
             + n
             + " {\n    val a = "
-            + owner.value
+            + owner
             + ".fromRow(unprefixed(r, \"a\"));\n    "
             + bindTarget
             + "\n    return "
@@ -522,19 +522,21 @@ pub fn belongsTo(
             + targetName
             + ": b);\n}",
     );
-    if (decl.kind != DeclKind.Type)
-        decl.fail(
+    if (compiler.kind(decl) != DeclKind.Type)
+        compiler.fail(
             "#[belongsTo] must annotate a record holding the two entities",
+            at: decl,
         );
     if (ownerName == "")
-        decl.fail("#[belongsTo] " + n + " has no field of type " + owner.value);
+        compiler.fail("#[belongsTo] " + n + " has no field of type " + owner, at: decl);
     if (targetName == "")
-        decl.fail(
+        compiler.fail(
             "#[belongsTo] "
                 + n
                 + " has no field of type "
-                + target.value
+                + target
                 + " or ?"
-                + target.value,
+                + target,
+            at: decl,
         );
 }

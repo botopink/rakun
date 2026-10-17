@@ -35,9 +35,9 @@
 ////
 //// A decorator body can call no function, so the checks are inline.
 
-pub fn cached(comptime decl: @Decl) {
+pub fn cached(expr decl: unknown) {
     var readers: Array<string> = [];
-    decl.methods.forEach({ m ->
+    compiler.methods(decl).forEach({ m ->
         m.annotations.forEach({ a ->
             if (a.name == "cacheable")
                 readers.push(
@@ -49,7 +49,7 @@ pub fn cached(comptime decl: @Decl) {
     var lossy = "";
     var badReturn = "";
     var twice = "";
-    decl.methods.forEach({ m ->
+    compiler.methods(decl).forEach({ m ->
         var readName = "";
         var evictName = "";
         var evictAll = false;
@@ -68,7 +68,7 @@ pub fn cached(comptime decl: @Decl) {
             }
         });
         val two = if (marks > 1 && twice == "")
-            decl.name + "." + m.name
+            compiler.name(decl)! + "." + m.name
         else
             twice;
         twice = two;
@@ -78,7 +78,7 @@ pub fn cached(comptime decl: @Decl) {
         m.params.forEach({ p ->
             val lost = p.typeName == "";
             val note = if ((lost && p.name != "self" && lossy == ""))
-                decl.name + "." + m.name + " parameter '" + p.name + "'"
+                compiler.name(decl)! + "." + m.name + " parameter '" + p.name + "'"
             else
                 lossy;
             lossy = note;
@@ -96,12 +96,12 @@ pub fn cached(comptime decl: @Decl) {
         val ret = m.returnType;
         val lostRet = false;
         val retNote = if ((lostRet && lossy == ""))
-            decl.name + "." + m.name + " return type '" + ret + "'"
+            compiler.name(decl)! + "." + m.name + " return type '" + ret + "'"
         else
             lossy;
         lossy = retNote;
         val badRet = if (readName != "" && ret != "string" && badReturn == "")
-            decl.name + "." + m.name + " returns `" + ret + "`"
+            compiler.name(decl)! + "." + m.name + " returns `" + ret + "`"
         else
             badReturn;
         badReturn = badRet;
@@ -156,56 +156,62 @@ pub fn cached(comptime decl: @Decl) {
         } else if (ret != "") "return " + call + ";" else call + ";";
         methods.push(sig + " {\n        " + body + "\n    }");
     });
-    if (decl.kind != DeclKind.Behavior)
-        decl.fail(
+    if (compiler.kind(decl) != DeclKind.Behavior)
+        compiler.fail(
             "#[cached] must annotate a behavior - it reflects the behavior's method signatures and gives it the "
-                + decl.name
+                + compiler.name(decl)!
                 + ".Cached twin that implements it",
+            at: decl,
         );
     if (twice != "")
-        decl.fail(
+        compiler.fail(
             "#[cached]: "
                 + twice
                 + " carries both #[cacheable] and #[cacheEvict] - one cache role per method",
+            at: decl,
         );
     if (badReturn != "")
-        decl.fail(
+        compiler.fail(
             "#[cached]: "
                 + badReturn
                 + " - a #[cacheable] method returns string, the only value the store holds",
+            at: decl,
         );
     if (lossy != "")
-        decl.fail(
+        compiler.fail(
             "#[cached] cannot forward "
                 + lossy
                 + ": reflection gave no type for it, so the twin cannot redeclare it",
+            at: decl,
         );
-    decl.addType(
+    compiler.addType(
         "Cached",
-        "(inner: "
-            + decl.name
+        compiler.buildType("(inner: "
+            + compiler.name(decl)!
             + ") implement "
-            + decl.name
+            + compiler.name(decl)!
             + " {\n    "
             + methods.join("\n\n    ")
-            + "\n}",
+            + "\n}"),
     );
 }
 
-pub fn cacheable(comptime decl: @Decl, comptime name: @Expr<string>) {
-    if (decl.kind != DeclKind.Method)
-        decl.fail(
+pub fn cacheable(expr decl: unknown, comptime name: string) {
+    if (compiler.kind(decl) != DeclKind.Method)
+        compiler.fail(
             "#[cacheable] must annotate a method of a #[cached] behavior",
+            at: decl,
         );
 }
 
 pub fn cacheEvict(
-    comptime decl: @Decl,
-    comptime name: @Expr<string>,
-    comptime allEntries: @Expr<bool>,
+    expr decl: unknown,
+    comptime name: string,
+    comptime allEntries: bool,
 ) {
-    if (decl.kind != DeclKind.Method)
-        decl.fail(
+    if (compiler.kind(decl) != DeclKind.Method)
+        compiler.fail(
             "#[cacheEvict] must annotate a method of a #[cached] behavior",
+            at: decl,
         );
 }

@@ -46,30 +46,30 @@ pub declare fn rkRegisterQuery(name: string, sql: string) -> i32;
 #[@External.Erlang("rakun_sql", "registered_queries")]
 pub declare fn rkRegisteredQueries() -> string[];
 
-pub fn query(comptime decl: @Decl, comptime sql: @Expr<string>) {
-    val literal = sql.value
+pub fn query(expr decl: unknown, comptime sql: string) {
+    val literal = sql
         .replaceAll("\\", "\\\\")
         .replaceAll("\"", "\\\"")
         .replaceAll("\n", "\\n");
-    decl.addMember(
+    compiler.addMember(
         "pub fn "
-            + decl.name
+            + compiler.name(decl)!
             + "Sql() -> string { return \""
             + literal
             + "\"; }",
     );
     @emit(
         "val __rkQueryReg_"
-            + (decl.owner?.name ?? "module")
+            + (compiler.owner(decl)?.name ?? "module")
             + "_"
-            + decl.name
+            + compiler.name(decl)!
             + " = rkRegisterQuery(\""
-            + decl.name
+            + compiler.name(decl)!
             + "\", \""
             + literal
             + "\");",
     );
-    val trimmed = sql.value.trim();
+    val trimmed = sql.trim();
     val head = (trimmed
         .replaceAll("\n", " ")
         .replaceAll("\t", " ")
@@ -82,21 +82,23 @@ pub fn query(comptime decl: @Decl, comptime sql: @Expr<string>) {
         || head == "DELETE"
         || head == "WITH"
         || head == "CALL";
-    val uncast = sql.value.replaceAll("'::", "");
+    val uncast = sql.replaceAll("'::", "");
     val smell = uncast.contains("':")
         || uncast.contains("'$")
         || uncast.contains("'?");
-    if (decl.kind != DeclKind.Method)
-        decl.fail("#[query] must annotate a method of a repository type");
-    if (trimmed == "") decl.fail("#[query] statement is empty");
+    if (compiler.kind(decl) != DeclKind.Method)
+        compiler.fail("#[query] must annotate a method of a repository type", at: decl);
+    if (trimmed == "") compiler.fail("#[query] statement is empty", at: decl);
     if ((trimmed != "" && known == false))
-        decl.fail(
+        compiler.fail(
             "#[query] statement starts with '"
                 + head
                 + "', which is not one of SELECT, INSERT, UPDATE, DELETE, WITH, CALL",
+            at: decl,
         );
     if (smell)
-        decl.fail(
+        compiler.fail(
             "#[query] statement has a quote next to a placeholder (':name, '$1 or '?) - a placeholder is a bound value, never text inside a literal; write :name without the quotes",
+            at: decl,
         );
 }

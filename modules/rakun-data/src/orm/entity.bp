@@ -159,26 +159,26 @@ fn columnsOf(fields: Field[]) -> Field[] {
 
 // ── the decorator ───────────────────────────────────────────────────────────
 
-pub fn entity(comptime decl: @Decl, comptime table: @Expr<string>) {
-    val cols = columnsOf(decl.fields);
-    val ids = decl.fields.filter({ f -> marked(f, "id") });
+pub fn entity(expr decl: unknown, comptime table: string) {
+    val cols = columnsOf(compiler.fields(decl));
+    val ids = compiler.fields(decl).filter({ f -> marked(f, "id") });
     val idName = ids.map({ f -> f.name }).at(0) ?? "";
     val idType = ids.map({ f -> f.typeName }).at(0) ?? "i32";
     val idCol = ids.map({ f -> columnOf(f) }).at(0) ?? "";
-    val versions = decl.fields.filter({ f -> marked(f, "version") });
+    val versions = compiler.fields(decl).filter({ f -> marked(f, "version") });
     val verName = versions.map({ f -> f.name }).at(0) ?? "";
     val verType = versions.map({ f -> f.typeName }).at(0) ?? "";
     val verCol = versions.map({ f -> columnOf(f) }).at(0) ?? "";
     val generated = ids.filter({ f -> marked(f, "generated") }).length > 0;
-    val audited = decl.annotations.filter({ a -> a.name == "revisions" }).length
+    val audited = compiler.annotations(decl).filter({ a -> a.name == "revisions" }).length
         > 0;
-    val n = decl.name;
+    val n = compiler.name(decl)!;
     val badType = cols.filter(
         { f -> f.typeName != "string" && f.typeName != "i32" && f.typeName != "bool" },
     );
     val colNames = cols.map({ f -> columnOf(f) });
     val types = cols.map({ f -> columnOf(f) + ":" + sqlType(f.typeName) });
-    val ctorFromRow = decl.fields.map({ f ->
+    val ctorFromRow = compiler.fields(decl).map({ f ->
         val value = if (marked(f, "transient")) defaultOf(f) else readOf(f);
         return f.name + ": " + value;
     });
@@ -201,7 +201,7 @@ pub fn entity(comptime decl: @Decl, comptime table: @Expr<string>) {
     );
     val returning = if (generated) " RETURNING " + idCol else "";
     val insertSql = "INSERT INTO "
-        + table.value
+        + table
         + " ("
         + insertCols.map({ f -> columnOf(f) }).join(", ")
         + ") VALUES ("
@@ -216,14 +216,14 @@ pub fn entity(comptime decl: @Decl, comptime table: @Expr<string>) {
     else
         "";
     val updateSql = "UPDATE "
-        + table.value
+        + table
         + " SET "
         + updCols.map({ f -> columnOf(f) + " = :" + columnOf(f) }).join(", ")
         + " WHERE "
         + idCol
         + " = :__id"
         + versionGuard;
-    val updStamp = decl.fields.map({ f ->
+    val updStamp = compiler.fields(decl).map({ f ->
         val value = if (marked(f, "updatedAt"))
             "now"
         else if (marked(f, "updatedBy"))
@@ -235,7 +235,7 @@ pub fn entity(comptime decl: @Decl, comptime table: @Expr<string>) {
         return f.name + ": " + value;
     });
     val deleteSql = "DELETE FROM "
-        + table.value
+        + table
         + " WHERE "
         + idCol
         + " = :__id"
@@ -243,7 +243,7 @@ pub fn entity(comptime decl: @Decl, comptime table: @Expr<string>) {
     val selectSql = "SELECT "
         + colNames.join(", ")
         + " FROM "
-        + table.value
+        + table
         + " WHERE "
         + idCol
         + " = :__id";
@@ -252,7 +252,7 @@ pub fn entity(comptime decl: @Decl, comptime table: @Expr<string>) {
     else
         "c." + idName + ".toString()";
     val idArgText = if (idType == "string") "id" else "id.toString()";
-    val revTable = table.value + "_revisions";
+    val revTable = table + "_revisions";
     val revCols = colNames.join(", ")
         + ", revision_number, revision_type, revision_timestamp, revision_author";
     val revParams = cols.map(
@@ -267,9 +267,9 @@ pub fn entity(comptime decl: @Decl, comptime table: @Expr<string>) {
         + ", :revision_number, :revision_type, :revision_timestamp, :revision_author)";
     val revTypes = types.join("|")
         + "|revision_number:integer|revision_type:text|revision_timestamp:text|revision_author:text";
-    decl.setMeta("table", table.value);
+    decl.setMeta("table", table);
     decl.setMeta("columns", colNames.join("|"));
-    decl.addMember(
+    compiler.addMember(
         "pub fn fromRow(r: Row) -> "
             + n
             + " { return "
@@ -278,18 +278,18 @@ pub fn entity(comptime decl: @Decl, comptime table: @Expr<string>) {
             + ctorFromRow.join(", ")
             + "); }",
     );
-    decl.addMember(
+    compiler.addMember(
         "pub fn params(c: "
             + n
             + ") -> Param[] { val ps: Param[] = ["
             + params.join(", ")
             + "]; return ps; }",
     );
-    decl.addType(
+    compiler.addType(
         "Columns",
-        "(" + cols.map({ f -> f.name + ": string" }).join(", ") + ")",
+        compiler.buildType("(" + cols.map({ f -> f.name + ": string" }).join(", ") + ")"),
     );
-    decl.addMember(
+    compiler.addMember(
         "pub fn columns() -> "
             + n
             + ".Columns { return "
@@ -300,11 +300,11 @@ pub fn entity(comptime decl: @Decl, comptime table: @Expr<string>) {
     );
     val generatedText = if (generated) "true" else "false";
     val auditedText = if (audited) "true" else "false";
-    decl.addMember(
+    compiler.addMember(
         "pub fn entityMeta() -> EntityMeta { return EntityMeta(entity: \""
             + n
             + "\", table: \""
-            + table.value
+            + table
             + "\", columns: \""
             + colNames.join("|")
             + "\", types: \""
@@ -342,22 +342,22 @@ pub fn entity(comptime decl: @Decl, comptime table: @Expr<string>) {
             + "\", ps);"
     else
         "return 0;";
-    decl.addMember(
+    compiler.addMember(
         "fn revise(t: Tx, c: "
             + n
             + ", kind: string) -> i32 {\n    "
             + reviseBody
             + "\n}",
     );
-    val transientArgs = if (decl.fields.length > cols.length)
+    val transientArgs = if (compiler.fields(decl).length > cols.length)
         ", "
-            + decl.fields
+            + compiler.fields(decl)
                 .filter({ f -> marked(f, "transient") })
                 .map({ f -> f.name + ": c0." + f.name })
                 .join(", ")
     else
         "";
-    decl.addMember(
+    compiler.addMember(
         "pub fn insert(sql: SqlTemplate, c0: "
             + n
             + ") -> "
@@ -371,7 +371,7 @@ pub fn entity(comptime decl: @Decl, comptime table: @Expr<string>) {
             + n
             + ".insertIn(t, c) });\n}",
     );
-    val storedFields = decl.fields.map({ f ->
+    val storedFields = compiler.fields(decl).map({ f ->
         val value = if (f.name == idName)
             "(rows.first() ?? Row(columns: [], values: [])).int(\""
                 + idCol
@@ -384,7 +384,7 @@ pub fn entity(comptime decl: @Decl, comptime table: @Expr<string>) {
         n + "(" + storedFields.join(", ") + ")"
     else
         "c";
-    decl.addMember(
+    compiler.addMember(
         "pub fn insertIn(t: Tx, c: "
             + n
             + ") -> "
@@ -401,7 +401,7 @@ pub fn entity(comptime decl: @Decl, comptime table: @Expr<string>) {
             + n
             + ".revise(t, stored, \"insert\");\n    return stored;\n}",
     );
-    decl.addMember(
+    compiler.addMember(
         "pub fn update(sql: SqlTemplate, c0: "
             + n
             + ") -> "
@@ -418,7 +418,7 @@ pub fn entity(comptime decl: @Decl, comptime table: @Expr<string>) {
         "ps.push(param(\"__version\", c." + verName + ".toString()));\n    "
     else
         "";
-    decl.addMember(
+    compiler.addMember(
         "pub fn updateIn(t: Tx, c: "
             + n
             + ", next: "
@@ -449,7 +449,7 @@ pub fn entity(comptime decl: @Decl, comptime table: @Expr<string>) {
         "c." + verName + ".toString()"
     else
         "\"-\"";
-    decl.addMember(
+    compiler.addMember(
         "fn stale(t: Tx, c: "
             + n
             + ") -> string {\n    val cur = t.query(\""
@@ -459,14 +459,14 @@ pub fn entity(comptime decl: @Decl, comptime table: @Expr<string>) {
             + ")]);\n    val stored = if (cur.rowCount() == 0) \"no row\" else "
             + storedVersionText
             + ";\n    return \"rakun-data: optimistic lock failure on "
-            + table.value
+            + table
             + " id \" + "
             + idText
             + " + \" - expected version \" + "
             + expectedVersionText
             + " + \", stored \" + stored;\n}",
     );
-    decl.addMember(
+    compiler.addMember(
         "pub fn delete(sql: SqlTemplate, c: "
             + n
             + ") -> i32 {\n    return sql.transaction({ t -> "
@@ -477,7 +477,7 @@ pub fn entity(comptime decl: @Decl, comptime table: @Expr<string>) {
         "if (n == 0) @panic(" + n + ".stale(t, c));\n    "
     else
         "";
-    decl.addMember(
+    compiler.addMember(
         "pub fn deleteIn(t: Tx, c: "
             + n
             + ") -> i32 {\n    var ps: Param[] = [param(\"__id\", "
@@ -492,7 +492,7 @@ pub fn entity(comptime decl: @Decl, comptime table: @Expr<string>) {
             + n
             + ".revise(t, c, \"delete\") else 0;\n    return n;\n}",
     );
-    decl.addMember(
+    compiler.addMember(
         "pub fn byId(sql: SqlTemplate, id: "
             + idType
             + ") -> ?"
@@ -506,7 +506,7 @@ pub fn entity(comptime decl: @Decl, comptime table: @Expr<string>) {
             + ".fromRow(rows.first() ?? Row(columns: [], values: []));\n}",
     );
     if (audited) {
-        decl.addMember(
+        compiler.addMember(
             "pub fn revisionMeta() -> EntityMeta { return EntityMeta(entity: \""
                 + n
                 + "Revision\", table: \""
@@ -526,7 +526,7 @@ pub fn entity(comptime decl: @Decl, comptime table: @Expr<string>) {
                 + n
                 + ".revisionMeta());",
         );
-        decl.addMember(
+        compiler.addMember(
             "pub fn revisionsOf(sql: SqlTemplate, id: "
                 + idType
                 + ") -> Revision<"
@@ -545,14 +545,14 @@ pub fn entity(comptime decl: @Decl, comptime table: @Expr<string>) {
                 + n
                 + ".fromRow(r)) });\n    return rkOrmSortRevisions(all);\n}",
         );
-        decl.addMember(
+        compiler.addMember(
             "pub fn revisionNumbers(sql: SqlTemplate, id: "
                 + idType
                 + ") -> i32[] {\n    return "
                 + n
                 + ".revisionsOf(sql, id).map({ r -> r.number });\n}",
         );
-        decl.addMember(
+        compiler.addMember(
             "pub fn revisionAt(sql: SqlTemplate, id: "
                 + idType
                 + ", timestamp: string) -> ?"
@@ -564,20 +564,22 @@ pub fn entity(comptime decl: @Decl, comptime table: @Expr<string>) {
                 + ".fromRow(Row(columns: [], values: []))));\n    if (last.kind == \"delete\") return null;\n    return last.entity;\n}",
         );
     }
-    if (decl.kind != DeclKind.Type || decl.variants.length > 0)
-        decl.fail(
+    if (compiler.kind(decl) != DeclKind.Type || compiler.variants(decl).length > 0)
+        compiler.fail(
             "#[entity] must annotate a record type - its fields are the columns",
+            at: decl,
         );
-    if (table.value.trim() == "")
-        decl.fail("#[entity] on " + n + " names an empty table");
+    if (table.trim() == "")
+        compiler.fail("#[entity] on " + n + " names an empty table", at: decl);
     if (ids.length == 0)
-        decl.fail(
+        compiler.fail(
             "#[entity] "
                 + n
                 + " has no #[id] field - exactly one field is the primary key",
+            at: decl,
         );
     if (ids.length > 1)
-        decl.fail(
+        compiler.fail(
             "#[entity] "
                 + n
                 + " has "
@@ -585,9 +587,10 @@ pub fn entity(comptime decl: @Decl, comptime table: @Expr<string>) {
                 + " #[id] fields ("
                 + ids.map({ f -> f.name }).join(", ")
                 + ") - exactly one field is the primary key",
+            at: decl,
         );
     if (verName != "" && verType != "i32")
-        decl.fail(
+        compiler.fail(
             "#[entity] "
                 + n
                 + ": the #[version] field "
@@ -595,9 +598,10 @@ pub fn entity(comptime decl: @Decl, comptime table: @Expr<string>) {
                 + " is "
                 + verType
                 + " - a version is an i32",
+            at: decl,
         );
     if (badType.length > 0)
-        decl.fail(
+        compiler.fail(
             "#[entity] "
                 + n
                 + ": the field "
@@ -605,6 +609,7 @@ pub fn entity(comptime decl: @Decl, comptime table: @Expr<string>) {
                     .map({ f -> f.name + " is " + f.typeName })
                     .at(0) ?? "")
                 + " - a column is string, i32 or bool",
+            at: decl,
         );
 }
 
@@ -614,52 +619,52 @@ pub fn rkOrmSortRevisions<T>(xs: Revision<T>[]) -> Revision<T>[] {
 
 // ── the field markers ───────────────────────────────────────────────────────
 
-pub fn id(comptime decl: @Decl) {
-    if (decl.kind != DeclKind.Field)
-        decl.fail("#[id] marks a field of an #[entity] record");
+pub fn id(expr decl: unknown) {
+    if (compiler.kind(decl) != DeclKind.Field)
+        compiler.fail("#[id] marks a field of an #[entity] record", at: decl);
 }
 
-pub fn generated(comptime decl: @Decl) {
-    if (decl.kind != DeclKind.Field)
-        decl.fail("#[generated] marks the #[id] field of an #[entity] record");
+pub fn generated(expr decl: unknown) {
+    if (compiler.kind(decl) != DeclKind.Field)
+        compiler.fail("#[generated] marks the #[id] field of an #[entity] record", at: decl);
 }
 
-pub fn column(comptime decl: @Decl, comptime name: @Expr<string>) {
-    if (decl.kind != DeclKind.Field)
-        decl.fail("#[column] marks a field of an #[entity] record");
+pub fn column(expr decl: unknown, comptime name: string) {
+    if (compiler.kind(decl) != DeclKind.Field)
+        compiler.fail("#[column] marks a field of an #[entity] record", at: decl);
 }
 
-pub fn version(comptime decl: @Decl) {
-    if (decl.kind != DeclKind.Field)
-        decl.fail("#[version] marks an i32 field of an #[entity] record");
+pub fn version(expr decl: unknown) {
+    if (compiler.kind(decl) != DeclKind.Field)
+        compiler.fail("#[version] marks an i32 field of an #[entity] record", at: decl);
 }
 
-pub fn createdAt(comptime decl: @Decl) {
-    if (decl.kind != DeclKind.Field)
-        decl.fail("#[createdAt] marks a field of an #[entity] record");
+pub fn createdAt(expr decl: unknown) {
+    if (compiler.kind(decl) != DeclKind.Field)
+        compiler.fail("#[createdAt] marks a field of an #[entity] record", at: decl);
 }
 
-pub fn updatedAt(comptime decl: @Decl) {
-    if (decl.kind != DeclKind.Field)
-        decl.fail("#[updatedAt] marks a field of an #[entity] record");
+pub fn updatedAt(expr decl: unknown) {
+    if (compiler.kind(decl) != DeclKind.Field)
+        compiler.fail("#[updatedAt] marks a field of an #[entity] record", at: decl);
 }
 
-pub fn createdBy(comptime decl: @Decl) {
-    if (decl.kind != DeclKind.Field)
-        decl.fail("#[createdBy] marks a field of an #[entity] record");
+pub fn createdBy(expr decl: unknown) {
+    if (compiler.kind(decl) != DeclKind.Field)
+        compiler.fail("#[createdBy] marks a field of an #[entity] record", at: decl);
 }
 
-pub fn updatedBy(comptime decl: @Decl) {
-    if (decl.kind != DeclKind.Field)
-        decl.fail("#[updatedBy] marks a field of an #[entity] record");
+pub fn updatedBy(expr decl: unknown) {
+    if (compiler.kind(decl) != DeclKind.Field)
+        compiler.fail("#[updatedBy] marks a field of an #[entity] record", at: decl);
 }
 
-pub fn transient(comptime decl: @Decl) {
-    if (decl.kind != DeclKind.Field)
-        decl.fail("#[transient] marks a field of an #[entity] record");
+pub fn transient(expr decl: unknown) {
+    if (compiler.kind(decl) != DeclKind.Field)
+        compiler.fail("#[transient] marks a field of an #[entity] record", at: decl);
 }
 
-pub fn revisions(comptime decl: @Decl) {
-    if (decl.kind != DeclKind.Type)
-        decl.fail("#[revisions] marks an #[entity] record");
+pub fn revisions(expr decl: unknown) {
+    if (compiler.kind(decl) != DeclKind.Type)
+        compiler.fail("#[revisions] marks an #[entity] record", at: decl);
 }

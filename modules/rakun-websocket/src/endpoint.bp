@@ -14,9 +14,9 @@
 //// served by the one instance `<Type>.make()` keeps. Decorator bodies are
 //// comment-free and call no function.
 
-pub fn wsEndpoint(comptime decl: @Decl, comptime path: @Expr<string>) {
+pub fn wsEndpoint(expr decl: unknown, comptime path: string) {
     var stereotype = "";
-    decl.annotations.forEach({ a ->
+    compiler.annotations(decl).forEach({ a ->
         val isStereo = a.name == "component"
             || a.name == "service"
             || a.name == "controller"
@@ -27,12 +27,12 @@ pub fn wsEndpoint(comptime decl: @Decl, comptime path: @Expr<string>) {
     var hasOpen = false;
     var hasMessage = false;
     var hasClose = false;
-    decl.methods.forEach({ m ->
+    compiler.methods(decl).forEach({ m ->
         if (m.name == "onOpen") hasOpen = true;
         if (m.name == "onMessage") hasMessage = true;
         if (m.name == "onClose") hasClose = true;
     });
-    val make = decl.name + ".make()";
+    val make = compiler.name(decl)! + ".make()";
     val session = "WsSession(id: id, principal: principal, path: path)";
     val open = if (hasOpen)
         "{ id, principal, path -> " + make + ".onOpen(" + session + ") }"
@@ -51,31 +51,34 @@ pub fn wsEndpoint(comptime decl: @Decl, comptime path: @Expr<string>) {
             + ", code, reason) }"
     else
         "{ id, principal, path, code, reason -> 0 }";
-    if (decl.kind != DeclKind.Type || decl.variants.length > 0)
-        decl.fail(
+    if (compiler.kind(decl) != DeclKind.Type || compiler.variants(decl).length > 0)
+        compiler.fail(
             "#[wsEndpoint] must annotate a record-shaped type holding onOpen / onMessage / onClose",
+            at: decl,
         );
     if (stereotype == "")
-        decl.fail(
+        compiler.fail(
             "#[wsEndpoint] needs a stereotype on the same type (#[service] or #[component]) - every connection is served by the one instance "
-                + decl.name
+                + compiler.name(decl)!
                 + ".make() keeps",
+            at: decl,
         );
     if (hasMessage == false)
-        decl.fail(
+        compiler.fail(
             "#[wsEndpoint] "
-                + decl.name
+                + compiler.name(decl)!
                 + " has no onMessage(self: Self, session: WsSession, message: string) -> i32 - an endpoint that cannot receive is not an endpoint",
+            at: decl,
         );
-    if (path.value.startsWith("/") == false)
-        decl.fail("#[wsEndpoint] path `" + path.value + "` must start with /");
+    if (path.startsWith("/") == false)
+        compiler.fail("#[wsEndpoint] path `" + path + "` must start with /", at: decl);
     @emit(
         "val __rkWs_"
-            + decl.name
+            + compiler.name(decl)!
             + " = rkRegisterWsEndpoint(\""
-            + path.value
+            + path
             + "\", \""
-            + decl.name
+            + compiler.name(decl)!
             + "\", "
             + open
             + ", "

@@ -208,8 +208,8 @@ pub fn arbMaxToSheet(px: string, inner: Sheet) -> Sheet {
 // comptime landmines (a line comment, a parenthesised receiver, `.at()`, a
 // tail-position `loop`).
 
-pub fn cssValue(comptime q: @Expr<string>) -> @Expr<string> {
-    val raw = q.text();
+pub fn cssValue(expr q: string) -> string {
+    val raw = compiler.text(q);
     val braces = raw.split("{").length + raw.split("}").length;
     val angles = raw.split("<").length + raw.split(">").length;
     val others = raw.split(";").length
@@ -217,27 +217,29 @@ pub fn cssValue(comptime q: @Expr<string>) -> @Expr<string> {
         + raw.split("\\").length;
     val hits = braces + angles + others;
     val safe = if (hits > 7) {
-        q.fail("emilia: an arbitrary value may not contain { } < > ; @ or a backslash: "
-            + raw);
+        compiler.fail("emilia: an arbitrary value may not contain { } < > ; @ or a backslash: "
+            + raw,
+        at: q);
         raw;
     } else raw;
-    return @expr(safe);
+    return safe;
 }
 
-pub fn cssIdent(comptime q: @Expr<string>) -> @Expr<string> {
-    val raw = q.text();
+pub fn cssIdent(expr q: string) -> string {
+    val raw = compiler.text(q);
     val allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_";
     val rest = allowed.split("").fold(raw, { acc, c -> acc.split(c).join("") });
     val safe = if (rest != "" || raw == "") {
-        q.fail("emilia: an arbitrary property name may contain only letters, digits, - and _: "
-            + raw);
+        compiler.fail("emilia: an arbitrary property name may contain only letters, digits, - and _: "
+            + raw,
+        at: q);
         raw;
     } else raw;
-    return @expr(safe);
+    return safe;
 }
 
-pub fn cssSelector(comptime q: @Expr<string>) -> @Expr<string> {
-    val raw = q.text();
+pub fn cssSelector(expr q: string) -> string {
+    val raw = compiler.text(q);
     val braces = raw.split("{").length + raw.split("}").length;
     val others = raw.split("<").length
         + raw.split(";").length
@@ -245,15 +247,16 @@ pub fn cssSelector(comptime q: @Expr<string>) -> @Expr<string> {
         + raw.split("\\").length;
     val amps = raw.split("&").length;
     val safe = if (braces + others > 6 || amps != 2) {
-        q.fail("emilia: an arbitrary selector carries exactly one & and none of { } < ; @ or a backslash: "
-            + raw);
+        compiler.fail("emilia: an arbitrary selector carries exactly one & and none of { } < ; @ or a backslash: "
+            + raw,
+        at: q);
         raw;
     } else raw;
-    return @expr(safe);
+    return safe;
 }
 
-pub fn cssQuery(comptime q: @Expr<string>) -> @Expr<string> {
-    val raw = q.text();
+pub fn cssQuery(expr q: string) -> string {
+    val raw = compiler.text(q);
     val braces = raw.split("{").length + raw.split("}").length;
     val angles = raw.split("<").length + raw.split(">").length;
     val others = raw.split(";").length
@@ -261,15 +264,16 @@ pub fn cssQuery(comptime q: @Expr<string>) -> @Expr<string> {
         + raw.split("\\").length;
     val hits = braces + angles + others;
     val safe = if (hits > 7) {
-        q.fail("emilia: an at-rule condition is written without its @ and may not contain { } < > ; @ or a backslash: "
-            + raw);
+        compiler.fail("emilia: an at-rule condition is written without its @ and may not contain { } < > ; @ or a backslash: "
+            + raw,
+        at: q);
         raw;
     } else raw;
-    return @expr(safe);
+    return safe;
 }
 
-pub fn cssLength(comptime q: @Expr<string>) -> @Expr<string> {
-    val raw = q.text();
+pub fn cssLength(expr q: string) -> string {
+    val raw = compiler.text(q);
     val unit = "0123456789."
         .split("")
         .fold(raw, { acc, c -> acc.split(c).join("") });
@@ -279,11 +283,12 @@ pub fn cssLength(comptime q: @Expr<string>) -> @Expr<string> {
     val units: string[] = ["px", "em", "rem", "ch", "vw", "vh", "%"];
     val known = units.indexOf(unit) != -1 && raw.endsWith(unit);
     val safe = if (bare == raw || !known) {
-        q.fail("emilia: a breakpoint length is digits and one unit of px em rem ch vw vh %: "
-            + raw);
+        compiler.fail("emilia: a breakpoint length is digits and one unit of px em rem ch vw vh %: "
+            + raw,
+        at: q);
         raw;
     } else raw;
-    return @expr(safe);
+    return safe;
 }
 
 // ── front 57 · tests ─────────────────────────────────────────────────────────
@@ -313,27 +318,27 @@ pub fn panicMessage(body: fn() -> i32) -> string {
 }
 
 test "cssValue — a hex compiles and yields itself" {
-    assert cssValue "#316ff6" == "#316ff6";
-    assert cssValue "calc(100dvh - 1rem)" == "calc(100dvh - 1rem)";
+    assert cssValue @`#316ff6` == "#316ff6";
+    assert cssValue @`calc(100dvh - 1rem)` == "calc(100dvh - 1rem)";
 }
 
 test "cssIdent — a custom property and a property name compile" {
-    assert cssIdent "--gutter-width" == "--gutter-width";
-    assert cssIdent "background-color" == "background-color";
+    assert cssIdent @`--gutter-width` == "--gutter-width";
+    assert cssIdent @`background-color` == "background-color";
 }
 
 test "cssSelector — one & compiles" {
-    assert cssSelector "&.is-dragging" == "&.is-dragging";
-    assert cssSelector "& > li" == "& > li";
+    assert cssSelector @`&.is-dragging` == "&.is-dragging";
+    assert cssSelector @`& > li` == "& > li";
 }
 
 test "cssQuery — a supports condition compiles without its @" {
-    assert cssQuery "supports(display:grid)" == "supports(display:grid)";
+    assert cssQuery @`supports(display:grid)` == "supports(display:grid)";
 }
 
 test "cssLength — px and rem compile" {
-    assert cssLength "320px" == "320px";
-    assert cssLength "40rem" == "40rem";
+    assert cssLength @`320px` == "320px";
+    assert cssLength @`40rem` == "40rem";
 }
 
 test "the reject sets — each refuses its breakout and admits the ordinary case" {

@@ -25,9 +25,9 @@
 //// bodies are comment-free and call no function (the comptime rules), so the
 //// offset rule is spelled out inline.
 
-pub fn listener(comptime decl: @Decl) {
+pub fn listener(expr decl: unknown) {
     var stereotype = "";
-    decl.annotations.forEach({ a ->
+    compiler.annotations(decl).forEach({ a ->
         val isStereo = a.name == "component"
             || a.name == "service"
             || a.name == "repository"
@@ -39,7 +39,7 @@ pub fn listener(comptime decl: @Decl) {
     });
     var regs: Array<string> = [];
     var problem = "";
-    decl.methods.forEach({ m ->
+    compiler.methods(decl).forEach({ m ->
         var markers: Array<string> = [];
         var broker = "";
         var dest = "";
@@ -71,7 +71,7 @@ pub fn listener(comptime decl: @Decl) {
             }
         });
         if (markers.length > 1 && problem == "")
-            problem = decl.name
+            problem = compiler.name(decl)!
                 + "."
                 + m.name
                 + " carries "
@@ -90,12 +90,12 @@ pub fn listener(comptime decl: @Decl) {
         if (markers.length == 1
             && problem == ""
             && (others.length != 1 || msgType != "Message"))
-            problem = decl.name
+            problem = compiler.name(decl)!
                 + "."
                 + m.name
                 + " must take exactly one parameter of type Message - a handler is (self: Self, msg: Message) -> i32";
         if (markers.length == 1 && problem == "" && m.returnType != "i32")
-            problem = decl.name
+            problem = compiler.name(decl)!
                 + "."
                 + m.name
                 + " returns `"
@@ -104,11 +104,11 @@ pub fn listener(comptime decl: @Decl) {
         if (markers.length == 1)
             regs.push(
                 "val __rkListener_"
-                    + decl.name
+                    + compiler.name(decl)!
                     + "_"
                     + m.name
                     + " = rkRegisterListenerAs(\""
-                    + decl.name
+                    + compiler.name(decl)!
                     + "."
                     + m.name
                     + "\", \""
@@ -120,84 +120,93 @@ pub fn listener(comptime decl: @Decl) {
                     + "\", \""
                     + dest
                     + "\", { msg -> "
-                    + decl.name
+                    + compiler.name(decl)!
                     + ".make()."
                     + m.name
                     + "(msg) });",
             );
     });
-    if (decl.kind != DeclKind.Type || decl.variants.length > 0)
-        decl.fail(
+    if (compiler.kind(decl) != DeclKind.Type || compiler.variants(decl).length > 0)
+        compiler.fail(
             "#[listener] must annotate a component type - it reads the broker markers of the type's methods",
+            at: decl,
         );
     if (stereotype == "")
-        decl.fail(
+        compiler.fail(
             "#[listener] needs a stereotype on the same type (#[service] or #[component]) - the handler reaches the one instance "
-                + decl.name
+                + compiler.name(decl)!
                 + ".make() keeps",
+            at: decl,
         );
-    if (problem != "") decl.fail("#[listener] " + problem);
+    if (problem != "") compiler.fail("#[listener] " + problem, at: decl);
     if (regs.length == 0)
-        decl.fail(
+        compiler.fail(
             "#[listener] on "
-                + decl.name
+                + compiler.name(decl)!
                 + " finds no method carrying #[amqpListener], #[kafkaListener], #[redisListener] or #[streamListener] - it would register nothing",
+            at: decl,
         );
     @emit(regs.join("\n"));
 }
 
-pub fn amqpListener(comptime decl: @Decl, comptime queue: @Expr<string>) {
-    if (decl.kind != DeclKind.Method)
-        decl.fail(
+pub fn amqpListener(expr decl: unknown, comptime queue: string) {
+    if (compiler.kind(decl) != DeclKind.Method)
+        compiler.fail(
             "#[amqpListener] must annotate a method of a #[listener] type",
+            at: decl,
         );
 }
 
 pub fn kafkaListener(
-    comptime decl: @Decl,
-    comptime topic: @Expr<string>,
-    comptime groupId: @Expr<string>,
+    expr decl: unknown,
+    comptime topic: string,
+    comptime groupId: string,
 ) {
-    if (decl.kind != DeclKind.Method)
-        decl.fail(
+    if (compiler.kind(decl) != DeclKind.Method)
+        compiler.fail(
             "#[kafkaListener] must annotate a method of a #[listener] type",
+            at: decl,
         );
-    if (groupId.value == "")
-        decl.fail(
+    if (groupId == "")
+        compiler.fail(
             "#[kafkaListener] needs a consumer group id - the second argument",
+            at: decl,
         );
 }
 
-pub fn redisListener(comptime decl: @Decl, comptime channel: @Expr<string>) {
-    if (decl.kind != DeclKind.Method)
-        decl.fail(
+pub fn redisListener(expr decl: unknown, comptime channel: string) {
+    if (compiler.kind(decl) != DeclKind.Method)
+        compiler.fail(
             "#[redisListener] must annotate a method of a #[listener] type",
+            at: decl,
         );
 }
 
 pub fn streamListener(
-    comptime decl: @Decl,
-    comptime stream: @Expr<string>,
-    comptime offset: @Expr<string>,
+    expr decl: unknown,
+    comptime stream: string,
+    comptime offset: string,
 ) {
-    if (decl.kind != DeclKind.Method)
-        decl.fail(
+    if (compiler.kind(decl) != DeclKind.Method)
+        compiler.fail(
             "#[streamListener] must annotate a method of a #[listener] type",
+            at: decl,
         );
-    val digits = offset.value.length() > 0
-        && offset.value
+    val digits = offset.length() > 0
+        && offset
             .split("")
             .filter(
                 { c -> c != "0" && c != "1" && c != "2" && c != "3" && c != "4" && c != "5" && c != "6" && c != "7" && c != "8" && c != "9" },
             ).length
             == 0;
-    val keyword = offset.value == "first"
-        || offset.value == "last"
-        || offset.value == "next";
+    val keyword = offset == "first"
+        || offset == "last"
+        || offset == "next";
     if (keyword == false && digits == false)
-        decl.fail(
+        compiler.fail(
             "#[streamListener] offset `"
-                + offset.value
+                + offset
                 + "` is not first, last, next or a decimal number",
+            at: decl,
         );
 }
