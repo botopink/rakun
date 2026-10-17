@@ -121,5 +121,5 @@ Two measurements make stubbing them the wrong move rather than a shortcut:
    `client_runtime.bp`'s `clientRender` does not red erlang) — but the module
    it names, `rakun-bpp/client-runtime`, does not exist, so the declaration
    would emit a `require` of a file nobody writes. A host stub returning an
-   answer no one can check is exactly the shape `router.d.bp`'s one-line `Link`
-   was, and the reason it never became real.
+   answer no one can check is exactly the shape the former declaration-only
+   router's one-line `Link` was, and the reason it never became real.

@@ -2,8 +2,8 @@
 
 > Package: [`rakun-bpp`](../docs.md) · index: [`../../docs.md`](../../docs.md)
 
-`router.bp` is a real module since front 26 of 1.0.10-beta; `router.d.bp` is
-gone. What a component asks for is a **route snapshot**: a five-field record
+`router.bp` is a real module since front 26 of 1.0.10-beta; there is no
+declaration file (decision 575 (1)). What a component asks for is a **route snapshot**: a five-field record
 the server fills before the render and the client rebuilds after a client-side
 navigation, so the same component code produces the same markup on both sides.
 

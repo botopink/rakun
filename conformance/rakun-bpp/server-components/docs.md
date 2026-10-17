@@ -2,7 +2,8 @@
 
 > Package: [`rakun-bpp`](../docs.md) · index: [`../../docs.md`](../../docs.md)
 
-Promoted from `server.d.bp` (front 28). The declaration file listed three
+Promoted from a declaration file (front 28; there is none since decision
+575 (1)). The declaration file listed three
 blockers; all three are answered rather than carried. The async data layer is
 **not** gated any more — `fn … -> @Task<T>` with a statement-level
 `await` compiles and RUNS on both rows, `test` blocks included — `request()`
