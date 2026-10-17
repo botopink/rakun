@@ -5,7 +5,7 @@
 A React/Next-style UI framework written in botopink, on the language's own
 primitives: the `Element` tree and its builders, the forty-six HTML
 constructors, synchronous `renderToString`, the
-`state`/`effect`/`memo`/`ref`/`reducer` family, the `html """…"""` authoring
+`state`/`effect`/`memo`/`ref`/`reducer` family, the `` html @`…` `` authoring
 DSL, the router, server components, client navigation, the client boundary,
 streaming, forms, error boundaries and metadata. What is still gated is the
 *client* half — the delegated click handler, prefetch, link status and the
@@ -21,7 +21,7 @@ says what the feature does and links the cells beside it.
 |---|---|
 | [Components](components/docs.md) | loading the package, the component model, the DOM builders, the element surface, the client runtime |
 | [Hooks](hooks/docs.md) | the five nouns and a custom hook |
-| [The `html` DSL](html-dsl/docs.md) | `html """…"""` and its holes |
+| [The `html` DSL](html-dsl/docs.md) | `` html @`…` `` and its holes |
 | [The router](router/docs.md) | the router snapshot, its cells and the six hooks |
 | [Server components](server-components/docs.md) | `RequestData`, the server-component and loader conventions |
 | [Client navigation](client-navigation/docs.md) | `link` props, the anchor, prefetch, remounting |
@@ -60,9 +60,9 @@ says what the feature does and links the cells beside it.
   around them, `islandId`/`islandAttrOf`/`islandAttr`, `Island`, `clientMount`,
   `islandEntry`, `propsOf`, `serverSlotAttr`/`serverSlot` and the `serverOnly`
   poison pill (`client.bp`, pure, no host cell) — and the
-  `html """…"""` markup DSL
+  `` html @`…` `` markup DSL
   (comptime expansion to the builder pipeline). Author trees as `div([…])` or as
-  `html """…"""`.
+  `` html @`…` ``.
 - **Gated / declarative** (each a generic core gap, none rakun-bpp-specific):
   - (closed) `use request()`: `request()` is `fn … -> @Component<RequestData>` (botopink decisions 104/128), activated inside a
     `@Component<Element>` server component.

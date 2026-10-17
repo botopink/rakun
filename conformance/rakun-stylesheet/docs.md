@@ -46,7 +46,7 @@ The spec authors a richer surface that v0 does not yet ship:
 - `#[emilia([.Pad.All.4, .Bg.White])] div([…])` — annotation on
   builder, generic rakun-bpp hook.
 - `<div [emilia]={[.Pad.All.4, .Bg.White]}>` — `[name]={expr}`
-  attribute inside the `html """…"""` DSL, generic rakun-bpp hook.
+  attribute inside the `` html @`…` `` DSL, generic rakun-bpp hook.
 - Nested section paths (`.Color.Red.500`, `.Pad.X.4`) — gated on the
   `enum-sections` language extension. v0's flat variant names
   (`ColorRed500`, `PadX4`) re-shape into the section paths when

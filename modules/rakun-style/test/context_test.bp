@@ -1,8 +1,11 @@
 //// styled: a component computed at render registers its class and rules in
 //// the sheet its render provides through `StyledSheet`'s context (decisions 352,
 //// 354). The provider's writer is a mock here, so each registration is a
-//// recorded call: a `${p}` splice registers nothing, a literal computed at
-//// build registers nothing, a property standing on its own registers itself.
+//// recorded call: a `${p}` splice registers nothing, a literal with no hole is
+//// computed at build and registers nothing, a literal with a hole registers
+//// itself even when the hole is known at build (the template never reads a
+//// hole's value, decision 577 (5)), a property standing on its own registers
+//// itself.
 
 import {testing.asserts, testing.mocks, context.createContext, context.provide} from "std";
 import {styled.styled, styled.styledProperty, styled.StyledView, styled.StyledPropertyView, styled.StyledSheet, styled.Styled, styled.StyledProperty};
@@ -49,6 +52,10 @@ fn badge(c: string) -> StyledView {
 
 pub val tab4 = styledProperty @`tab-size: 4;`;
 
+fn plain() -> StyledView {
+    return styled @`color: red;`;
+}
+
 fn tabbed() -> StyledView {
     return styled @`${tab4} color: red;`;
 }
@@ -77,13 +84,22 @@ test "a ${p} splice registers nothing of its own" {
         .add(mocks.anyString(), mocks.anyString(), mocks.anyString());
 }
 
-test "a literal computed at build registers nothing" {
+test "a literal with no hole is computed at build and registers nothing" {
+    val w = Writer.mock();
+    val t = await Render(w, { -> plain() });
+    try asserts.equals(t.rules, "." + t.className + "{color:red}");
+    val _v = mocks
+        .verify(w, mocks.never())
+        .add(mocks.anyString(), mocks.anyString(), mocks.anyString());
+}
+
+test "a literal whose hole is known at build is computed at render all the same (decision 577 (5))" {
     val w = Writer.mock();
     val t = await Render(w, { -> tabbed() });
     try asserts.equals(t.className, "s_b480a37a");
     val _v = mocks
-        .verify(w, mocks.never())
-        .add(mocks.anyString(), mocks.anyString(), mocks.anyString());
+        .verify(w, mocks.times(1))
+        .add(mocks.eq("components"), mocks.eq("s_b480a37a"), mocks.anyString());
 }
 
 test "a property standing on its own registers itself" {

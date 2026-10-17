@@ -94,7 +94,7 @@ pub fn <tag>(children: Children, attrs: Array<#(string, string)> = []) -> Elemen
 ```
 
 Children positional, `attrs:` labeled. The shape is not a free choice: the
-`html """…"""` DSL writes `tag([kids], attrs: [pairs])`, so a constructor of any
+`` html @`…` `` DSL writes `tag([kids], attrs: [pairs])`, so a constructor of any
 other arity is unreachable from the markup front-end.
 
 Two builders and two predicates:
@@ -125,13 +125,13 @@ A void constructor keeps the same two-parameter shape and **drops** the
 children it was handed — `input([text("x", attrs: [])], attrs: []).children` is
 empty. The one-parameter `input(attrs:)` that would make children an arity
 error was rejected: it is a second convention, and it is unreachable from the
-`html """…"""` DSL's call shape.
+`` html @`…` `` DSL's call shape.
 
 ### Three names that could not be the obvious one
 
 | Tag | Constructor | Why |
 |---|---|---|
-| `<html>` | `htmlTag` | `html` is already the `html """…"""` template fn (member `rakun-bpp`), and a file importing the DSL beside the tags would bind two `html`s — a collision. The DSL keeps the name |
+| `<html>` | `htmlTag` | `html` is already the `` html @`…` `` template fn (member `rakun-bpp`), and a file importing the DSL beside the tags would bind two `html`s — a collision. The DSL keeps the name |
 | `<time>` | `timeTag` | `time` was a std module when the tag was named (std's clock is `io.clock` since decision 106), and a consumer importing it in the same file would have collided |
 | `<main>` | `main` | Shipped under its own name, because the consuming fronts import it that way |
 
@@ -153,7 +153,7 @@ renderer and writes a closing tag unconditionally, so
 void set is *exported* rather than applied here: the renderer that ships reads
 `isVoidTag`.
 
-**A void element cannot be authored inside `html """…"""`.** The DSL lowers a
+**A void element cannot be authored inside `` html @`…` ``.** The DSL lowers a
 self-closing tag to a one-positional-argument call and flushes it after the
 token loop rather than at its position, so `<div><img/></div>` renders
 `<div></div><img></img>` — the image lands after its parent. Build void

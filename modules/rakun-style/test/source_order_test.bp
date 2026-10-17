@@ -17,7 +17,9 @@ fn padAll(n: i32) -> StyledPropertyView {
     return styledProperty @`padding: --spacing(${n});`;
 }
 
-// Decision 368's literal: every hole known at build, so computed at build.
+// Decision 368's literal. Its holes are known at build, but a template never
+// reads a hole's value (decision 577 (5)): it is computed at render, under the
+// render's provider.
 pub val focusPad = styled @`${bg} &:focus { ${gray} } ${pad}`;
 
 // The same declarations, the padding before the nested rule: another order,
@@ -59,7 +61,8 @@ fn spliceAfter(n: i32) -> StyledView {
 
 pub val pad2 = styledProperty @`padding: --spacing(2);`;
 
-// The same literal with the splice known at build: computed at build.
+// The same literal with the splice known at build: computed at render as well
+// (decision 577 (5)).
 pub val spliceAfterAtBuild = styled @`color: red; &:hover { color: blue; } ${pad2}`;
 
 fn Render(view: fn() -> StyledView) -> @Component<Styled> {
@@ -71,7 +74,7 @@ fn Render(view: fn() -> StyledView) -> @Component<Styled> {
 fn dropped(layer: string, item: Styled) -> void {}
 
 test "a declaration after a nested rule opens a new rule of the class" {
-    val s = await focusPad;
+    val s = await Render({ -> focusPad });
     try asserts.equals(s.className, "s_b2548ea2");
     try asserts.equals(
         s.rules,
@@ -87,8 +90,8 @@ test "a declaration after a nested rule opens a new rule of the class" {
 }
 
 test "the order is the class: the padding before the nested rule is another class" {
-    val before = await padFocus;
-    val after = await focusPad;
+    val before = await Render({ -> padFocus });
+    val after = await Render({ -> focusPad });
     try asserts.equals(
         before.rules,
         "."
@@ -170,7 +173,7 @@ test "a splice after a nested rule opens a new rule, computed at render as at bu
             + k
             + "{padding:calc(var(--spacing) * 2)}",
     );
-    val b = await spliceAfterAtBuild;
+    val b = await Render({ -> spliceAfterAtBuild });
     try asserts.equals(b.className, r.className);
     try asserts.equals(b.rules, r.rules);
 }
