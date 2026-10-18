@@ -38,9 +38,9 @@ import {compiler, compiler.DeclKind} from "std";
 // (front 06's gap table), so a marker that wired itself could not find the type
 // it belongs to. It contributes the component wiring a stereotype does — scan
 // plus a singleton factory — and then one chain entry calling `handle`.
-pub fn filter(expr decl: unknown) {
+pub fn filter(syntax decl: unknown) {
     val declName = compiler.name(decl)!;
-    compiler.compile({ -> rkScan(declName); });
+    compiler.init({ -> rkScan(declName); });
     var args: Array<string> = [];
     compiler.fields(decl).forEach({ f ->
         var valKey = "";
@@ -75,7 +75,7 @@ pub fn filter(expr decl: unknown) {
         { a -> if (a.name == "order") ord = a.args.join("") },
     );
     val ordText = ord.replaceAll("\"", "");
-    compiler.compile({ -> registerFilter(declName, toI32(ordText), { req, chain -> decl.make().handle(req, chain) }); });
+    compiler.init({ -> registerFilter(declName, toI32(ordText), { req, chain -> decl.make().handle(req, chain) }); });
     if (compiler.kind(decl) != DeclKind.Type) compiler.fail("#[filter] must annotate a type", at: decl);
     if (compiler.variants(decl).length > 0)
         compiler.fail("#[filter] must annotate a type with fields, not an enum", at: decl);
@@ -87,9 +87,9 @@ pub fn filter(expr decl: unknown) {
 // stereotype contributes, then one converter registration for the media type.
 // A later registration for the same media type replaces the built-in one, so
 // an application's converter wins for its type.
-pub fn messageConverter(expr decl: unknown, comptime media: string) {
+pub fn messageConverter(syntax decl: unknown, comptime media: string) {
     val declName = compiler.name(decl)!;
-    compiler.compile({ -> rkScan(declName); });
+    compiler.init({ -> rkScan(declName); });
     var args: Array<string> = [];
     compiler.fields(decl).forEach({ f ->
         var valKey = "";
@@ -119,7 +119,7 @@ pub fn messageConverter(expr decl: unknown, comptime media: string) {
             + compiler.name(decl)!
             + "\"); v }); }",
     );
-    compiler.compile({ -> registerConverter(media, { v -> decl.make().write(v) }, { b -> decl.make().read(b) }); });
+    compiler.init({ -> registerConverter(media, { v -> decl.make().write(v) }, { b -> decl.make().read(b) }); });
     if (compiler.kind(decl) != DeclKind.Type)
         compiler.fail("#[messageConverter] must annotate a type", at: decl);
     if (compiler.variants(decl).length > 0)
@@ -135,9 +135,9 @@ pub fn messageConverter(expr decl: unknown, comptime media: string) {
 // `customize(self, reg: WebRegistry) -> i32`: the component wiring, then one
 // customizer registration at its `#[order("N")]` (default 0). `bootWeb()` runs
 // every customizer once, in that order.
-pub fn webCustomizer(expr decl: unknown) {
+pub fn webCustomizer(syntax decl: unknown) {
     val declName = compiler.name(decl)!;
-    compiler.compile({ -> rkScan(declName); });
+    compiler.init({ -> rkScan(declName); });
     var args: Array<string> = [];
     compiler.fields(decl).forEach({ f ->
         var valKey = "";
@@ -172,7 +172,7 @@ pub fn webCustomizer(expr decl: unknown) {
         { a -> if (a.name == "order") ord = a.args.join("") },
     );
     val ordText = ord.replaceAll("\"", "");
-    compiler.compile({ -> rkCustomizerRegister(declName, toI32(ordText), { reg -> decl.make().customize(reg) }); });
+    compiler.init({ -> rkCustomizerRegister(declName, toI32(ordText), { reg -> decl.make().customize(reg) }); });
     if (compiler.kind(decl) != DeclKind.Type)
         compiler.fail("#[webCustomizer] must annotate a type", at: decl);
     if (compiler.variants(decl).length > 0)
@@ -197,7 +197,7 @@ pub fn webCustomizer(expr decl: unknown) {
 // integer wins — is the one `#[value]` already uses, and the emitted line is
 // `toI32("-100")`. When the parser accepts the minus sign the signature becomes
 // `n: i32` and the emitted `toI32(` wrapper is deleted; nothing else moves.
-pub fn order(expr decl: unknown, comptime n: string) {
+pub fn order(syntax decl: unknown, comptime n: string) {
     if (compiler.kind(decl) == DeclKind.Field)
         compiler.fail("#[order] must annotate a type or a function, not a field", at: decl);
 }
@@ -205,14 +205,14 @@ pub fn order(expr decl: unknown, comptime n: string) {
 // `#[middleware]` on `pub fn middleware(req, chain)`. The matcher is read off
 // the stacked `#[matcher(...)]`; with none the entry runs on every request,
 // which is Next's own default.
-pub fn middleware(expr decl: unknown) {
+pub fn middleware(syntax decl: unknown) {
     var pattern = "\"\"";
     compiler.annotations(decl).forEach(
         { a -> if (a.name == "matcher") pattern = a.args.join("") },
     );
     val declName = compiler.name(decl)!;
     val patternText = pattern.replaceAll("\"", "");
-    compiler.compile({ ->
+    compiler.init({ ->
         registerMiddleware(
             declName,
             patternText,
@@ -223,7 +223,7 @@ pub fn middleware(expr decl: unknown) {
         compiler.fail("#[middleware] must annotate a function", at: decl);
 }
 
-pub fn matcher(expr decl: unknown, comptime pattern: string) {
+pub fn matcher(syntax decl: unknown, comptime pattern: string) {
     if (compiler.kind(decl) != DeclKind.Fn)
         compiler.fail("#[matcher] must annotate the #[middleware] function", at: decl);
 }
@@ -234,7 +234,7 @@ pub fn matcher(expr decl: unknown, comptime pattern: string) {
 // is keyed by the controller's `#[route]` prefix, so the override applies to
 // that controller's routes and to nothing else.
 pub fn crossOrigin(
-    expr decl: unknown,
+    syntax decl: unknown,
     comptime origins: string,
     comptime methods: string,
 ) {
@@ -243,7 +243,7 @@ pub fn crossOrigin(
         { a -> if (a.name == "route") prefix = a.args.join("") },
     );
     val prefixText = prefix.replaceAll("\"", "");
-    compiler.compile({ -> registerCorsMapping(prefixText, origins, methods); });
+    compiler.init({ -> registerCorsMapping(prefixText, origins, methods); });
     if (compiler.kind(decl) != DeclKind.Type)
         compiler.fail("#[crossOrigin] must annotate a controller type", at: decl);
     if (prefix == "")
@@ -257,9 +257,9 @@ pub fn crossOrigin(
 // method-level placement marker, because a method `@Decl` carries no owner. The
 // advice does the wiring: it walks its own methods and registers one handler
 // per tag.
-pub fn controllerAdvice(expr decl: unknown) {
+pub fn controllerAdvice(syntax decl: unknown) {
     val declName = compiler.name(decl)!;
-    compiler.compile({ -> rkScan(declName); });
+    compiler.init({ -> rkScan(declName); });
     var aargs: Array<string> = [];
     compiler.fields(decl).forEach({ f ->
         var valKey = "";
@@ -310,7 +310,7 @@ pub fn controllerAdvice(expr decl: unknown) {
     });
     if (handlers.length > 0) {
         compiler.addMember("pub fn rkAdvice() { " + handlers.join(" ") + " }");
-        compiler.compile({ -> decl.rkAdvice(); });
+        compiler.init({ -> decl.rkAdvice(); });
     }
     if (compiler.kind(decl) != DeclKind.Type)
         compiler.fail("#[controllerAdvice] must annotate a type", at: decl);
@@ -324,7 +324,7 @@ pub fn controllerAdvice(expr decl: unknown) {
 // The tag is a STRING, not a type name. botopink has no typed raise and no
 // user-visible catch of one, so there is nothing for a type to key on; the
 // front's first language-gap row says so rather than pretending otherwise.
-pub fn exceptionHandler(expr decl: unknown, comptime tag: string) {
+pub fn exceptionHandler(syntax decl: unknown, comptime tag: string) {
     if (compiler.kind(decl) != DeclKind.Method)
         compiler.fail(
             "#[exceptionHandler] must annotate a method of a #[controllerAdvice] type",

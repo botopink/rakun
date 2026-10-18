@@ -3,7 +3,7 @@
 > Package `rakun-style` (was `styled`; front 165 s2) of the rakun workspace — `repository/rakun/modules/rakun-style/` · workspace rules: [`../../AGENTS.md`](../../AGENTS.md) · refusals: `../../refusals/rakun-style/` · examples: `../../examples/rakun-style/`
 
 The `rakun-style` package (decision 338; its `` styled @`…` `` template function keeps its name): the base for building CSS components. `` styled @`…` `` and
-`` styledProperty @`…` `` are template functions (over the template text, `expr css: string`) that read a CSS rule body at build and answer a
+`` styledProperty @`…` `` are template functions (over the template text, `syntax css: string`) that read a CSS rule body at build and answer a
 component in the language's model — `@Component<Styled>` (`StyledView`) and
 `@Component<StyledProperty>` (`StyledPropertyView`); the layered `Sheet` holds
 components in `@layer`s; the theme mechanism (`Theme`, `entry`, `clear`, `clearNs`, `clearAll`,

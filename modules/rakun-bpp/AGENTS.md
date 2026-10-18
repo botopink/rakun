@@ -11,7 +11,7 @@ capability, activated by the `use` keyword (decision 88 of 1.0.10-beta:
 loads data is `fn … -> @Task<Element>` (the return type is the effect — botopink
 decisions 118–128, front 24; the `#[@<effect>]` annotations and `@Future` left, and
 `*fn` before them); the JSX-like
-`` html @`…` `` DSL is a template function over the template text (`expr template: string`, `-> Element`), expanding markup
+`` html @`…` `` DSL is a template function over the template text (`syntax template: string`, `-> Element`), expanding markup
 to the builder pipeline at comptime. The compiler is **unaware** of rakun-bpp (hard rule + `grep -riE
 "rakun|rakun-bpp" modules/compiler-core/src` gate); the framework is a pure
 client, reached with `from "rakun-bpp"`, never embedded.
@@ -267,7 +267,7 @@ were promoted rather than filled in. A host-bound module here is now an ordinary
   surface is flat and a second `state` shadows `hooks.state` for every consumer
   (last module wins, silently, even from a non-`pub` `mod` — measured).
 - `renderToString` is **synchronous** (`.bp`); SSR needs no async.
-- A decorator's first parameter is `expr decl: unknown` and each argument parameter is `comptime x: T`
+- A decorator's first parameter is `syntax decl: unknown` and each argument parameter is `comptime x: T`
   (decisions 575, 576); the body reads the argument as `x` — `#[page("blog/[slug]")]`'s `seg` in `routes.bp`.
 - Components are PascalCase (`Counter`, `Page`); fns/builders camelCase.
 - Not embedded: do **not** wire rakun-bpp into `comptime/stdlib/prelude.zig` or
@@ -277,7 +277,7 @@ were promoted rather than filled in. A host-bound module here is now an ordinary
 
 rakun-bpp is a *consumer*. What it relies on:
 
-- **Landed**: `context-inference` (`@Context`/`use`), `expr-templates` (`expr` parameters),
+- **Landed**: `context-inference` (`@Context`/`use`), `expr-templates` (`syntax` parameters),
   the G1–G4 gaps (fn-typed fields, labeled tuple types, `fn() -> T[]`, `Children`
   coercion), the generic `from "<lib>"` loader, and — new in this port — generic
   **cross-module nominal-type resolution** (a local component `fn … -> Element`
@@ -598,8 +598,8 @@ server pass exactly as it renders in the browser.
 
 | What | Where | Shape |
 |---|---|---|
-| The marker | `#[client]` | an `expr decl: unknown`-first comptime fn. Records the meta `component` as a typed `ClientMark(component)` record (`@typeInfo(<Name>).meta(ClientMark)?.component`, decision 216) — a compile-time constant, never a call into a host registry, because a Node-only call would break the erlang server render |
-| The props rule | `#[clientProps]` | on the props RECORD, because the declaration handle (`expr decl: unknown`) does not expose a function's parameters. Whitelist: `string` · `i32` · `f64` · `bool` |
+| The marker | `#[client]` | a `syntax decl: unknown`-first comptime fn. Records the meta `component` as a typed `ClientMark(component)` record (`@typeInfo(<Name>).meta(ClientMark)?.component`, decision 216) — a compile-time constant, never a call into a host registry, because a Node-only call would break the erlang server render |
+| The props rule | `#[clientProps]` | on the props RECORD, because the declaration handle (`syntax decl: unknown`) does not expose a function's parameters. Whitelist: `string` · `i32` · `f64` · `bool` |
 | The island marker | `islandId(n)` · `islandAttrOf(id)` · `islandAttr(n)` | decision 77: `islandAttrOf` is the ONE occurrence of `"data-jh-i"` in this tree. Front 23 fills `RenderHooks.islandAttr` from `islandAttr`; front 68's entry imports the same function |
 | The island | `Island(id, component, props)` · `clientMount(island, children)` | the placeholder carries the id and NOTHING else; the component name and encoded props go to the payload's `i` row |
 | The payload row | `islandEntry(island)` | `#(id, component, "k=v&k=v")`, encoded with std's `encoding.formStringify` (decision 116 rule 4) |

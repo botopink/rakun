@@ -11,7 +11,7 @@ constructor dependency injection plus a declarative web layer (`#[restController
 + route annotations). **Opt-in, never auto-loaded:** it enters a module's scope
 only via `from "rakun"`. **The compiler core knows nothing about rakun** — every
 behaviour is plain botopink + a host runtime, on the generic annotation-processor
-mechanism (the declaration handle `expr decl: unknown` read through `compiler.*`, comptime decorator bodies, `compiler.compile` executors and `compiler.addMember`).
+mechanism (the declaration handle `syntax decl: unknown` read through `compiler.*`, comptime decorator bodies, `compiler.compile` executors and `compiler.addMember`).
 
 How the wiring works: each component decorator (`decorators.bp`) is a comptime fn
 over the annotated `type` (`DeclKind.Type` with no `variants` — an enum-shaped `type` is rejected). It contributes (1) a scan
@@ -486,7 +486,7 @@ string>`, `stop()`. Cells under `conformance/rakun/plug-and-play/`, on erlang an
   `Lifecycle.Manual`, the leading-dot `.Manual` being refused at an annotation; `configOf` reads through the host
   singleton because `v is fn() -> T` in a generic body makes the call's `T` `unknown`; the library loops by index
   (`while`), and `boot_modules` reads `registry.find` without `?.` (on beam `find(…)?.name` answered `null`).
-- `compiler.compile` (two sites) becomes `compiler.init` (615), `expr decl` (two sites) `syntax decl` (616),
+- `compiler.compile` (two sites) becomes `compiler.init` (615), `syntax decl` (two sites) `syntax decl` (616),
   `compiler.name(decl)!` drops the `!` (612) by B-137's codemod.
 
 ## The erlang host module
@@ -1090,7 +1090,7 @@ members, and a member exercising a layout or a server action needs fronts 23 and
   case of the non-ASCII cookie refusal is not expressible as a cell at all; the
   guard, its text and the negative case are asserted instead, and the gap is
   listed here rather than quietly dropped.
-- **A decorator's first parameter is `expr decl: unknown` and each argument parameter is `comptime x: T`** (decisions 575, 576): every marker body reads
+- **A decorator's first parameter is `syntax decl: unknown` and each argument parameter is `comptime x: T`** (decisions 575, 576): every marker body reads
   its argument as `x`, the value itself, known at build; a marker that never reads a parameter (the route
   markers read their lexemes from `compiler.annotations(decl)`) still takes a value of its type.
 - **A refusal is a function.** `noFrameProblem` / `nestedFrameProblem` /
@@ -2474,7 +2474,7 @@ quietly matches nothing is the failure mode decision 67 exists to prevent.
 - **A negative integer literal in a decorator argument does not parse.**
   `#[mark(-20)]` is `error: this token cannot appear here … unexpected 20`, on
   BOTH targets, while `#[mark(20)]` compiles. Measured against `2e6bb4ac` with
-  the smallest program there is (a `pub fn mark(expr decl: unknown, comptime n: i32)`
+  the smallest program there is (a `pub fn mark(syntax decl: unknown, comptime n: i32)`
   and two one-type test files). Every order in the band below zero is therefore
   unwritable as an integer, so **`#[order]` takes a STRING** — `#[order("-100")]`
   — parsed with front 05's `toI32`, and the emitted line is
