@@ -297,48 +297,6 @@ fn attrsCode(flat: string, groups: string, dyn: string) -> string {
     return if (dyn != "") "htmlAttrs([" + groups + "])" else "[" + flat + "]";
 }
 
-// `compiler.text` answers a template text as a string literal's content
-// today: each backslash, `"`, `$`, newline, carriage return and tab of the
-// raw text is written `\\`, `\"`, `\$`, `\n`, `\r`, `\t` (decision 577 (5)
-// answers the raw text; the compiler's answer is a 144 defect). `rawChars`
-// reads the raw characters back; `rawOffsets` holds each one's offset in the
-// string `compiler.text` answered — the offset a `Span` names.
-fn unescaped(c: string) -> string {
-    return if (c == "n") "\n" else if (c == "r") "\r" else if (c == "t") "\t" else c;
-}
-
-fn rawChars(text: string) -> string[] {
-    var out: string[] = [];
-    var esc = false;
-    for (text.split("")) { c ->
-        if (esc) {
-            out.push(unescaped(c));
-            esc = false;
-        } else if (c == "\\")
-            esc = true
-        else
-            out.push(c);
-    }
-    return out;
-}
-
-fn rawOffsets(text: string) -> i32[] {
-    var out: i32[] = [];
-    var esc = false;
-    var at = 0;
-    for (text.split("")) { c ->
-        if (esc)
-            esc = false
-        else if (c == "\\") {
-            out.push(at);
-            esc = true;
-        } else
-            out.push(at);
-        at = at + 1;
-    }
-    return out;
-}
-
 fn decode(s: string) -> string {
     return s
         .split("&lt;")
@@ -443,9 +401,7 @@ pub fn html(expr template: string) -> Element {
     // the code built below, typed where the call stands (14s8-a (e)). A hole
     // is one character of the markup, `interpMark`, spanning `${…}`.
     val written = compiler.text(template);
-    val raw = rawChars(written);
-    val rawPos = rawOffsets(written);
-    val offsetOf = { k -> rawPos.at(k) ?? written.length };
+    val raw = written.split("");
     var holeAt = -1;
     var holeDepth = 0;
     var inStr = false;
@@ -456,9 +412,7 @@ pub fn html(expr template: string) -> Element {
     for (raw) { c ->
         val i = rawAt;
         rawAt = rawAt + 1;
-        if (skip)
-            skip = false
-        else if (holeAt < 0) {
+        if (skip) skip = false else if (holeAt < 0) {
             if (c == "$" && (raw.at(i + 1) ?? "") == "{") {
                 holeAt = i;
                 holeDepth = 1;
@@ -466,8 +420,8 @@ pub fn html(expr template: string) -> Element {
                 skip = true;
             } else {
                 chs = chs.append([c]);
-                poss = poss.append([offsetOf(i)]);
-                pend = pend.append([offsetOf(i + 1)]);
+                poss = poss.append([i]);
+                pend = pend.append([i + 1]);
                 codes = codes.append([""]);
             }
         } else if (inStr) {
@@ -488,21 +442,19 @@ pub fn html(expr template: string) -> Element {
             holeDepth = holeDepth - 1;
             if (holeDepth == 0) {
                 chs = chs.append([interpMark]);
-                poss = poss.append([offsetOf(holeAt)]);
-                pend = pend.append([offsetOf(i + 1)]);
+                poss = poss.append([holeAt]);
+                pend = pend.append([i + 1]);
                 codes = codes.append([hole]);
                 holeAt = -1;
-            } else
-                hole = hole + c;
-        } else
-            hole = hole + c;
+            } else hole = hole + c;
+        } else hole = hole + c;
     }
     srcEnd = written.length;
     if (holeAt >= 0)
         compiler.fail(
             "html: a `\${` hole is not closed",
             at: template,
-            span: Span(offsetOf(holeAt), offsetOf(holeAt + 2), 1),
+            span: Span(holeAt, holeAt + 2, 1),
         );
     val n = chs.length;
 
@@ -530,7 +482,8 @@ pub fn html(expr template: string) -> Element {
 
     var failed = false;
     val failSpan = { a, b, msg ->
-        if (failed == false) compiler.fail("html: " + msg, at: template, span: Span(a, b, 1));
+        if (failed == false)
+            compiler.fail("html: " + msg, at: template, span: Span(a, b, 1));
         failed = true;
     };
 

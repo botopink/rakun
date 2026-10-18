@@ -257,9 +257,7 @@ fn holed(text: string) -> bool {
 // The code of a `styled` literal whose rules are `text`.
 fn styledCode(text: string, codes: string[]) -> string {
     if (holed(text))
-        return "styledComputed(\"s_\", "
-            + computedArguments(text, codes)
-            + ")";
+        return "styledComputed(\"s_\", " + computedArguments(text, codes) + ")";
     val className = "s_" + classHash(text);
     return "styledConstant("
         + quoted(className)
@@ -286,48 +284,6 @@ fn propertyCode(decls: string, codes: string[]) -> string {
         + ")";
 }
 
-// `compiler.text` answers a template text as a string literal's content
-// today: each backslash, `"`, `$`, newline, carriage return and tab of the
-// raw text is written `\\`, `\"`, `\$`, `\n`, `\r`, `\t` (decision 577 (5)
-// answers the raw text; the compiler's answer is a 144 defect). `rawChars`
-// reads the raw characters back; `rawOffsets` holds each one's offset in the
-// string `compiler.text` answered — the offset a `Span` names.
-fn unescaped(c: string) -> string {
-    return if (c == "n") "\n" else if (c == "r") "\r" else if (c == "t") "\t" else c;
-}
-
-fn rawChars(text: string) -> string[] {
-    var out: string[] = [];
-    var esc = false;
-    for (text.split("")) { c ->
-        if (esc) {
-            out.push(unescaped(c));
-            esc = false;
-        } else if (c == "\\")
-            esc = true
-        else
-            out.push(c);
-    }
-    return out;
-}
-
-fn rawOffsets(text: string) -> i32[] {
-    var out: i32[] = [];
-    var esc = false;
-    var at = 0;
-    for (text.split("")) { c ->
-        if (esc)
-            esc = false
-        else if (c == "\\") {
-            out.push(at);
-            esc = true;
-        } else
-            out.push(at);
-        at = at + 1;
-    }
-    return out;
-}
-
 // A template text read into the reader's `Source`: one entry per character,
 // a `${…}` hole one entry `\u{2}<k>\u{3}` spanning the hole, its expression
 // the `k`th code. The holes are the template's own syntax (decision 577 (1)):
@@ -336,9 +292,7 @@ fn rawOffsets(text: string) -> i32[] {
 type Scanned(src: Source, unclosed: i32)
 
 fn scan(text: string) -> Scanned {
-    val raw = rawChars(text);
-    val rawPos = rawOffsets(text);
-    val offsetOf = { k -> rawPos.at(k) ?? text.length };
+    val raw = text.split("");
     var cs: string[] = [];
     var starts: i32[] = [];
     var ends: i32[] = [];
@@ -353,9 +307,7 @@ fn scan(text: string) -> Scanned {
     for (raw) { c ->
         val i = k;
         k = k + 1;
-        if (skip)
-            skip = false
-        else if (holeAt < 0) {
+        if (skip) skip = false else if (holeAt < 0) {
             if (c == "$" && (raw.at(i + 1) ?? "") == "{") {
                 holeAt = i;
                 depth = 1;
@@ -363,8 +315,8 @@ fn scan(text: string) -> Scanned {
                 skip = true;
             } else {
                 cs = cs.append([c]);
-                starts = starts.append([offsetOf(i)]);
-                ends = ends.append([offsetOf(i + 1)]);
+                starts = starts.append([i]);
+                ends = ends.append([i + 1]);
             }
         } else if (inStr) {
             hole = hole + c;
@@ -384,18 +336,16 @@ fn scan(text: string) -> Scanned {
             depth = depth - 1;
             if (depth == 0) {
                 cs = cs.append(["\u{2}" + codes.length.toString() + "\u{3}"]);
-                starts = starts.append([offsetOf(holeAt)]);
-                ends = ends.append([offsetOf(i + 1)]);
+                starts = starts.append([holeAt]);
+                ends = ends.append([i + 1]);
                 codes = codes.append([hole]);
                 holeAt = -1;
-            } else
-                hole = hole + c;
-        } else
-            hole = hole + c;
+            } else hole = hole + c;
+        } else hole = hole + c;
     }
     return Scanned(
         src: Source(cs: cs, starts: starts, ends: ends, codes: codes),
-        unclosed: if (holeAt < 0) -1 else offsetOf(holeAt),
+        unclosed: if (holeAt < 0) -1 else holeAt,
     );
 }
 
