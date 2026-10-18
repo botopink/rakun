@@ -39,7 +39,7 @@ consumer outside it with the git form. `dependencies` is the object form only
 ## Today's surface (v0)
 
 ```bp
-import { emilia, flush, Token } from "rakun-stylesheet";
+import { emilia.emilia, flush, Token } from "rakun-stylesheet";
 import { div, h1, p, renderToString } from "rakun-bpp";
 
 val cardBg = emilia([

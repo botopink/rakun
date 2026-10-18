@@ -578,7 +578,7 @@ attachment syntaxes.
 ## How it integrates with rakun-bpp (today and tomorrow)
 
 - **Today.** A consumer does
-  `import { emilia, flush, Token } from "rakun-stylesheet"`, calls `emilia(...)`
+  `import { emilia.emilia, flush, Token } from "rakun-stylesheet"`, calls `emilia(...)`
   to GET a class name, then composes the SSR output as
   `renderToString(page) + flush()`. v0's `Element` has **no attribute
   slot**, so the class name lives in the `<style>` block but is not

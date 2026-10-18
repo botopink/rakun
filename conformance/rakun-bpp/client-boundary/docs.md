@@ -36,7 +36,7 @@ component that only loads data is `fn … -> @Task<Element>` and cannot be marke
 client: its reflected `returnType` is `"@Task<Element>"`, which the second check
 below rejects.
 
-Applying it requires importing it — `import { client, clientProps } from
+Applying it requires importing it — `import { client.client, clientProps } from
 "rakun-bpp";`. The gate is `botopink test`.
 
 ## `#[clientProps]` — the serializable whitelist

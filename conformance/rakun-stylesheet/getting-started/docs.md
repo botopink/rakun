@@ -24,7 +24,7 @@ A member of the rakun workspace writes `{ "rakun-stylesheet": { "workspace":
 true } }` instead — that is what [`examples/rakun-stylesheet/emilia-card/`](../../../examples/rakun-stylesheet/emilia-card/)
 does — and a project elsewhere in the ecosystem `{ "path": "…/modules/rakun-stylesheet" }`.
 
-Bare `import { emilia, flush, Token } from "rakun-stylesheet"` resolves at v0;
+Bare `import { emilia.emilia, flush, Token } from "rakun-stylesheet"` resolves at v0;
 the `import emilia from "rakun-stylesheet"` package-handle form is a recorded
 follow-up (binds the handle but doesn't currently lower the bare
 `emilia(…)` call).
