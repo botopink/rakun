@@ -29,6 +29,7 @@ says what the feature does and links the cells beside it.
 | [Configuration](configuration/docs.md) | `#[value]`, `#[configurationProperties]`, the eight sources |
 | [The request context](request-context/docs.md) | the frame, its phases, `headers()`, `cookies()`, `after()`, memoization |
 | [The container](container/docs.md) | `#[managed]`, `Context`, `#[provides]`, lifecycle, events, scopes, shutdown |
+| [Plug-and-play](plug-and-play/docs.md) | `#[rakun.module]`, `rakun.boot()`, `inject` / `onStop`, `#[rakun.config]` |
 | [Auto-configuration](auto-configuration/docs.md) | conditions, ordering, the report, `#[profile]` |
 | [Validation](validation/docs.md) | `#[validated]`, binders, application constraints, configuration that refuses to boot |
 | [SSL bundles](ssl-bundles/docs.md) | resolving, reloading and reporting PEM bundles |

@@ -1,0 +1,263 @@
+//// rakun — plug-and-play (front 165 s5; decisions 580, 581): what a package
+//// contributes, and how the program starts it.
+////
+//// A package declares its module at its root, a component function marked
+//// `#[rakun.module]`:
+////
+////     import {rakun} from "rakun";
+////     import {rakun.Service, rakun.inject, rakun.onStop} from "rakun";
+////
+////     #[rakun.module]
+////     pub component fn web() -> @Component<Service> {
+////         val store = use inject("store");
+////         use onStop({ -> @print("web stops") });
+////         return Service(name: "web");
+////     }
+////
+//// and the program's `main` writes `rakun.boot();`. The decorator's executor
+//// writes the module into the run-time `registry` before `main` (decision
+//// 575 (3), 580), the function itself as its `make` (581 (2)); `boot()` is
+//// ordinary run-time code over that registry: nothing is discovered at run
+//// time and nothing is reflected.
+////
+//// A module runs as a component over a `ServiceScope` — the render scope
+//// without a DOM (decisions 388, 504) — so its body `use`s hooks:
+//// `inject(name)` starts the module of that name once, on demand, and answers
+//// its `Service` (a module therefore starts after everything it injects: the
+//// boot order is the dependency order); `onStop(f)` runs `f` at `stop()`,
+//// the last module started stopping first.
+////
+//// A program overrides a package's defaults with a typed record:
+////
+////     #[rakun.config]
+////     pub val zeta: ZetaConfig = ZetaConfig(path: "data/prod");
+////
+//// (a field `ZetaConfig` does not declare is the ordinary build error), and
+//// the package reads it with `configOf("ZetaConfig", ZetaConfig())`, its own
+//// defaults when the program declares none.
+
+import {compiler, compiler.DeclKind} from "std";
+import {context.RenderScope} from "std";
+import {io.clock.sleep} from "std";
+import {runtime.rkSingleton};
+
+/// What a module answers once it has started: the service it contributes.
+pub type Service(name: string)
+
+/// When `boot()` starts a module: at boot, `afterMs` milliseconds after boot
+/// began, or only when the program calls `start(name)` (or a started module
+/// `inject`s it).
+pub type Lifecycle {
+    Eager,
+    Lazy(afterMs: i32),
+    Manual,
+}
+
+/// One module of the program: its name (the annotated function's), when it
+/// starts, and the component function that starts it.
+pub type Module(name: string, lifecycle: Lifecycle, make: fn() -> @Component<Service>)
+
+// ── the registry the executors write (decisions 575 (3), 580) ────────────────
+
+var modules: Module[] = [];
+
+var started: Started[] = [];
+
+var stops: (fn())[] = [];
+
+// A module started, and the service it answered.
+type Started(name: string, service: Service)
+
+fn startedService(name: string) -> ?Service {
+    var i = 0;
+    while (i < started.length) {
+        val s = started.at(i)!;
+        if (s.name == name) return s.service;
+        i = i + 1;
+    }
+    return null;
+}
+
+/// The program's modules, in init order: modules in dependency order, each
+/// module's declarations in source order.
+pub type Registry() {
+    /// Records a module; what `#[rakun.module]`'s executor calls.
+    pub fn add(self: Self, m: Module) {
+        modules.push(m);
+    }
+
+    /// The module named `name`, or `null` when no package declares it.
+    pub fn find(self: Self, name: string) -> ?Module {
+        var i = 0;
+        while (i < modules.length) {
+            val m = modules.at(i)!;
+            if (m.name == name) return m;
+            i = i + 1;
+        }
+        return null;
+    }
+
+    /// Every module, in the order they were added.
+    pub fn all(self: Self) -> Module[] {
+        return modules;
+    }
+}
+
+/// The program's registry.
+pub val registry: Registry = Registry();
+
+// ── the decorators ──────────────────────────────────────────────────────────
+
+/// Marks a package's module: a `component fn() -> @Component<Service>`. Its
+/// executor adds `Module(name, lifecycle, make)` to the registry before
+/// `main`, `make` the annotated function itself.
+pub fn module(expr decl: unknown, comptime lifecycle: Lifecycle = .Eager) {
+    val shaped = compiler.kind(decl) == DeclKind.Fn
+        && compiler.returnType(decl) == "@Component<Service>"
+        && compiler.params(decl).length == 0;
+    if (!shaped)
+        compiler.fail("#[module] goes on a component fn() -> Component<Service>", at: decl);
+    val name = compiler.name(decl)!;
+    compiler.compile({ -> registry.add(Module(name: name, lifecycle: lifecycle, make: decl)) });
+}
+
+/// Marks the program's override of a package's config: a `val` whose type is
+/// written. Its executor records the value under that type's name before
+/// `main`; the package reads it with `configOf`.
+pub fn config(expr decl: unknown) {
+    if (compiler.kind(decl) != DeclKind.Val)
+        compiler.fail("#[config] goes on a val: `pub val x: <ConfigType> = …`", at: decl);
+    val typeName = compiler.returnType(decl);
+    if (typeName == "")
+        compiler.fail("#[config] needs the val's type written: `pub val x: <ConfigType> = …`", at: decl);
+    compiler.compile({ -> rkSingleton(configKey(typeName), { -> decl }); });
+}
+
+/// The program's `#[rakun.config]` value of the type named `typeName`, or
+/// `defaults` when the program declares none.
+pub fn configOf<T>(typeName: string, defaults: T) -> T {
+    return rkSingleton(configKey(typeName), { -> defaults });
+}
+
+// The host singleton a config value is kept under: the first one recorded
+// wins, the program's executor running before any module starts.
+fn configKey(typeName: string) -> string {
+    return "rakun.config:" + typeName;
+}
+
+// ── the scope and the hooks ─────────────────────────────────────────────────
+
+/// The scope modules run in: the render scope without a DOM (decisions 388,
+/// 504). `boot()` makes one and mounts every module into it.
+pub type ServiceScope(render: RenderScope) {
+    /// The empty scope a boot starts from.
+    pub fn root() -> ServiceScope {
+        return ServiceScope(render: RenderScope.root());
+    }
+
+    /// Starts `m` once and answers its service; a module already started
+    /// answers the service it started with.
+    pub fn mount(self: Self, m: Module) -> Service {
+        val known = startedService(m.name);
+        if (known != null) return known;
+        val c: @Component<Service> = m.make();
+        val r = c.run(self.render);
+        started.push(Started(name: m.name, service: r.value));
+        return r.value;
+    }
+}
+
+fn moduleNamed(name: string) -> Module {
+    val m = registry.find(name);
+    if (m == null)
+        @panic("rakun: no module named `"
+            + name
+            + "` - add the package that declares it to botopink.json");
+    return m;
+}
+
+/// The service of the module named `name`, started once, on demand: a module
+/// that injects another starts after it.
+pub fn inject(name: string) -> @Component<Service> {
+    val known = startedService(name);
+    if (known != null) return known;
+    val c: @Component<Service> = moduleNamed(name).make();
+    val s = await c;
+    started.push(Started(name: name, service: s));
+    return s;
+}
+
+/// Runs `f` when the program calls `stop()`.
+pub fn onStop(f: fn()) -> @Component<void> {
+    stops.push(f);
+}
+
+// ── boot, start, stop ───────────────────────────────────────────────────────
+
+/// Starts the program's modules over one `ServiceScope`: every `.Eager` one in
+/// registry order, then every `.Lazy` one once its `afterMs` has passed since
+/// boot began, in `afterMs` order; a `.Manual` one waits for `start(name)`.
+pub fn boot() {
+    val scope = ServiceScope.root();
+    val all = registry.all();
+    var i = 0;
+    while (i < all.length) {
+        val m = all.at(i)!;
+        if (m.lifecycle == Lifecycle.Eager) val _s = scope.mount(m);
+        i = i + 1;
+    }
+    // The `.Lazy` ones, smallest `afterMs` first: each pass starts the one
+    // with the smallest delay not started yet.
+    var waited = 0;
+    var more = true;
+    while (more) {
+        more = false;
+        var next = -1;
+        var j = 0;
+        while (j < all.length) {
+            val m = all.at(j)!;
+            val ms = afterOf(m);
+            val pending = ms >= 0 && startedService(m.name) == null;
+            if (pending && (next < 0 || ms < afterOf(all.at(next)!))) next = j;
+            j = j + 1;
+        }
+        if (next >= 0) {
+            val m = all.at(next)!;
+            val ms = afterOf(m);
+            if (ms > waited) {
+                sleep(ms - waited);
+                waited = ms;
+            }
+            val _s = scope.mount(m);
+            more = true;
+        }
+    }
+}
+
+// A `.Lazy` module's delay; -1 for the others.
+fn afterOf(m: Module) -> i32 {
+    return case m.lifecycle {
+        .Lazy(ms) -> ms;
+        _ -> -1;
+    };
+}
+
+/// Starts the module named `name` (a `.Manual` one, or any not started yet);
+/// an error naming it when no package declares it.
+pub fn start(name: string) -> @Result<void, string> {
+    val m = registry.find(name);
+    if (m == null) throw "rakun: no module named `" + name + "`";
+    val _s = ServiceScope.root().mount(m);
+    return;
+}
+
+/// Runs every `onStop` handler, the last registered first.
+pub fn stop() {
+    var i = stops.length - 1;
+    while (i >= 0) {
+        val f = stops.at(i);
+        if (f != null) f();
+        i = i - 1;
+    }
+    stops = [];
+}

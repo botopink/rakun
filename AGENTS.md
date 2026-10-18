@@ -466,6 +466,29 @@ rows are the compiler repository's to edit (the erlang rows of `rakun`, `rakun-e
 as a `build` restriction — `test-libs` names every line). rakun has no line in
 `known-red-libs.txt`.
 
+## Plug-and-play — `modules/rakun/src/rakun.bp` (front 165 s5)
+
+The module `rakun` of the package `rakun` (`import {rakun} from "rakun";`): `Service`, `Lifecycle { Eager,
+Lazy(afterMs), Manual }`, `Module(name, lifecycle, make)`, the run-time `registry` (`add`, `find`, `all`), the
+decorators `#[rakun.module(lifecycle: Lifecycle = .Eager)]` (on a `component fn() -> @Component<Service>` only,
+refused at the annotation otherwise; its executor adds the module, `make` the function itself, decisions 580, 581)
+and `#[rakun.config]` (on a `val` whose type is written; its executor keeps the value under the type's name in the
+host singleton table, read by `configOf("<Type>", defaults)`), the hooks `inject(name)` (a module started once, on
+demand) and `onStop(f)`, `ServiceScope` (the render scope without a DOM), `boot()`, `start(name) -> @Result<void,
+string>`, `stop()`. Cells under `conformance/rakun/plug-and-play/`, on erlang and beam.
+
+- A program imports a name of each package whose modules it starts: an un-imported module of a declared
+  dependency joins no init list (question filed with s5).
+- The two build errors (one thing contributed twice, a required package absent) wait on the compiler: a decorator
+  body reading `compiler.catalogue` makes its module unimportable (`typeinfo-all-imported`).
+- Written around compiler defects: a component value is bound to a typed `val` before `await` / `.run` (the call
+  chain `m.make().run(s)` / `await f().make()` lowers wrongly on erlang); a `Lifecycle` argument is written
+  `Lifecycle.Manual`, the leading-dot `.Manual` being refused at an annotation; `configOf` reads through the host
+  singleton because `v is fn() -> T` in a generic body makes the call's `T` `unknown`; the library loops by index
+  (`while`), and `boot_modules` reads `registry.find` without `?.` (on beam `find(…)?.name` answered `null`).
+- `compiler.compile` (two sites) becomes `compiler.init` (615), `expr decl` (two sites) `syntax decl` (616),
+  `compiler.name(decl)!` drops the `!` (612) by B-137's codemod.
+
 ## The erlang host module
 
 `modules/rakun/src/sidecars/rakun_runtime.erl` is rakun's host runtime, ported
