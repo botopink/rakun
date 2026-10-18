@@ -7,8 +7,7 @@
 //// each hole's expression spliced into the code it builds and typed where
 //// the call stands (577 (1)) — and each answers a component in the
 //// language's model (decision 128, the pattern of 276's `View`):
-//// `Component<Styled>` (`StyledView`) and `Component<StyledProperty>`
-//// (`StyledPropertyView`).
+//// `Component<Styled>` and `Component<StyledProperty>`.
 ////
 //// A component's class is the layer's prefix (`s_`) and the content hash of
 //// its rules, so the same rules are the same class. A literal with no hole is
@@ -28,7 +27,7 @@ import {hash.classHash};
 // What a tag annotation and a sheet take: anything that is a `styled`
 // component.
 pub behavior Styleable {
-    fn toStyled(self: Self) -> StyledView;
+    fn toStyled(self: Self) -> Component<Styled>;
 }
 
 // The render's sheet as a component computed at render sees it (decisions
@@ -49,9 +48,8 @@ fn missingProvider(layer: string, item: Styled) -> void {
 
 // A component: its class and its rules (`.s_<hash>{…}` and its nested rules, in
 // source order — decision 368).
-// LANGUAGE GAP: a wrapper's type alias cannot implement a behavior (a type's conformance is its own clause), so `Styleable` is implemented by the records `Styled` and `StyledProperty`, not by `StyledView` and `StyledPropertyView`.
 pub type Styled(className: string, rules: string) implement Styleable, Renderable {
-    fn toStyled(self: Self) -> StyledView {
+    fn toStyled(self: Self) -> Component<Styled> {
         return styledConstant(self.className, self.rules);
     }
 }
@@ -59,14 +57,10 @@ pub type Styled(className: string, rules: string) implement Styleable, Renderabl
 // A declarations-only component: its class, its rules (`.s_<hash>{…}`) and
 // its declarations, which a `${p}` hole of another literal inlines.
 pub type StyledProperty(className: string, rules: string, declarations: string) implement Styleable, Renderable {
-    fn toStyled(self: Self) -> StyledView {
+    fn toStyled(self: Self) -> Component<Styled> {
         return styledConstant(self.className, self.rules);
     }
 }
-
-pub type StyledView = Component<Styled>;
-
-pub type StyledPropertyView = Component<StyledProperty>;
 
 // ── the run-time half: what the template's code calls ───────────────────────
 
@@ -110,7 +104,7 @@ pub component fn propertyConstant(
 }
 
 // The text between holes, each spliced property's declarations in its place.
-component fn spliced(texts: string[], views: StyledPropertyView[]) -> Component<string> {
+component fn spliced(texts: string[], views: Component<StyledProperty>[]) -> Component<string> {
     var out = texts.at(0) ?? "";
     var k = 0;
     for (views) { v ->
@@ -128,7 +122,7 @@ component fn spliced(texts: string[], views: StyledPropertyView[]) -> Component<
 pub component fn styledComputed(
     prefix: string,
     texts: string[],
-    views: StyledPropertyView[],
+    views: Component<StyledProperty>[],
 ) -> Component<Styled> {
     val sheet = use context(styledContext);
     val text = await spliced(texts, views);
@@ -141,7 +135,7 @@ pub component fn styledComputed(
 pub component fn propertyComputed(
     prefix: string,
     texts: string[],
-    views: StyledPropertyView[],
+    views: Component<StyledProperty>[],
 ) -> Component<StyledProperty> {
     val sheet = use context(styledContext);
     val declarations = await spliced(texts, views);
@@ -159,7 +153,7 @@ pub component fn propertyComputed(
 // A `${p}` hole's property, run under a provider that keeps nothing: a splice
 // inlines `p`'s declarations and registers no class of its own (352, 338) —
 // `p`, computed at render, would otherwise add its class when it runs.
-pub component fn splice(view: fn() -> StyledPropertyView) -> Component<StyledProperty> {
+pub component fn splice(view: fn() -> Component<StyledProperty>) -> Component<StyledProperty> {
     use provide(createContext(StyledSheet(layer: "", add: discard)));
     val p = await view();
     return p;
@@ -351,7 +345,7 @@ fn scan(text: string) -> Scanned {
 
 // `styled "…"`: a component — declarations, nested rules, variants, at-rules.
 // LANGUAGE GAP: a library's template function cannot read the program's catalogue (`@TypeInfo.all(with: theme)` in an imported module), so both literals read `baseTheme()`, never the application's `#[theme]`.
-pub default fn styled(syntax css: string) -> StyledView {
+pub default fn styled(syntax css: string) -> Component<Styled> {
     val scanned = scan(compiler.text(css));
     val src = scanned.src;
     val cs = src.cs;
@@ -388,7 +382,7 @@ pub default fn styled(syntax css: string) -> StyledView {
 // the character.
 pub fn styledProperty(
     syntax css: string,
-) -> StyledPropertyView {
+) -> Component<StyledProperty> {
     val scanned = scan(compiler.text(css));
     val src = scanned.src;
     val cs = src.cs;

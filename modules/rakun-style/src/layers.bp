@@ -7,7 +7,7 @@
 //// a component, in declaration order. A sheet is a value: `add` answers the
 //// sheet with the component in it (a record has no assignable field).
 
-import {styled.Styled};
+import {styled.Styled, styled.Styleable};
 import {failure.panic} from "std";
 
 // A layer: its name and the class prefix of the components it holds.
@@ -18,8 +18,9 @@ pub fn layer(name: string) -> Layer {
     return Layer(name: name, prefix: "s_");
 }
 
-// One component in a layer, under the class the layer gives it.
-pub type SheetEntry(layer: string, className: string, rules: string)
+// One component in a layer: the component `toStyled()` answered, run when the
+// sheet renders.
+pub type SheetEntry(layer: string, view: Component<Styled>)
 
 fn validLayerName(name: string) -> bool {
     val allowed = "abcdefghijklmnopqrstuvwxyz0123456789-";
@@ -70,33 +71,37 @@ pub type Sheet(layers: Layer[], entries: SheetEntry[]) {
         return prefix + item.className.slice(cut + 1, item.className.length);
     }
 
-    // The sheet with `item` in `layerName`. A property goes in as its
-    // `toStyled()`.
-    // LANGUAGE GAP: a method's behavior-typed parameter refuses an implementer (a free function's takes it), so `add` takes the `Styled` a `Styleable` answers, not the `Styleable`.
-    pub fn add(self: Self, layerName: string, item: Styled) -> Sheet {
-        val className = self.classIn(layerName, item);
-        val present = self.entries.any(
-            { e -> e.layer == layerName && e.className == className },
-        );
-        if (present) return self;
-        val rules = item.rules
-            .split("." + item.className)
-            .join("." + className);
+    // The sheet with `item`'s component in `layerName`: the entry holds
+    // `item.toStyled()` and the render runs it.
+    pub fn add(self: Self, layerName: string, item: Styleable) -> Sheet {
         val one: SheetEntry[] = [
-            SheetEntry(layer: layerName, className: className, rules: rules),
+            SheetEntry(layer: layerName, view: item.toStyled()),
         ];
         return Sheet(layers: self.layers, entries: self.entries.append(one));
     }
 
     // `@layer <name>{…}` for each layer holding a component, in declaration
-    // order; each layer's components in the order they were added.
-    pub fn render(self: Self) -> string {
+    // order; each layer's components in the order they were added, each once,
+    // under the layer's prefix. Each entry runs with the render's scope.
+    pub fn render(self: Self) -> Component<string> {
         var out = "";
         for (self.layers) { l ->
-            val held = self.entries
-                .filter({ e -> e.layer == l.name })
-                .map({ e -> e.rules })
-                .join("");
+            var classes: string[] = [];
+            var held = "";
+            for (self.entries) { e ->
+                if (e.layer == l.name) {
+                    val view = e.view;
+                    val item = await view();
+                    val className = self.classIn(l.name, item);
+                    if (!classes.contains(className)) {
+                        classes = classes.append([className]);
+                        held = held
+                            + item.rules
+                                .split("." + item.className)
+                                .join("." + className);
+                    }
+                }
+            }
             if (held != "") out = out + "@layer " + l.name + "{" + held + "}";
         }
         return out;

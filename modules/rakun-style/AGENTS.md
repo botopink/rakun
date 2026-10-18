@@ -4,22 +4,22 @@
 
 The `rakun-style` package (decision 338; its `` styled @`…` `` template function keeps its name): the base for building CSS components. `` styled @`…` `` and
 `` styledProperty @`…` `` are template functions (over the template text, `syntax css: string`) that read a CSS rule body at build and answer a
-component in the language's model — `Component<Styled>` (`StyledView`) and
-`Component<StyledProperty>` (`StyledPropertyView`); the layered `Sheet` holds
+component in the language's model — `Component<Styled>` and
+`Component<StyledProperty>`; the layered `Sheet` holds
 components in `@layer`s; the theme mechanism (`Theme`, `entry`, `clear`, `clearNs`, `clearAll`,
 `extendTheme`, `#[theme]`) is what `@variant md` and `--theme(…)` read. The middle of the three
 CSS layers: it imports `css` (the reader's character walk) and `std`, and knows no file kind, no
 markup, no manifest and no framework.
 
 ```bp
-import styled, {styledProperty, StyledView, StyledPropertyView} from "rakun-style";
+import styled, {styledProperty} from "rakun-style";
 
 pub val tab4 = styledProperty @`tab-size: 4;`;
-fn padAll(n: i32) -> StyledPropertyView { return styledProperty @`padding: --spacing(${n});`; }
+fn padAll(n: i32) -> Component<StyledProperty> { return styledProperty @`padding: --spacing(${n});`; }
 
 // `${padAll(2)}` is a call: computed at render, so a function run below the
 // render's `StyledSheet` provider (a `val` is evaluated outside every render).
-fn code() -> StyledView {
+fn code() -> Component<Styled> {
     return styled @`
   ${tab4}
   font-family: var(--font-mono);
@@ -55,8 +55,8 @@ styled/
 │   │                    baseTheme, themeValue, wasCleared, valueText, nsPrefix, the #[theme] decorator
 │   ├── variants.bp    ← VariantRead, readVariant — what `@variant <name>` means under a theme
 │   ├── reader.bp      ← Source, Block, Value, readBlock, firstNonDeclaration — the literal read at build
-│   ├── layers.bp      ← Layer, layer, SheetEntry, Sheet (of, add, classIn, render)
-│   └── styled.bp      ← StyledSheet, styledContext, Styled, StyledProperty, StyledView, StyledPropertyView,
+│   ├── layers.bp      ← Layer, layer, SheetEntry, Sheet (of, add, classIn, render; `add` stores `item.toStyled()`, `render` is a component that runs each entry)
+│   └── styled.bp      ← StyledSheet, styledContext, Styled, StyledProperty,
 │                        Styleable, styled (default), styledProperty, the constant/computed constructors,
 │                        splice, holeText, Holes (what a literal's holes are worth at build, decision 355)
 ├── test/              ← styled_test (the literals), theme_test, sheet_test, context_test (what registers through
@@ -81,7 +81,7 @@ A rule body, read at build (`reader.bp`):
 | Written | Served (`.k` = the component's class) |
 |---|---|
 | `prop: value;` (the `;` required) | `.k{prop:value;…}` — whitespace squeezed, comments dropped |
-| `${p}` where a declaration stands (`p` a `StyledPropertyView`) | `p`'s declarations in place — Tailwind's `@apply` |
+| `${p}` where a declaration stands (`p` a `Component<StyledProperty>`) | `p`'s declarations in place — Tailwind's `@apply` |
 | `${v}` inside a value (`v` a `string`, `i32` or `f64`) | the value's text |
 | `&:hover { … }`, `.icon { … }`, `a, & > p { … }` | `.k:hover{…}`, `.k .icon{…}` — CSS nesting, lists crossed |
 | `@variant hover / first / after { … }` | the pseudo-class or pseudo-element appended |
@@ -138,8 +138,9 @@ at render (`` pub val code = styled @`${padAll(2)}` ``) fails when it is first r
 outside every render (`119-f`); such a component is a function.
 
 **The sheet** is a value: `Sheet.of([layer("base"), Layer(name: "utilities", prefix: "e_")])`,
-`sheet.add(layerName, styled)` answers the sheet with the component in that layer once, under the
-layer's prefix (the hash kept), and `render()` writes `@layer <name>{…}` per non-empty layer in
+`sheet.add(layerName, item)` (`item` a `Styleable`) answers the sheet holding `item.toStyled()` in that
+layer, and `await sheet.render()` runs each entry and writes each component once, under the
+layer's prefix (the hash kept) as `@layer <name>{…}` per non-empty layer in
 declaration order.
 
 ## Testing

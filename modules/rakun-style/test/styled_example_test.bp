@@ -9,25 +9,25 @@
 // `styledProperty "…"` (declarations only) are template functions: values go
 // in `${…}` holes, so the braces stay CSS's; Tailwind v4's CSS syntax works
 // where it is CSS (`--spacing()`, `--theme()`, `@variant`); `@apply` is a hole
-// of a `StyledPropertyView`. Both answer components in the language's model
+// of a `Component<StyledProperty>`. Both answer components in the language's model
 // (`Component<…>`), so a test reads one after `await`. A component computed
 // at render registers in the render's sheet through `use
 // context(StyledContext)` (decisions 352, 354), so it runs below a provider.
 
-import {styled.styled, styled.styledProperty, styled.StyledView, styled.StyledPropertyView, styled.StyledSheet, styled.Styled, styled.StyledProperty, layers.Sheet, layers.layer};
+import {styled.styled, styled.styledProperty, styled.StyledSheet, styled.Styled, styled.StyledProperty, layers.Sheet, layers.layer};
 import {context.createContext, context.provide} from "std";
 
 pub val tab4 = styledProperty @`tab-size: 4;`;
 
 // Tailwind: @utility p-* { padding: --spacing(--value(integer)); }
-fn padAll(n: i32) -> StyledPropertyView {
+fn padAll(n: i32) -> Component<StyledProperty> {
     return styledProperty @`padding: --spacing(${n});`;
 }
 
 // `${padAll(2)}` is a call, so `code` is computed at render (decision 355):
 // a function, run below the render's provider — a `val` is evaluated outside
 // every render.
-fn code() -> StyledView {
+fn code() -> Component<Styled> {
     return styled @`
   ${tab4}
   font-family: var(--font-mono);
@@ -40,14 +40,14 @@ fn code() -> StyledView {
 
 // The render's root: whoever renders provides `StyledSheet`'s context — rakun-bpp's
 // render, emilia's `flush()` (decision 354 (7)). This one keeps nothing.
-component fn Render(view: fn() -> StyledView) -> Component<Styled> {
+component fn Render(view: fn() -> Component<Styled>) -> Component<Styled> {
     use provide(createContext(StyledSheet(layer: "components", add: dropped)));
     val out = await view();
     return out;
 }
 
 component fn RenderProperty(
-    view: fn() -> StyledPropertyView,
+    view: fn() -> Component<StyledProperty>,
 ) -> Component<StyledProperty> {
     use provide(createContext(StyledSheet(layer: "components", add: dropped)));
     val out = await view();
@@ -61,7 +61,7 @@ test "styled: a property's hole is a value; --spacing() expands" {
     assert p.rules == "." + p.className + "{padding:calc(var(--spacing) * 4)}";
 }
 
-test "styled: a StyledPropertyView in a hole inlines its declarations (@apply)" {
+test "styled: a Component<StyledProperty> in a hole inlines its declarations (@apply)" {
     val c = await Render({ -> code() });
     assert c.rules.contains(
         "." + c.className + "{tab-size:4;font-family:var(--font-mono)}",
@@ -92,13 +92,13 @@ test "styled: the same rules are the same class, under the layer's prefix" {
 test "styled: a sheet renders its layers in declaration order, each component once" {
     val c = await Render({ -> code() });
     val p = await RenderProperty({ -> padAll(2) });
-    // LANGUAGE GAP: a sheet is a value (no assignment to a record's field) and a method's behavior-typed parameter refuses an implementer, so `add` answers the sheet and takes the `Styled` a property's `toStyled()` answers.
+    // LANGUAGE GAP: a sheet is a value (no assignment to a record's field) and so `add` answers the sheet.
     val sheet = Sheet
         .of([layer("base"), layer("components")])
         .add("components", c)
         .add("components", c)
-        .add("base", await p.toStyled());
-    val out = sheet.render();
+        .add("base", p);
+    val out = await sheet.render();
     assert out.indexOf("@layer base") < out.indexOf("@layer components");
     assert out.split(c.rules).length == 2;
 }
