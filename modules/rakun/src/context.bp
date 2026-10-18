@@ -218,63 +218,63 @@ pub fn parseBeans(wire: string) -> Bean[] {
 
 // ── the host cells ──────────────────────────────────────────────────────────
 //
-// Every cell carries one `@External.Erlang` form: rakun is erlang-only
+// Every cell carries one `@external(.Erlang(…))` form: rakun is erlang-only
 // (decision 113), so there is no second row to pair a cell for.
 
-#[@External.Erlang("rakun_context", "bean_register")]
+#[@external(.Erlang("rakun_context:bean_register($0, $1)"))]
 pub declare fn rkBeanStore<T>(record: string, factory: fn() -> T) -> i32;
 
-#[@External.Erlang("rakun_context", "bean_table")]
+#[@external(.Erlang("rakun_context:bean_table()"))]
 pub declare fn rkBeanTable() -> string;
 
-#[@External.Erlang("rakun_context", "bean_count")]
+#[@external(.Erlang("rakun_context:bean_count()"))]
 pub declare fn rkBeanCount() -> i32;
 
-#[@External.Erlang("rakun_context", "bean_has_record")]
+#[@external(.Erlang("rakun_context:bean_has_record($0)"))]
 pub declare fn rkBeanHasRecord(record: string) -> bool;
 
 // The factory stored under this EXACT line, invoked. botopink chose the line
 // out of `rkBeanTable()`; the host does an equality test and a call.
-#[@External.Erlang("rakun_context", "bean_invoke")]
+#[@external(.Erlang("rakun_context:bean_invoke($0)"))]
 pub declare fn rkBeanInvoke<T>(record: string) -> ?T;
 
 // The same call with the value discarded, for the eager pass: the caller has no
 // type to bind the answer to, and a construction that raises must still raise.
-#[@External.Erlang("rakun_context", "bean_touch")]
+#[@external(.Erlang("rakun_context:bean_touch($0)"))]
 pub declare fn rkBeanTouch(record: string) -> i32;
 
 // The eager pass needs the FAILURE, not the halt: `bootSequence` publishes
 // `ApplicationFailed` instead of the tail and only then raises, so it has to see
 // a construction fail without being taken down by it. `""` is success.
-#[@External.Erlang("rakun_context", "bean_try")]
+#[@external(.Erlang("rakun_context:bean_try($0)"))]
 pub declare fn rkBeanTry(record: string) -> string;
 
-#[@External.Erlang("rakun_context", "bean_reset")]
+#[@external(.Erlang("rakun_context:bean_reset()"))]
 pub declare fn rkBeanReset() -> i32;
 
 // Decision 256's catalogue: the factories the application's entry point
 // collects at comptime, one per bean name, stored as the `unknown` values they
 // are. `rkResolve<T>` narrows an entry with `is fn() -> T` when it reads it.
-#[@External.Erlang("rakun_context", "catalogue_put")]
+#[@external(.Erlang("rakun_context:catalogue_put($0, $1)"))]
 pub declare fn rkCatalogueStore(name: string, factory: unknown) -> i32;
 
-#[@External.Erlang("rakun_context", "catalogue_get")]
+#[@external(.Erlang("rakun_context:catalogue_get($0)"))]
 pub declare fn rkCatalogueEntry(name: string) -> unknown;
 
-#[@External.Erlang("rakun_context", "catalogue_names")]
+#[@external(.Erlang("rakun_context:catalogue_names()"))]
 pub declare fn rkCatalogueNames() -> string;
 
-#[@External.Erlang("rakun_context", "catalogue_reset")]
+#[@external(.Erlang("rakun_context:catalogue_reset()"))]
 pub declare fn rkCatalogueReset() -> i32;
 
 // `rkSingleton` one scope down. On the BEAM this is the process dictionary, so
 // two concurrent requests are two processes and get their own instance for
 // free; node is single-threaded, so the scope is the bracket the dispatcher
 // opens and `rkRequestScopeEnd` closes.
-#[@External.Erlang("rakun_context", "request_scoped")]
+#[@external(.Erlang("rakun_context:request_scoped($0, $1)"))]
 pub declare fn rkRequestScoped<T>(key: string, build: fn() -> T) -> T;
 
-#[@External.Erlang("rakun_context", "request_scope_end")]
+#[@external(.Erlang("rakun_context:request_scope_end()"))]
 pub declare fn rkRequestScopeEnd() -> i32;
 
 // ── the test seam ───────────────────────────────────────────────────────────
@@ -286,19 +286,19 @@ pub declare fn rkRequestScopeEnd() -> i32;
 // counter or it is nothing. Both are host state for the same reason the
 // registry is: botopink has no top-level mutable state.
 
-#[@External.Erlang("rakun_context", "note")]
+#[@external(.Erlang("rakun_context:note($0)"))]
 pub declare fn rkCtxNote(line: string) -> i32;
 
-#[@External.Erlang("rakun_context", "note_log")]
+#[@external(.Erlang("rakun_context:note_log()"))]
 pub declare fn rkCtxNotes() -> string;
 
-#[@External.Erlang("rakun_context", "note_reset")]
+#[@external(.Erlang("rakun_context:note_reset()"))]
 pub declare fn rkCtxNoteReset() -> i32;
 
-#[@External.Erlang("rakun_context", "bump")]
+#[@external(.Erlang("rakun_context:bump($0)"))]
 pub declare fn rkCtxBump(key: string) -> i32;
 
-#[@External.Erlang("rakun_context", "counted")]
+#[@external(.Erlang("rakun_context:counted($0)"))]
 pub declare fn rkCtxCount(key: string) -> i32;
 
 // ── registration ────────────────────────────────────────────────────────────
@@ -859,40 +859,44 @@ pub fn managed(expr decl: unknown) {
     var isPrimary = "false";
     var isLazy = "false";
     var stereotype = "";
-    compiler.annotations(decl).forEach({ a ->
-        val q = if (a.name == "qualifier") a.args.join("") else qual;
-        qual = q;
-        val s = if (a.name == "scope") a.args.join("") else scopeLit;
-        scopeLit = s;
-        val p = if (a.name == "primary") "true" else isPrimary;
-        isPrimary = p;
-        val l = if (a.name == "lazy") "true" else isLazy;
-        isLazy = l;
-        val isStereo = a.name == "component"
-            || a.name == "service"
-            || a.name == "repository"
-            || a.name == "controller"
-            || a.name == "restController"
-            || a.name == "configuration";
-        val st = if (isStereo) a.name else stereotype;
-        stereotype = st;
-    });
+    compiler
+        .annotations(decl)
+        .forEach({ a ->
+            val q = if (a.name == "qualifier") a.args.join("") else qual;
+            qual = q;
+            val s = if (a.name == "scope") a.args.join("") else scopeLit;
+            scopeLit = s;
+            val p = if (a.name == "primary") "true" else isPrimary;
+            isPrimary = p;
+            val l = if (a.name == "lazy") "true" else isLazy;
+            isLazy = l;
+            val isStereo = a.name == "component"
+                || a.name == "service"
+                || a.name == "repository"
+                || a.name == "controller"
+                || a.name == "restController"
+                || a.name == "configuration";
+            val st = if (isStereo) a.name else stereotype;
+            stereotype = st;
+        });
     val singleton = scopeLit == "\"singleton\"";
     val request = scopeLit == "\"request\"";
     var args: Array<string> = [];
-    compiler.fields(decl).forEach({ f ->
-        var valKey = "";
-        f.annotations.forEach(
-            { a -> if (a.name == "value") valKey = a.args.join("") },
-        );
-        val expr = if (valKey != "") {
-            if (f.typeName == "i32")
-                "rkPropInt(" + valKey + ")"
-            else
-                "rkProp(" + valKey + ")";
-        } else "rkResolve(\"" + f.typeName + "\")";
-        args.push(f.name + ": " + expr);
-    });
+    compiler
+        .fields(decl)
+        .forEach({ f ->
+            var valKey = "";
+            f.annotations.forEach(
+                { a -> if (a.name == "value") valKey = a.args.join("") },
+            );
+            val expr = if (valKey != "") {
+                if (f.typeName == "i32")
+                    "rkPropInt(" + valKey + ")"
+                else
+                    "rkProp(" + valKey + ")";
+            } else "rkResolve(\"" + f.typeName + "\")";
+            args.push(f.name + ": " + expr);
+        });
     val declName = compiler.name(decl)!;
     val qualName = qual.replaceAll("\"", "");
     val scopeName = scopeLit.replaceAll("\"", "");
@@ -933,53 +937,60 @@ pub fn managed(expr decl: unknown) {
     val instance = if (singleton) declName + ".make()" else declName + ".new()";
     var hooked = "";
     var hooks: Array<string> = [];
-    compiler.methods(decl).forEach({ m ->
-        var phase = "";
-        m.annotations.forEach({ a ->
-            val ph = if (a.name == "postConstruct")
-                "post"
-            else if (a.name == "preDestroy")
-                "pre"
-            else
-                phase;
-            phase = ph;
+    compiler
+        .methods(decl)
+        .forEach({ m ->
+            var phase = "";
+            m.annotations.forEach({ a ->
+                val ph = if (a.name == "postConstruct")
+                    "post"
+                else if (a.name == "preDestroy")
+                    "pre"
+                else
+                    phase;
+                phase = ph;
+            });
+            val seen = if (phase != "") m.name else hooked;
+            hooked = seen;
+            if (phase != "")
+                hooks.push(
+                    "rkRegisterLifecycle(\""
+                        + declName
+                        + "\", \""
+                        + m.name
+                        + "\", \""
+                        + phase
+                        + "\", 0, { -> "
+                        + instance
+                        + "."
+                        + m.name
+                        + "() });",
+                );
         });
-        val seen = if (phase != "") m.name else hooked;
-        hooked = seen;
-        if (phase != "")
-            hooks.push(
-                "rkRegisterLifecycle(\""
-                    + declName
-                    + "\", \""
-                    + m.name
-                    + "\", \""
-                    + phase
-                    + "\", 0, { -> "
-                    + instance
-                    + "."
-                    + m.name
-                    + "() });",
-            );
-    });
-    compiler.methods(decl).forEach({ m ->
-        var evName = "";
-        m.annotations.forEach({ a ->
-            val en = if (a.name == "eventListener") a.args.join("") else evName;
-            evName = en;
+    compiler
+        .methods(decl)
+        .forEach({ m ->
+            var evName = "";
+            m.annotations.forEach({ a ->
+                val en = if (a.name == "eventListener")
+                    a.args.join("")
+                else
+                    evName;
+                evName = en;
+            });
+            if (evName != "")
+                hooks.push(
+                    "rkRegisterListener("
+                        + evName
+                        + ", \""
+                        + declName
+                        + "\", { ev -> "
+                        + instance
+                        + "."
+                        + m.name
+                        + "(ev) });",
+                );
         });
-        if (evName != "")
-            hooks.push(
-                "rkRegisterListener("
-                    + evName
-                    + ", \""
-                    + declName
-                    + "\", { ev -> "
-                    + instance
-                    + "."
-                    + m.name
-                    + "(ev) });",
-            );
-    });
     if (hooks.length > 0) {
         compiler.addMember("pub fn rkHooks() { " + hooks.join(" ") + " }");
         compiler.compile({ -> decl.rkHooks(); });
@@ -1046,16 +1057,18 @@ pub fn provides(expr decl: unknown) {
     var scopeLit = "\"singleton\"";
     var isPrimary = "false";
     var isLazy = "false";
-    compiler.annotations(decl).forEach({ a ->
-        val q = if (a.name == "qualifier") a.args.join("") else qual;
-        qual = q;
-        val s = if (a.name == "scope") a.args.join("") else scopeLit;
-        scopeLit = s;
-        val p = if (a.name == "primary") "true" else isPrimary;
-        isPrimary = p;
-        val l = if (a.name == "lazy") "true" else isLazy;
-        isLazy = l;
-    });
+    compiler
+        .annotations(decl)
+        .forEach({ a ->
+            val q = if (a.name == "qualifier") a.args.join("") else qual;
+            qual = q;
+            val s = if (a.name == "scope") a.args.join("") else scopeLit;
+            scopeLit = s;
+            val p = if (a.name == "primary") "true" else isPrimary;
+            isPrimary = p;
+            val l = if (a.name == "lazy") "true" else isLazy;
+            isLazy = l;
+        });
     val t = compiler.returnType(decl);
     val declName = compiler.name(decl)!;
     val qualName = qual.replaceAll("\"", "");
@@ -1163,7 +1176,9 @@ pub fn imports(expr decl: unknown, comptime names: string) {
                 );
         });
     if (registrations.length > 0) {
-        compiler.addMember("pub fn rkImports() { " + registrations.join(" ") + " }");
+        compiler.addMember("pub fn rkImports() { "
+            + registrations.join(" ")
+            + " }");
         compiler.compile({ -> decl.rkImports(); });
     }
     if (compiler.kind(decl) != DeclKind.Type)

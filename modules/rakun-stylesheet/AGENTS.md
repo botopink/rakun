@@ -570,7 +570,7 @@ attachment syntaxes.
   (`&:hover`) and/or an at-rule (`@media (width >= 48rem)`), so a modified
   token becomes a SIBLING rule of the class, never text nested in its body.
 - **Lowering to JS.** v0 lowers to plain `function emilia(tokens) {
-  ... }` + a host expression per `#[@External.<targert>(...)]` declaration. There is
+  ... }` + a host expression per `#[@external(.<Target>(…))]` declaration. There is
   **no compiler change** beyond what was already in `feat` (`@external`
   templates, `case`/exhaustiveness, enum payload destructuring with
   named fields).
@@ -604,7 +604,7 @@ Both hooks are **emilia-agnostic** — rakun-bpp owns the mechanism.
 
 - **Not a compiler change.** No new `#[@…]` annotation in the core, no
   AST node, no codegen hook. The entire DSL is `pub fn` + `case` +
-  `#[@External.<targert>(...)]` — already shipped primitives.
+  `#[@external(.<Target>(…))]` — already shipped primitives.
 - **Not a CSS processor.** emilia reads no author CSS: author CSS is the
   `css` library's, components are `styled`'s (decision 338), and emilia is
   the layer of typed tokens over them. No preprocessor pipeline. Since front
@@ -744,7 +744,7 @@ emilia/
 │           │                the body. Prefer the docblock anyway
 │           └── emilia.bp  ← `emilia(tokens) -> string` + `flush()` + the
 │                            `tokenToCss`/`tokensToCss` dispatchers + the
-│                            `#\[@External\.<target>(…)]` host cells
+│                            `#[@external(.<Target>(…))]` host cells
 │                            (`register`, `flushSheet`) + the 17 inline
 │                            tests. It imports `Token` as
 │                            `import {tokens.Token};` — naming the
@@ -1038,10 +1038,10 @@ here), `runExamplesGate "$bin" <t>`, `runRefusalsGate` (no `refusals/` here).
   `emilia-card` reaches through `{ "emilia": { "workspace": true } }` and what
   an outside consumer reaches through the git form — a member is reached by
   its manifest `name`, never by its path (decision 75).
-- **Cross-module `#[@External.<targert>(...)]` symbol imports don't lower at v0** —
+- **Cross-module `#[@external(.<Target>(…))]` symbol imports don't lower at v0** —
   `import { register };` from a sibling module resolves the type but
   the runtime symbol is `undefined`. Until the codegen path closes
-  that gap, keep all `#[@External.<targert>(...)]` host-cell expressions in the
+  that gap, keep all `#[@external(.<Target>(…))]` host-cell expressions in the
   module that USES them (currently `emilia.bp`).
 - **`extend` is a language keyword, so the theme's composer is `extendTheme`.**
   `Name extend Type { … }` is the type-extension block, which makes `fn

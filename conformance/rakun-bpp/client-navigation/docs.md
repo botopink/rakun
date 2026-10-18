@@ -112,7 +112,7 @@ and one hook are missing, all of them blocked on fronts that have not started:
 Two measurements make stubbing them the wrong move rather than a shortcut:
 
 1. A **called** node-only cell reds the **erlang** build at its call site —
-   ``error: `__cellStatus` has no `#[@External.<Target>(…)]` for the erlang
+   ``error: `__cellStatus` has no `#[@external(.<Target>(…))]` for the erlang
    backend`` — and this module is compiled on both rows of the core member, so
    a `linkStatus()` wrapper would take every landed assertion off the erlang
    row. It is the mirror of the erlang-only → commonJS measurement `router.bp`

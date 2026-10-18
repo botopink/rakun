@@ -138,10 +138,10 @@ rakun-ssr/
   package (decision 326) — is never listed; `routing`, `actions`, `validation` are declared
   like any library (`{ "git": "https://github.com/botopink/<pkg>.git", "branch": "feat" }`).
 - A member may only **restrict** the workspace's `targets`, and only structurally (gate-d): the
-  excluded target's `botopink build` must fail on a host binding (`has no #[@External.<Target>]`),
+  excluded target's `botopink build` must fail on a host binding (`has no #[@external(.<Target>(…))]`),
   never on a checker error, and a member that builds there runs there. Today one member
   restricts: `rakun-ssr` is `["erlang"]` — its commonJS build fails on rakun's hosts (`rkReqLive`,
-  `rkBeanStore`, … `have no #[@External] for the node backend`); the rest, `rakun-ssr` and `rakun-ssr`
+  `rkBeanStore`, … `have no #[@external(…)] for the node backend`); the rest, `rakun-ssr` and `rakun-ssr`
   included, run on both rows. Nothing on both rows imports rakun (every rakun manifest is
   `["erlang"]`, decision 117) — that is `rakun-ssr`'s.
 - One module cannot hold two types of one name: an `as` alias of an imported type still binds its

@@ -175,7 +175,7 @@ pure bodies. The substitution itself is the client bundler's step (front 68,
 counter/client.mjs` runs the built `Counter` that way and prints the re-renders
 after `set(3)` and `set(-2)`. `modules/rakun-bpp/src/client_runtime.bp` carries
 the one bp-typed cell, `clientRender`, whose
-`#[@External.Node("./client_runtime.mjs", "render")]`
+`#[@external(.Node(\"require('./client_runtime.mjs').render(…)\"))]`
 is what makes the CLI ship the sidecar (a miss is silent — see `AGENTS.md`
 § Known defect); the five nouns are not re-declared in
 bp, because a package's import surface is flat and a second `state` would

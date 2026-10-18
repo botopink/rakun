@@ -29,35 +29,43 @@ import {sql.params.Param, sql.params.param, sql.rows.Row, sql.rows.Rows, sql.tem
 
 // Milliseconds since the epoch: an `i64` (decision 264 — an epoch in
 // milliseconds is beyond `i32`'s range, so arithmetic on it as an `i32` aborts).
-#[@External.Erlang("""(fun() -> erlang:system_time(millisecond) end)()""")]
+#[@external(.Erlang("""(fun() -> erlang:system_time(millisecond) end)()"""))]
 pub declare fn nowMs() -> i64;
 
-#[@External.Erlang("""(fun(__X) -> __X end)($0)""")]
+#[@external(.Erlang("""(fun(__X) -> __X end)($0)"""))]
 declare fn wide(n: i32) -> i64;
 
-#[@External.Erlang("""(fun() -> list_to_binary(pid_to_list(self()) ++ "@" ++ atom_to_list(node())) end)()""")]
+#[@external(
+    .Erlang("""(fun() -> list_to_binary(pid_to_list(self()) ++ "@" ++ atom_to_list(node())) end)()"""),
+)]
 declare fn me() -> string;
 
-#[@External.Erlang("""(fun(__F) -> try __F(), <<>> catch _:{panic, __R} when is_binary(__R) -> __R; _:__R -> iolist_to_binary(io_lib:format("~p", [__R])) end end)($0)""")]
+#[@external(
+    .Erlang("""(fun(__F) -> try __F(), <<>> catch _:{panic, __R} when is_binary(__R) -> __R; _:__R -> iolist_to_binary(io_lib:format("~p", [__R])) end end)($0)"""),
+)]
 pub declare fn attempt(work: fn() -> i32) -> string;
 // `bump` and `note` are read-modify-writes of one persistent_term shared by
 // every process (two relays, a relay and its caller): each runs under a
 // node-local `global:trans` lock on its key, so a concurrent writer cannot
 // overwrite the other's update with the value it read before it. Without the
 // lock two relays lost a quarter of their log lines.
-#[@External.Erlang("""(fun(__N) -> global:trans({{rakun_tx_counter, __N}, self()}, fun() -> __V = persistent_term:get({rakun_tx_counter, __N}, 0) + 1, persistent_term:put({rakun_tx_counter, __N}, __V), __V end, [node()]) end)($0)""")]
+#[@external(
+    .Erlang("""(fun(__N) -> global:trans({{rakun_tx_counter, __N}, self()}, fun() -> __V = persistent_term:get({rakun_tx_counter, __N}, 0) + 1, persistent_term:put({rakun_tx_counter, __N}, __V), __V end, [node()]) end)($0)"""),
+)]
 pub declare fn bump(name: string) -> i32;
 
-#[@External.Erlang("""(fun(__N) -> persistent_term:get({rakun_tx_counter, __N}, 0) end)($0)""")]
+#[@external(.Erlang("""(fun(__N) -> persistent_term:get({rakun_tx_counter, __N}, 0) end)($0)"""))]
 pub declare fn counterOf(name: string) -> i32;
 
-#[@External.Erlang("""(fun(__T) -> logger:notice("~ts", [__T]), global:trans({rakun_tx_log, self()}, fun() -> persistent_term:put(rakun_tx_log, persistent_term:get(rakun_tx_log, []) ++ [__T]) end, [node()]), 0 end)($0)""")]
+#[@external(
+    .Erlang("""(fun(__T) -> logger:notice("~ts", [__T]), global:trans({rakun_tx_log, self()}, fun() -> persistent_term:put(rakun_tx_log, persistent_term:get(rakun_tx_log, []) ++ [__T]) end, [node()]), 0 end)($0)"""),
+)]
 pub declare fn note(line: string) -> i32;
 
-#[@External.Erlang("""persistent_term:get(rakun_tx_log, [])""")]
+#[@external(.Erlang("""persistent_term:get(rakun_tx_log, [])"""))]
 pub declare fn txLog() -> string[];
 
-#[@External.Erlang("rakun_sql", "tx_open")]
+#[@external(.Erlang("rakun_sql:tx_open($0)"))]
 declare fn txOpen(ds: string) -> bool;
 
 pub type OutboxMessage(

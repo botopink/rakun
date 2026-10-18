@@ -37,7 +37,7 @@ fn code() -> StyledView {
 "branch": "feat" } }`; this package declares `css` the same way. Inside the meta checkout a
 `git` entry resolves by name through the `repository/` root, elsewhere through the install store.
 
-No `#[@External]` cell of its own: the run-time half calls std's `hash.contentHash`, the build-time
+No `#[@external(…)]` cell of its own: the run-time half calls std's `hash.contentHash`, the build-time
 half is pure botopink run on the comptime runtime (decision 331).
 
 ## Tree

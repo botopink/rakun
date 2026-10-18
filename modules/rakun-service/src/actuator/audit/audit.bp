@@ -56,27 +56,37 @@ pub behavior AuditRepository {
     fn capacity(self: Self) -> i32;
 }
 
-#[@External.Erlang("""erlang:system_time(millisecond)""")]
+#[@external(.Erlang("""erlang:system_time(millisecond)"""))]
 pub declare fn auditNowMs() -> i64;
 
-#[@External.Erlang("""(fun(__X) -> __X end)($0)""")]
+#[@external(.Erlang("""(fun(__X) -> __X end)($0)"""))]
 declare fn wide(n: i32) -> i64;
 
 // ── the ring ────────────────────────────────────────────────────────────────
 
-#[@External.Erlang("""(fun(__Cap) -> __Name = list_to_atom("rakun_audit_" ++ integer_to_list(erlang:unique_integer([positive, monotonic]))), __Me = self(), __P = spawn(fun() -> ets:new(__Name, [named_table, public, ordered_set]), ets:insert(__Name, {dropped, 0}), __Me ! {rakun_audit_ready, __Name}, receive stop -> ok end end), receive {rakun_audit_ready, __Name} -> ok after 2000 -> ok end, persistent_term:put({rakun_audit_keeper, __Name}, __P), atom_to_binary(__Name) end)($0)""")]
+#[@external(
+    .Erlang("""(fun(__Cap) -> __Name = list_to_atom("rakun_audit_" ++ integer_to_list(erlang:unique_integer([positive, monotonic]))), __Me = self(), __P = spawn(fun() -> ets:new(__Name, [named_table, public, ordered_set]), ets:insert(__Name, {dropped, 0}), __Me ! {rakun_audit_ready, __Name}, receive stop -> ok end end), receive {rakun_audit_ready, __Name} -> ok after 2000 -> ok end, persistent_term:put({rakun_audit_keeper, __Name}, __P), atom_to_binary(__Name) end)($0)"""),
+)]
 declare fn ringNew(capacity: i32) -> string;
 
-#[@External.Erlang("""(fun(__T, __Cap, __E) -> __N = binary_to_existing_atom(__T), ets:insert(__N, {{e, erlang:unique_integer([monotonic])}, __E}), __Size = ets:info(__N, size) - 1, case __Size > __Cap of true -> ets:delete(__N, ets:next(__N, dropped)), ets:update_counter(__N, dropped, 1), 0; false -> 0 end end)($0, $1, $2)""")]
+#[@external(
+    .Erlang("""(fun(__T, __Cap, __E) -> __N = binary_to_existing_atom(__T), ets:insert(__N, {{e, erlang:unique_integer([monotonic])}, __E}), __Size = ets:info(__N, size) - 1, case __Size > __Cap of true -> ets:delete(__N, ets:next(__N, dropped)), ets:update_counter(__N, dropped, 1), 0; false -> 0 end end)($0, $1, $2)"""),
+)]
 declare fn ringPut(table: string, capacity: i32, event: AuditEvent) -> i32;
 
-#[@External.Erlang("""(fun(__T) -> [__E || {{e, _}, __E} <- ets:tab2list(binary_to_existing_atom(__T))] end)($0)""")]
+#[@external(
+    .Erlang("""(fun(__T) -> [__E || {{e, _}, __E} <- ets:tab2list(binary_to_existing_atom(__T))] end)($0)"""),
+)]
 declare fn ringAll(table: string) -> Array<AuditEvent>;
 
-#[@External.Erlang("""(fun(__T) -> case ets:lookup(binary_to_existing_atom(__T), dropped) of [{dropped, __N}] -> __N; _ -> 0 end end)($0)""")]
+#[@external(
+    .Erlang("""(fun(__T) -> case ets:lookup(binary_to_existing_atom(__T), dropped) of [{dropped, __N}] -> __N; _ -> 0 end end)($0)"""),
+)]
 declare fn ringDropped(table: string) -> i32;
 
-#[@External.Erlang("""(fun(__T) -> case persistent_term:get({rakun_audit_keeper, binary_to_existing_atom(__T)}, undefined) of undefined -> <<>>; __P -> list_to_binary(pid_to_list(__P)) end end)($0)""")]
+#[@external(
+    .Erlang("""(fun(__T) -> case persistent_term:get({rakun_audit_keeper, binary_to_existing_atom(__T)}, undefined) of undefined -> <<>>; __P -> list_to_binary(pid_to_list(__P)) end end)($0)"""),
+)]
 pub declare fn auditTableOwner(table: string) -> string;
 
 fn matches(
@@ -137,37 +147,49 @@ pub fn memoryAuditRepository(capacity: i32) -> MemoryAuditRepository {
 
 // ── the SQL arm ─────────────────────────────────────────────────────────────
 
-#[@External.Erlang("""(fun(__Q, __U) -> persistent_term:put(rakun_audit_sql, {__Q, __U}), 0 end)($0, $1)""")]
+#[@external(
+    .Erlang("""(fun(__Q, __U) -> persistent_term:put(rakun_audit_sql, {__Q, __U}), 0 end)($0, $1)"""),
+)]
 pub declare fn installAuditSql(
     query: fn(sql: string, params: Array<#(string, string)>) -> Array<Array<string>>,
     update: fn(sql: string, params: Array<#(string, string)>) -> i32,
 ) -> i32;
 
-#[@External.Erlang("""(fun(__S, __P) -> case persistent_term:get(rakun_audit_sql, undefined) of undefined -> erlang:error({panic, <<"rakun-service: the SQL audit repository has no executor - installAuditSql(query, update) over front 08's SqlTemplate">>}); {__Q, _} -> __Q(__S, __P) end end)($0, $1)""")]
+#[@external(
+    .Erlang("""(fun(__S, __P) -> case persistent_term:get(rakun_audit_sql, undefined) of undefined -> erlang:error({panic, <<"rakun-service: the SQL audit repository has no executor - installAuditSql(query, update) over front 08's SqlTemplate">>}); {__Q, _} -> __Q(__S, __P) end end)($0, $1)"""),
+)]
 declare fn sqlQuery(
     sql: string,
     params: Array<#(string, string)>,
 ) -> Array<Array<string>>;
 
-#[@External.Erlang("""(fun(__S, __P) -> case persistent_term:get(rakun_audit_sql, undefined) of undefined -> erlang:error({panic, <<"rakun-service: the SQL audit repository has no executor">>}); {_, __U} -> try {ok, __U(__S, __P)} catch _:{panic, __R} when is_binary(__R) -> {error, __R}; _:__R -> {error, iolist_to_binary(io_lib:format("~p", [__R]))} end end end)($0, $1)""")]
+#[@external(
+    .Erlang("""(fun(__S, __P) -> case persistent_term:get(rakun_audit_sql, undefined) of undefined -> erlang:error({panic, <<"rakun-service: the SQL audit repository has no executor">>}); {_, __U} -> try {ok, __U(__S, __P)} catch _:{panic, __R} when is_binary(__R) -> {error, __R}; _:__R -> {error, iolist_to_binary(io_lib:format("~p", [__R]))} end end end)($0, $1)"""),
+)]
 declare fn sqlUpdate(
     sql: string,
     params: Array<#(string, string)>,
 ) -> @Result<i32, string>;
 
-#[@External.Erlang("""(fun(__T) -> logger:error("~ts", [__T]), persistent_term:put(rakun_audit_failures, persistent_term:get(rakun_audit_failures, 0) + 1), 0 end)($0)""")]
+#[@external(
+    .Erlang("""(fun(__T) -> logger:error("~ts", [__T]), persistent_term:put(rakun_audit_failures, persistent_term:get(rakun_audit_failures, 0) + 1), 0 end)($0)"""),
+)]
 declare fn noteFailure(line: string) -> i32;
 
-#[@External.Erlang("""persistent_term:get(rakun_audit_failures, 0)""")]
+#[@external(.Erlang("""persistent_term:get(rakun_audit_failures, 0)"""))]
 pub declare fn auditWriteFailures() -> i32;
 
-#[@External.Erlang("""(fun(__Ps) -> unicode:characters_to_binary(uri_string:compose_query([{unicode:characters_to_list(__K), unicode:characters_to_list(__V)} || {__K, __V} <- __Ps], [{encoding, utf8}])) end)($0)""")]
+#[@external(
+    .Erlang("""(fun(__Ps) -> unicode:characters_to_binary(uri_string:compose_query([{unicode:characters_to_list(__K), unicode:characters_to_list(__V)} || {__K, __V} <- __Ps], [{encoding, utf8}])) end)($0)"""),
+)]
 declare fn encodePairs(pairs: Array<#(string, string)>) -> string;
 
-#[@External.Erlang("""(fun(__D) -> case __D of <<>> -> []; _ -> case uri_string:dissect_query(__D) of __L when is_list(__L) -> [{unicode:characters_to_binary(__K), case __V of true -> <<>>; _ -> unicode:characters_to_binary(__V) end} || {__K, __V} <- __L]; _ -> [] end end end)($0)""")]
+#[@external(
+    .Erlang("""(fun(__D) -> case __D of <<>> -> []; _ -> case uri_string:dissect_query(__D) of __L when is_list(__L) -> [{unicode:characters_to_binary(__K), case __V of true -> <<>>; _ -> unicode:characters_to_binary(__V) end} || {__K, __V} <- __L]; _ -> [] end end end)($0)"""),
+)]
 declare fn decodePairs(data: string) -> Array<#(string, string)>;
 
-#[@External.Erlang("""(fun(__S) -> try binary_to_integer(__S) catch _:_ -> 0 end end)($0)""")]
+#[@external(.Erlang("""(fun(__S) -> try binary_to_integer(__S) catch _:_ -> 0 end end)($0)"""))]
 declare fn toI64(s: string) -> i64;
 
 // The table the front 77 migration creates.
@@ -266,10 +288,10 @@ pub fn sqlAuditRepository(table: string) -> SqlAuditRepository {
 
 // ── the active repository ───────────────────────────────────────────────────
 
-#[@External.Erlang("""(fun(__R) -> persistent_term:put(rakun_audit_repo, __R), 0 end)($0)""")]
+#[@external(.Erlang("""(fun(__R) -> persistent_term:put(rakun_audit_repo, __R), 0 end)($0)"""))]
 declare fn storeRepo<R>(repo: R) -> i32;
 
-#[@External.Erlang("""persistent_term:get(rakun_audit_repo, undefined)""")]
+#[@external(.Erlang("""persistent_term:get(rakun_audit_repo, undefined)"""))]
 declare fn loadRepo<R>() -> ?R;
 
 pub fn installAudit<R>(repo: R) -> i32 {
@@ -279,7 +301,7 @@ pub fn installAudit<R>(repo: R) -> i32 {
     );
 }
 
-#[@External.Erlang("""(fun() -> persistent_term:erase(rakun_audit_repo), 0 end)()""")]
+#[@external(.Erlang("""(fun() -> persistent_term:erase(rakun_audit_repo), 0 end)()"""))]
 declare fn forgetRepo() -> i32;
 
 // Uninstalls the active repository and the sink.
@@ -296,10 +318,14 @@ fn recordActive(event: AuditEvent) -> i32 {
     return 0;
 }
 
-#[@External.Erlang("""(fun() -> case persistent_term:get(rakun_audit_repo, undefined) of __R when is_tuple(__R) -> case lists:suffix("MemoryAuditRepository", atom_to_list(element(1, __R))) of true -> __R; false -> undefined end; _ -> undefined end end)()""")]
+#[@external(
+    .Erlang("""(fun() -> case persistent_term:get(rakun_audit_repo, undefined) of __R when is_tuple(__R) -> case lists:suffix("MemoryAuditRepository", atom_to_list(element(1, __R))) of true -> __R; false -> undefined end; _ -> undefined end end)()"""),
+)]
 declare fn activeMemory() -> ?MemoryAuditRepository;
 
-#[@External.Erlang("""(fun() -> case persistent_term:get(rakun_audit_repo, undefined) of __R when is_tuple(__R) -> case lists:suffix("SqlAuditRepository", atom_to_list(element(1, __R))) of true -> __R; false -> undefined end; _ -> undefined end end)()""")]
+#[@external(
+    .Erlang("""(fun() -> case persistent_term:get(rakun_audit_repo, undefined) of __R when is_tuple(__R) -> case lists:suffix("SqlAuditRepository", atom_to_list(element(1, __R))) of true -> __R; false -> undefined end; _ -> undefined end end)()"""),
+)]
 declare fn activeSql() -> ?SqlAuditRepository;
 
 // Records an event on the active repository, now; 0 when none is installed.

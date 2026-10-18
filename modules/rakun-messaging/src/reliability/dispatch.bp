@@ -49,45 +49,59 @@ import {Health, rkRegisterHealthIndicator} from "rakun";
 import {counter, timer, Tag} from "rakun-metrics";
 import {reliability.policy.RetryPolicy, reliability.policy.Outcome, reliability.policy.AckMode, reliability.policy.DeadLetter, reliability.policy.retryPolicyProblem, reliability.policy.nextDelay, reliability.policy.nextAction, reliability.policy.reasonOf, reliability.policy.deadLetterName, reliability.policy.deadLetterJson, reliability.policy.parseCount};
 
-#[@External.Erlang("""(fun(__Ms) -> timer:sleep(__Ms), 0 end)($0)""")]
+#[@external(.Erlang("""(fun(__Ms) -> timer:sleep(__Ms), 0 end)($0)"""))]
 declare fn pause(ms: i32) -> i32;
 // Epoch milliseconds and monotonic microseconds are `i64`: both are far
 // outside `i32`, and integer overflow aborts (decision 264).
-#[@External.Erlang("""erlang:system_time(millisecond)""")]
+#[@external(.Erlang("""erlang:system_time(millisecond)"""))]
 declare fn nowMs() -> i64;
 
-#[@External.Erlang("""erlang:monotonic_time(microsecond)""")]
+#[@external(.Erlang("""erlang:monotonic_time(microsecond)"""))]
 declare fn nowMicros() -> i64;
 
-#[@External.Erlang("""(fun(__F, __D) -> try {ok, __F(__D)} catch _:{panic, __R} when is_binary(__R) -> {error, __R}; _:__R -> {error, iolist_to_binary(io_lib:format("~p", [__R]))} end end)($0, $1)""")]
+#[@external(
+    .Erlang("""(fun(__F, __D) -> try {ok, __F(__D)} catch _:{panic, __R} when is_binary(__R) -> {error, __R}; _:__R -> {error, iolist_to_binary(io_lib:format("~p", [__R]))} end end)($0, $1)"""),
+)]
 declare fn guarded(
     handler: fn(d: Delivery) -> Outcome,
     d: Delivery,
 ) -> @Result<Outcome, string>;
 
-#[@External.Erlang("""(fun(__N, __D) -> __L = persistent_term:get(rakun_rel_listeners, []), case lists:keymember(__N, 1, __L) of true -> ok; false -> persistent_term:put(rakun_rel_listeners, __L ++ [{__N, __D}]) end, 0 end)($0, $1)""")]
+#[@external(
+    .Erlang("""(fun(__N, __D) -> __L = persistent_term:get(rakun_rel_listeners, []), case lists:keymember(__N, 1, __L) of true -> ok; false -> persistent_term:put(rakun_rel_listeners, __L ++ [{__N, __D}]) end, 0 end)($0, $1)"""),
+)]
 declare fn remember(name: string, broker: string) -> i32;
 
-#[@External.Erlang("""[<<__N/binary, "|", __B/binary>> || {__N, __B} <- persistent_term:get(rakun_rel_listeners, [])]""")]
+#[@external(
+    .Erlang("""[<<__N/binary, "|", __B/binary>> || {__N, __B} <- persistent_term:get(rakun_rel_listeners, [])]"""),
+)]
 declare fn remembered() -> string[];
 
-#[@External.Erlang("""(fun() -> persistent_term:erase(rakun_rel_listeners), persistent_term:erase(rakun_rel_log), persistent_term:erase(rakun_rel_seen_bad), 0 end)()""")]
+#[@external(
+    .Erlang("""(fun() -> persistent_term:erase(rakun_rel_listeners), persistent_term:erase(rakun_rel_log), persistent_term:erase(rakun_rel_seen_bad), 0 end)()"""),
+)]
 declare fn forgetAll() -> i32;
 
-#[@External.Erlang("""(fun(__T) -> logger:warning("~ts", [__T]), persistent_term:put(rakun_rel_log, persistent_term:get(rakun_rel_log, []) ++ [__T]), 0 end)($0)""")]
+#[@external(
+    .Erlang("""(fun(__T) -> logger:warning("~ts", [__T]), persistent_term:put(rakun_rel_log, persistent_term:get(rakun_rel_log, []) ++ [__T]), 0 end)($0)"""),
+)]
 declare fn warn(line: string) -> i32;
 
-#[@External.Erlang("""persistent_term:get(rakun_rel_log, [])""")]
+#[@external(.Erlang("""persistent_term:get(rakun_rel_log, [])"""))]
 pub declare fn reliabilityLog() -> string[];
 
-#[@External.Erlang("""(fun(__V) -> __S = persistent_term:get(rakun_rel_seen_bad, []), case lists:member(__V, __S) of true -> false; false -> persistent_term:put(rakun_rel_seen_bad, [__V | __S]), true end end)($0)""")]
+#[@external(
+    .Erlang("""(fun(__V) -> __S = persistent_term:get(rakun_rel_seen_bad, []), case lists:member(__V, __S) of true -> false; false -> persistent_term:put(rakun_rel_seen_bad, [__V | __S]), true end end)($0)"""),
+)]
 declare fn firstSighting(value: string) -> bool;
 
-#[@External.Erlang("""(fun() -> get(rakun_msg_settled) =/= undefined end)()""")]
+#[@external(.Erlang("""(fun() -> get(rakun_msg_settled) =/= undefined end)()"""))]
 declare fn settledByHandler() -> bool;
 // Batch: defer this message's settlement (front 15's worker then leaves it),
 // and settle every deferred tag through the owner once `size` are held.
-#[@External.Erlang("""(fun(__Size) -> case get(rakun_msg_tag) of undefined -> 0; direct -> 0; __T -> put(rakun_msg_settled, deferred), __L = [__T | case get(rakun_rel_batch) of undefined -> []; __X -> __X end], case length(__L) >= __Size of true -> [begin __R = make_ref(), rakun_messaging_owner ! {call, self(), __R, {settle, __Tg, ack}}, receive {__R, _} -> ok after 5000 -> ok end end || __Tg <- lists:reverse(__L)], put(rakun_rel_batch, []), length(__L); false -> put(rakun_rel_batch, __L), 0 end end end)($0)""")]
+#[@external(
+    .Erlang("""(fun(__Size) -> case get(rakun_msg_tag) of undefined -> 0; direct -> 0; __T -> put(rakun_msg_settled, deferred), __L = [__T | case get(rakun_rel_batch) of undefined -> []; __X -> __X end], case length(__L) >= __Size of true -> [begin __R = make_ref(), rakun_messaging_owner ! {call, self(), __R, {settle, __Tg, ack}}, receive {__R, _} -> ok after 5000 -> ok end end || __Tg <- lists:reverse(__L)], put(rakun_rel_batch, []), length(__L); false -> put(rakun_rel_batch, __L), 0 end end end)($0)"""),
+)]
 declare fn deferAck(size: i32) -> i32;
 
 pub type Delivery(message: Message, headers: Array<#(string, string)>, body: string) {

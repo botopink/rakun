@@ -67,11 +67,11 @@ fn restore() -> i32 {
 // Checks that must overlap meet at a barrier none of them can pass alone.
 
 // The test process, handed to a check so it can report its own pid.
-#[@External.Erlang("""self()""")]
+#[@external(.Erlang("""self()"""))]
 declare fn selfPid() -> unknown;
 
 // Send this process's pid to `to` as `{rk_hung, Pid}`.
-#[@External.Erlang("""(fun(__To) -> __To ! {rk_hung, self()}, 0 end)($0)""")]
+#[@external(.Erlang("""(fun(__To) -> __To ! {rk_hung, self()}, 0 end)($0)"""))]
 declare fn reportPid(to: unknown) -> i32;
 
 // How many of the checks that reported their pid are still alive after
@@ -79,13 +79,17 @@ declare fn reportPid(to: unknown) -> i32;
 // awaited (an already-dead pid answers `noproc` at once). A killed check is
 // down in microseconds; the budget only turns a live one into a count instead
 // of a hang.
-#[@External.Erlang("""(fun(__Ms) -> __Pids = (fun BpDrain(__Acc) -> receive {rk_hung, __P} -> BpDrain([__P | __Acc]) after 0 -> __Acc end end)([]), length([__Q || __Q <- __Pids, (fun(__Pid) -> __M = erlang:monitor(process, __Pid), receive {'DOWN', __M, process, __Pid, _} -> false after __Ms -> erlang:demonitor(__M, [flush]), true end end)(__Q)]) end)($0)""")]
+#[@external(
+    .Erlang("""(fun(__Ms) -> __Pids = (fun BpDrain(__Acc) -> receive {rk_hung, __P} -> BpDrain([__P | __Acc]) after 0 -> __Acc end end)([]), length([__Q || __Q <- __Pids, (fun(__Pid) -> __M = erlang:monitor(process, __Pid), receive {'DOWN', __M, process, __Pid, _} -> false after __Ms -> erlang:demonitor(__M, [flush]), true end end)(__Q)]) end)($0)"""),
+)]
 declare fn survivors(budgetMs: i32) -> i32;
 
 // Block until `parties` processes have arrived under `key`, then let them all
 // through; `false` when `budgetMs` passes first. The barrier is one registered
 // process (`rk_test_meet`), started by the first caller.
-#[@External.Erlang("""(fun(__K, __N, __Ms) -> __S = case whereis(rk_test_meet) of undefined -> __P = spawn(fun() -> (fun BpMeet(__Map) -> receive {arrive, __K2, __N2, __F, __R} -> __W = [{__F, __R} | maps:get(__K2, __Map, [])], case length(__W) >= __N2 of true -> lists:foreach(fun({__F2, __R2}) -> __F2 ! {__R2, go} end, __W), BpMeet(maps:remove(__K2, __Map)); false -> BpMeet(__Map#{__K2 => __W}) end end end)(#{}) end), try register(rk_test_meet, __P), __P catch error:badarg -> exit(__P, kill), whereis(rk_test_meet) end; __Q -> __Q end, __Ref = make_ref(), __S ! {arrive, __K, __N, self(), __Ref}, receive {__Ref, go} -> true after __Ms -> false end end)($0, $1, $2)""")]
+#[@external(
+    .Erlang("""(fun(__K, __N, __Ms) -> __S = case whereis(rk_test_meet) of undefined -> __P = spawn(fun() -> (fun BpMeet(__Map) -> receive {arrive, __K2, __N2, __F, __R} -> __W = [{__F, __R} | maps:get(__K2, __Map, [])], case length(__W) >= __N2 of true -> lists:foreach(fun({__F2, __R2}) -> __F2 ! {__R2, go} end, __W), BpMeet(maps:remove(__K2, __Map)); false -> BpMeet(__Map#{__K2 => __W}) end end end)(#{}) end), try register(rk_test_meet, __P), __P catch error:badarg -> exit(__P, kill), whereis(rk_test_meet) end; __Q -> __Q end, __Ref = make_ref(), __S ! {arrive, __K, __N, self(), __Ref}, receive {__Ref, go} -> true after __Ms -> false end end)($0, $1, $2)"""),
+)]
 declare fn meet(key: string, parties: i32, budgetMs: i32) -> bool;
 
 // A check that never answers inside a run: reports its pid to `to`, then

@@ -25,7 +25,7 @@ prefix); a `#[configuration]` registers each `#[bean]` method's return type in
 the context table (`rkRegisterBean`). botopink has no top-level mutable state, so the registries those calls
 feed — the scan list, the singleton cache, the cycle guard, the config props, the
 router table — live in the BEAM host module `sidecars/rakun_runtime.erl`, reached
-through the `#[@External.Erlang]` declarations in `runtime.bp`. rakun is
+through the `#[@external(.Erlang(…))]` declarations in `runtime.bp`. rakun is
 erlang-only (decision 113). The emitted code references those runtime fns by
 name, so a module declaring components also imports them (`import {service,
 rkScan, rkSingleton, rkEnter, rkDone, rkRegisterRoute, …} from "rakun"`). The HTTP
@@ -127,13 +127,13 @@ rakun/
 │   │   │   ├── root.bp        ← module-tree root: `pub mod decorators; http; runtime; bootstrap;`
 │   │   │   ├── http.bp        ← concrete, emitted: `HttpMethod` enum-shaped type · `Response` type
 │   │   │   │                    (builders) · `App` config · `Request` behavior
-│   │   │   ├── runtime.bp     ← the host cells, each one `@External.Erlang` form
+│   │   │   ├── runtime.bp     ← the host cells, each one `@external(.Erlang(…))` form
 │   │   │   │                    (`rkScan`/`rkSingleton`/`rkEnter`/`rkDone`/`rkProp`/
 │   │   │   │                    `rkRegisterRoute`/`rkDispatch`/`rkDispatchHttp`/`rkServe`/…)
 │   │   │   ├── sidecars/
 │   │   │   │   └── rakun_runtime.erl ← THE ERLANG HOST MODULE (§ The erlang host module):
 │   │   │   │                    the `application` + supervision tree + ETS tables behind
-│   │   │   │                    every `@External.Erlang` cell. Shipped by
+│   │   │   │                    every `@external(.Erlang(…))` cell. Shipped by
 │   │   │   │                    `shipErlSidecars`; the atom may not be `runtime`
 │   │   │   ├── ssl_bundle.bp  ← THE SSL BUNDLE REGISTRY (§ TLS and the SSL bundle
 │   │   │   │                    registry): the property grammar, the refusals,
@@ -437,8 +437,8 @@ ten scaffolds and the three examples — declare `"targets": ["erlang"]`, and ea
 per-member whitelist `botopink-lib-test` reads). `botopink test` / `build` / `run` default
 to erlang here. The node host halves (`runtime.mjs`, `context.mjs`, `request_context.mjs`,
 `autoconfig.mjs`, `ssl_bundle.mjs`, `rakun-app`'s `file_router.mjs` / `ssr.mjs`, `rakun-service`'s
-`chain.mjs`) are deleted and no `#[@External.Node]` form remains in any member: every host
-cell is one `@External.Erlang` form. What both a browser and the server run is not a rakun
+`chain.mjs`) are deleted and no `#[@external(.Node(…))]` form remains in any member: every host
+cell is one `@external(.Erlang(…))` form. What both a browser and the server run is not a rakun
 member — the matcher and the navigation vocabulary are the library `routing`, the action
 protocol `actions`, validation `validation` (decisions 115, 116). The sections below that
 reason about "both rows", a "node twin" or `runtime.mjs:N` record why each piece was
@@ -470,7 +470,7 @@ as a `build` restriction — `test-libs` names every line). rakun has no line in
 
 `modules/rakun/src/sidecars/rakun_runtime.erl` is rakun's host runtime, ported
 term for term from the deleted `runtime.mjs`. Every host cell in `runtime.bp`
-carries one form, `@External.Erlang("rakun_runtime", "<snake_case>")`;
+carries one form, `@external(.Erlang("rakun_runtime:<snake_case>(…)"))`;
 `test/erlang_runtime_test.bp` names the cells directly.
 
 **The module atom may not be `runtime`.** `shipErlSidecars`
@@ -556,7 +556,7 @@ on the warm path.
 
 (Written while the core still ran on commonJS; since the erlang-only move an
 erlang-only cell CAN be asserted from a `.bp` test.) `runtime.mjs` was frozen for the milestone, so four pieces of the erlang host
-module have no `@External.Node` counterpart and therefore no `rk*` cell:
+module have no `@external(.Node(…))` counterpart and therefore no `rk*` cell:
 `set_reply_header/2`, `reply_headers_json/0`, `boot/1` and `add_failure/3`.
 They are reached from erlang (by the acceptor, and by later fronts' sidecars),
 not from `.bp`. **A cell that is erlang-only cannot be asserted from a `.bp`
@@ -910,8 +910,8 @@ draft on the site.
 **Two deviations from the front's text, both from before front 01 landed.**
 The signature is `hash.hmacSha256` (hex, not base64url; was `crypto.hmacSha256`)
 and the token is `random.randomBytes(16)` from `io.random` (hex too; was
-`crypto.randomBytes`). Both carry an `@External.Node` and an
-`@External.Erlang` form and answer identically on the two rows, which is the
+`crypto.randomBytes`). Both carry an `@external(.Node(…))` and an
+`@external(.Erlang(…))` form and answer identically on the two rows, which is the
 property that matters; the encoding is wider on the wire and nothing else. When
 front 01 lands, `draftSign` is the one function to change.
 
@@ -1087,7 +1087,7 @@ puts the `.json`/`.yaml` decoding in `src/sidecars/rakun_config.erl` because
 std's `json` has no structured walker. An erlang-only cell cannot be asserted
 from this repository at all: `botopink test` compiles every `test/*.bp` on BOTH
 rows with no per-target gate, and a `declare fn` carrying only an
-`#[@External.Erlang]` form is a located `has no #[@External.<Target>(…)] for the
+`#[@external(.Erlang(…))]` form is a located `has no #[@external(.<Target>(…))] for the
 node backend` **at the call site**, which reddens the commonJS row — the only row
 the core member's `targets` gates. `runtime.mjs` is frozen and a second Node file
 is forbidden, so there is no node twin to pair such a cell with. The readers are
@@ -1384,8 +1384,8 @@ rather than waived:
 - **Every cell carries both forms.** `rkBeanStore`, `rkBeanTable`, `rkBeanCount`,
   `rkBeanHasRecord`, `rkBeanInvoke`, `rkBeanTouch`, `rkBeanReset`,
   `rkRequestScoped`, `rkRequestScopeEnd` and the five test-seam cells each
-  declare an `@External.Node("./context.mjs", …)` and an
-  `@External.Erlang("rakun_context", …)`. Neither row has a call with no binding,
+  declare an `@external(.Node(\"require('./context.mjs').…\"))` and an
+  `@external(.Erlang("rakun_context:…"))`. Neither row has a call with no binding,
   so neither row reds.
 - **`runtime.mjs` is untouched.** The freeze is on a file, not on the idea of a
   node host; `context.mjs` is this front's own.
@@ -2197,7 +2197,7 @@ silently. Every rakun sidecar is `rakun_<name>.erl`.
 ### Why this front ships BOTH host files where its spec said erlang only
 
 The spec (`specs/1.0.10-beta/03-rakun/72-rakun-auto-configuration/README.md`
-§ Test plan) declares the host cells `@External.Erlang`-only and says "the tests
+§ Test plan) declares the host cells `@external(.Erlang(…))`-only and says "the tests
 are declared erlang-only and the lib test runner is told so". Measured against
 the pinned compiler: **there is no per-file target gate.** `botopink test`
 compiles every `test/*.bp` on BOTH rows with no per-target switch
@@ -3661,7 +3661,7 @@ owner string stays `"rakun-logging"`.
 
 | File | Holds |
 |---|---|
-| `src/cells.bp` | every host cell of the member (all `#[@External.Erlang("rakun_logging", …)]`): emit, facts (+ the test seam `rkLogFixFacts(seconds, pid, node)`), property-key listing, run-time overrides, logger-name registry, correlation slot, capture handler, console/file handlers, `sys.config` consult, file reads |
+| `src/cells.bp` | every host cell of the member (all `#[@external(.Erlang("rakun_logging:…"))]`): emit, facts (+ the test seam `rkLogFixFacts(seconds, pid, node)`), property-key listing, run-time overrides, logger-name registry, correlation slot, capture handler, console/file handlers, `sys.config` consult, file reads |
 | `src/levels.bp` | `Level { Trace, Debug, Info, Warn, Error }`, `otpLevel`, ranks (`off` accepted in keys), the groups (`web`, `sql` predefined; `rakun.logging.group.<name>`), the resolver `effectiveLevelName(name)` / `enabledFor(name, level)` |
 | `src/formats.bp` | `LogRecord`, the four schemas `renderEcs`/`renderGelf`/`renderLogstash`/`renderPlain`, `render(format, record)`, `formatProblem` |
 | `src/correlation.bp` | `correlationId()`, `withCorrelationId(id)`, `clearCorrelationId()`, `beginCorrelation(traceparent, xRequestId)`, `correlated(traceparent, xRequestId, work)`, `freshCorrelation(work)`, `correlationFromHeaders`, `traceIdOf` |
@@ -4562,7 +4562,7 @@ holds for the library:
 > DESCRIPTION to the client and write a SECOND evaluator in the client's
 > language, which guarantees the two drift. This module does not. `#[validated]`
 > emits a plain botopink function whose body is string comparisons, length
-> checks and regex matches — no host cell, no `@External` anything — so ONE
+> checks and regex matches — no host cell, no `@external` anything — so ONE
 > source compiles for erlang and for commonJS and the two sides run the same
 > predicate. What is serialized is only the constraint table, and only for a
 > consumer that is not botopink.
@@ -4823,11 +4823,11 @@ with `openssl` into a scratch directory, drives all of it with OTP `ssl`
 clients, and removes the material at the end.
 ### Why this front ships BOTH host files where its spec said erlang only
 
-The spec declares every host seam `#[@External.Erlang("rakun_ssl", …)]` only,
+The spec declares every host seam `#[@external(.Erlang("rakun_ssl:…"))]` only,
 because `ssl` and `public_key` are OTP applications with no Node form. That is
 true of `ssl:listen/2` and false of everything the registry needs. And the
 measured shape decides it: `botopink test` compiles every `test/*.bp` on BOTH
-rows with no per-target gate, so a cell carrying only an `#[@External.Erlang]`
+rows with no per-target gate, so a cell carrying only an `#[@external(.Erlang(…))]`
 form is a located diagnostic AT THE CALL SITE on the node row — a single
 erlang-only cell behind a called wrapper takes the whole member off commonJS,
 which is the row `modules/rakun` is pinned on. So `src/ssl_bundle.mjs` sits
@@ -4994,7 +4994,7 @@ completed handshake.
   `bootstrap.bp`). Nothing is declaration-only (decision 575 (1)). `Request.param`/`query`/`header` return a plain `string` (`""` when
   absent), not `?string` — behavior-method optional returns don't yet get the
   `@Option` lowering, and a required path var / empty default is the cleaner contract.
-- **Host state behind `#[@External.Node]`.** The one mutable seam is `runtime.mjs`; the
+- **Host state behind `#[@external(.Node(…))]`.** The one mutable seam is `runtime.mjs`; the
   core never sees it. Decorator bodies obey the comptime constraints (no sibling
   calls, `if`-expr, bare-`if` only last, block-lambdas) — see
   [`../botopink-lang/modules/compiler-core/src/comptime/AGENTS.md`](../botopink-lang/modules/compiler-core/src/comptime/AGENTS.md).

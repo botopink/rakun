@@ -73,13 +73,13 @@ says what the feature does and links the cells beside it.
     `form`/`input`/`button`/`label`/`select`/`textarea`; `Link` is front 27's
     `src/link.bp`, compiled and pure — see *Client navigation*;
   - the **browser half** of client navigation. `link.bp` and `reconcile.bp`
-    ship the render-time half; the four `#[@External.Node]` cells
+    ship the render-time half; the four `#[@external(.Node(…))]` cells
     (`__jhLinkMount`, `__jhLinkPrefetch`, `__jhLinkStatus`,
     `__jhLinkRouteKind`), the `linkStatus()` hook and the transition driver
     `reconcile(current, target)` wait on front 68's generated bundle and front
     60's route-kind table, and are not stubbed;
   - the **build-time half** of the client boundary. `client.bp` ships the
-    markers, the island and the hole; the two `#[@External.Node]` cells
+    markers, the island and the hole; the two `#[@external(.Node(…))]` cells
     (`hydrate`, `islandProps`), the `propsFor(name)` wrapper over the second,
     and every "may not" rule — no `serverOnly` in the client graph, no request
     scope in a client module, a server component as a child and never a prop —

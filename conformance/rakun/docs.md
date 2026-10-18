@@ -135,7 +135,7 @@ form is the only one (decision 76). rakun has no library dependencies:
 the HTTP transport `Rakun.run` starts is its own `runtime.mjs` `serve`, over node's
 `http` module (commonJS only). The runtime `.mjs` files are shipped
 next to the emitted modules by the CLI (**G2**), so a consumer build resolves
-every `#[@External.Node]` require.
+every `#[@external(.Node(…))]` require.
 
 ## See also
 

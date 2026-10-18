@@ -67,7 +67,7 @@ repository/rakun-bpp/
 │   │   │   ├── hooks.bp       ← COMPILED: State<T> + state/effect/memo/ref/reducer (@Component<_>, pure server-pass bodies) + test {} (imports `Element`)
 │   │   │   ├── prelude.bp     ← COMPILED (front 118): the `.bpp` prelude (decision 270) — `import` items of the core's own modules only (`Element`, `ElementBase`, `View`, `Node`, `raw`, `el`, every builder; `timeTag as time`), and the marker `#[bpp.htmlPrelude] pub val prelude = bpp.Prelude();` by which the toolchain finds it (decision 361, std's `bpp`)
 │   │   │   ├── elements.bp    ← COMPILED: the element surface (front 94) — `el`/`voidEl`, `isVoidTag`/`isRawTextTag`, and the tags `element.bp` does not declare
-│   │   │   ├── client_runtime.bp  ← COMPILED: the `clientRender` `#[@External.Node("./client_runtime.mjs", "render")]` cell — ships the sidecar
+│   │   │   ├── client_runtime.bp  ← COMPILED: the `clientRender` `#[@external(.Node(\"require('./client_runtime.mjs').render(…)\"))]` cell — ships the sidecar
 │   │   │   ├── client_runtime.mjs ← HOST: the client build's hooks (state/effect/memo/ref/reducer + render) over rakun-bpp's own re-render loop
 │   │   │   ├── router.bp      ← COMPILED: the route snapshot (front 26) — `RouterState`, `pairValue`, `snapshot`/`fill`, `navigationFor`/`applySignal` (the envelope's `n`, through `routing`), `resolveRoute` (`routing`'s `matchPath` over the payload's `t`)
 │   │   │   ├── client_app.bp  ← COMPILED (front 26 Step 6): `ClientApp` / `clientApp(routes, mount, allowedRedirects).start()` — a client-only app over `routing`'s matcher, front 30's `compose` and the one browser write `__jhMount`; `notFound` / `redirect` handled as the server render handles them. Host halves `client_app.mjs` / `sidecars/jhonstart_client_app.erl` (a module store when there is no `window`)
@@ -136,7 +136,7 @@ repository/rakun-bpp/
 │   │   └── test/
 │   │       ├── link_test.bp     ← `botopink test` flat suite: the props, the anchor's seven attribute rows, the prefetch table, the layout key, and `use linkStatus()` read by a `#[client]` component (front 27) — both rows
 │   │       └── reconcile_test.bp ← `botopink test` flat suite: `layoutKeys`/`sharedDepth`, and `applyTransition` over a RECORDING `DomOps` (inline `put`/`get` · `globalThis` cells; a three-island page counting mounts): the replaced depth, the call order, `data-jh-pending` set first and cleared last, a failed markup (front 27) — both rows
-│   ├── jhonstart-dom-test/ ← MEMBER (front 30's browser half; targets [commonJS]): `src/fake_dom.mjs` — a minimal document (parser for the render's markup, `querySelector(All)` over `tag` / `[attr]` / `[attr="v"]`, `template` content, `replaceChildren`, a serializer; `history` / `location` / `dispatchEvent` recorded) reached through `src/root.bp`'s `#[@External.Node]` cells and its `callFill(name, id)` / `callSignal(name)` wrappers — and `test/dom_test.bp`: the fill function (replaces its hole, idempotent, a missing hole dropped), `readPayload` (the last payload script, a refused text an `Error`), the signal function (relative redirect = `replaceState` + `popstate`, a listed absolute one `location.replace`, an unlisted one nothing, not-found swaps `[data-jh-root]` and drops later fills). No DOM on the BEAM, hence commonJS only (`decisions-pending.md` 30-g) — a structural restriction under `00-gate` gate-d: `botopink build --target erlang` refuses the member with `` `callGlobal` has no `#[@External.<Target>(…)]` for the erlang backend `` at `src/root.bp:37`
+│   ├── jhonstart-dom-test/ ← MEMBER (front 30's browser half; targets [commonJS]): `src/fake_dom.mjs` — a minimal document (parser for the render's markup, `querySelector(All)` over `tag` / `[attr]` / `[attr="v"]`, `template` content, `replaceChildren`, a serializer; `history` / `location` / `dispatchEvent` recorded) reached through `src/root.bp`'s `#[@external(.Node(…))]` cells and its `callFill(name, id)` / `callSignal(name)` wrappers — and `test/dom_test.bp`: the fill function (replaces its hole, idempotent, a missing hole dropped), `readPayload` (the last payload script, a refused text an `Error`), the signal function (relative redirect = `replaceState` + `popstate`, a listed absolute one `location.replace`, an unlisted one nothing, not-found swaps `[data-jh-root]` and drops later fills). No DOM on the BEAM, hence commonJS only (`decisions-pending.md` 30-g) — a structural restriction under `00-gate` gate-d: `botopink build --target erlang` refuses the member with `` `callGlobal` has no `#[@external(.<Target>(…))]` for the erlang backend `` at `src/root.bp:37`
 │   └── rakun-bpp/ ← MEMBER (front 95; the helpers of `specs/1.0.10-beta/04-jhonstart/modules.md` § 5): `assert<Subject>(loc, …)` over `snap`'s `assertAs`, each with a pure `<subject>Text` twin, plus fixtures and the render harness
 │       ├── botopink.json  ← name rakun-bpp, files [root.bp, harness.bp, assert_*.bp], dependencies { rakun-bpp, rakun-bpp, rakun-bpp: { workspace: true } }
 │       ├── src/root.bp    ← `pub mod` per helper file + one inline `test` proving the core resolves
@@ -172,7 +172,7 @@ their two suites, moved out of the core by front 95 as a relocation only: the
 one edit is `import {Element, ElementBase} from "rakun-bpp";` in `link.bp` (and
 the same line in `link_test.bp`); nothing in the core imported either module.
 The member declares no `targets`, so it inherits both rows — its code is pure;
-the four `#[@External.Node]` cells front 68 brings reopen that question
+the four `#[@external(.Node(…))]` cells front 68 brings reopen that question
 (`specs/1.0.10-beta/04-jhonstart/modules.md` § 4).
 
 The other members `specs/1.0.10-beta/04-jhonstart/modules.md` § 1 plans —
@@ -431,7 +431,7 @@ no built consumer existed to break.
 ### Why the request cells are rakun-bpp's own
 
 Front 28's README binds the six cells to front 62's
-`#[@External.Erlang("rakun_request_context", …)]` and says there is to be no
+`#[@external(.Erlang("rakun_request_context:…"))]` and says there is to be no
 Node cell in the file. Neither half is writable, and both halves were measured
 against compiler `2e6bb4ac` on 2026-09-21:
 
@@ -440,7 +440,7 @@ against compiler `2e6bb4ac` on 2026-09-21:
    expected to fail at the first cell", and it is worse than that:
 
    ```text
-   error: `__jhReqMethod` has no `#[@External.<Target>(…)]` for the node backend
+   error: `__jhReqMethod` has no `#[@external(.<Target>(…))]` for the node backend
     --> src/main.bp:5:12
    ```
 
@@ -564,7 +564,7 @@ they point in opposite directions:
    2026-09-21 against compiler `2e6bb4ac`, smallest program:
 
    ```bp
-   #[@External.Node("./rt.mjs", "status")]
+   #[@external(.Node(\"require('./rt.mjs').status(…)\"))]
    declare fn __cellStatus() -> string;
    pub fn statusOf() -> string { return __cellStatus(); }
    ```
@@ -572,7 +572,7 @@ they point in opposite directions:
    ```text
    $ botopink build --target commonJS     # Compiled in 95.64ms
    $ botopink build --target erlang
-   error: `__cellStatus` has no `#[@External.<Target>(…)]` for the erlang backend
+   error: `__cellStatus` has no `#[@external(.<Target>(…))]` for the erlang backend
     --> src/main.bp:5:12
    ```
 

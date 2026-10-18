@@ -6,7 +6,7 @@ import {Request, Response, rkSetProp, rkRegisterRoute, rkDispatchHttp} from "rak
 import {bus.attach, bus.detach, bus.execute, bus.automaticMeters, bus.eventNameProblem, bus.installAutomaticMeters, bus.rkTelemetryHandlers, bus.rkTelemetryFailures};
 import {registry.meterNames, registry.prometheusTextFor};
 
-#[@External.Erlang("rakun_runtime", "prop")]
+#[@external(.Erlang("rakun_runtime:prop($0)"))]
 declare fn prop(key: string) -> string;
 
 fn bump(key: string) -> i32 {
@@ -15,13 +15,19 @@ fn bump(key: string) -> i32 {
     return 0;
 }
 
-#[@External.Erlang("""(fun() -> __P = rakun_telemetry:owner_pid(), timer:sleep(20), {reductions, __R} = erlang:process_info(__P, reductions), __R end)()""")]
+#[@external(
+    .Erlang("""(fun() -> __P = rakun_telemetry:owner_pid(), timer:sleep(20), {reductions, __R} = erlang:process_info(__P, reductions), __R end)()"""),
+)]
 declare fn ownerReductions() -> i32;
 
-#[@External.Erlang("""(fun() -> {message_queue_len, __N} = erlang:process_info(self(), message_queue_len), __N end)()""")]
+#[@external(
+    .Erlang("""(fun() -> {message_queue_len, __N} = erlang:process_info(self(), message_queue_len), __N end)()"""),
+)]
 declare fn myQueue() -> i32;
 
-#[@External.Erlang("""(fun(__N) -> [rakun_telemetry:execute([rakun, bus1, nobody, stop], #{}, #{}) || _ <- lists:seq(1, __N)], __N end)($0)""")]
+#[@external(
+    .Erlang("""(fun(__N) -> [rakun_telemetry:execute([rakun, bus1, nobody, stop], #{}, #{}) || _ <- lists:seq(1, __N)], __N end)($0)"""),
+)]
 declare fn executeUnheard(n: i32) -> i32;
 
 test "bus: an event nobody attached to sends no message and wakes no process" {
@@ -56,13 +62,19 @@ test "bus: a handler that raises is detached, logged once, and the emitter never
         == 0;
 }
 
-#[@External.Erlang("""(fun() -> _ = ets:new(rakun_fake_telemetry, [named_table, public, set]), __Src = "-module(telemetry). -export([attach/4, detach/1, execute/3]). attach(Id, E, F, C) -> ets:insert(rakun_fake_telemetry, {Id, E, F, C}), ok. detach(Id) -> ets:delete(rakun_fake_telemetry, Id), ok. execute(E, M, D) -> [F(E, M, D, C) || {_, E2, F, C} <- ets:tab2list(rakun_fake_telemetry), E2 =:= E], ok. ", {ok, __Toks, _} = erl_scan:string(__Src), __Split = fun __Sp([], _A, __O) -> lists:reverse(__O); __Sp([{dot, _} = __D | __T], __A, __O) -> __Sp(__T, [], [lists:reverse([__D | __A]) | __O]); __Sp([__H | __T], __A, __O) -> __Sp(__T, [__H | __A], __O) end, __Forms = [begin {ok, __F} = erl_parse:parse_form(__Ts), __F end || __Ts <- __Split(__Toks, [], [])], {ok, telemetry, __Bin} = compile:forms(__Forms, []), {module, telemetry} = code:load_binary(telemetry, "telemetry.erl", __Bin), 1 end)()""")]
+#[@external(
+    .Erlang("""(fun() -> _ = ets:new(rakun_fake_telemetry, [named_table, public, set]), __Src = "-module(telemetry). -export([attach/4, detach/1, execute/3]). attach(Id, E, F, C) -> ets:insert(rakun_fake_telemetry, {Id, E, F, C}), ok. detach(Id) -> ets:delete(rakun_fake_telemetry, Id), ok. execute(E, M, D) -> [F(E, M, D, C) || {_, E2, F, C} <- ets:tab2list(rakun_fake_telemetry), E2 =:= E], ok. ", {ok, __Toks, _} = erl_scan:string(__Src), __Split = fun __Sp([], _A, __O) -> lists:reverse(__O); __Sp([{dot, _} = __D | __T], __A, __O) -> __Sp(__T, [], [lists:reverse([__D | __A]) | __O]); __Sp([__H | __T], __A, __O) -> __Sp(__T, [__H | __A], __O) end, __Forms = [begin {ok, __F} = erl_parse:parse_form(__Ts), __F end || __Ts <- __Split(__Toks, [], [])], {ok, telemetry, __Bin} = compile:forms(__Forms, []), {module, telemetry} = code:load_binary(telemetry, "telemetry.erl", __Bin), 1 end)()"""),
+)]
 declare fn loadFakeTelemetry() -> i32;
 
-#[@External.Erlang("""(fun() -> code:purge(telemetry), code:delete(telemetry), code:purge(telemetry), ets:delete(rakun_fake_telemetry), 0 end)()""")]
+#[@external(
+    .Erlang("""(fun() -> code:purge(telemetry), code:delete(telemetry), code:purge(telemetry), ets:delete(rakun_fake_telemetry), 0 end)()"""),
+)]
 declare fn unloadFakeTelemetry() -> i32;
 
-#[@External.Erlang("""(fun(__Id, __Ev, __H) -> ok = telemetry:attach(__Id, [binary_to_atom(__S) || __S <- binary:split(__Ev, <<".">>, [global])], fun(_E, _M, _D, _C) -> __H() end, #{}), 1 end)($0, $1, $2)""")]
+#[@external(
+    .Erlang("""(fun(__Id, __Ev, __H) -> ok = telemetry:attach(__Id, [binary_to_atom(__S) || __S <- binary:split(__Ev, <<".">>, [global])], fun(_E, _M, _D, _C) -> __H() end, #{}), 1 end)($0, $1, $2)"""),
+)]
 declare fn attachDirect(id: string, event: string, handler: fn() -> i32) -> i32;
 
 test "bus: with telemetry loadable, a handler attached through either path receives the event once" {

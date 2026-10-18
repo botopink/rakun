@@ -22,7 +22,9 @@
 
 import {compiler, compiler.DeclKind} from "std";
 
-#[@External.Erlang("""(fun(__N, __S, __O, __F) -> __L = persistent_term:get(rakun_cli_plugins, []), case lists:keyfind(__N, 1, __L) of {__N, _, __Owner, _} -> erlang:error({panic, <<"rakun-cli: the command `", __N/binary, "` is declared twice - ", __Owner/binary, " and ", __O/binary>>}); false -> persistent_term:put(rakun_cli_plugins, __L ++ [{__N, __S, __O, __F}]), 1 end end)($0, $1, $2, $3)""")]
+#[@external(
+    .Erlang("""(fun(__N, __S, __O, __F) -> __L = persistent_term:get(rakun_cli_plugins, []), case lists:keyfind(__N, 1, __L) of {__N, _, __Owner, _} -> erlang:error({panic, <<"rakun-cli: the command `", __N/binary, "` is declared twice - ", __Owner/binary, " and ", __O/binary>>}); false -> persistent_term:put(rakun_cli_plugins, __L ++ [{__N, __S, __O, __F}]), 1 end end)($0, $1, $2, $3)"""),
+)]
 declare fn store(
     name: string,
     summary: string,
@@ -30,16 +32,22 @@ declare fn store(
     run: fn(args: Array<string>) -> i32,
 ) -> i32;
 
-#[@External.Erlang("""[__N || {__N, _, _, _} <- persistent_term:get(rakun_cli_plugins, [])]""")]
+#[@external(.Erlang("""[__N || {__N, _, _, _} <- persistent_term:get(rakun_cli_plugins, [])]"""))]
 pub declare fn pluginNames() -> string[];
 
-#[@External.Erlang("""(fun(__N) -> case lists:keyfind(__N, 1, persistent_term:get(rakun_cli_plugins, [])) of {_, __S, _, _} -> __S; false -> <<>> end end)($0)""")]
+#[@external(
+    .Erlang("""(fun(__N) -> case lists:keyfind(__N, 1, persistent_term:get(rakun_cli_plugins, [])) of {_, __S, _, _} -> __S; false -> <<>> end end)($0)"""),
+)]
 pub declare fn pluginSummary(name: string) -> string;
 
-#[@External.Erlang("""(fun(__N, __A) -> case lists:keyfind(__N, 1, persistent_term:get(rakun_cli_plugins, [])) of {_, _, _, __F} -> __F(__A); false -> 2 end end)($0, $1)""")]
+#[@external(
+    .Erlang("""(fun(__N, __A) -> case lists:keyfind(__N, 1, persistent_term:get(rakun_cli_plugins, [])) of {_, _, _, __F} -> __F(__A); false -> 2 end end)($0, $1)"""),
+)]
 pub declare fn runPlugin(name: string, args: Array<string>) -> i32;
 
-#[@External.Erlang("""(fun(__N) -> persistent_term:put(rakun_cli_plugins, lists:keydelete(__N, 1, persistent_term:get(rakun_cli_plugins, []))), 0 end)($0)""")]
+#[@external(
+    .Erlang("""(fun(__N) -> persistent_term:put(rakun_cli_plugins, lists:keydelete(__N, 1, persistent_term:get(rakun_cli_plugins, []))), 0 end)($0)"""),
+)]
 pub declare fn forgetPlugin(name: string) -> i32;
 
 pub fn rkCliRegister(
@@ -83,99 +91,105 @@ pub fn cliCommand(
 
 pub fn cliCommands(expr decl: unknown) {
     var stereotype = "";
-    compiler.annotations(decl).forEach({ a ->
-        val isStereo = a.name == "component"
-            || a.name == "service"
-            || a.name == "repository"
-            || a.name == "controller"
-            || a.name == "restController"
-            || a.name == "configuration";
-        val st = if (isStereo) a.name else stereotype;
-        stereotype = st;
-    });
+    compiler
+        .annotations(decl)
+        .forEach({ a ->
+            val isStereo = a.name == "component"
+                || a.name == "service"
+                || a.name == "repository"
+                || a.name == "controller"
+                || a.name == "restController"
+                || a.name == "configuration";
+            val st = if (isStereo) a.name else stereotype;
+            stereotype = st;
+        });
     var seen: Array<string> = [];
     var owners: Array<string> = [];
     var problem = "";
     var found = 0;
     var commands: Array<string> = [];
-    compiler.methods(decl).forEach({ m ->
-        var args = "";
-        var cmd = "";
-        var marked = false;
-        m.annotations.forEach({ a ->
-            val isCmd = a.name == "cliCommand";
-            val nextArgs = if (isCmd) a.args.join(", ") else args;
-            args = nextArgs;
-            val nextCmd = if (isCmd && a.args.length > 0)
-                a.args.join("|")
-            else
-                cmd;
-            cmd = nextCmd;
-            val mk = if (isCmd) true else marked;
-            marked = mk;
-        });
-        val first = cmd.split("|").join("");
-        var count = 0;
-        var argType = "";
-        m.params.forEach({ p ->
-            val c = count + 1;
-            count = c;
-            val t = if (c == 2) p.typeName else argType;
-            argType = t;
-        });
-        val badSig = marked
-            && (problem == "")
-            && ((count != 2)
-                || (argType != "Array<string>" && argType != "string[]"));
-        val withSig = if (badSig)
-            "#[cliCommands] "
-                + compiler.name(decl)!
-                + "."
-                + m.name
-                + " carries #[cliCommand] and is not (self: Self, args: Array<string>) -> i32"
-        else
-            problem;
-        problem = withSig;
-        val key = if (marked) (args.split(",").at(0) ?? "").trim() else "";
-        val clash = marked && (problem == "") && (seen.indexOf(key) >= 0);
-        val clashText = if (clash)
-            "#[cliCommands] two commands of "
-                + compiler.name(decl)!
-                + " are named "
-                + key
-                + " - "
-                + compiler.name(decl)!
-                + "."
-                + owners.at(seen.indexOf(key)) ?? ""
-                + " and "
-                + compiler.name(decl)!
-                + "."
-                + m.name
-        else
-            problem;
-        problem = clashText;
-        if (marked) {
-            seen.push(key);
-            owners.push(m.name);
-            found = found + 1;
-        }
-        if (marked && (problem == ""))
-            commands.push(
-                "rkCliRegister("
-                    + args
-                    + ", \""
+    compiler
+        .methods(decl)
+        .forEach({ m ->
+            var args = "";
+            var cmd = "";
+            var marked = false;
+            m.annotations.forEach({ a ->
+                val isCmd = a.name == "cliCommand";
+                val nextArgs = if (isCmd) a.args.join(", ") else args;
+                args = nextArgs;
+                val nextCmd = if (isCmd && a.args.length > 0)
+                    a.args.join("|")
+                else
+                    cmd;
+                cmd = nextCmd;
+                val mk = if (isCmd) true else marked;
+                marked = mk;
+            });
+            val first = cmd.split("|").join("");
+            var count = 0;
+            var argType = "";
+            m.params.forEach({ p ->
+                val c = count + 1;
+                count = c;
+                val t = if (c == 2) p.typeName else argType;
+                argType = t;
+            });
+            val badSig = marked
+                && (problem == "")
+                && ((count != 2)
+                    || (argType != "Array<string>" && argType != "string[]"));
+            val withSig = if (badSig)
+                "#[cliCommands] "
                     + compiler.name(decl)!
                     + "."
                     + m.name
-                    + "\", { args -> "
+                    + " carries #[cliCommand] and is not (self: Self, args: Array<string>) -> i32"
+            else
+                problem;
+            problem = withSig;
+            val key = if (marked) (args.split(",").at(0) ?? "").trim() else "";
+            val clash = marked && (problem == "") && (seen.indexOf(key) >= 0);
+            val clashText = if (clash)
+                "#[cliCommands] two commands of "
                     + compiler.name(decl)!
-                    + ".make()."
+                    + " are named "
+                    + key
+                    + " - "
+                    + compiler.name(decl)!
+                    + "."
+                    + owners.at(seen.indexOf(key)) ?? ""
+                    + " and "
+                    + compiler.name(decl)!
+                    + "."
                     + m.name
-                    + "(args) });",
-            );
-    });
+            else
+                problem;
+            problem = clashText;
+            if (marked) {
+                seen.push(key);
+                owners.push(m.name);
+                found = found + 1;
+            }
+            if (marked && (problem == ""))
+                commands.push(
+                    "rkCliRegister("
+                        + args
+                        + ", \""
+                        + compiler.name(decl)!
+                        + "."
+                        + m.name
+                        + "\", { args -> "
+                        + compiler.name(decl)!
+                        + ".make()."
+                        + m.name
+                        + "(args) });",
+                );
+        });
     if (commands.length > 0) {
-        compiler.addMember("pub fn rkCliCommands() { " + commands.join(" ") + " }");
+        compiler.addMember("pub fn rkCliCommands() { "
+            + commands.join(" ")
+            + " }");
         compiler.compile({ -> decl.rkCliCommands(); });
     }
     if (compiler.kind(decl) != DeclKind.Type)

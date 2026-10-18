@@ -329,7 +329,9 @@ fn jsonLeafText(v: Json) -> string {
 
 // A number's shortest text: an integral value (below 2^53) with no fraction,
 // anything else OTP's shortest round-tripping float.
-#[@External.Erlang("""(fun(__F) -> case (__F == trunc(__F)) andalso (abs(__F) < 9007199254740992.0) of true -> integer_to_binary(trunc(__F)); false -> float_to_binary(__F, [short]) end end)($0)""")]
+#[@external(
+    .Erlang("""(fun(__F) -> case (__F == trunc(__F)) andalso (abs(__F) < 9007199254740992.0) of true -> integer_to_binary(trunc(__F)); false -> float_to_binary(__F, [short]) end end)($0)"""),
+)]
 declare fn numeralText(x: f64) -> string;
 
 // ── `.yaml` / `.yml` — a documented SUBSET ──────────────────────────────────
@@ -1421,7 +1423,7 @@ pub type DataSize(
     bytes: i64,
 )
 
-#[@External.Erlang("""(fun(__X) -> __X end)($0)""")]
+#[@external(.Erlang("""(fun(__X) -> __X end)($0)"""))]
 declare fn wide(n: i32) -> i64;
 
 fn durationUnitMillis(unit: string) -> i32 {
@@ -1491,7 +1493,10 @@ fn isoDurationMillis(raw: string) -> i64 {
                 1000
             else
                 -1;
-            if (step < 0) bad = true else total = total + wide(toI32(digits)) * wide(step);
+            if (step < 0)
+                bad = true
+            else
+                total = total + wide(toI32(digits)) * wide(step);
             digits = "";
         }
         i = i + 1;
@@ -1556,10 +1561,12 @@ pub fn parseDuration(raw: string, unit: string, key: string) -> Duration {
         val digits: string = splitDigits(v);
         val suffix: string = sub(v, digits.length(), v.length()).trim();
         if (suffix == "")
-            return Duration(millis: wide(toI32(digits)) * wide(durationUnitMillis(unit)))
+            return Duration(millis: wide(toI32(digits))
+                * wide(durationUnitMillis(unit)))
         else
             return Duration(
-                millis: wide(toI32(digits)) * wide(durationSuffixMillis(suffix)),
+                millis: wide(toI32(digits))
+                    * wide(durationSuffixMillis(suffix)),
             );
     }
 }
@@ -1969,46 +1976,49 @@ pub fn configurationProperties(
     var args: Array<string> = [];
     var unbindable = "";
     var catalogue: Array<string> = [];
-    compiler.fields(decl).forEach({ f ->
-        var unit = "";
-        var fallback = "";
-        var nested = false;
-        f.annotations.forEach({ a ->
-            if (a.name == "unit") unit = a.args.join("").replaceAll("\"", "");
-            if (a.name == "defaultValue")
-                fallback = a.args.join("").replaceAll("\"", "");
-            if (a.name == "nested") nested = true;
+    compiler
+        .fields(decl)
+        .forEach({ f ->
+            var unit = "";
+            var fallback = "";
+            var nested = false;
+            f.annotations.forEach({ a ->
+                if (a.name == "unit")
+                    unit = a.args.join("").replaceAll("\"", "");
+                if (a.name == "defaultValue")
+                    fallback = a.args.join("").replaceAll("\"", "");
+                if (a.name == "nested") nested = true;
+            });
+            val key = "prefix + \".\" + \"" + f.name + "\"";
+            val quoted = "\"" + fallback + "\"";
+            val boolDefault = if (fallback == "") "false" else fallback;
+            val intDefault = if (fallback == "") "0" else fallback;
+            val floatDefault = if (fallback == "") "0.0" else fallback;
+            val reader = if (nested)
+                f.typeName + ".bind(" + key + ")"
+            else if (f.typeName == "bool")
+                "rkPropBool(" + key + ", " + boolDefault + ")"
+            else if (f.typeName == "i32")
+                "rkPropIntOr(" + key + ", " + intDefault + ")"
+            else if (f.typeName == "f64")
+                "rkPropFloat(" + key + ", " + floatDefault + ")"
+            else if (f.typeName == "Duration")
+                "rkPropDuration(" + key + ", \"" + unit + "\")"
+            else if (f.typeName == "DataSize")
+                "rkPropSize(" + key + ", \"" + unit + "\")"
+            else if (f.typeName == "string[]" || f.typeName == "Array<string>")
+                "rkPropList(" + key + ")"
+            else
+                "rkValueOr(" + key + ", " + quoted + ")";
+            val listOfOther = (f.typeName.endsWith("[]")
+                || f.typeName.startsWith("Array<"))
+                && f.typeName != "string[]"
+                && f.typeName != "Array<string>";
+            if (listOfOther && unbindable == "")
+                unbindable = f.name + ": " + f.typeName;
+            args.push(f.name + ": " + reader);
+            catalogue.push(f.name + ":" + f.typeName + ":" + fallback);
         });
-        val key = "prefix + \".\" + \"" + f.name + "\"";
-        val quoted = "\"" + fallback + "\"";
-        val boolDefault = if (fallback == "") "false" else fallback;
-        val intDefault = if (fallback == "") "0" else fallback;
-        val floatDefault = if (fallback == "") "0.0" else fallback;
-        val reader = if (nested)
-            f.typeName + ".bind(" + key + ")"
-        else if (f.typeName == "bool")
-            "rkPropBool(" + key + ", " + boolDefault + ")"
-        else if (f.typeName == "i32")
-            "rkPropIntOr(" + key + ", " + intDefault + ")"
-        else if (f.typeName == "f64")
-            "rkPropFloat(" + key + ", " + floatDefault + ")"
-        else if (f.typeName == "Duration")
-            "rkPropDuration(" + key + ", \"" + unit + "\")"
-        else if (f.typeName == "DataSize")
-            "rkPropSize(" + key + ", \"" + unit + "\")"
-        else if (f.typeName == "string[]" || f.typeName == "Array<string>")
-            "rkPropList(" + key + ")"
-        else
-            "rkValueOr(" + key + ", " + quoted + ")";
-        val listOfOther = (f.typeName.endsWith("[]")
-            || f.typeName.startsWith("Array<"))
-            && f.typeName != "string[]"
-            && f.typeName != "Array<string>";
-        if (listOfOther && unbindable == "")
-            unbindable = f.name + ": " + f.typeName;
-        args.push(f.name + ": " + reader);
-        catalogue.push(f.name + ":" + f.typeName + ":" + fallback);
-    });
     val declName = compiler.name(decl)!;
     val catalogueLine = catalogue.join("|");
     compiler.addMember(
@@ -2037,9 +2047,11 @@ pub fn configurationProperties(
     // the property sources are loaded and before the first component is
     // constructed (`bootSequence`), not at its first injection.
     var validated = false;
-    compiler.annotations(decl).forEach({ a ->
-        if (a.name == "validated") validated = true;
-    });
+    compiler
+        .annotations(decl)
+        .forEach({ a ->
+            if (a.name == "validated") validated = true;
+        });
     if (validated) {
         compiler.addMember("check", { -> configProblemOf(declName, prefix, decl.bind(prefix).validate()) });
         compiler.compile({ -> rkConfigCheckRegister(declName, { -> decl.check() }); });
@@ -2071,7 +2083,8 @@ pub fn nested(expr decl: unknown) {
 // `#[unit("seconds")]` is the unit a BARE number is read in for a `Duration` or
 // a `DataSize` field. A suffixed value (`30s`, `10MB`) parses whatever it says.
 pub fn unit(expr decl: unknown, comptime name: string) {
-    if (compiler.kind(decl) != DeclKind.Field) compiler.fail("#[unit] must annotate a field", at: decl);
+    if (compiler.kind(decl) != DeclKind.Field)
+        compiler.fail("#[unit] must annotate a field", at: decl);
 }
 
 // `#[defaultValue("false")]` is row 8 — the declared field default — written

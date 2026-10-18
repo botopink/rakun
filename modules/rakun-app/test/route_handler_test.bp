@@ -100,7 +100,7 @@ fn brokenStream(req: Request) -> @Task<HandlerResponse> {
     return brokenParts();
 }
 
-#[@External.Erlang("""erlang:error(<<"thunk failed">>)""")]
+#[@external(.Erlang("""erlang:error(<<"thunk failed">>)"""))]
 declare fn boom() -> string;
 
 fn slowStream(req: Request) -> @Task<HandlerResponse> {
@@ -112,13 +112,15 @@ fn part(ms: i32, text: string) -> string {
     return text;
 }
 
-#[@External.Erlang("rakun_request_context", "sleep")]
+#[@external(.Erlang("rakun_request_context:sleep($0)"))]
 declare fn sleepMs(ms: i32) -> i32;
 
 // Block until `parties` processes have arrived under `key`, then let them all
 // through; `false` when `budgetMs` passes first. The barrier is one registered
 // process (`rk_test_meet`), started by the first caller.
-#[@External.Erlang("""(fun(__K, __N, __Ms) -> __S = case whereis(rk_test_meet) of undefined -> __P = spawn(fun() -> (fun BpMeet(__Map) -> receive {arrive, __K2, __N2, __F, __R} -> __W = [{__F, __R} | maps:get(__K2, __Map, [])], case length(__W) >= __N2 of true -> lists:foreach(fun({__F2, __R2}) -> __F2 ! {__R2, go} end, __W), BpMeet(maps:remove(__K2, __Map)); false -> BpMeet(__Map#{__K2 => __W}) end end end)(#{}) end), try register(rk_test_meet, __P), __P catch error:badarg -> exit(__P, kill), whereis(rk_test_meet) end; __Q -> __Q end, __Ref = make_ref(), __S ! {arrive, __K, __N, self(), __Ref}, receive {__Ref, go} -> true after __Ms -> false end end)($0, $1, $2)""")]
+#[@external(
+    .Erlang("""(fun(__K, __N, __Ms) -> __S = case whereis(rk_test_meet) of undefined -> __P = spawn(fun() -> (fun BpMeet(__Map) -> receive {arrive, __K2, __N2, __F, __R} -> __W = [{__F, __R} | maps:get(__K2, __Map, [])], case length(__W) >= __N2 of true -> lists:foreach(fun({__F2, __R2}) -> __F2 ! {__R2, go} end, __W), BpMeet(maps:remove(__K2, __Map)); false -> BpMeet(__Map#{__K2 => __W}) end end end)(#{}) end), try register(rk_test_meet, __P), __P catch error:badarg -> exit(__P, kill), whereis(rk_test_meet) end; __Q -> __Q end, __Ref = make_ref(), __S ! {arrive, __K, __N, self(), __Ref}, receive {__Ref, go} -> true after __Ms -> false end end)($0, $1, $2)"""),
+)]
 declare fn meet(key: string, parties: i32, budgetMs: i32) -> bool;
 
 fn meetingPart(key: string, text: string) -> string {
@@ -307,7 +309,9 @@ test "rakun handler: a thunk that raises ends the stream; the chunks already wri
     assert res.body == "a";
 }
 
-#[@External.Erlang("""(fun(__Port, __Req) -> {ok, __S} = gen_tcp:connect("127.0.0.1", __Port, [binary, {active, false}]), ok = gen_tcp:send(__S, __Req), __Loop = fun __Loop(__Acc) -> case binary:match(__Acc, <<"0", 13, 10, 13, 10>>) of nomatch -> case gen_tcp:recv(__S, 0, 10000) of {ok, __M} -> __Loop(<<__Acc/binary, __M/binary>>); _ -> __Acc end; _ -> __Acc end end, __R = __Loop(<<>>), gen_tcp:close(__S), __R end)($0, $1)""")]
+#[@external(
+    .Erlang("""(fun(__Port, __Req) -> {ok, __S} = gen_tcp:connect("127.0.0.1", __Port, [binary, {active, false}]), ok = gen_tcp:send(__S, __Req), __Loop = fun __Loop(__Acc) -> case binary:match(__Acc, <<"0", 13, 10, 13, 10>>) of nomatch -> case gen_tcp:recv(__S, 0, 10000) of {ok, __M} -> __Loop(<<__Acc/binary, __M/binary>>); _ -> __Acc end; _ -> __Acc end end, __R = __Loop(<<>>), gen_tcp:close(__S), __R end)($0, $1)"""),
+)]
 declare fn rawExchange(port: i32, request: string) -> string;
 
 test "rakun handler: a streamed response is chunked with no Content-Length" {

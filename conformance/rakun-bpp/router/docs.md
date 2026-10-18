@@ -111,9 +111,9 @@ component outside a request is a legitimate thing to do, and it is how the
 package's own tests render the server pass.
 
 **Every cell carries both targets.** The front's spec calls for the five reads
-to be `#[@External.Erlang]` only; that is not writable. This module is compiled
+to be `#[@external(.Erlang(…))]` only; that is not writable. This module is compiled
 on both rows of the core member, and an erlang-only cell reds the commonJS row
-at its *call site* (`` `__jhRoutePath` has no `#[@External.<Target>(…)]` for the
+at its *call site* (`` `__jhRoutePath` has no `#[@external(.<Target>(…))]` for the
 node backend ``) the moment `snapshot()` calls it — a declared and never-called
 cell is fine, which is why `client_runtime.bp`'s node-only `clientRender` does
 not red the erlang row. The dual form is also what the mechanism needs: the
