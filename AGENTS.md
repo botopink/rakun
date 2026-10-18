@@ -1240,14 +1240,14 @@ A type-level decorator in `src/config.bp` (`decorators.bp` is frozen for the
 milestone). It contributes three things to the record:
 
 ```bp
-MyService.bind(prefix: string) -> MyService   // prefix is a PARAMETER
+MyService.bindProperties(prefix: string) -> MyService   // prefix is a PARAMETER
 MyService.make() -> MyService                 // the stereotype's DI factory member
 rkRegisterConfigKeys("my.service", "…")      // the run-time catalogue, an executor
 ```
 
 The prefix being a parameter is what makes `#[nested]` compose: a nested field
 calls the nested type's own binder with `prefix + "." + <field>`, and neither
-decorator has to know the other exists. `bind` is a constructor over the
+decorator has to know the other exists. `bindProperties` is a constructor over the
 fields, computed at build, so it is a string member until B-140 — which is
 also why two levels of nesting work with no extra machinery. `<Name>.make()` is
 the stereotype's factory member, so a bound record enters the entry point's
