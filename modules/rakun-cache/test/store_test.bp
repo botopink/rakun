@@ -292,15 +292,23 @@ test "store: a write racing sixteen readers is never undone by a read" {
         [],
     );
     val _s = cacheStore(p, ["k"], "0");
+    // The order, not a deadline: the readers read until the writer has
+    // stored its `done` row, so every write of the writer is raced by readers
+    // however slow the machine is.
     val out = rkCacheSpawnMany(17, { i ->
         var lost = "";
-        for (Array.range(1, 401)) { n ->
-            if (i == 1) {
+        if (i == 1) {
+            for (Array.range(1, 401)) { n ->
                 val _w = cacheStore(p, ["k"], n.toString());
                 val seen = cachePeek(p, ["k"]).value;
                 if (seen != n.toString() && lost == "")
                     lost = "wrote " + n.toString() + " read " + seen;
-            } else val _r = cachePeek(p, ["k"]);
+            }
+            val _d = cacheStore(p, ["done"], "1");
+        } else {
+            while (!cachePeek(p, ["done"]).found) {
+                val _r = cachePeek(p, ["k"]);
+            }
         }
         lost
     });
