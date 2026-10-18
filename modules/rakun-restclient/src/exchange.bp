@@ -61,144 +61,146 @@ pub fn httpExchange(expr decl: unknown, comptime group: string) {
     val g = group.replaceAll("\"", "").trim();
     var problems: Array<string> = [];
     var methods: Array<string> = [];
-    compiler.methods(decl).forEach({ m ->
-        var verb = "";
-        var path = "";
-        var count = 0;
-        m.annotations.forEach({ a ->
-            val v = if (a.name == "getExchange")
-                "GET"
-            else if (a.name == "postExchange")
-                "POST"
-            else if (a.name == "putExchange")
-                "PUT"
-            else if (a.name == "patchExchange")
-                "PATCH"
-            else if (a.name == "deleteExchange")
-                "DELETE"
-            else
-                "";
-            val isExchange = v != "";
-            val nextVerb = if (isExchange) v else verb;
-            verb = nextVerb;
-            val nextPath = if (isExchange)
-                a.args.join("").replaceAll("\"", "").trim()
-            else
-                path;
-            path = nextPath;
-            val nextCount = if (isExchange) count + 1 else count;
-            count = nextCount;
-        });
-        val label = compiler.name(decl)! + "." + m.name;
-        if (count == 0)
-            problems.push(
-                label
-                    + " has no exchange annotation - add #[getExchange], #[postExchange], #[putExchange], #[patchExchange] or #[deleteExchange]",
-            );
-        if (count > 1)
-            problems.push(label + " has more than one exchange annotation");
-        if (m.returnType != "string")
-            problems.push(
-                label
-                    + " returns `"
-                    + m.returnType
-                    + "`, but an exchange method returns the body as string: std has no JSON value model to decode a response into a record (language gap), so a typed return cannot work",
-            );
-        var params: Array<string> = [];
-        var args: Array<string> = [];
-        m.params.forEach({ p ->
-            if (p.name != "self") {
-                params.push(p.name);
-                args.push(p.name + ": " + p.typeName);
-                if (p.typeName != "string")
-                    problems.push(
-                        label
-                            + " parameter `"
-                            + p.name
-                            + "` is `"
-                            + p.typeName
-                            + "`, but exchange parameters are string",
-                    );
-            }
-        });
-        var pathNames: Array<string> = [];
-        path
-            .split("/")
-            .forEach({ seg ->
-                if (seg.startsWith(":")) {
-                    val name = seg.replaceAll(":", "");
-                    pathNames.push(name);
-                    if (params.contains(name) == false)
+    compiler
+        .methods(decl)
+        .forEach({ m ->
+            var verb = "";
+            var path = "";
+            var count = 0;
+            m.annotations.forEach({ a ->
+                val v = if (a.name == "getExchange")
+                    "GET"
+                else if (a.name == "postExchange")
+                    "POST"
+                else if (a.name == "putExchange")
+                    "PUT"
+                else if (a.name == "patchExchange")
+                    "PATCH"
+                else if (a.name == "deleteExchange")
+                    "DELETE"
+                else
+                    "";
+                val isExchange = v != "";
+                val nextVerb = if (isExchange) v else verb;
+                verb = nextVerb;
+                val nextPath = if (isExchange)
+                    a.args.join("").replaceAll("\"", "").trim()
+                else
+                    path;
+                path = nextPath;
+                val nextCount = if (isExchange) count + 1 else count;
+                count = nextCount;
+            });
+            val label = compiler.name(decl)! + "." + m.name;
+            if (count == 0)
+                problems.push(
+                    label
+                        + " has no exchange annotation - add #[getExchange], #[postExchange], #[putExchange], #[patchExchange] or #[deleteExchange]",
+                );
+            if (count > 1)
+                problems.push(label + " has more than one exchange annotation");
+            if (m.returnType != "string")
+                problems.push(
+                    label
+                        + " returns `"
+                        + m.returnType
+                        + "`, but an exchange method returns the body as string: std has no JSON value model to decode a response into a record (language gap), so a typed return cannot work",
+                );
+            var params: Array<string> = [];
+            var args: Array<string> = [];
+            m.params.forEach({ p ->
+                if (p.name != "self") {
+                    params.push(p.name);
+                    args.push(p.name + ": " + p.typeName);
+                    if (p.typeName != "string")
                         problems.push(
                             label
-                                + " path "
-                                + path
-                                + " names `:"
-                                + name
-                                + "`, but the method has no parameter `"
-                                + name
-                                + "` (parameters: "
-                                + params.join(", ")
-                                + ")",
+                                + " parameter `"
+                                + p.name
+                                + "` is `"
+                                + p.typeName
+                                + "`, but exchange parameters are string",
                         );
                 }
             });
-        var rest: Array<string> = [];
-        params.forEach({ p ->
-            if (pathNames.contains(p) == false) rest.push(p);
+            var pathNames: Array<string> = [];
+            path
+                .split("/")
+                .forEach({ seg ->
+                    if (seg.startsWith(":")) {
+                        val name = seg.replaceAll(":", "");
+                        pathNames.push(name);
+                        if (params.contains(name) == false)
+                            problems.push(
+                                label
+                                    + " path "
+                                    + path
+                                    + " names `:"
+                                    + name
+                                    + "`, but the method has no parameter `"
+                                    + name
+                                    + "` (parameters: "
+                                    + params.join(", ")
+                                    + ")",
+                            );
+                    }
+                });
+            var rest: Array<string> = [];
+            params.forEach({ p ->
+                if (pathNames.contains(p) == false) rest.push(p);
+            });
+            val bodied = verb == "POST" || verb == "PUT" || verb == "PATCH";
+            if (bodied && rest.length != 1)
+                problems.push(
+                    label
+                        + " is a "
+                        + verb
+                        + ": exactly one parameter that is not a path parameter carries the body, and it has "
+                        + rest.length.toString()
+                        + " ("
+                        + rest.join(", ")
+                        + ")",
+                );
+            if ((bodied == false) && verb != "" && rest.length > 0)
+                problems.push(
+                    label
+                        + " is a "
+                        + verb
+                        + " and takes no body, but parameter `"
+                        + rest.join("`, `")
+                        + "` is not in the path "
+                        + path,
+                );
+            val body = if (bodied) rest.join("") else "\"\"";
+            val names = "["
+                + pathNames.map({ n -> "\"" + n + "\"" }).join(", ")
+                + "]";
+            val values = "[" + pathNames.join(", ") + "]";
+            val sig = if (args.length > 0)
+                "self: Self, " + args.join(", ")
+            else
+                "self: Self";
+            val call = "self.client.exchange(\""
+                + verb
+                + "\", \""
+                + path
+                + "\", "
+                + names
+                + ", "
+                + values
+                + ", "
+                + body
+                + ")";
+            methods.push(
+                "fn "
+                    + m.name
+                    + "("
+                    + sig
+                    + ") -> string {\n        return "
+                    + call
+                    + ";\n    }",
+            );
         });
-        val bodied = verb == "POST" || verb == "PUT" || verb == "PATCH";
-        if (bodied && rest.length != 1)
-            problems.push(
-                label
-                    + " is a "
-                    + verb
-                    + ": exactly one parameter that is not a path parameter carries the body, and it has "
-                    + rest.length.toString()
-                    + " ("
-                    + rest.join(", ")
-                    + ")",
-            );
-        if ((bodied == false) && verb != "" && rest.length > 0)
-            problems.push(
-                label
-                    + " is a "
-                    + verb
-                    + " and takes no body, but parameter `"
-                    + rest.join("`, `")
-                    + "` is not in the path "
-                    + path,
-            );
-        val body = if (bodied) rest.join("") else "\"\"";
-        val names = "["
-            + pathNames.map({ n -> "\"" + n + "\"" }).join(", ")
-            + "]";
-        val values = "[" + pathNames.join(", ") + "]";
-        val sig = if (args.length > 0)
-            "self: Self, " + args.join(", ")
-        else
-            "self: Self";
-        val call = "self.client.exchange(\""
-            + verb
-            + "\", \""
-            + path
-            + "\", "
-            + names
-            + ", "
-            + values
-            + ", "
-            + body
-            + ")";
-        methods.push(
-            "fn "
-                + m.name
-                + "("
-                + sig
-                + ") -> string {\n        return "
-                + call
-                + ";\n    }",
-        );
-    });
     if (compiler.kind(decl) != DeclKind.Behavior)
         compiler.fail(
             "#[httpExchange] must annotate a behavior - the generated client is a type implementing it",
@@ -229,7 +231,15 @@ pub fn httpExchange(expr decl: unknown, comptime group: string) {
                 + "\n}",
         ),
     );
-    compiler.addMember("http", { -> decl.Http(client: RestClient.forGroup(g)) });
+    compiler.addMember(
+        "pub fn http() -> "
+            + compiler.name(decl)!
+            + ".Http { return "
+            + compiler.name(decl)!
+            + ".Http(client: RestClient.forGroup(\""
+            + g
+            + "\")); }",
+    );
 }
 
 pub fn getExchange(expr decl: unknown, comptime path: string) {
