@@ -29,6 +29,18 @@ case "${1:-}" in
     -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
 esac
 
+# On a machine whose fixed per-machine file (`$XDG_CONFIG_HOME/botopink/machine`,
+# else `~/.config/botopink/machine`) reads `machine-1`, conformance is machine
+# 2's (decisions 768, 769): the gate runs `--no-conformance` and says so.
+machineFile="${XDG_CONFIG_HOME:-$HOME/.config}/botopink/machine"
+if [ -f "$machineFile" ] && [ "$(tr -d '[:space:]' < "$machineFile")" = "machine-1" ]; then
+    case " $* " in
+        *" --no-conformance "*) ;;
+        *) echo "gate: machine-1 — --no-conformance added (decisions 768, 769)"
+           set -- "$@" --no-conformance ;;
+    esac
+fi
+
 # shellcheck source=git-hooks/lib/runner-standalone.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/git-hooks/lib/runner-standalone.sh"
 runStandaloneGate "$@"
