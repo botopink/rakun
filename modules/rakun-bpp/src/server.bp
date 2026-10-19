@@ -5,9 +5,9 @@
 // listed three blockers and all three are answered rather than carried:
 //
 //   - "the async SSR data layer … is gated on the effect-await surface" is
-//     CLOSED. `fn … -> Task<T>` with a statement-level `await` compiles and
+//     CLOSED. `fn … -> Async<T>` with a statement-level `await` compiles and
 //     RUNS on both rows, `test` blocks included — measured here, not assumed,
-//     and every `Task` assertion in `test/server_test.bp` executes on the
+//     and every `Async` assertion in `test/server_test.bp` executes on the
 //     erlang row.
 //   - "`request()` is host-bound" stays true, and the host half ships WITH the
 //     module, cell for cell on both rows, exactly as front 26's router does.
@@ -49,17 +49,17 @@
 //    one rakun uses on the server (decision 116 rule 4). A cookie or query
 //    value carrying `%20` reads as a space here exactly as it does in rakun.
 
-// ── `Task` is EAGER on erlang, and that changes how a page is written ───────
+// ── `Async` is EAGER on erlang, and that changes how a page is written ───────
 //
-// `libs/std/src/http.bp:16-18` states it: Erlang is eager, a `Task<T>`
+// `libs/std/src/http.bp:16-18` states it: Erlang is eager, a `Async<T>`
 // resolves to `T`, so the caller's `await` is identity on that
-// backend (botopink decision 120). Two `Task` loaders do NOT run in parallel
+// backend (botopink decision 120). Two `Async` loaders do NOT run in parallel
 // because they are Tasks — they run in the order the body reaches them, and the
 // page costs the SUM of its loaders.
 //
 // So a page with INDEPENDENT loaders does not await them one after another and
 // hope. Parallel loading on the BEAM is a spawned process per unit of work,
-// gathered by index, it takes **unstarted tasks** (`Array<fn() -> Task<T>>`,
+// gathered by index, it takes **unstarted tasks** (`Array<fn() -> Async<T>>`,
 // i.e. `[{ -> loadPost(slug) }, { -> loadSidebar() }]`) rather than Tasks that
 // have already run, and it is **front 02's**. This file ships no `awaitAll`,
 // no `race` and no `allSettled`, and `conformance/docs.md` § *Server components* says who
@@ -67,7 +67,7 @@
 //
 // ── Where an `await` may stand ──────────────────────────────────────────────
 //
-// At statement level in a `Task` / `Component` body, and nowhere else. Never as the
+// At statement level in a `Async` / `Component` body, and nowhere else. Never as the
 // last statement of a lambda: `§2.38` makes a lambda's last statement an
 // implicit-return expression and no file in this tree awaits inside one. A
 // component that needs N rows awaits ONE loader returning `Array<T>` and maps
@@ -236,14 +236,14 @@ fn requireEntered(reader: string) -> i32 {
 //
 // A hook (decisions 104/128 of 1.0.10-beta): `val r = use request()` in a
 // server component — `fn … -> Component<Element>`, which may
-// also `await` because `Component` extends `Task`. Called without `use` it
-// answers the same `Component` (a Promise on commonJS), so a `Task` body or a
+// also `await` because `Component` extends `Async`. Called without `use` it
+// answers the same `Component` (a Promise on commonJS), so a `Async` body or a
 // test `await`s it. It cannot fail, so its `T` is not a `Result`.
 //
 // Reading the request marks the render DYNAMIC (router.bp's `markDynamic`):
 // its output depends on this reader's headers, cookies or query, so a cache
 // may not keep it as static.
-pub fn request() -> Component<RequestData> {
+pub component fn request() -> Component<RequestData> {
     requireEntered("request()");
     markDynamic();
     return RequestData(
@@ -274,22 +274,22 @@ pub fn headers() -> Array<#(string, string)> {
 // ── step 3: the server-component convention ─────────────────────────────────
 //
 // A server component is a `pub fn` taking its route params and returning
-// `Task<Element>`. There is no decorator for it and there will not be one: the
+// `Async<Element>`. There is no decorator for it and there will not be one: the
 // marker is the return type itself (botopink decision 118 — the return is the
 // annotation), and the language ENFORCES it: a body that `await`s under a
-// return that is not a `Task` (or above) is `effect-await-without-task`, and a
+// return that is not a `Async` (or above) is `effect-await-without-task`, and a
 // second marker would be a second thing to get wrong. A server component that
 // also activates a hook is `fn … -> Component<Element>` (decision
-// 128: `Task` grants no `use`, and `Component` extends `Task`, so that one
+// 128: `Async` grants no `use`, and `Component` extends `Async`, so that one
 // return grants `use` and `await` both); `renderComponent` renders its thunk.
 //
 // Neither return is a `Result`, so a component cannot propagate a failed load
 // with `try` (decision 121): it handles the error in its own body — `try … catch`,
 // `case`, or an error screen. A loader that can fail returns
-// `Task<Result<T, E>>` and the component writes `try await load(…) catch …`.
+// `Async<Result<T, E>>` and the component writes `try await load(…) catch …`.
 //
-// The parameter is `fn() -> Task<Element>` — an UNSTARTED thunk, not an
-// already-running `Task<Element>`. That is the same shape front 02's
+// The parameter is `fn() -> Async<Element>` — an UNSTARTED thunk, not an
+// already-running `Async<Element>`. That is the same shape front 02's
 // spawn-and-gather takes, so a page that grows a second loader moves from
 // `renderServerComponent({ -> Page(params) })` to front 02 without changing what
 // it hands anybody.
@@ -299,21 +299,21 @@ pub fn headers() -> Array<#(string, string)> {
 // fails `variable 'Page' is unbound` on erlang — a compiler defect measured
 // against `2e6bb4ac` and reported, not worked around. It is the same rule
 // rakun's front 23 records for the fields of its `ElementView`.
-pub fn renderServerComponent(
-    component: fn() -> Task<Element>,
-) -> Task<string> {
+pub async fn renderServerComponent(
+    component: fn() -> Async<Element>,
+) -> Async<string> {
     val tree = await component();
     return renderToString(tree);
 }
 
 // A server component that activates a hook is `fn … ->
 // Component<Element>` (decision 128 of botopink 1.0.10-beta: only a
-// `Component` return grants `use`, and `Component` extends `Task`, so the same
+// `Component` return grants `use`, and `Component` extends `Async`, so the same
 // body may `await` too). Its thunk is rendered here, as `renderServerComponent`
-// renders a `Task` one.
-pub fn renderComponent(
+// renders a `Async` one.
+pub async fn renderComponent(
     component: fn() -> Component<Element>,
-) -> Task<string> {
+) -> Async<string> {
     val tree = await component();
     return renderToString(tree);
 }

@@ -159,7 +159,7 @@ declare fn rkActHeaderOf(headersJson: string, name: string) -> string;
 
 #[compiler.external(.Erlang("rakun_ssr:set_fallback($0)"))]
 declare fn rkActSetFallback(
-    dispatch: fn(req: Request) -> Task<Response>,
+    dispatch: fn(req: Request) -> Async<Response>,
 ) -> i32;
 
 #[compiler.external(.Erlang("""(fun(__R) -> maps:get(verb, __R) end)($0)"""))]
@@ -167,11 +167,11 @@ declare fn rkActVerb(req: Request) -> string;
 
 // ── the marker ──────────────────────────────────────────────────────────────
 //
-// `#[serverAction]` on `pub fn name(form: FormData) -> Task<ActionResult>`
-// (or `-> Task<Result<ActionResult, E>>`, whose `Error` is a failed action)
+// `#[serverAction]` on `pub fn name(form: FormData) -> Async<ActionResult>`
+// (or `-> Async<Result<ActionResult, E>>`, whose `Error` is a failed action)
 // compiles `rkRegisterAction("<name>", <name>)` into the init list
 // (`compiler.compile`, run before `main`). Reflection spells the
-// return type as written, so any other return — `Task<i32>` included — is
+// return type as written, so any other return — `Async<i32>` included — is
 // refused here. A decorator body is comment-free and calls no function.
 
 pub fn serverAction<T>(syntax decl: fn(form: FormData) -> T) {
@@ -379,7 +379,7 @@ fn envelopeOf(
     );
 }
 
-fn renderPage(pathname: string) -> Task<i32> {
+async fn renderPage(pathname: string) -> Async<i32> {
     val _b = rkSsrBegin();
     val status: i32 = await servePage(
         rkMakeRequest("GET", pathname, "{}", "{}", "{}", ""),
@@ -389,7 +389,7 @@ fn renderPage(pathname: string) -> Task<i32> {
 }
 
 // The page at `pathname` re-rendered (phase `Render`, front 23), buffered.
-fn rerender(pathname: string) -> Task<ActionOutcome> {
+async fn rerender(pathname: string) -> Async<ActionOutcome> {
     val status: i32 = await rkActWithoutSocket({ -> renderPage(pathname) });
     return outcome(status, rkSsrHeader("content-type"), rkSsrBody());
 }
@@ -439,14 +439,14 @@ fn isNone(out: NavOutcome) -> bool {
 // The dispatcher. `header` is the value of the configured header (`""` when
 // absent): its presence is the scripted path; `refreshValue()` in it with no
 // id is a refresh.
-pub fn dispatchAction(
+pub async fn dispatchAction(
     pathname: string,
     origin: string,
     host: string,
     contentType: string,
     body: string,
     header: string,
-) -> Task<ActionOutcome> {
+) -> Async<ActionOutcome> {
     val problem = actionsConfigProblem();
     if (problem != "") panic(problem);
     val early = preBodyRefusal(origin, host, contentType, body.length());
@@ -482,12 +482,12 @@ pub fn dispatchAction(
     );
 }
 
-fn dispatchInFrame(
+async fn dispatchInFrame(
     pathname: string,
     contentType: string,
     body: string,
     header: string,
-) -> Task<ActionOutcome> {
+) -> Async<ActionOutcome> {
     val scripted = header != "";
     if (scripted && header == refreshValue()) {
         val page: ActionOutcome = await rerender(pathname);
@@ -542,7 +542,7 @@ fn dispatchInFrame(
 
 // ── the app path ────────────────────────────────────────────────────────────
 
-pub fn actionsResponse(req: Request) -> Task<Response> {
+pub async fn actionsResponse(req: Request) -> Async<Response> {
     if (rkActVerb(req) != "POST" || isPage(req.path) == false) {
         val app: Response = await appResponse(req);
         return app;

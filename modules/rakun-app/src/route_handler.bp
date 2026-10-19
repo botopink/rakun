@@ -3,7 +3,7 @@
 ////
 //// SEVEN VERB DECORATORS, one per `HttpMethod`, each taking the app-relative
 //// segment: `#[getRoute("api/posts")]` on a `fn(req: Request) ->
-//// Task<HandlerResponse>` registers an `R|/api/posts||GET` record and the
+//// Async<HandlerResponse>` registers an `R|/api/posts||GET` record and the
 //// handler into front 22's table through `rkAppRegisterHandler`. The verb goes
 //// in the marker because nothing reflects a module's export names. A segment
 //// holds a page OR a handler (front 22's scan); one verb twice at one segment
@@ -46,7 +46,7 @@ pub type HandlerResponse(
     status: i32,
     headers: Array<#(string, string)>,
     chunks: string[],
-    tasks: Array<fn() -> Task<string>>,
+    tasks: Array<fn() -> Async<string>>,
 ) {
     pub fn json(body: string) -> HandlerResponse {
         return HandlerResponse(
@@ -124,7 +124,7 @@ pub type HandlerResponse(
 // One chunk per thunk, in index order, whatever order they finish in.
 pub fn streamed(
     status: i32,
-    tasks: Array<fn() -> Task<string>>,
+    tasks: Array<fn() -> Async<string>>,
 ) -> HandlerResponse {
     return HandlerResponse(
         status: status,
@@ -361,11 +361,11 @@ declare fn rkSsrBeginHandler() -> i32;
 declare fn rkSsrAddHeader(name: string, value: string) -> void;
 
 #[compiler.external(.Erlang("rakun_ssr:stream($0)"))]
-declare fn rkSsrStream(tasks: Array<fn() -> Task<string>>) -> i32;
+declare fn rkSsrStream(tasks: Array<fn() -> Async<string>>) -> i32;
 
 #[compiler.external(.Erlang("rakun_ssr:set_fallback($0)"))]
 declare fn rkAppSetFallback(
-    dispatch: fn(req: Request) -> Task<Response>,
+    dispatch: fn(req: Request) -> Async<Response>,
 ) -> i32;
 
 // The verbs registered at the pattern a request reached, in table order.
@@ -375,11 +375,11 @@ pub fn verbsAt(pattern: string) -> string[] {
         .map({ e -> e.verb });
 }
 
-fn missingHandler() -> fn(req: Request) -> Task<HandlerResponse> {
+fn missingHandler() -> fn(req: Request) -> Async<HandlerResponse> {
     return { req -> noHandler(req) };
 }
 
-fn noHandler(req: Request) -> Task<HandlerResponse> {
+async fn noHandler(req: Request) -> Async<HandlerResponse> {
     return HandlerResponse.notFound();
 }
 
@@ -437,7 +437,7 @@ fn allowHeader(pattern: string) -> string {
 }
 
 // A handler for a request that reached an `R` record at `pattern`.
-pub fn serveHandler(req: Request, m: RouteMatch) -> Task<i32> {
+pub async fn serveHandler(req: Request, m: RouteMatch) -> Async<i32> {
     val pattern: string = m.entry.pattern;
     val verb: string = methodOf(req);
     val verbs: string[] = verbsAt(pattern);
@@ -453,7 +453,7 @@ pub fn serveHandler(req: Request, m: RouteMatch) -> Task<i32> {
     val record: string = writeTable(
         [RouteEntry(kind: "R", pattern: pattern, slot: "", verb: chosen)],
     );
-    val handle: fn(req: Request) -> Task<HandlerResponse> = rkAppRender(
+    val handle: fn(req: Request) -> Async<HandlerResponse> = rkAppRender(
         record,
         missingHandler(),
     );
@@ -495,7 +495,7 @@ pub fn serveHandler(req: Request, m: RouteMatch) -> Task<i32> {
     return writeHandlerResponse(answered, headFallback, cookies);
 }
 
-fn signalled() -> Task<HandlerResponse> {
+async fn signalled() -> Async<HandlerResponse> {
     return HandlerResponse.noContent();
 }
 
@@ -542,7 +542,7 @@ fn writeNoHandler(verb: string, pattern: string) -> i32 {
     .Erlang("""(fun(__F) -> try __F() catch _:_ -> {'rakun_app@route_handler@@HandlerResponse', 500, [], [], []} end end)($0)"""),
 )]
 declare fn rkRunHandler(
-    work: fn() -> Task<HandlerResponse>,
+    work: fn() -> Async<HandlerResponse>,
 ) -> HandlerResponse;
 
 // The app path — pages and handlers — as the core router's fallback.
@@ -550,7 +550,7 @@ pub fn serveApp() -> i32 {
     return rkAppSetFallback({ req -> appResponse(req) });
 }
 
-pub fn appResponse(req: Request) -> Task<Response> {
+pub async fn appResponse(req: Request) -> Async<Response> {
     val found = matchPath(parseTable(rkAppTable()), req.path);
     if (found != null)
         if (found.entry.kind == "R") {

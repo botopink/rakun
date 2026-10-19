@@ -46,14 +46,14 @@ import {table.RouteEntry, table.parseTable, table.writeTable, match.RouteMatch, 
 pub type ChunkWriter(
     setStatus: fn(code: i32),
     setHeader: fn(name: string, value: string),
-    write: fn(chunk: string) -> Task<void>,
-    close: fn() -> Task<void>,
+    write: fn(chunk: string) -> Async<void>,
+    close: fn() -> Async<void>,
 )
 
 // A renderer's `Error(msg)` is answered like a raise (decision 130): 500 when
 // nothing was written, otherwise the response is closed; the message goes to
 // the log under a correlation digest, never on the wire.
-pub type PageRenderer = fn(req: Request, out: ChunkWriter) -> Task<Result<void, string>>;
+pub type PageRenderer = fn(req: Request, out: ChunkWriter) -> Async<Result<void, string>>;
 
 // The orchestrator's one call per page pattern, at boot. A second renderer for
 // one pattern fails here, naming it (front 22's `rkAppRegisterPage`).
@@ -63,7 +63,7 @@ pub fn page(pattern: string, render: PageRenderer) -> i32 {
 
 // The four doors as functions of this module — a renderer may call them or the
 // fields themselves (`out.write(chunk)`), from any module.
-pub fn writeTo(out: ChunkWriter, chunk: string) -> Task<void> {
+pub async fn writeTo(out: ChunkWriter, chunk: string) -> Async<void> {
     await out.write(chunk);
 }
 
@@ -77,7 +77,7 @@ pub fn setHeaderOn(out: ChunkWriter, name: string, value: string) -> i32 {
     return 0;
 }
 
-pub fn closeOut(out: ChunkWriter) -> Task<void> {
+pub async fn closeOut(out: ChunkWriter) -> Async<void> {
     await out.close();
 }
 
@@ -93,10 +93,10 @@ pub declare fn rkSsrSetStatus(code: i32) -> void;
 pub declare fn rkSsrSetHeader(name: string, value: string) -> void;
 
 #[compiler.external(.Erlang("rakun_ssr:write($0)"))]
-pub declare fn rkSsrWrite(chunk: string) -> Task<void>;
+pub declare fn rkSsrWrite(chunk: string) -> Async<void>;
 
 #[compiler.external(.Erlang("rakun_ssr:close()"))]
-pub declare fn rkSsrClose() -> Task<void>;
+pub declare fn rkSsrClose() -> Async<void>;
 
 #[compiler.external(.Erlang("rakun_ssr:status()"))]
 pub declare fn rkSsrStatus() -> i32;
@@ -118,7 +118,7 @@ pub declare fn rkSsrBody() -> string;
 
 // Run `render`; the text it answers, or the reason it raised.
 #[compiler.external(.Erlang("rakun_ssr:guard($0)"))]
-pub declare fn rkSsrGuard(render: fn() -> Task<string>) -> string;
+pub declare fn rkSsrGuard(render: fn() -> Async<string>) -> string;
 
 // A failed render's reason, to the log under a correlation digest; answers the
 // digest.
@@ -132,7 +132,7 @@ pub declare fn rkSsrPageRequest(req: Request, paramsWire: string) -> Request;
 
 #[compiler.external(.Erlang("rakun_ssr:set_fallback($0)"))]
 pub declare fn rkSsrSetFallback(
-    dispatch: fn(req: Request) -> Task<Response>,
+    dispatch: fn(req: Request) -> Async<Response>,
 ) -> i32;
 
 #[compiler.external(.Erlang("rakun_ssr:clear_fallback()"))]
@@ -176,7 +176,7 @@ fn missingRenderer() -> PageRenderer {
     return { req, out -> notFoundStatus(out) };
 }
 
-fn notFoundStatus(out: ChunkWriter) -> Task<Result<void, string>> {
+async fn notFoundStatus(out: ChunkWriter) -> Async<Result<void, string>> {
     out.setStatus(404);
     return;
 }
@@ -186,11 +186,11 @@ pub fn renderErrorProblem(message: string) -> string {
 }
 
 // The renderer's outcome as text: `""` for `Ok`, the problem for `Error(msg)`.
-fn renderOutcome(
+async fn renderOutcome(
     render: PageRenderer,
     req: Request,
     out: ChunkWriter,
-) -> Task<string> {
+) -> Async<string> {
     val r: Result<void, string> = await render(req, out);
     return case r {
         Ok(_) -> "";
@@ -207,7 +207,7 @@ pub fn notFoundProblem(pathname: string) -> string {
 // The dispatch: one function, the status written. The renderer runs inside one
 // request scope in phase `Render`; a renderer that raised before writing is a
 // 500; the response is closed once.
-pub fn servePage(req: Request, out: ChunkWriter) -> Task<i32> {
+pub async fn servePage(req: Request, out: ChunkWriter) -> Async<i32> {
     val found: PageMatch = matchPage(req.path);
     if (found.record == "") {
         out.setStatus(404);
@@ -252,7 +252,7 @@ fn failRender(out: ChunkWriter) -> i32 {
     return 0;
 }
 
-fn closeIfOpen(out: ChunkWriter) -> Task<i32> {
+async fn closeIfOpen(out: ChunkWriter) -> Async<i32> {
     if (rkSsrClosed()) return 0;
     await out.close();
     return 0;
@@ -269,7 +269,7 @@ pub fn stopServingPages() -> i32 {
     return rkSsrClearFallback();
 }
 
-pub fn pageResponse(req: Request) -> Task<Response> {
+pub async fn pageResponse(req: Request) -> Async<Response> {
     val _b = rkSsrBegin();
     val status: i32 = await servePage(req, chunkWriter());
     return Response(status: status, body: rkSsrBody());

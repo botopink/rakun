@@ -39,7 +39,7 @@
 //
 // ── What a render answers ───────────────────────────────────────────────────
 //
-// `-> Task<Result<void, string>>` (front 24 open point 8, option (a)): `Ok`
+// `-> Async<Result<void, string>>` (front 24 open point 8, option (a)): `Ok`
 // when the response was closed normally or with a signal, `Error(message)` for
 // a failed render — a refused redirect target, a plugin whose `close` answered
 // `Error`, a plugin key clash, a raw-text body that would close its element, a
@@ -66,7 +66,7 @@ pub type Chunk(id: string, html: string)
 
 // Awaits the boundary's child EXACTLY ONCE, at statement level, and renders it
 // through the escaping walker.
-pub fn resolve(b: Boundary) -> Task<Chunk> {
+pub async fn resolve(b: Boundary) -> Async<Chunk> {
     val child = b.child;
     val tree = await child();
     return Chunk(id: b.id, html: renderNode(tree));
@@ -112,8 +112,8 @@ pub fn notFoundSignalHtml(css: string, html: string) -> string {
 pub type Response(
     status: fn(code: i32),
     header: fn(name: string, value: string),
-    write: fn(chunk: string) -> Task<void>,
-    close: fn() -> Task<void>,
+    write: fn(chunk: string) -> Async<void>,
+    close: fn() -> Async<void>,
 )
 
 #[compiler.external(.JavaScript("require('./render.mjs').markWrite()"), .Erlang("jhonstart_render:mark_write()"))]
@@ -133,9 +133,9 @@ declare fn __jhLate() -> string;
     .Erlang("jhonstart_render:each_completed($0, $1)"),
 )]
 declare fn __jhEachCompleted(
-    tasks: Array<fn() -> Task<Resolved>>,
-    onDone: fn(index: i32, r: Resolved) -> Task<i32>,
-) -> Task<i32>;
+    tasks: Array<fn() -> Async<Resolved>>,
+    onDone: fn(index: i32, r: Resolved) -> Async<i32>,
+) -> Async<i32>;
 
 fn guardStatus(res: Response, code: i32) -> void {
     assert __jhWrites() == 0, "render: status("
@@ -153,7 +153,7 @@ fn guardHeader(res: Response, name: string, value: string) -> void {
     header(name, value);
 }
 
-fn guardWrite(res: Response, chunk: string) -> Task<void> {
+async fn guardWrite(res: Response, chunk: string) -> Async<void> {
     __jhMarkWrite();
     val write = res.write;
     await write(chunk);
@@ -274,13 +274,13 @@ fn renderOrFail(tree: Element) -> Result<string, string> {
 // the erlang row — including the plugins' `chunk(id)`: a stylesheet library
 // that registers per process only sees the classes the boundary's render
 // registered from inside that process.
-fn resolveIn(
+async fn resolveIn(
     plugins: Array<RenderPlugin>,
     req: RequestData,
     route: PageContext,
     query: string,
     f: Fill,
-) -> Task<Resolved> {
+) -> Async<Resolved> {
     val b = f.boundary;
     enterRequest(req);
     fill(
@@ -375,19 +375,19 @@ fn pluginAt(ps: Array<RenderPlugin>, i: i32) -> RenderPlugin {
     return found;
 }
 
-fn emptyText() -> Task<string> {
+async fn emptyText() -> Async<string> {
     return "";
 }
 
-fn emptyChunk(holeId: string) -> Task<string> {
+async fn emptyChunk(holeId: string) -> Async<string> {
     return "";
 }
 
-fn closedOk() -> Task<Result<void, string>> {
+async fn closedOk() -> Async<Result<void, string>> {
     return;
 }
 
-fn noPayload() -> Task<Array<#(string, Json)>> {
+async fn noPayload() -> Async<Array<#(string, Json)>> {
     return [];
 }
 
@@ -401,7 +401,7 @@ fn noPlugin() -> RenderPlugin {
     );
 }
 
-fn headsFrom(ps: Array<RenderPlugin>, i: i32) -> Task<string> {
+async fn headsFrom(ps: Array<RenderPlugin>, i: i32) -> Async<string> {
     if (i >= ps.length) return "";
     val p = pluginAt(ps, i);
     val head = p.head;
@@ -410,11 +410,11 @@ fn headsFrom(ps: Array<RenderPlugin>, i: i32) -> Task<string> {
     return mine + rest;
 }
 
-fn chunksFrom(
+async fn chunksFrom(
     ps: Array<RenderPlugin>,
     i: i32,
     holeId: string,
-) -> Task<string> {
+) -> Async<string> {
     if (i >= ps.length) return "";
     val p = pluginAt(ps, i);
     val chunk = p.chunk;
@@ -423,7 +423,7 @@ fn chunksFrom(
     return mine + rest;
 }
 
-fn closeFrom(ps: Array<RenderPlugin>, i: i32) -> Task<string> {
+async fn closeFrom(ps: Array<RenderPlugin>, i: i32) -> Async<string> {
     if (i >= ps.length) return "";
     val p = pluginAt(ps, i);
     val close = p.close;
@@ -441,10 +441,10 @@ fn closeFrom(ps: Array<RenderPlugin>, i: i32) -> Task<string> {
 }
 
 // Each plugin's `payload()` contribution, `#(pluginName, #(key, json))`.
-fn payloadsFrom(
+async fn payloadsFrom(
     ps: Array<RenderPlugin>,
     i: i32,
-) -> Task<Array<#(string, string, string)>> {
+) -> Async<Array<#(string, string, string)>> {
     if (i >= ps.length) return [];
     val p = pluginAt(ps, i);
     val payload = p.payload;
@@ -539,12 +539,12 @@ fn payloadOf(
     );
 }
 
-fn closeRes(res: Response) -> Task<void> {
+async fn closeRes(res: Response) -> Async<void> {
     val close = res.close;
     await close();
 }
 
-fn finish(res: Response, failure: string) -> Task<Result<void, string>> {
+async fn finish(res: Response, failure: string) -> Async<Result<void, string>> {
     await closeRes(res);
     leaveRequest();
     if (failure != "") throw failure;
@@ -552,12 +552,12 @@ fn finish(res: Response, failure: string) -> Task<Result<void, string>> {
 }
 
 // A signal (or a failure) met before the first chunk.
-fn early(
+async fn early(
     site: App,
     input: PageInput,
     res: Response,
     reason: string,
-) -> Task<Result<void, string>> {
+) -> Async<Result<void, string>> {
     if (isSignal(reason) == false) {
         val failed = await finish(res, reason);
         return try failed;
@@ -602,13 +602,13 @@ fn early(
     return try closed;
 }
 
-pub fn renderWith(
+pub async fn renderWith(
     site: App,
     input: PageInput,
     req: RequestData,
     res: Response,
     streaming: bool,
-) -> Task<Result<void, string>> {
+) -> Async<Result<void, string>> {
     __jhStateReset();
     resetDynamic();
     enterRequest(req);
@@ -683,7 +683,7 @@ fn thunksOf(
     route: PageContext,
     query: string,
     boundaries: Array<Fill>,
-) -> Array<fn() -> Task<Resolved>> {
+) -> Array<fn() -> Async<Resolved>> {
     return boundaries.map(
         { b -> boundaryThunk(plugins, req, route, query, b) },
     );
@@ -695,13 +695,13 @@ fn boundaryThunk(
     route: PageContext,
     query: string,
     f: Fill,
-) -> fn() -> Task<Resolved> {
+) -> fn() -> Async<Resolved> {
     return { -> resolveIn(plugins, req, route, query, f) };
 }
 
 // The late half: after the first write a signal is markup, a failure ends the
 // stream, and nothing after either is written. Every branch returns what it
-// wrote (`-> Task<i32>`), the value `completion`'s callback type answers.
+// wrote (`-> Async<i32>`), the value `completion`'s callback type answers.
 // A boundary's DYNAMIC mark joins the render's before anything else, so a
 // boundary resolved after a late signal still counts.
 fn carryDynamic(r: Resolved) -> i32 {
@@ -709,12 +709,12 @@ fn carryDynamic(r: Resolved) -> i32 {
     return 0;
 }
 
-fn onResolved(
+async fn onResolved(
     site: App,
     input: PageInput,
     res: Response,
     r: Resolved,
-) -> Task<i32> {
+) -> Async<i32> {
     carryDynamic(r);
     if (__jhLate() != "") return 0;
     if (r.kind == "fill") {
@@ -726,18 +726,18 @@ fn onResolved(
     return signalled;
 }
 
-fn writeFill(site: App, res: Response, r: Resolved) -> Task<i32> {
+async fn writeFill(site: App, res: Response, r: Resolved) -> Async<i32> {
     val write = res.write;
     await write(fillHtml(Chunk(id: r.id, html: r.html), r.css));
     return 1;
 }
 
-fn writeLateSignal(
+async fn writeLateSignal(
     site: App,
     input: PageInput,
     res: Response,
     r: Resolved,
-) -> Task<i32> {
+) -> Async<i32> {
     val out = signalFromReason(r.reason);
     val isRedirect = kindWordOf(out) == "redirect";
     if (isRedirect
@@ -758,7 +758,7 @@ fn completion(
     site: App,
     input: PageInput,
     res: Response,
-) -> fn(index: i32, r: Resolved) -> Task<i32> {
+) -> fn(index: i32, r: Resolved) -> Async<i32> {
     return { index, r -> onResolved(site, input, res, r) };
 }
 
@@ -768,12 +768,12 @@ fn lateFailure() -> string {
     return "";
 }
 
-fn closing(
+async fn closing(
     site: App,
     input: PageInput,
     res: Response,
     holes: string[],
-) -> Task<Result<void, string>> {
+) -> Async<Result<void, string>> {
     val closeFailure = await closeFrom(site.plugins, 0);
     if (closeFailure != "") {
         val failed = await finish(res, closeFailure);
@@ -792,7 +792,7 @@ fn closing(
     return try done;
 }
 
-fn streamed(
+async fn streamed(
     site: App,
     input: PageInput,
     req: RequestData,
@@ -800,7 +800,7 @@ fn streamed(
     res: Response,
     shellHtml: string,
     boundaries: Array<Fill>,
-) -> Task<Result<void, string>> {
+) -> Async<Result<void, string>> {
     val pluginHead = await headsFrom(site.plugins, 0);
     val status = res.status;
     status(200);
@@ -827,7 +827,7 @@ fn streamed(
 
 // Every boundary resolves first — a signal among them is still before the
 // first chunk — and the whole document is one write, the fills in shell order.
-fn whole(
+async fn whole(
     site: App,
     input: PageInput,
     req: RequestData,
@@ -835,7 +835,7 @@ fn whole(
     res: Response,
     shellHtml: string,
     boundaries: Array<Fill>,
-) -> Task<Result<void, string>> {
+) -> Async<Result<void, string>> {
     await __jhEachCompleted(
         thunksOf(site.plugins, req, route, input.query, boundaries),
         { index, r -> collectResolved(r) },
@@ -895,7 +895,7 @@ declare fn __jhCollectResolved(r: Resolved) -> i32;
 #[compiler.external(.JavaScript("require('./render.mjs').takeResolved()"), .Erlang("jhonstart_render:take_resolved()"))]
 declare fn __jhTakeResolved() -> Array<Resolved>;
 
-fn collectResolved(r: Resolved) -> Task<i32> {
+async fn collectResolved(r: Resolved) -> Async<i32> {
     return __jhCollectResolved(r);
 }
 
@@ -918,12 +918,12 @@ fn resolvedFor(resolved: Array<Resolved>, id: string) -> Resolved {
     return found;
 }
 
-fn fillsInOrder(
+async fn fillsInOrder(
     site: App,
     boundaries: Array<Fill>,
     resolved: Array<Resolved>,
     i: i32,
-) -> Task<string> {
+) -> Async<string> {
     if (i >= boundaries.length) return "";
     val id = holeIds(boundaries).at(i) ?? "";
     val r = resolvedFor(resolved, id);
@@ -946,7 +946,7 @@ pub type App(plugins: Array<RenderPlugin>, allowedRedirects: string[], lang: str
         input: PageInput,
         req: RequestData,
         res: Response,
-    ) -> Task<Result<void, string>> {
+    ) -> Async<Result<void, string>> {
         return renderWith(self, input, req, guarded(res), false);
     }
 
@@ -957,7 +957,7 @@ pub type App(plugins: Array<RenderPlugin>, allowedRedirects: string[], lang: str
         input: PageInput,
         req: RequestData,
         res: Response,
-    ) -> Task<Result<void, string>> {
+    ) -> Async<Result<void, string>> {
         return renderWith(self, input, req, guarded(res), true);
     }
 }

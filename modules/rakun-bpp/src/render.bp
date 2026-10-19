@@ -103,10 +103,10 @@ declare fn __jhSetHooks(h: RenderHooks) -> void;
 declare fn __jhHooks(fallback: RenderHooks) -> RenderHooks;
 
 #[compiler.external(.JavaScript("require('./render.mjs').pushNode($0)"), .Erlang("jhonstart_render:push_node($0)"))]
-declare fn __jhPushNode(n: fn(scope: RenderScope) -> Task<Walked>) -> i32;
+declare fn __jhPushNode(n: fn(scope: RenderScope) -> Async<Walked>) -> i32;
 
 #[compiler.external(.JavaScript("require('./render.mjs').nodeAt($0)"), .Erlang("jhonstart_render:node_at($0)"))]
-declare fn __jhNodeAt(index: string) -> fn(scope: RenderScope) -> Task<Walked>;
+declare fn __jhNodeAt(index: string) -> fn(scope: RenderScope) -> Async<Walked>;
 
 // Raises `reason` and never returns: a signal or a failure that leaves the
 // boundary it was caught at goes on as an abort whose message is the reason,
@@ -133,7 +133,7 @@ pub fn registeredBoundaries() -> Array<Boundary> {
 
 // `f`'s task under std's `failure.attemptTask` (botopink decisions 431, 494):
 // its value, or `Error(reason)` — the message of the raise it crashed with.
-pub fn attemptTask<T>(f: fn() -> Task<T>) -> Task<Result<T, string>> {
+pub async fn attemptTask<T>(f: fn() -> Async<T>) -> Async<Result<T, string>> {
     val out = await failure.attemptTask(f);
     return case out {
         Ok(v) -> v;
@@ -143,10 +143,10 @@ pub fn attemptTask<T>(f: fn() -> Task<T>) -> Task<Result<T, string>> {
 
 // A component's run walked with `scope`, under `attemptTask` —
 // `Error(reason)` for a raise.
-pub fn componentOutcome(
+pub async fn componentOutcome(
     f: fn() -> Component<Element>,
     scope: RenderScope,
-) -> Task<Result<Walked, string>> {
+) -> Async<Result<Walked, string>> {
     val out = await attemptTask({ -> renderComponent(f(), scope) });
     return try out;
 }
@@ -214,7 +214,7 @@ fn notFoundNode(b: NotFoundBoundaryNode) -> Element {
     return nodePlaceholder({ scope -> renderNotFound(b, scope) });
 }
 
-fn nodePlaceholder(n: fn(scope: RenderScope) -> Task<Walked>) -> Element {
+fn nodePlaceholder(n: fn(scope: RenderScope) -> Async<Walked>) -> Element {
     val index = __jhPushNode(n);
     return Element(
         tag: "#node",
@@ -226,10 +226,10 @@ fn nodePlaceholder(n: fn(scope: RenderScope) -> Task<Walked>) -> Element {
 
 // Run `c` with `scope`, then every boundary node of its tree with the scope
 // its run answered.
-pub fn renderComponent(
+pub async fn renderComponent(
     c: Component<Element>,
     scope: RenderScope,
-) -> Task<Walked> {
+) -> Async<Walked> {
     val r = await c.run(scope);
     val own = __jhTakeBoundaries().map(
         { b -> Fill(boundary: b, scope: r.scope) },
@@ -238,7 +238,7 @@ pub fn renderComponent(
     return Walked(tree: inner.tree, fills: own.append(inner.fills));
 }
 
-fn resolveTree(e: Element, scope: RenderScope) -> Task<Walked> {
+async fn resolveTree(e: Element, scope: RenderScope) -> Async<Walked> {
     if (e.tag == "#node") {
         val run = __jhNodeAt(e.value);
         val walked = await run(scope);
@@ -269,10 +269,10 @@ fn failureOf(outcome: Result<Walked, string>) -> string {
     };
 }
 
-pub fn renderErrorBoundary(
+pub async fn renderErrorBoundary(
     b: ErrorBoundaryNode,
     scope: RenderScope,
-) -> Task<Walked> {
+) -> Async<Walked> {
     val outcome = await componentOutcome(b.child, scope);
     val failure = failureOf(outcome);
     if (isSignal(failure))
@@ -287,10 +287,10 @@ pub fn renderErrorBoundary(
     return walked;
 }
 
-pub fn renderNotFound(
+pub async fn renderNotFound(
     b: NotFoundBoundaryNode,
     scope: RenderScope,
-) -> Task<Walked> {
+) -> Async<Walked> {
     val outcome = await componentOutcome(b.child, scope);
     val failure = failureOf(outcome);
     if (failure == notFoundReason()) {
@@ -474,7 +474,7 @@ fn enterDepth(route: PageContext, depth: i32) -> i32 {
     );
 }
 
-fn layoutOf(
+component fn layoutOf(
     seg: UiSegment,
     route: PageContext,
     depth: i32,
@@ -486,7 +486,7 @@ fn layoutOf(
     return tree;
 }
 
-fn templateOf(seg: UiSegment, route: PageContext) -> Component<Element> {
+component fn templateOf(seg: UiSegment, route: PageContext) -> Component<Element> {
     if (seg.hasTemplate == false) return childrenMarker();
     val view = seg.templateView;
     val tree = await view(propsFor(route));
@@ -503,7 +503,7 @@ fn templateOf(seg: UiSegment, route: PageContext) -> Component<Element> {
 // The root of every page render: it provides `styled`'s `StyledSheet`
 // context (decisions 352, 354 (7), 379), so a `styled` component computed at
 // render below it writes to this render's sheet (`styled_sheet.bp`).
-pub fn compose(
+pub component fn compose(
     chain: Array<UiSegment>,
     route: PageContext,
     page: fn() -> Component<Element>,
@@ -513,7 +513,7 @@ pub fn compose(
     return tree;
 }
 
-fn composeAt(
+component fn composeAt(
     chain: Array<UiSegment>,
     i: i32,
     route: PageContext,
@@ -535,7 +535,7 @@ fn errorId(seg: UiSegment) -> string {
 }
 
 // `error > loading > not-found > (the rest)` for segment `i`.
-fn errorLevel(
+component fn errorLevel(
     chain: Array<UiSegment>,
     i: i32,
     route: PageContext,
@@ -559,7 +559,7 @@ fn errorLevel(
 // The error boundary of segment `i` around its not-found level, as a node
 // the renderer runs (`renderErrorBoundary`): a signal is re-raised, an
 // ordinary failure renders the segment's error view.
-fn caughtBelow(
+component fn caughtBelow(
     chain: Array<UiSegment>,
     i: i32,
     route: PageContext,
@@ -583,7 +583,7 @@ fn caughtBelow(
 // The not-found level, as a node the renderer runs (`renderNotFound`):
 // `data-jh-n` around the rest, and the nearest not-found tree for a not-found
 // signal raised below it.
-fn notFoundLevel(
+component fn notFoundLevel(
     chain: Array<UiSegment>,
     i: i32,
     route: PageContext,

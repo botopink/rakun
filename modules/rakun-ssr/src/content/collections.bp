@@ -8,7 +8,7 @@
 ////         return defineCollection("authors", file("content/authors.json"), { d -> Author.parse(d) });
 ////     }
 ////
-//// A loader is `fn() -> Task<Result<Array<RawEntry>, string>>` — `glob`
+//// A loader is `fn() -> Async<Result<Array<RawEntry>, string>>` — `glob`
 //// and `file` build one, an application may write its own. A `RawEntry` is
 //// what a loader read: an id, the entry's data as a `Json` document, a body
 //// and the file it came from. Nothing is typed until the parse decodes the
@@ -49,7 +49,7 @@ pub type RawEntry(
 
 // Reads a collection's entries. `glob` and `file` build one; an application
 // writes its own as any function of this type.
-pub type Loader = fn() -> Task<Result<Array<RawEntry>, string>>;
+pub type Loader = fn() -> Async<Result<Array<RawEntry>, string>>;
 
 // `field` of every entry names an entry of `collection` (`Str`, or an `Arr`
 // of `Str`): checked by the sync once every collection loaded.
@@ -155,7 +155,7 @@ pub fn glob(base: string, pattern: string) -> Loader {
 fn loadGlob(
     base: string,
     pattern: string,
-) -> Task<Result<Array<RawEntry>, string>> {
+) -> Async<Result<Array<RawEntry>, string>> {
     val listed = fs.glob(pattern, base);
     if (listed.isError())
         throw base
@@ -250,7 +250,7 @@ pub fn file(source: string) -> Loader {
     return { -> loadFile(source) };
 }
 
-fn loadFile(file: string) -> Task<Result<Array<RawEntry>, string>> {
+async fn loadFile(file: string) -> Async<Result<Array<RawEntry>, string>> {
     val text = try readFile(file);
     val doc = try decodeFile(file, text);
     val isList = case doc {
@@ -379,10 +379,10 @@ fn readStore(file: string, name: string) -> Result<Array<RawEntry>, string> {
         });
 }
 
-fn rawEntriesOf(
+async fn rawEntriesOf(
     name: string,
     loader: Loader,
-) -> Task<Result<Array<RawEntry>, string>> {
+) -> Async<Result<Array<RawEntry>, string>> {
     val store = env.read(storeVariable()) ?? "";
     if (store != "") return try readStore(storeFile(store, name), name);
     val loaded = await loader();
@@ -394,7 +394,7 @@ fn rawEntriesOf(
 // Every entry of `c`, in the loader's order, its data decoded by the
 // collection's parse. A collection that cannot be read or an entry that does
 // not decode panics, naming it.
-pub fn getCollection<T>(c: Collection<T>) -> Task<Array<Entry<T>>> {
+pub async fn getCollection<T>(c: Collection<T>) -> Async<Array<Entry<T>>> {
     val raw = await rawEntriesOf(c.name, c.loader);
     val entries = case raw {
         Ok(found) -> found;
@@ -427,16 +427,16 @@ fn failDecode<T>(c: Collection<T>, e: RawEntry, report: ValidationReport) -> Ent
 }
 
 // The entries of `c` that `keep` answers `true` for.
-pub fn getCollectionWhere<T>(
+pub async fn getCollectionWhere<T>(
     c: Collection<T>,
     keep: fn(entry: Entry<T>) -> bool,
-) -> Task<Array<Entry<T>>> {
+) -> Async<Array<Entry<T>>> {
     val all = await getCollection(c);
     return all.filter({ e -> keep(e) });
 }
 
 // The entry of `c` whose id is `id`, `null` when there is none.
-pub fn getEntry<T>(c: Collection<T>, id: string) -> Task<?Entry<T>> {
+pub async fn getEntry<T>(c: Collection<T>, id: string) -> Async<?Entry<T>> {
     val all = await getCollection(c);
     val hit = all.filter({ e -> e.id == id });
     if (hit.length == 0) return null;
@@ -562,7 +562,7 @@ fn referencedIds(value: Json) -> Array<string> {
     };
 }
 
-fn gather(collections: Array<AnyCollection>) -> Task<Gathered> {
+async fn gather(collections: Array<AnyCollection>) -> Async<Gathered> {
     var loaded: Array<Loaded> = [];
     var problems: Array<string> = [];
     var names: Array<string> = [];
@@ -594,7 +594,7 @@ fn gather(collections: Array<AnyCollection>) -> Task<Gathered> {
 // Every problem of `collections`, read from their files: each violation as
 // `<file>: <path>: <message>`, a repeated id, a reference to a missing entry,
 // a file the loader could not read. Empty when the content is sound.
-pub fn syncProblems(collections: Array<AnyCollection>) -> Task<Array<string>> {
+pub async fn syncProblems(collections: Array<AnyCollection>) -> Async<Array<string>> {
     val found = await gather(collections);
     return found.problems;
 }
@@ -612,10 +612,10 @@ fn makeDirs(dir: string) -> Result<i32, string> {
 // `rakun-ssr sync`: refuses with every problem, one per line; with none, writes
 // `<outDir>/content/<name>.json` for every collection and answers how many
 // entries it wrote.
-pub fn writeStore(
+pub async fn writeStore(
     collections: Array<AnyCollection>,
     outDir: string,
-) -> Task<Result<i32, string>> {
+) -> Async<Result<i32, string>> {
     val found = await gather(collections);
     if (found.problems.length > 0) throw found.problems.join("\n");
     try makeDirs(path.join([outDir, "content"]));

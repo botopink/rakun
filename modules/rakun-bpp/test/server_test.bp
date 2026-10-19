@@ -20,10 +20,10 @@
 // to omit or duplicate; what is left to get wrong is the return:
 //
 //   `pub fn f() -> i32 { val p = await loadPost("x"); … }` — `await` under a
-//   return that is not a `Task` (or above)
+//   return that is not a `Async` (or above)
 //     error: effect-await-without-task
 //
-//   `fn Page() -> Task<Element> { val here = use pathname(); … }` — `Task`
+//   `fn Page() -> Async<Element> { val here = use pathname(); … }` — `Async`
 //   grants no `use`; the chain spells the case instead
 //   (`fn Page() -> Component<Element>`)
 //     error: use-without-context-effect
@@ -247,14 +247,14 @@ pub type Post(id: string, title: string)
 
 pub type Comment(author: string, body: string)
 
-// A loader is an ordinary fn returning `Task<T>` — the return is the effect.
-// These two stand in for a database read and cannot fail, so their Task carries
+// A loader is an ordinary fn returning `Async<T>` — the return is the effect.
+// These two stand in for a database read and cannot fail, so their Async carries
 // no `Result` and a component awaits them with a bare `await`; a loader that can
-// fail returns `Task<Result<T, E>>` and a component handles it with
+// fail returns `Async<Result<T, E>>` and a component handles it with
 // `try await … catch …` (decision 121). `server.bp` ships no loader machinery,
 // because `libs/std/src/http.bp` already has `fetch(url)`, a database loader is
 // front 08's and parallel awaiting is front 02's.
-fn loadPost(slug: string) -> Task<Post> {
+async fn loadPost(slug: string) -> Async<Post> {
     return Post(id: "p-" + slug, title: "Post " + slug);
 }
 
@@ -262,7 +262,7 @@ fn loadPost(slug: string) -> Task<Post> {
 // synchronously afterwards — never N awaits inside a `map`. `§2.38` makes a
 // lambda's last statement an implicit-return expression, so an `await` cannot
 // stand there.
-fn loadComments(postId: string) -> Task<Array<Comment>> {
+async fn loadComments(postId: string) -> Async<Array<Comment>> {
     return [
         Comment(author: "ana", body: "first on " + postId),
         Comment(author: "bo", body: "second on " + postId),
@@ -274,7 +274,7 @@ fn commentRow(c: Comment) -> Element {
 }
 
 // One await, then a synchronous render.
-fn PostTitlePage(params: Array<#(string, string)>) -> Task<Element> {
+async fn PostTitlePage(params: Array<#(string, string)>) -> Async<Element> {
     val r = RequestData(
         method: "GET",
         path: "/blog",
@@ -287,7 +287,7 @@ fn PostTitlePage(params: Array<#(string, string)>) -> Task<Element> {
     return div([h1([text(post.title, attrs: [])], attrs: [])], attrs: []);
 }
 
-test "server: a Task component awaits a loader and renders" {
+test "server: a Async component awaits a loader and renders" {
     val out = await renderServerComponent(
         { -> PostTitlePage([#("slug", "hi")]) },
     );
@@ -296,13 +296,13 @@ test "server: a Task component awaits a loader and renders" {
 
 // TWO sequential awaits, both at STATEMENT level, the second depending on the
 // first. On the erlang row these cost two round trips even when the results are
-// independent, because `Task` there is eager (botopink decision 120):
+// independent, because `Async` there is eager (botopink decision 120):
 // the page costs the SUM of its loaders. When the loaders are INDEPENDENT the
 // answer is front 02's spawn-and-gather over unstarted tasks
 // (`[{ -> loadPost(s) }, { -> loadSidebar() }]`), not a `map` over Tasks,
 // which would simply run them in order. These two are dependent — `loadComments`
 // needs `post.id` — so sequence is what they actually are.
-fn PostPage(params: Array<#(string, string)>) -> Task<Element> {
+async fn PostPage(params: Array<#(string, string)>) -> Async<Element> {
     val r = RequestData(
         method: "GET",
         path: "/blog",
@@ -343,7 +343,7 @@ test "server: renderServerComponent awaits once and then is renderToString" {
     assert out == "<div>plain</div>";
 }
 
-fn justTree(e: Element) -> Task<Element> {
+async fn justTree(e: Element) -> Async<Element> {
     return e;
 }
 
@@ -353,7 +353,7 @@ fn justTree(e: Element) -> Task<Element> {
 // loader is awaited at statement level, and the render is synchronous. This is
 // what makes the front worth having — the data layer and the component tree in
 // one file.
-fn GreetingPage() -> Task<Element> {
+async fn GreetingPage() -> Async<Element> {
     val r = await request();
     val post = await loadPost(r.param("slug"));
     return div(
@@ -386,7 +386,7 @@ test "server: a component reads the filled request and renders it" {
 // That is the property the record buys and the reason `request()` is a thin
 // builder over six cells rather than the thing components call: a page written
 // against the record is testable, and one written against the cells is not.
-fn GreetingFor(r: RequestData) -> Task<Element> {
+async fn GreetingFor(r: RequestData) -> Async<Element> {
     val post = await loadPost(r.param("slug"));
     return div(
         [
@@ -414,10 +414,10 @@ test "server: the same page renders from an explicit request, with no host" {
 
 // ── decision 128: a server component that uses and awaits ───────────────────
 //
-// `fn … -> Component<Element>`: `Component` extends `Task`, so the
+// `fn … -> Component<Element>`: `Component` extends `Async`, so the
 // one return grants `use` and `await` (decisions 104/118/128 of 1.0.10-beta —
-// a `Task` body does not activate a hook). `renderComponent` renders its thunk.
-fn RoutedPage() -> Component<Element> {
+// a `Async` body does not activate a hook). `renderComponent` renders its thunk.
+component fn RoutedPage() -> Component<Element> {
     val here = use pathname();
     val post = await loadPost("hi");
     return div(
@@ -461,7 +461,7 @@ test "server: a rendered value is NOT escaped — escaping is front 01's, at the
     assert out == "<div><p><script>alert(1)</script></p></div>";
 }
 
-fn SearchEcho(r: RequestData) -> Task<Element> {
+async fn SearchEcho(r: RequestData) -> Async<Element> {
     return div([p([text(r.queryParam("q"), attrs: [])], attrs: [])], attrs: []);
 }
 

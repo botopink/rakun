@@ -50,13 +50,13 @@ import {hash, compiler.Span, compiler, failure.panic} from "std";
 // unambiguous because a payload record is tagged `R` or `B` and a registered
 // name never is; `output.bp`'s `drainStep` is where that is written down.
 //
-// `drainRules` returns `Task<string>` — wrapped in `Promise.resolve(...)`
+// `drainRules` returns `Async<string>` — wrapped in `Promise.resolve(...)`
 // so the public `flush()` surface is awaitable from any callsite (an SSR
 // pipeline may chain it with `await renderToString(page)` symmetric to
-// `await fetch(url)` from `std/http`). It cannot fail, so the Task carries no
+// `await fetch(url)` from `std/http`). It cannot fail, so the Async carries no
 // `Result` and a caller writes a bare `await`. Tests support `await` via the
 // implicit await channel of a `test` block (`inferTestDecl`) + `async function`
-// emission in `commonJS.emitTestFn`. The erlang backend's eager `Task<T>` = `T`
+// emission in `commonJS.emitTestFn`. The erlang backend's eager `Async<T>` = `T`
 // rule makes `await` an identity there.
 //
 // Both commonJS and erlang carry the cells; beam/wasm are not ported.
@@ -70,7 +70,7 @@ declare fn register(name: string, body: string) -> void;
     .JavaScript("""Promise.resolve((function(){ var __M = (globalThis.__emilia_sheet ||= new Map()); var __S = Array.from(__M.entries()).map(function(__E){ return __E[0] + "\t" + __E[1]; }).join("\n"); __M.clear(); return __S; })())"""),
     .Erlang("""(fun() -> L__ = case erase('__emilia_sheet') of undefined -> []; X__ -> X__ end, iolist_to_binary(lists:join(<<"\n">>, [[K__, <<"\t">>, V__] || {K__, V__} <- L__])) end)()"""),
 )]
-declare fn drainRules() -> Task<string>;
+declare fn drainRules() -> Async<string>;
 
 // The payload registered under `name`, or "" when none is — read WITHOUT
 // draining. Front 59's `named()` needs it to refuse a second, different
@@ -251,11 +251,11 @@ pub fn emilia(tokens: Token[]) -> string {
 // theme and base layers `o` asks for and no `@layer utilities` body, because
 // nothing registered in between.
 //
-// Async (`Task<string>` — the return is the effect) so the SSR caller can
+// Async (`Async<string>` — the return is the effect) so the SSR caller can
 // chain it with the other async pieces of a render pipeline
-// (`await renderToString(page) + await flush()`). Tests resolve the Task
+// (`await renderToString(page) + await flush()`). Tests resolve the Async
 // inline via the implicit await channel of a `test {…}` block.
-pub fn flushWith(o: Options) -> Task<string> {
+pub async fn flushWith(o: Options) -> Async<string> {
     val raw = await drainRules();
     return renderDocument(raw, o);
 }
@@ -263,7 +263,7 @@ pub fn flushWith(o: Options) -> Task<string> {
 // The stock render: `fullTheme()` (decision 80 — every front's entries, so
 // no `var(--…)` a token emits is left undefined), no reset, no prefix,
 // cascade layers on. The signature is the one it had before front 56.
-pub fn flush() -> Task<string> {
+pub async fn flush() -> Async<string> {
     return await flushWith(fullOptions());
 }
 
