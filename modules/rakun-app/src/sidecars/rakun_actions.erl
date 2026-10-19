@@ -6,7 +6,7 @@
 %%%     the function value itself (`erlang:fun_info/2`) — the module the
 %%%     `#[serverAction]` fn was declared in, which `@Decl` does not carry;
 %%%   * the CALL: an action returns an `ActionResult`, an `Ok(ActionResult)` or
-%%%     an `Error(E)` (its `@Task` is eager on the BEAM), or raises. `call/2`
+%%%     an `Error(E)` (its `Task` is eager on the BEAM), or raises. `call/2`
 %%%     classifies that into a word and keeps the value for `result/0` /
 %%%     `failure/0`; a navigation signal (a thrown `nav:` binary, front 63) is
 %%%     re-thrown untouched so the caller's `captureSignals` sees it;

@@ -13,7 +13,7 @@ import {layout, page, PageContext, LayoutProps, pageParams, rkAppLayout, rkAppPa
 pub fn rootLayout(props: LayoutProps<Element>) -> Element { … }
 
 #[page("blog/[slug]")]
-pub fn blogPostPage(route: PageContext) -> @Task<Element> {
+pub fn blogPostPage(route: PageContext) -> Task<Element> {
     return post(pageParams(route).get("slug"));
 }
 ```

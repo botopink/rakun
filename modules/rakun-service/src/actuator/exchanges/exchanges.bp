@@ -20,7 +20,7 @@
 //// ones.
 
 import {rkProp, toI32, Request, Response} from "rakun";
-import {json} from "std";
+import {json, compiler, failure.panic} from "std";
 import {filter.WebRequest, filter.Chain, filter.registerFilter, filter.headerLines, filter.cookieLines, filter.chainNames};
 import {EndpointResponse, rkRegisterEndpoint} from "rakun";
 import {actuator.management.sanitizeEntries};
@@ -136,54 +136,54 @@ pub fn recordingProblem() -> string {
 
 // ── the ring ────────────────────────────────────────────────────────────────
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun() -> case ets:whereis(rakun_http_exchanges) of undefined -> __Me = self(), spawn(fun() -> ets:new(rakun_http_exchanges, [named_table, public, ordered_set]), __Me ! rakun_hx_ready, receive stop -> ok end end), receive rakun_hx_ready -> ok after 2000 -> ok end, 0; _ -> 0 end end)()"""),
 )]
 declare fn ringEnsure() -> i32;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__Cap, __E) -> ets:insert(rakun_http_exchanges, {erlang:unique_integer([monotonic]), __E}), case ets:info(rakun_http_exchanges, size) > __Cap of true -> ets:delete(rakun_http_exchanges, ets:first(rakun_http_exchanges)); false -> true end, 0 end)($0, $1)"""),
 )]
 declare fn ringPut(capacity: i32, e: HttpExchange) -> i32;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun() -> case ets:whereis(rakun_http_exchanges) of undefined -> []; _ -> lists:reverse([__E || {_, __E} <- ets:tab2list(rakun_http_exchanges)]) end end)()"""),
 )]
 pub declare fn exchangesNewestFirst() -> Array<HttpExchange>;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun() -> case ets:whereis(rakun_http_exchanges) of undefined -> 0; _ -> ets:delete_all_objects(rakun_http_exchanges), 0 end end)()"""),
 )]
 pub declare fn clearExchanges() -> i32;
 
-#[@external(.Erlang("""erlang:system_time(millisecond)"""))]
+#[compiler.external(.Erlang("""erlang:system_time(millisecond)"""))]
 declare fn nowMs() -> i64;
 // The monotonic clock is far outside `i32` (decision 264); a request's
 // duration is back in `i32`, and one beyond it raises rather than wraps.
-#[@external(.Erlang("""erlang:monotonic_time(millisecond)"""))]
+#[compiler.external(.Erlang("""erlang:monotonic_time(millisecond)"""))]
 declare fn monoMs() -> i64;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__X) when __X >= -2147483648, __X =< 2147483647 -> __X; (__X) -> erlang:error({integer_overflow, iolist_to_binary(io_lib:format("rakun-service: a request that took ~p ms is outside i32", [__X]))}) end)($0)"""),
 )]
 declare fn tookOf(ms: i64) -> i32;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__F) -> try {ok, __F()} catch __C:__R:__S -> {error, {__C, __R, __S}} end end)($0)"""),
 )]
-declare fn attempt(run: fn() -> Response) -> @Result<Response, string>;
+declare fn attempt(run: fn() -> Response) -> Result<Response, string>;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__E) -> {__C, __R, __S} = __E, erlang:raise(__C, __R, __S) end)($0)"""),
 )]
 declare fn reraise(e: string) -> Response;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun() -> case get(rakun_conn_socket) of undefined -> <<>>; __S -> case (case get(rakun_transport) of ssl -> ssl:peername(__S); _ -> inet:peername(__S) end) of {ok, {__A, _}} -> list_to_binary(inet:ntoa(__A)); _ -> <<>> end end end)()"""),
 )]
 declare fn remoteAddress() -> string;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun() -> __M = list_to_atom("rakun_" ++ "security"), case erlang:function_exported(__M, slot, 1) of true -> case erlang:apply(__M, slot, [<<"principal">>]) of <<"-">> -> <<>>; __P -> __P end; false -> <<>> end end)()"""),
 )]
 declare fn securityPrincipal() -> string;
@@ -278,7 +278,7 @@ pub fn exchangeEntryName() -> string {
 // when recording is enabled. Answers 1 when installed.
 pub fn installExchangeRecording() -> i32 {
     val problem = recordingProblem();
-    if (problem != "") @panic(problem);
+    if (problem != "") panic(problem);
     if (recordingEnabled() == false) return 0;
     val _r = ringEnsure();
     if (chainNames().indexOf(exchangeEntryName()) >= 0) return 1;

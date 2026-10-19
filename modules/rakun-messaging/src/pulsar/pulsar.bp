@@ -20,7 +20,7 @@
 //// subscription, so there is nothing to dead-letter a message from.
 
 import {rkProp} from "rakun";
-import {json, json.Json} from "std";
+import {json, json.Json, failure.panic, compiler} from "std";
 import {RestClient, ClientResponse} from "rakun-restclient";
 
 pub type TopicName(
@@ -41,14 +41,14 @@ pub fn parseTopic(name: string) -> TopicName {
         );
     val persistence = name.slice(0, scheme);
     if (persistence != "persistent" && persistence != "non-persistent")
-        @panic(
+        panic(
             "rakun pulsar: `"
                 + name
                 + "` - a topic is persistent:// or non-persistent://",
         );
     val parts = name.slice(scheme + 3, name.length()).split("/");
     if (parts.length != 3)
-        @panic(
+        panic(
             "rakun pulsar: `"
                 + name
                 + "` - a full topic name is <persistence>://<tenant>/<namespace>/<topic>",
@@ -124,7 +124,7 @@ fn msSetting(key: string, fallback: i32) -> i32 {
     return if (raw == "") fallback else toInt(raw);
 }
 
-#[@external(.Erlang("""(fun(__S) -> try binary_to_integer(__S) catch _:_ -> 0 end end)($0)"""))]
+#[compiler.external(.Erlang("""(fun(__S) -> try binary_to_integer(__S) catch _:_ -> 0 end end)($0)"""))]
 declare fn toInt(s: string) -> i32;
 
 // Front 13's client on `rakun.pulsar.admin-url`, with
@@ -149,7 +149,7 @@ fn adminPath(t: TopicName) -> string {
         + t.topic;
 }
 
-pub fn createTopic(name: string) -> @Result<i32, string> {
+pub fn createTopic(name: string) -> Result<i32, string> {
     val res: ClientResponse = admin()
         .put(adminPath(parseTopic(name)), "")
         .retrieve();
@@ -164,7 +164,7 @@ pub fn createTopic(name: string) -> @Result<i32, string> {
 }
 
 // The reader of `GET …/subscriptions`: a JSON array of names.
-pub fn readSubscriptions(body: string) -> @Result<string[], string> {
+pub fn readSubscriptions(body: string) -> Result<string[], string> {
     val d = json.decode(body);
     if (d.isError()) throw "rakun pulsar: the subscriptions answer is not JSON";
     val v: Json = d.unwrapOr(Json.Null);
@@ -190,7 +190,7 @@ pub fn readSubscriptions(body: string) -> @Result<string[], string> {
 }
 
 // The reader of `GET …/stats`: `subscriptions.<name>.msgBacklog`.
-pub fn readBacklog(body: string, subscription: string) -> @Result<i32, string> {
+pub fn readBacklog(body: string, subscription: string) -> Result<i32, string> {
     val d = json.decode(body);
     if (d.isError()) throw "rakun pulsar: the stats answer is not JSON";
     val v: Json = d.unwrapOr(Json.Null);
@@ -212,7 +212,7 @@ pub fn readBacklog(body: string, subscription: string) -> @Result<i32, string> {
     return toI32(n);
 }
 
-#[@external(.Erlang("""(fun(__F) -> trunc(__F) end)($0)"""))]
+#[compiler.external(.Erlang("""(fun(__F) -> trunc(__F) end)($0)"""))]
 declare fn toI32(n: f64) -> i32;
 
 fn member(v: Json, key: string) -> Json {
@@ -226,7 +226,7 @@ fn member(v: Json, key: string) -> Json {
         .at(0) ?? Json.Null;
 }
 
-pub fn subscriptionsOf(name: string) -> @Result<string[], string> {
+pub fn subscriptionsOf(name: string) -> Result<string[], string> {
     val res: ClientResponse = admin()
         .get(adminPath(parseTopic(name)) + "/subscriptions")
         .retrieve();
@@ -236,7 +236,7 @@ pub fn subscriptionsOf(name: string) -> @Result<string[], string> {
     return readSubscriptions(res.body);
 }
 
-pub fn backlogOf(name: string, subscription: string) -> @Result<i32, string> {
+pub fn backlogOf(name: string, subscription: string) -> Result<i32, string> {
     val res: ClientResponse = admin()
         .get(adminPath(parseTopic(name)) + "/stats")
         .retrieve();

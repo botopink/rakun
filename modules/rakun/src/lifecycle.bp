@@ -33,7 +33,7 @@
 // `src/` rather than spelled a second time — `request_context.bp` imports
 // `charOf`/`sub` from the same module for the same reason.
 import {config.toI32};
-import {compiler, compiler.DeclKind} from "std";
+import {compiler, compiler.DeclKind, failure.panic, io.terminal.print} from "std";
 
 // ── the host cells ──────────────────────────────────────────────────────────
 //
@@ -43,19 +43,19 @@ import {compiler, compiler.DeclKind} from "std";
 // `shipErlSidecars` copies per ATOM named in emitted output and three atoms
 // would be three files to keep in step.
 
-#[@external(.Erlang("rakun_context:lifecycle_register($0, $1)"))]
+#[compiler.external(.Erlang("rakun_context:lifecycle_register($0, $1)"))]
 pub declare fn rkLifecycleStore<R>(record: string, run: fn() -> R) -> i32;
 
-#[@external(.Erlang("rakun_context:lifecycle_table()"))]
+#[compiler.external(.Erlang("rakun_context:lifecycle_table()"))]
 pub declare fn rkLifecycleTable() -> string;
 
 // Run every not-yet-run entry of `phase`, answering the `owner|method` of each
 // that raised, `\n`-separated. `tolerant` decides whether the pass stops at the
 // first failure. The host runs and catches; the MESSAGE is written here.
-#[@external(.Erlang("rakun_context:lifecycle_run($0, $1)"))]
+#[compiler.external(.Erlang("rakun_context:lifecycle_run($0, $1)"))]
 pub declare fn rkLifecycleRun(phase: string, tolerant: bool) -> string;
 
-#[@external(.Erlang("rakun_context:lifecycle_reset()"))]
+#[compiler.external(.Erlang("rakun_context:lifecycle_reset()"))]
 pub declare fn rkLifecycleReset() -> i32;
 
 // ── the refusals ────────────────────────────────────────────────────────────
@@ -139,9 +139,9 @@ pub fn rkRegisterLifecycle<R>(
     run: fn() -> R,
 ) -> i32 {
     val known = phase == "post" || phase == "pre";
-    if (!known) @panic(lifecyclePhaseProblem(phase));
-    if (unwritable(owner)) @panic(lifecycleFieldProblem("owner", owner));
-    if (unwritable(method)) @panic(lifecycleFieldProblem("method", method));
+    if (!known) panic(lifecyclePhaseProblem(phase));
+    if (unwritable(owner)) panic(lifecycleFieldProblem("owner", owner));
+    if (unwritable(method)) panic(lifecycleFieldProblem("method", method));
     return rkLifecycleStore(
         hookLine(
             Hook(owner: owner, method: method, phase: phase, order: order),
@@ -162,7 +162,7 @@ fn unwritable(value: string) -> bool {
 // worse than a refused boot.
 pub fn runPostConstruct() -> i32 {
     val failed = rkLifecycleRun("post", false);
-    if (failed != "") @panic(postConstructProblem(describe(failed)));
+    if (failed != "") panic(postConstructProblem(describe(failed)));
     return ranCount("post");
 }
 
@@ -174,7 +174,7 @@ pub fn runPreDestroy() -> string {
     val failed = rkLifecycleRun("pre", true);
     if (failed == "") return "" else {
         val who = describe(failed);
-        @print(preDestroyProblem(who));
+        print(preDestroyProblem(who));
         return who;
     }
 }
@@ -229,20 +229,20 @@ pub fn lifecycleHooks(phase: string) -> Hook[] {
 // false, drain the in-flight requests — is FRONT 07's, which calls `shutdown()`
 // after the drain.
 
-#[@external(.Erlang("rakun_context:exit_register($0, $1)"))]
+#[compiler.external(.Erlang("rakun_context:exit_register($0, $1)"))]
 pub declare fn rkExitStore(name: string, gen: fn() -> i32) -> i32;
 
 // Every generator called, its answer `\n`-separated in registration order. The
 // maximum is taken here: arithmetic is botopink's, not the host's.
-#[@external(.Erlang("rakun_context:exit_values()"))]
+#[compiler.external(.Erlang("rakun_context:exit_values()"))]
 pub declare fn rkExitValues() -> string;
 
-#[@external(.Erlang("rakun_context:exit_reset()"))]
+#[compiler.external(.Erlang("rakun_context:exit_reset()"))]
 pub declare fn rkExitReset() -> i32;
 
 pub fn rkRegisterExitCode(name: string, gen: fn() -> i32) -> i32 {
     if (unwritable(name))
-        @panic(lifecycleFieldProblem("exit-code generator", name));
+        panic(lifecycleFieldProblem("exit-code generator", name));
     return rkExitStore(name, gen);
 }
 

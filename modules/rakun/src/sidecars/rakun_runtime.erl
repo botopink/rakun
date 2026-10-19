@@ -4,7 +4,7 @@
 %%% botopink is immutable-first and has no top-level mutable state, so rakun's
 %%% runtime state — the component scan registry, the dependency-cycle guard,
 %%% the singleton cache, the property map and the router table — lives in the
-%%% host, reached from `src/runtime.bp` through `#[@External.Erlang(…)]`
+%%% host, reached from `src/runtime.bp` through `#[compiler.external(.Erlang(…))]`
 %%% declarations. This module is the host half of that seam; rakun is
 %%% erlang-only (decision 113). Comments citing `runtime.mjs:N` name the node
 %%% implementation this module was ported from, term for term.

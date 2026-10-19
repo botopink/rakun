@@ -19,17 +19,17 @@ with every boundary showing its fallback.
 ## Boundaries and fills
 
 ```text
-pub type Boundary(id: string, fallback: Element, child: fn() -> @Component<Element>)
+pub type Boundary(id: string, fallback: Element, child: fn() -> Component<Element>)
 pub fn Suspense(b: Boundary) -> Element      // <div data-jh-h="h1">fallback</div>
 pub fn holeId(index: i32) -> string          // "h1"
-pub fn resolve(b: Boundary) -> @Task<Chunk>  // awaits the child once
+pub fn resolve(b: Boundary) -> Task<Chunk>  // awaits the child once
 pub fn fillHtml(c: Chunk, css: string) -> string
 //   <template data-jh-f="h1">css…markup…</template><script>__bp1("h1")</script>
 ```
 
 {suspense_boundary/src/main.bp}
 
-The child is an **unstarted thunk**: `@Task` is eager on erlang, so a started
+The child is an **unstarted thunk**: `Task` is eager on erlang, so a started
 Task would already have run. `Suspense` registers the boundary with the render
 (an `Element` has nowhere to carry the thunk). `renderStream` hands each
 boundary's thunk to its own process and writes the fills in **completion**
@@ -57,9 +57,9 @@ the library `routing`'s, and a consumer's flat `import {Segment} from
 
 | File in `app/` | Marker | Signature it accepts |
 |---|---|---|
-| `layout.bp` | `#[layout(seg)]` | `fn(props: LayoutProps) -> @Component<Element>` |
-| `template.bp` | `#[template(seg)]` | `fn(props: LayoutProps) -> @Component<Element>` |
-| `page.bp` | `#[page(seg)]` | `fn(route: PageContext) -> @Component<Element>` (parameters: `pageParams(route)`) |
+| `layout.bp` | `#[layout(seg)]` | `fn(props: LayoutProps) -> Component<Element>` |
+| `template.bp` | `#[template(seg)]` | `fn(props: LayoutProps) -> Component<Element>` |
+| `page.bp` | `#[page(seg)]` | `fn(route: PageContext) -> Component<Element>` (parameters: `pageParams(route)`) |
 | `default.bp` | `#[defaultView(seg)]` | `fn(props: LayoutProps) -> Element` |
 
 `#[page]`, `#[layout]` and `#[template]` refuse any other return, naming the
@@ -87,13 +87,13 @@ contract-1 lines; rakun-ssr copies it into rakun's table.
 
 ```text
 pub type Response(status: fn(code: i32) -> void, header: fn(name: string, value: string) -> void,
-                  write: fn(chunk: string) -> @Task<void>, close: fn() -> @Task<void>)
+                  write: fn(chunk: string) -> Task<void>, close: fn() -> Task<void>)
 pub type PageInput(build, pathname, pattern, params, query, table, actions,
-                   chain: Array<UiSegment>, page: fn() -> @Component<Element>,
+                   chain: Array<UiSegment>, page: fn() -> Component<Element>,
                    metadata: Array<Metadata>, viewports: Array<Viewport>)
 pub fn app(plugins: Array<RenderPlugin>, allowedRedirects: string[] = [], lang: string = "en") -> App
-site.render(input, req, res) -> @Task<@Result<void, string>>
-site.renderStream(input, req, res) -> @Task<@Result<void, string>>
+site.render(input, req, res) -> Task<Result<void, string>>
+site.renderStream(input, req, res) -> Task<Result<void, string>>
 ```
 
 `lang` is the document's `<html lang>`: letters, digits and `-`, starting with
@@ -136,8 +136,8 @@ fill and signal functions (called only by rakun-ssr front 68's entry).
 ## `RenderPlugin`
 
 ```text
-pub type RenderPlugin(name: string, head: fn() -> @Task<string>, chunk: fn(holeId: string) -> @Task<string>,
-                      close: fn() -> @Task<@Result<void, string>>, payload: fn() -> @Task<Array<#(string, Json)>>)
+pub type RenderPlugin(name: string, head: fn() -> Task<string>, chunk: fn(holeId: string) -> Task<string>,
+                      close: fn() -> Task<Result<void, string>>, payload: fn() -> Task<Array<#(string, Json)>>)
 ```
 
 A record of async functions (an array of two different behavior implementors

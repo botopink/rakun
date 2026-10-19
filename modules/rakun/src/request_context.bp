@@ -37,7 +37,7 @@
 
 import {runtime.rkProp, runtime.rkPropInt};
 import {config.charOf, config.sub};
-import {hash, encoding, io.random} from "std";
+import {hash, encoding, io.random, failure.panic, compiler} from "std";
 
 // ── the five phases ─────────────────────────────────────────────────────────
 //
@@ -82,15 +82,15 @@ pub fn phaseFrom(name: string) -> RequestPhase {
     if (name == "action") return RequestPhase.Action;
     if (name == "handler") return RequestPhase.Handler;
     if (name == "after") return RequestPhase.After;
-    @panic("rakun request: `" + name + "` is not a request phase");
+    panic("rakun request: `" + name + "` is not a request phase");
     return RequestPhase.Handler;
 }
 
 // The base decision 128's wrapper named for a request hook. Decision 354 took
-// the base out of `@Component<R>`: the request becomes the root context
+// the base out of `Component<R>`: the request becomes the root context
 // `RequestContext` rakun's pipeline provides (`04-rakun/128`), which retires
 // this marker. `RequestScope` — the frame a request runs inside — implements
-// `@Renderable`, the marker that replaced `@Context<RequestBase>`.
+// `Renderable`, the marker that replaced `@Context<RequestBase>`.
 pub type RequestBase()
 
 // `headersWire` is `name\tvalue` lines, `\n`-separated, names already lowercased
@@ -104,7 +104,7 @@ pub type RequestScope(
     query: string,
     headersWire: string,
     strict: bool,
-) implement @Renderable
+) implement Renderable
 
 // ── the host cells ──────────────────────────────────────────────────────────
 //
@@ -112,22 +112,22 @@ pub type RequestScope(
 // host never reads a slot's MEANING: `beginRequest` writes them and the
 // accessors below read them back.
 
-#[@external(.Erlang("rakun_request_context:begin_frame($0)"))]
+#[compiler.external(.Erlang("rakun_request_context:begin_frame($0)"))]
 pub declare fn rkReqBegin(id: string) -> i64;
 
-#[@external(.Erlang("rakun_request_context:end_frame()"))]
+#[compiler.external(.Erlang("rakun_request_context:end_frame()"))]
 pub declare fn rkReqEnd() -> i32;
 
-#[@external(.Erlang("rakun_request_context:is_live()"))]
+#[compiler.external(.Erlang("rakun_request_context:is_live()"))]
 pub declare fn rkReqLive() -> bool;
 
-#[@external(.Erlang("rakun_request_context:epoch()"))]
+#[compiler.external(.Erlang("rakun_request_context:epoch()"))]
 pub declare fn rkReqEpoch() -> i64;
 
-#[@external(.Erlang("rakun_request_context:slot($0)"))]
+#[compiler.external(.Erlang("rakun_request_context:slot($0)"))]
 pub declare fn rkReqSlot(name: string) -> string;
 
-#[@external(.Erlang("rakun_request_context:put_slot($0, $1)"))]
+#[compiler.external(.Erlang("rakun_request_context:put_slot($0, $1)"))]
 pub declare fn rkReqPutSlot(name: string, value: string) -> i32;
 
 // The queued `Set-Cookie` lines. A keyed line list, insertion-ordered and
@@ -137,10 +137,10 @@ pub declare fn rkReqPutSlot(name: string, value: string) -> i32;
 // The host knows only "a keyed list of lines" — the same primitive
 // `set_reply_header/2` already is; it does not know what a cookie looks like.
 
-#[@external(.Erlang("rakun_request_context:queue_cookie($0, $1)"))]
+#[compiler.external(.Erlang("rakun_request_context:queue_cookie($0, $1)"))]
 pub declare fn rkReqQueueCookie(name: string, line: string) -> i32;
 
-#[@external(.Erlang("rakun_request_context:cookie_blob()"))]
+#[compiler.external(.Erlang("rakun_request_context:cookie_blob()"))]
 pub declare fn rkReqCookieBlob() -> string;
 
 // ── deferred work: the host cells ───────────────────────────────────────────
@@ -150,51 +150,51 @@ pub declare fn rkReqCookieBlob() -> string;
 // frame and starts the work; `afterWait` reaps it and enforces the budget. The
 // dispatcher calls both, in that order, around writing the response.
 
-#[@external(.Erlang("rakun_request_context:defer($0)"))]
+#[compiler.external(.Erlang("rakun_request_context:defer($0)"))]
 pub declare fn rkReqDefer(work: fn() -> i32) -> i32;
 
-#[@external(.Erlang("rakun_request_context:defer_count()"))]
+#[compiler.external(.Erlang("rakun_request_context:defer_count()"))]
 pub declare fn rkReqDeferCount() -> i32;
 
-#[@external(.Erlang("rakun_request_context:start_deferred($0)"))]
+#[compiler.external(.Erlang("rakun_request_context:start_deferred($0)"))]
 pub declare fn rkReqStartDeferred(timeoutMs: i32) -> i32;
 
-#[@external(.Erlang("rakun_request_context:after_wait($0)"))]
+#[compiler.external(.Erlang("rakun_request_context:after_wait($0)"))]
 pub declare fn rkReqAfterWait(budgetMs: i32) -> i32;
 
-#[@external(.Erlang("rakun_request_context:after_stat($0)"))]
+#[compiler.external(.Erlang("rakun_request_context:after_stat($0)"))]
 pub declare fn rkReqAfterStat(name: string) -> i32;
 
-#[@external(.Erlang("rakun_request_context:after_log()"))]
+#[compiler.external(.Erlang("rakun_request_context:after_log()"))]
 pub declare fn rkReqAfterLog() -> string;
 
-#[@external(.Erlang("rakun_request_context:after_reset()"))]
+#[compiler.external(.Erlang("rakun_request_context:after_reset()"))]
 pub declare fn rkReqAfterReset() -> i32;
 
 // The shared scratch. A deferred child is a different PROCESS on the BEAM, so a
 // counter it bumps cannot live in either dictionary; this is the ETS the front's
 // own text names when it says "the loader increments an ETS counter".
 
-#[@external(.Erlang("rakun_request_context:share_bump($0)"))]
+#[compiler.external(.Erlang("rakun_request_context:share_bump($0)"))]
 pub declare fn rkReqShareBump(key: string) -> i32;
 
-#[@external(.Erlang("rakun_request_context:share_count($0)"))]
+#[compiler.external(.Erlang("rakun_request_context:share_count($0)"))]
 pub declare fn rkReqShareCount(key: string) -> i32;
 
-#[@external(.Erlang("rakun_request_context:share_put($0, $1)"))]
+#[compiler.external(.Erlang("rakun_request_context:share_put($0, $1)"))]
 pub declare fn rkReqSharePut(key: string, value: string) -> i32;
 
-#[@external(.Erlang("rakun_request_context:share_get($0)"))]
+#[compiler.external(.Erlang("rakun_request_context:share_get($0)"))]
 pub declare fn rkReqShareGet(key: string) -> string;
 
-#[@external(.Erlang("rakun_request_context:share_reset()"))]
+#[compiler.external(.Erlang("rakun_request_context:share_reset()"))]
 pub declare fn rkReqShareReset() -> i32;
 
 // A BLOCKING sleep. Front 01's `clock` module does not exist yet and the
 // deferred-work and single-flight assertions need a thunk that is still
 // running; `timer:sleep/1` on the BEAM and `Atomics.wait` on node are the two
 // synchronous ones there are.
-#[@external(.Erlang("rakun_request_context:sleep($0)"))]
+#[compiler.external(.Erlang("rakun_request_context:sleep($0)"))]
 pub declare fn rkReqSleep(ms: i32) -> i32;
 
 // ── the per-request memo table: the host cells ──────────────────────────────
@@ -203,16 +203,16 @@ pub declare fn rkReqSleep(ms: i32) -> i32;
 // keeps its own type instead of stringifying. The table lives IN the frame, so
 // it dies with the request. `request_memo.bp` is the surface over these.
 
-#[@external(.Erlang("rakun_request_context:memo_state($0)"))]
+#[compiler.external(.Erlang("rakun_request_context:memo_state($0)"))]
 pub declare fn rkMemoState(key: string) -> i32;
 
-#[@external(.Erlang("rakun_request_context:memo_resolve($0, $1)"))]
+#[compiler.external(.Erlang("rakun_request_context:memo_resolve($0, $1)"))]
 pub declare fn rkMemoResolve<T>(key: string, load: fn() -> T) -> T;
 
-#[@external(.Erlang("rakun_request_context:memo_preload($0, $1)"))]
+#[compiler.external(.Erlang("rakun_request_context:memo_preload($0, $1)"))]
 pub declare fn rkMemoPreload<T>(key: string, load: fn() -> T) -> i32;
 
-#[@external(.Erlang("rakun_request_context:memo_count($0)"))]
+#[compiler.external(.Erlang("rakun_request_context:memo_count($0)"))]
 pub declare fn rkMemoCount(name: string) -> i32;
 
 // ── the refusals ────────────────────────────────────────────────────────────
@@ -247,7 +247,7 @@ pub fn requestLive() -> bool {
 }
 
 fn demand(what: string) -> i32 {
-    if (rkReqLive() == false) @panic(noFrameProblem(what));
+    if (rkReqLive() == false) panic(noFrameProblem(what));
     return 0;
 }
 
@@ -258,7 +258,7 @@ pub fn demandRequest(what: string) -> i32 {
 }
 
 pub fn beginRequest(scope: RequestScope) -> i64 {
-    if (rkReqLive()) @panic(nestedFrameProblem(rkReqSlot("path")));
+    if (rkReqLive()) panic(nestedFrameProblem(rkReqSlot("path")));
     val epoch = rkReqBegin(scope.id);
     val _m = rkReqPutSlot("method", scope.method);
     val _p = rkReqPutSlot("path", scope.path);
@@ -330,7 +330,7 @@ pub fn requestStrict() -> bool {
 // question in the same words.
 pub fn checkEpoch(epoch: i64, what: string) -> i32 {
     val _d = demand(what + "()");
-    if (rkReqEpoch() != epoch) @panic(staleEpochProblem(what));
+    if (rkReqEpoch() != epoch) panic(staleEpochProblem(what));
     return 0;
 }
 
@@ -366,7 +366,7 @@ pub fn strictProblem(what: string, path: string) -> string {
 
 pub fn markDynamic(reason: string) -> i32 {
     val _d = demand("markDynamic()");
-    if (requestStrict()) @panic(strictProblem(reason, rkReqSlot("path")));
+    if (requestStrict()) panic(strictProblem(reason, rkReqSlot("path")));
     val first: string = rkReqSlot("reason");
     val keep: string = if (first == "") reason else first;
     val _r = rkReqPutSlot("reason", keep);
@@ -626,8 +626,8 @@ pub fn serializeCookie(
     value: string,
     attrs: CookieAttrs,
 ) -> string {
-    if (nonAscii(name)) @panic(cookieValueProblem(name));
-    if (nonAscii(value)) @panic(cookieValueProblem(name));
+    if (nonAscii(name)) panic(cookieValueProblem(name));
+    if (nonAscii(value)) panic(cookieValueProblem(name));
     var out: string = name + "=" + encoding.percentEncode(value);
     val path: string = attrs.path;
     if (path != "") out = out + "; Path=" + path;
@@ -706,7 +706,7 @@ fn cookieHeader() -> string {
 fn demandWritablePhase() -> i32 {
     val phase: string = rkReqSlot("phase");
     val blocked = ((phase == "render") || (phase == "after"));
-    if (blocked) @panic(cookiePhaseProblem(phase));
+    if (blocked) panic(cookiePhaseProblem(phase));
     return 0;
 }
 
@@ -773,7 +773,7 @@ pub fn cookieOf(c: Cookies, name: string, fallback: string) -> string {
 // TWO DEVIATIONS FROM THE FRONT'S TEXT, both from before front 01's `hmac`
 // and `random` additions reached `libs/std`. The signature is
 // `hash.hmacSha256`, which is HEX rather than base64url, and the token is
-// `random.randomBytes(16)`, which is hex too. Both carry an `@external(.Erlang(…))`
+// `random.randomBytes(16)`, which is hex too. Both carry an `compiler.external(.Erlang(…))`
 // form, which is the property that matters; the encoding is wider on the wire and
 // nothing else. When front 01 lands, `draftSign` is the one function to change.
 
@@ -855,7 +855,7 @@ pub type DraftMode(
         val _c = checkEpoch(self.epoch, "draftMode");
         val _p = demandWritablePhase();
         val secret: string = draftSecret();
-        if (secret == "") @panic(draftSecretProblem());
+        if (secret == "") panic(draftSecretProblem());
         val token: string = random.randomBytes(16);
         val value: string = token + "." + draftSign(secret, token);
         val name: string = draftCookieName();
@@ -918,7 +918,7 @@ pub fn afterPhaseProblem() -> string {
 
 pub fn after(work: fn() -> i32) -> i32 {
     val _d = demand("after()");
-    if (rkReqSlot("phase") == "after") @panic(afterPhaseProblem());
+    if (rkReqSlot("phase") == "after") panic(afterPhaseProblem());
     return rkReqDefer(work);
 }
 

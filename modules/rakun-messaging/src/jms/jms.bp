@@ -36,6 +36,7 @@ import {Health, rkRegisterHealthIndicator} from "rakun";
 import {reliability.policy.Outcome, reliability.policy.DeadLetter, reliability.policy.deadLetterJson};
 import {reliability.dispatch.Delivery};
 import {jms_host.rkJmsConnect, jms_host.rkJmsSend, jms_host.rkJmsSubscribe, jms_host.rkJmsUnsubscribe, jms_host.rkJmsClose, jms_host.rkJmsAlive, jms_host.rkJmsRequest};
+import {failure.panic, compiler} from "std";
 
 pub type Destination {
     Queue(name: string),
@@ -61,7 +62,7 @@ pub fn armFor(url: string) -> string {
     if (u.startsWith("amqp://") || u.startsWith("amqps://")) return "amqp10";
     if (u.startsWith("stomp://") || u.startsWith("stomp+ssl://"))
         return "stomp";
-    @panic(
+    panic(
         "rakun jms: rakun.jms.url `"
             + redactedUrl(url)
             + "` has an unsupported scheme - amqp:// (amqps://) or stomp:// (stomp+ssl://)",
@@ -91,26 +92,26 @@ fn hostPort(url: string) -> #(string, i32) {
     return #(hp.slice(0, colon), toInt(hp.slice(colon + 1, hp.length())));
 }
 
-#[@external(.Erlang("""(fun(__S) -> try binary_to_integer(__S) catch _:_ -> 0 end end)($0)"""))]
+#[compiler.external(.Erlang("""(fun(__S) -> try binary_to_integer(__S) catch _:_ -> 0 end end)($0)"""))]
 declare fn toInt(s: string) -> i32;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__N) -> rakun_ssl:get(__N, <<"client">>) =/= <<>> orelse rakun_ssl:get(__N, <<"listener">>) =/= <<>> end)($0)"""),
 )]
 declare fn bundleRegistered(name: string) -> bool;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__T) -> logger:notice("~ts", [__T]), persistent_term:put(rakun_jms_log, persistent_term:get(rakun_jms_log, []) ++ [__T]), 0 end)($0)"""),
 )]
 declare fn note(line: string) -> i32;
 
-#[@external(.Erlang("""persistent_term:get(rakun_jms_log, [])"""))]
+#[compiler.external(.Erlang("""persistent_term:get(rakun_jms_log, [])"""))]
 pub declare fn jmsLog() -> string[];
 
-#[@external(.Erlang("""(fun(__C) -> persistent_term:put(rakun_jms_conn, __C), 0 end)($0)"""))]
+#[compiler.external(.Erlang("""(fun(__C) -> persistent_term:put(rakun_jms_conn, __C), 0 end)($0)"""))]
 declare fn storeConn(conn: string) -> i32;
 
-#[@external(.Erlang("""persistent_term:get(rakun_jms_conn, <<>>)"""))]
+#[compiler.external(.Erlang("""persistent_term:get(rakun_jms_conn, <<>>)"""))]
 pub declare fn jmsConnection() -> string;
 
 // "" or why the configuration cannot boot.
@@ -141,7 +142,7 @@ pub fn jmsConfigProblem() -> string {
 
 pub fn startJms() -> i32 {
     val problem = jmsConfigProblem();
-    if (problem != "") @panic(problem);
+    if (problem != "") panic(problem);
     val url = rkProp("rakun.jms.url").trim();
     val hp = hostPort(url);
     val beat = toInt(rkProp("rakun.jms.heart-beat-ms").trim());
@@ -158,7 +159,7 @@ pub fn startJms() -> i32 {
         bundle,
     );
     if (c.startsWith("error:"))
-        @panic(
+        panic(
             "rakun jms: cannot connect to "
                 + redactedUrl(url)
                 + " - "
@@ -184,7 +185,7 @@ pub fn stopJms() -> i32 {
 
 pub fn jmsSend(destination: Destination, body: string) -> i32 {
     if (destinationName(destination).trim() == "")
-        @panic("rakun jms: a send needs a destination name");
+        panic("rakun jms: a send needs a destination name");
     val err = rkJmsSend(
         jmsConnection(),
         destinationPath(destination),
@@ -192,7 +193,7 @@ pub fn jmsSend(destination: Destination, body: string) -> i32 {
         [],
     );
     if (err != "")
-        @panic(
+        panic(
             "rakun jms: the send to "
                 + destinationPath(destination)
                 + " failed - "
@@ -205,7 +206,7 @@ pub fn jmsRequest(
     destination: Destination,
     body: string,
     timeoutMs: i32,
-) -> @Result<string, string> {
+) -> Result<string, string> {
     return rkJmsRequest(
         jmsConnection(),
         destinationPath(destination),
@@ -276,7 +277,7 @@ pub fn jmsListen(
 ) -> i32 {
     val path = destinationPath(destination);
     if (durable != "" && rkProp("rakun.jms.client-id").trim() == "")
-        @panic(
+        panic(
             "rakun jms: the durable subscription `"
                 + durable
                 + "` of "
@@ -315,7 +316,7 @@ pub fn jmsListen(
     else
         "";
     if (err != "")
-        @panic(
+        panic(
             "rakun jms: the broker refused the subscription "
                 + name
                 + " to "

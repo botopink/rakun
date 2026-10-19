@@ -33,6 +33,7 @@
 import {rkProp, toI32} from "rakun";
 import {Health, rkRegisterHealthIndicator} from "rakun";
 import {OutboxMessage, publishAfterCommitOn} from "rakun-data";
+import {compiler, failure.panic} from "std";
 
 pub type TlsMode {
     None,
@@ -67,16 +68,16 @@ pub type Mail(
     headers: Array<#(string, string)>,
 )
 
-#[@external(.Erlang("rakun_mail:compose($0, $1)"))]
+#[compiler.external(.Erlang("rakun_mail:compose($0, $1)"))]
 declare fn rkMailCompose(m: Mail, domain: string) -> string;
 
-#[@external(.Erlang("rakun_mail:envelope_rcpts($0)"))]
+#[compiler.external(.Erlang("rakun_mail:envelope_rcpts($0)"))]
 declare fn rkMailRcpts(m: Mail) -> string[];
 
-#[@external(.Erlang("rakun_mail:address_of($0)"))]
+#[compiler.external(.Erlang("rakun_mail:address_of($0)"))]
 pub declare fn addressOf(address: string) -> string;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__S, __F, __R, __M) -> case rakun_mail:send(__S, {rakun_mail:address_of(__F), __R, __M}) of ok -> <<>>; __E -> __E end end)($0, $1, $2, $3)"""),
 )]
 declare fn rkMailSend(
@@ -86,13 +87,13 @@ declare fn rkMailSend(
     message: string,
 ) -> string;
 
-#[@external(.Erlang("rakun_mail:probe($0, $1)"))]
+#[compiler.external(.Erlang("rakun_mail:probe($0, $1)"))]
 declare fn rkMailProbe(server: MailServer, timeoutMs: i32) -> string;
 
-#[@external(.Erlang("rakun_mail:transport_problem($0)"))]
+#[compiler.external(.Erlang("rakun_mail:transport_problem($0)"))]
 declare fn rkMailTransportProblem(transport: string) -> string;
 
-#[@external(.Erlang("""rakun_mail:configure($0, {$1, $2, $3})"""))]
+#[compiler.external(.Erlang("""rakun_mail:configure($0, {$1, $2, $3})"""))]
 declare fn rkMailConfigure(
     server: MailServer,
     concurrency: i32,
@@ -100,7 +101,7 @@ declare fn rkMailConfigure(
     backoffMs: i32,
 ) -> i32;
 
-#[@external(.Erlang("rakun_mail:enqueue($0, $1, $2, $3)"))]
+#[compiler.external(.Erlang("rakun_mail:enqueue($0, $1, $2, $3)"))]
 declare fn rkMailEnqueue(
     id: string,
     sender: string,
@@ -108,32 +109,32 @@ declare fn rkMailEnqueue(
     message: string,
 ) -> string;
 
-#[@external(.Erlang("rakun_mail:queue_stats()"))]
+#[compiler.external(.Erlang("rakun_mail:queue_stats()"))]
 pub declare fn mailQueueStats() -> string;
 
-#[@external(.Erlang("rakun_mail:dead_letters()"))]
+#[compiler.external(.Erlang("rakun_mail:dead_letters()"))]
 pub declare fn mailDeadLetters() -> string[];
 
-#[@external(.Erlang("rakun_mail:reset_queue()"))]
+#[compiler.external(.Erlang("rakun_mail:reset_queue()"))]
 pub declare fn resetMailQueue() -> i32;
 
-#[@external(.Erlang("rakun_mail:pending()"))]
+#[compiler.external(.Erlang("rakun_mail:pending()"))]
 pub declare fn mailPending() -> i32;
 
-#[@external(.Erlang("rakun_mail:log_lines()"))]
+#[compiler.external(.Erlang("rakun_mail:log_lines()"))]
 pub declare fn mailLog() -> string[];
 
-#[@external(.Erlang("rakun_mail:pack($0, $1, $2)"))]
+#[compiler.external(.Erlang("rakun_mail:pack($0, $1, $2)"))]
 declare fn rkMailPack(
     sender: string,
     rcpts: string[],
     message: string,
 ) -> string;
 
-#[@external(.Erlang("rakun_mail:deliver_packed($0, $1)"))]
+#[compiler.external(.Erlang("rakun_mail:deliver_packed($0, $1)"))]
 declare fn rkMailDeliverPacked(server: MailServer, payload: string) -> string;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun() -> <<"m-", (integer_to_binary(erlang:unique_integer([positive, monotonic])))/binary>> end)()"""),
 )]
 declare fn freshId() -> string;
@@ -154,7 +155,7 @@ pub fn tlsModeOf(name: string) -> TlsMode {
     if (n == "starttls") return TlsMode.StartTls;
     if (n == "implicit") return TlsMode.Implicit;
     if (n == "none" || n == "") return TlsMode.None;
-    @panic(
+    panic(
         "rakun mail: rakun.mail.tls is `"
             + name
             + "` - none, starttls or implicit",
@@ -212,7 +213,7 @@ pub fn mailConfigProblem() -> string {
 // At boot: validates, then hands the queue its server and policy.
 pub fn configureMail() -> i32 {
     val problem = mailConfigProblem();
-    if (problem != "") @panic(problem);
+    if (problem != "") panic(problem);
     return rkMailConfigure(
         mailServer(),
         intProp("queue.concurrency", 2),
@@ -225,9 +226,9 @@ pub fn configureMail() -> i32 {
 
 pub fn composeMessage(m: Mail) -> string {
     if (m.sender.trim() == "")
-        @panic("rakun mail: a mail needs a sender address (the From header)");
+        panic("rakun mail: a mail needs a sender address (the From header)");
     if (m.to.length + m.cc.length + m.bcc.length == 0)
-        @panic("rakun mail: a mail needs at least one recipient");
+        panic("rakun mail: a mail needs at least one recipient");
     return rkMailCompose(m, prop("message-id-domain", "rakun.local"));
 }
 

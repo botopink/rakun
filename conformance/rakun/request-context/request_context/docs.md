@@ -12,8 +12,8 @@ The reference text this cell shows (from [`../docs.md`](../docs.md), § The requ
 > by the dispatcher. `endRequest()` must run on the failure path too, or the next
 > request on a keep-alive connection starts inside the previous one's frame.
 >
-> `RequestScope` implements `@Renderable` (decision 354): a hook over the
-> request is written `-> @Component<T>`. The readers below are ordinary
+> `RequestScope` implements `Renderable` (decision 354): a hook over the
+> request is written `-> Component<T>`. The readers below are ordinary
 > functions, not hooks.
 >
 > The scope is a FRAME with an EPOCH, not a process: a connection process serves

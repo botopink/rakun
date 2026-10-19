@@ -4,7 +4,7 @@
 import {cli.scan.RouteEntry, cli.scan.scanFiles, cli.scan.scanApp, cli.scan.declaredArgument, cli.scan.describeScan, cli.scan.collisions};
 import {cli.resolve.Project, cli.resolve.resolveProject, cli.resolve.findRoot};
 import {config.OnzeConfig, types.AliasMap};
-import {io.fs, io.process, io.clock, path, io.env} from "std";
+import {io.fs, io.process, io.clock, path, io.env, compiler} from "std";
 import {assertAs} from "snap";
 
 // The run's own scratch directory — `botopink test` names it in
@@ -19,17 +19,17 @@ fn testTmp() -> string {
 fn page(seg: string) -> string {
     return "#[page(\""
         + seg
-        + "\")] pub fn p(route: PageContext) -> @Component<Element> { return div([]); }";
+        + "\")] pub fn p(route: PageContext) -> Component<Element> { return div([]); }";
 }
 
-fn errorOf(r: @Result<Array<RouteEntry>, string>) -> string {
+fn errorOf(r: Result<Array<RouteEntry>, string>) -> string {
     return case r {
         Ok(v) -> "ok";
         Error(e) -> e;
     };
 }
 
-fn projectError(r: @Result<Project, string>) -> string {
+fn projectError(r: Result<Project, string>) -> string {
     return case r {
         Ok(v) -> "ok";
         Error(e) -> e;
@@ -56,7 +56,7 @@ fn drop(dir: string) -> i32 {
 test "scan: every folder form ---- the staging table" {
     val entries = try scanFiles("", "app", [
         #("app/page.bp", page("")),
-        #("app/layout.bp", "#[layout(\"\")] pub fn l(props: LayoutProps) -> @Component<Element> { return props.children; }"),
+        #("app/layout.bp", "#[layout(\"\")] pub fn l(props: LayoutProps) -> Component<Element> { return props.children; }"),
         #("app/blog/[slug]/page.bp", page("blog/[slug]")),
         #("app/blog/[slug]/loading.bp", "pub fn Loading() -> Element { return p([]); }"),
         #("app/blog/[slug]/not-found.bp", "pub fn NotFound() -> Element { return p([]); }"),
@@ -64,11 +64,11 @@ test "scan: every folder form ---- the staging table" {
         #("app/docs/[...rest]/page.bp", page("docs/[...rest]")),
         #("app/shop/[[...rest]]/page.bp", page("shop/[[...rest]]")),
         #("app/dashboard/@feed/page.bp", page("dashboard/@feed")),
-        #("app/api/posts/route.bp", "#[getRoute(\"api/posts\")] pub fn list(req: Request) -> @Task<HandlerResponse> { return ok(); }"),
+        #("app/api/posts/route.bp", "#[getRoute(\"api/posts\")] pub fn list(req: Request) -> Task<HandlerResponse> { return ok(); }"),
         #("app/_components/card.bp", "pub fn Card() -> Element { return p([]); }"),
     ]);
     assert entries.length == 10;
-    try assertAs(@src(), "scan", describeScan(entries));
+    try assertAs(comptime compiler.src, "scan", describeScan(entries));
 }
 
 test "scan: the group does not reach the pattern" {
@@ -78,10 +78,10 @@ test "scan: the group does not reach the pattern" {
 }
 
 test "scan: refusals ---- page and route together, a missing decorator, a staging clash" {
-    val both = errorOf(scanFiles("", "app", [#("app/api/page.bp", page("api")), #("app/api/route.bp", "#[getRoute(\"api\")] pub fn g(req: Request) -> @Task<HandlerResponse> { return ok(); }")]));
-    val bare = errorOf(scanFiles("", "app", [#("app/blog/page.bp", "pub fn p(route: PageContext) -> @Component<Element> { return div([]); }")]));
+    val both = errorOf(scanFiles("", "app", [#("app/api/page.bp", page("api")), #("app/api/route.bp", "#[getRoute(\"api\")] pub fn g(req: Request) -> Task<HandlerResponse> { return ok(); }")]));
+    val bare = errorOf(scanFiles("", "app", [#("app/blog/page.bp", "pub fn p(route: PageContext) -> Component<Element> { return div([]); }")]));
     val clash = errorOf(scanFiles("", "app", [#("app/blog/[slug]/page.bp", page("blog/[slug]")), #("app/blog/d_slug/page.bp", page("blog/d_slug"))]));
-    try assertAs(@src(), "errors", [both, bare, clash].join("\n"));
+    try assertAs(comptime compiler.src, "errors", [both, bare, clash].join("\n"));
 }
 
 test "scan: declaredArgument reads the first matching decorator" {

@@ -2,7 +2,7 @@
 //// (front 75 steps 4 and 7). Exposure is front 76's: each endpoint is
 //// reached with a stand-in decision installed and cleared again.
 
-import {io.fs} from "std";
+import {io.fs, compiler} from "std";
 import {Response, rkDispatchHttp} from "rakun";
 import {mountActuator} from "rakun-service/actuator/actuator";
 import {installExposure, clearExposure} from "rakun-service/actuator/endpoint_host";
@@ -10,7 +10,7 @@ import {registry.Tag, registry.counter, registry.gauge, registry.timer, registry
 import {endpoints.registerMetricsEndpoints, endpoints.processSorts};
 
 // A timer sample is an `i64` (decision 264); a literal is `i32`.
-#[@external(.Erlang("""(fun(__X) -> __X end)($0)"""))]
+#[compiler.external(.Erlang("""(fun(__X) -> __X end)($0)"""))]
 declare fn wide(n: i32) -> i64;
 
 fn t(k: string, v: string) -> Tag {
@@ -36,7 +36,7 @@ test "prometheus: a label value's quote, backslash and newline are escaped" {
         == "# TYPE p2_odd_total counter\np2_odd_total{v=\"a\\\"b\\\\c\\nd\"} 1\n";
 }
 
-#[@external(.Erlang("""(fun() -> erlang:unique_integer([positive, monotonic]) end)()"""))]
+#[compiler.external(.Erlang("""(fun() -> erlang:unique_integer([positive, monotonic]) end)()"""))]
 declare fn tick() -> i32;
 
 test "prometheus: two scrapes in a row agree on counters and never go back on a gauge" {
@@ -51,7 +51,7 @@ test "prometheus: two scrapes in a row agree on counters and never go back on a 
     assert toInt(g2.trim()) >= toInt(g1.trim()), g1 + " / " + g2;
 }
 
-#[@external(.Erlang("""(fun(__S) -> try binary_to_integer(__S) catch _:_ -> -1 end end)($0)"""))]
+#[compiler.external(.Erlang("""(fun(__S) -> try binary_to_integer(__S) catch _:_ -> -1 end end)($0)"""))]
 declare fn toInt(s: string) -> i32;
 
 fn get(path: string, query: string) -> Response {
@@ -77,12 +77,12 @@ test "endpoints: prometheus, processes and vm are default-denied until exposed" 
     assert exposed("vm", "/actuator/vm", "{}").status == 200;
 }
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__J, __K) -> __Rows = json:decode(__J), __Vs = [maps:get(__K, __R) || __R <- __Rows], __Keys = [<<"pid">>, <<"registered_name">>, <<"initial_call">>, <<"current_function">>, <<"reductions">>, <<"memory">>, <<"message_queue_len">>], __All = lists:all(fun(__R) -> lists:all(fun(__X) -> maps:is_key(__X, __R) end, __Keys) end, __Rows), __All andalso __Vs =:= lists:reverse(lists:sort(__Vs)) end)($0, $1)"""),
 )]
 declare fn rowsSortedBy(json: string, key: string) -> bool;
 
-#[@external(.Erlang("""(fun(__J) -> length(json:decode(__J)) end)($0)"""))]
+#[compiler.external(.Erlang("""(fun(__J) -> length(json:decode(__J)) end)($0)"""))]
 declare fn rowCount(json: string) -> i32;
 
 test "endpoints: processes answers the top rows sorted by the asked key, with every field" {
@@ -114,7 +114,7 @@ test "endpoints: processes answers the top rows sorted by the asked key, with ev
         ), bad.body;
 }
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__S) -> __All = length(binary:matches(__S, <<"process_info(">>)), __Keyed = case re:run(__S, <<"process_info\\([A-Za-z_]+, ">>, [global]) of {match, __M} -> length(__M); nomatch -> 0 end, __All > 0 andalso __All =:= __Keyed end)($0)"""),
 )]
 declare fn everyProcessInfoIsKeyed(source: string) -> bool;
@@ -126,7 +126,7 @@ test "endpoints: the sidecar never asks a process for its whole info" {
     assert everyProcessInfoIsKeyed(src);
 }
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__J) -> __M = maps:get(<<"memory">>, json:decode(__J)), __Now = erlang:memory(), lists:sort([atom_to_binary(__K) || {__K, _} <- __Now]) =:= lists:sort(maps:keys(__M)) andalso abs(maps:get(<<"total">>, __M) - proplists:get_value(total, __Now)) < proplists:get_value(total, __Now) div 20 end)($0)"""),
 )]
 declare fn sameMemory(json: string) -> bool;

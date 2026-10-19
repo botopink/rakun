@@ -171,7 +171,7 @@ rakun-<name>/
 | Spring Boot 4 | Rakun |
 |---|---|
 | `@SpringBootApplication` | `Rakun.run(App(...))` |
-| `@Component` / `@Service` / `@Repository` | `#[component]` / `#[service]` / `#[repository]` |
+| `Component` / `@Service` / `@Repository` | `#[component]` / `#[service]` / `#[repository]` |
 | `@RestController` + `@RequestMapping` | `#[restController]` + `#[route("/path")]` |
 | `@GetMapping` / `@PostMapping` | `#[getMapping]` / `#[postMapping]` |
 | `@Autowired` (constructor) | Field of the type (injected by type) |

@@ -2,7 +2,7 @@
 //// through the app fallback (`serveApp`) with `rkDispatchHttp`; the response
 //// headers are read back from front 23's writer (`rkSsrHeader`).
 
-import {testing.asserts} from "std";
+import {testing.asserts, failure.panic, compiler} from "std";
 import {io.fs, io.env} from "std";
 import {Request, Response, rkSetProp, rkDispatchHttp} from "rakun";
 import {table.RouteEntry, table.parseTable, table.writeTable} from "routing";
@@ -14,11 +14,11 @@ import {metadata_routes.SitemapEntry, metadata_routes.renderSitemap, metadata_ro
 fn tmp() -> string {
     val dir: string = env.read("BOTOPINK_TEST_TMPDIR") ?? "";
     if (dir == "")
-        @panic("BOTOPINK_TEST_TMPDIR is not set - botopink test sets it");
+        panic("BOTOPINK_TEST_TMPDIR is not set - botopink test sets it");
     return dir + "/rakun-app-metadata";
 }
 
-#[@external(.Erlang("""(fun(__P) -> ok = filelib:ensure_dir(__P), 0 end)($0)"""))]
+#[compiler.external(.Erlang("""(fun(__P) -> ok = filelib:ensure_dir(__P), 0 end)($0)"""))]
 declare fn ensureDir(file: string) -> i32;
 
 fn put(rel: string, bytes: string) -> i32 {
@@ -49,7 +49,7 @@ fn entry(loc: string) -> SitemapEntry {
     );
 }
 
-fn twoEntries() -> @Task<SitemapEntry[]> {
+fn twoEntries() -> Task<SitemapEntry[]> {
     val es: SitemapEntry[] = [
         SitemapEntry(
             loc: "https://site.test/",
@@ -116,7 +116,7 @@ test "metadata: an unknown changeFrequency and a priority above 1 fail at regist
     );
 }
 
-fn badEntries() -> @Task<SitemapEntry[]> {
+fn badEntries() -> Task<SitemapEntry[]> {
     val es: SitemapEntry[] = [
         SitemapEntry(
             loc: "x",
@@ -139,7 +139,7 @@ test "metadata: 50 001 entries shard in two, 50 000 in one, and the bound has no
     assert src.contains("rkProp(\"rakun.metadata.sitemap") == false;
 }
 
-fn manyEntries() -> @Task<SitemapEntry[]> {
+fn manyEntries() -> Task<SitemapEntry[]> {
     val es: SitemapEntry[] = Array
         .range(0, 50001)
         .map({ i -> entry("https://s/" + i.toString()) });
@@ -182,7 +182,7 @@ fn robots() -> Robots {
     );
 }
 
-fn robotsTask() -> @Task<Robots> {
+fn robotsTask() -> Task<Robots> {
     return robots();
 }
 
@@ -197,7 +197,7 @@ test "metadata: robots.txt renders the exact text" {
     assert renderRobots(noMap) == "User-Agent: *\nDisallow: /x\n\n";
 }
 
-fn injected() -> @Task<Robots> {
+fn injected() -> Task<Robots> {
     return Robots(
         rules: [
             RobotRule(userAgent: "*\nDisallow: /", allow: [], disallow: []),
@@ -263,11 +263,11 @@ test "metadata: the manifest is the exact JSON, a quote escaped, empty icons kep
     );
 }
 
-fn badManifest() -> @Task<WebManifest> {
+fn badManifest() -> Task<WebManifest> {
     return manifest("A", "fullscreen-ish", []);
 }
 
-fn goodManifest() -> @Task<WebManifest> {
+fn goodManifest() -> Task<WebManifest> {
     return manifest("A", "standalone", []);
 }
 
@@ -355,12 +355,12 @@ fn card() -> PageRenderer {
     return { req, out -> cardBody(out, req) };
 }
 
-fn cardBody(out: ChunkWriter, req: Request) -> @Task<@Result<void, string>> {
+fn cardBody(out: ChunkWriter, req: Request) -> Task<Result<void, string>> {
     await writeTo(out, "SVG for " + req.path + " " + rkPropS("card.version"));
     return;
 }
 
-#[@external(.Erlang("rakun_runtime:prop($0)"))]
+#[compiler.external(.Erlang("rakun_runtime:prop($0)"))]
 declare fn rkPropS(key: string) -> string;
 
 test "metadata: an image at blog/[slug] overrides the root's for /blog/hello and not for /about" {
@@ -517,7 +517,7 @@ test "metadata: every registration is one GET R entry and the table round-trips"
     assert metadataRoutePatterns().join(",") == "/sitemap.xml,/robots.txt";
 }
 
-fn appRobots(req: Request) -> @Task<HandlerResponse> {
+fn appRobots(req: Request) -> Task<HandlerResponse> {
     return HandlerResponse.text("mine");
 }
 

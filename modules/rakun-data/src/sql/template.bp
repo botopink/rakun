@@ -3,10 +3,10 @@
 ////
 //// TWO SURFACES, ON PURPOSE. `query`/`update`/`single` RAISE on a driver
 //// error, the way `JdbcTemplate` throws, and front 07's error entry turns the
-//// raise into a 500 problem detail. `tryQuery`/`tryUpdate` answer `@Result`
-//// for the caller who wants to branch. Both exist because a `-> @Result` fn
-//// cannot forward a `@Result` until front 24 lands decision 119: a repository
-//// that answered `@Result` would make every caller up the stack unwrap and
+//// raise into a 500 problem detail. `tryQuery`/`tryUpdate` answer `Result`
+//// for the caller who wants to branch. Both exist because a `-> Result` fn
+//// cannot forward a `Result` until front 24 lands decision 119: a repository
+//// that answered `Result` would make every caller up the stack unwrap and
 //// re-wrap. Both are decided from ONE host answer (`SqlOutcome`), so they
 //// cannot disagree about what failed.
 ////
@@ -26,7 +26,7 @@
 ////
 //// FUTURES. `queryAsync`/`updateAsync`/`singleAsync` are the whole of the
 //// reactive story: on the BEAM a reactive query is a process doing a blocking
-//// call. `@Task` is eager on erlang, so the twin runs where it is called; two
+//// call. `Task` is eager on erlang, so the twin runs where it is called; two
 //// of them run CONCURRENTLY when started through `async.runAll`, each in its
 //// own process with its own connection. A statement run from a spawned
 //// process does not join the caller's transaction — the mark is per process.
@@ -35,48 +35,49 @@ import {rkSingleton, rkRegisterBean, provides} from "rakun";
 import {datasource.ensureDataSource, datasource.rkDataSourceArm, datasource.defaultDataSourceName};
 import {sql.params.Param, sql.params.bindNamed, sql.params.paramsLine};
 import {sql.rows.SqlOutcome, sql.rows.Row, sql.rows.Rows};
+import {compiler, failure.panic} from "std";
 
 // ── the host cells (`src/sidecars/rakun_sql.erl`) ────────────────────────────
 
-#[@external(.Erlang("rakun_sql:exec($0, $1, $2)"))]
+#[compiler.external(.Erlang("rakun_sql:exec($0, $1, $2)"))]
 pub declare fn rkSqlExec(
     name: string,
     statement: string,
     values: string[],
 ) -> SqlOutcome;
 
-#[@external(.Erlang("rakun_sql:tx_run($0, $1, $2)"))]
+#[compiler.external(.Erlang("rakun_sql:tx_run($0, $1, $2)"))]
 pub declare fn rkSqlTxRun<T>(name: string, label: string, work: fn() -> T) -> T;
 
-#[@external(.Erlang("rakun_sql:tx_open($0)"))]
+#[compiler.external(.Erlang("rakun_sql:tx_open($0)"))]
 pub declare fn rkSqlTxOpen(name: string) -> bool;
 
-#[@external(.Erlang("rakun_sql:with_rollback($0, $1)"))]
+#[compiler.external(.Erlang("rakun_sql:with_rollback($0, $1)"))]
 pub declare fn rkSqlWithRollback<T>(name: string, work: fn() -> T) -> T;
 
-#[@external(.Erlang("rakun_sql:spawn_borrower($0, $1, $2)"))]
+#[compiler.external(.Erlang("rakun_sql:spawn_borrower($0, $1, $2)"))]
 pub declare fn rkSqlSpawnBorrower(
     name: string,
     statement: string,
     values: string[],
 ) -> i32;
 
-#[@external(.Erlang("rakun_sql:drop_all($0)"))]
+#[compiler.external(.Erlang("rakun_sql:drop_all($0)"))]
 pub declare fn rkSqlDropAll(name: string) -> i32;
 
-#[@external(.Erlang("rakun_sql:log($0)"))]
+#[compiler.external(.Erlang("rakun_sql:log($0)"))]
 pub declare fn rkSqlLog(line: string) -> i32;
 
-#[@external(.Erlang("rakun_sql:log_lines()"))]
+#[compiler.external(.Erlang("rakun_sql:log_lines()"))]
 pub declare fn rkSqlLogLines() -> string[];
 
-#[@external(.Erlang("rakun_sql:log_reset()"))]
+#[compiler.external(.Erlang("rakun_sql:log_reset()"))]
 pub declare fn rkSqlLogReset() -> i32;
 
-#[@external(.Erlang("rakun_sql:log_on()"))]
+#[compiler.external(.Erlang("rakun_sql:log_on()"))]
 pub declare fn rkSqlLogOn() -> i32;
 
-#[@external(.Erlang("rakun_sql:log_off()"))]
+#[compiler.external(.Erlang("rakun_sql:log_off()"))]
 pub declare fn rkSqlLogOff() -> i32;
 
 // ── one statement ────────────────────────────────────────────────────────────
@@ -106,7 +107,7 @@ fn rowsOf(o: SqlOutcome) -> Rows {
 }
 
 fn raising(o: SqlOutcome) -> SqlOutcome {
-    if (o.ok == false) @panic(o.error);
+    if (o.ok == false) panic(o.error);
     return o;
 }
 
@@ -114,7 +115,7 @@ fn raising(o: SqlOutcome) -> SqlOutcome {
 fn singleOf(o: SqlOutcome, sql: string) -> ?Row {
     val rows = rowsOf(raising(o));
     if (rows.rowCount() > 1)
-        @panic(
+        panic(
             "rakun-data: single() expected at most one row and got "
                 + rows.rowCount().toString()
                 + " - statement: "
@@ -127,7 +128,7 @@ pub fn tryQueryOn(
     name: string,
     sql: string,
     params: Param[],
-) -> @Result<Rows, string> {
+) -> Result<Rows, string> {
     val o = runStatement(name, sql, params);
     if (o.ok == false) throw o.error;
     return rowsOf(o);
@@ -137,7 +138,7 @@ pub fn tryUpdateOn(
     name: string,
     sql: string,
     params: Param[],
-) -> @Result<i32, string> {
+) -> Result<i32, string> {
     val o = runStatement(name, sql, params);
     if (o.ok == false) throw o.error;
     return o.count;
@@ -176,7 +177,7 @@ pub type SqlTemplate(dataSourceName: string) {
         self: Self,
         sql: string,
         params: Param[],
-    ) -> @Result<Rows, string> {
+    ) -> Result<Rows, string> {
         return tryQueryOn(self.dataSourceName, sql, params);
     }
 
@@ -184,7 +185,7 @@ pub type SqlTemplate(dataSourceName: string) {
         self: Self,
         sql: string,
         params: Param[],
-    ) -> @Result<i32, string> {
+    ) -> Result<i32, string> {
         return tryUpdateOn(self.dataSourceName, sql, params);
     }
 
@@ -210,11 +211,11 @@ pub type SqlTemplate(dataSourceName: string) {
         return rkSqlTxOpen(self.dataSourceName);
     }
 
-    pub fn queryAsync(self: Self, sql: string, params: Param[]) -> @Task<Rows> {
+    pub fn queryAsync(self: Self, sql: string, params: Param[]) -> Task<Rows> {
         return self.query(sql, params);
     }
 
-    pub fn updateAsync(self: Self, sql: string, params: Param[]) -> @Task<i32> {
+    pub fn updateAsync(self: Self, sql: string, params: Param[]) -> Task<i32> {
         return self.update(sql, params);
     }
 
@@ -222,7 +223,7 @@ pub type SqlTemplate(dataSourceName: string) {
         self: Self,
         sql: string,
         params: Param[],
-    ) -> @Task<?Row> {
+    ) -> Task<?Row> {
         return self.single(sql, params);
     }
 }
@@ -260,7 +261,7 @@ pub fn defaultSqlTemplate() -> SqlTemplate {
 // transaction on the default datasource. Any other propagation raises.
 pub fn rkTxRun<T>(label: string, propagation: string, work: fn() -> T) -> T {
     val problem = propagationProblem(propagation);
-    if (problem != "") @panic(problem);
+    if (problem != "") panic(problem);
     val ds = defaultDataSourceName();
     val _e = ensureDataSource(ds);
     return rkSqlTxRun(ds, label, work);

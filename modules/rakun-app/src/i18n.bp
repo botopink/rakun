@@ -27,7 +27,7 @@
 ////
 //// The route table is unchanged: `[locale]` is an ordinary dynamic segment.
 
-import {encoding, io.fs} from "std";
+import {encoding, io.fs, compiler, failure.panic} from "std";
 import {Request, Response, rkProp, demandRequest, requestLive, rkReqSlot, rkReqPutSlot, cookies, cookieDefaults} from "rakun";
 import {WebRequest, Chain, registerFilter, withHeader} from "rakun-service";
 import {CacheScope, CachePeek, CachePolicy, cachePolicy, cacheLifeOf, cacheStore, cachePeek} from "rakun-cache/cache";
@@ -38,21 +38,21 @@ pub type LocaleQ(tag: string, q: i32)
 
 pub type Alternate(hreflang: string, href: string)
 
-#[@external(.Erlang("""(fun(__S) -> persistent_term:put(rakun_i18n_locales, __S), 0 end)($0)"""))]
+#[compiler.external(.Erlang("""(fun(__S) -> persistent_term:put(rakun_i18n_locales, __S), 0 end)($0)"""))]
 declare fn rkI18nPut(set: LocaleSet) -> i32;
 
-#[@external(.Erlang("""persistent_term:get(rakun_i18n_locales, undefined)"""))]
+#[compiler.external(.Erlang("""persistent_term:get(rakun_i18n_locales, undefined)"""))]
 declare fn rkI18nGet() -> ?LocaleSet;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun() -> _ = persistent_term:erase(rakun_i18n_locales), _ = persistent_term:erase(rakun_i18n_loader), 0 end)()"""),
 )]
 declare fn rkI18nClear() -> i32;
 
-#[@external(.Erlang("""(fun(__F) -> persistent_term:put(rakun_i18n_loader, __F), 0 end)($0)"""))]
+#[compiler.external(.Erlang("""(fun(__F) -> persistent_term:put(rakun_i18n_loader, __F), 0 end)($0)"""))]
 declare fn rkI18nPutLoader(load: fn(locale: string) -> string) -> i32;
 
-#[@external(.Erlang("""persistent_term:get(rakun_i18n_loader, undefined)"""))]
+#[compiler.external(.Erlang("""persistent_term:get(rakun_i18n_loader, undefined)"""))]
 declare fn rkI18nLoader() -> ?fn(locale: string) -> string;
 
 // ── step 1 — the locale set ─────────────────────────────────────────────────
@@ -99,13 +99,13 @@ pub fn localesProblem(set: LocaleSet) -> string {
         return "rakun i18n: the locale set is empty - declare at least the default locale";
     for (set.locales) { t ->
         if (t.contains("_"))
-            @panic(
+            panic(
                 "rakun i18n: `"
                     + t
                     + "` separates with `_` - a locale tag separates with `-` (pt-BR)",
             );
         if (wellFormedTag(t) == false)
-            @panic(
+            panic(
                 "rakun i18n: `"
                     + t
                     + "` is not a language tag (`pt`, `pt-BR`, `es-419`)",
@@ -124,9 +124,9 @@ pub fn localesProblem(set: LocaleSet) -> string {
 
 pub fn registerLocales(set: LocaleSet) -> i32 {
     val problem = localesProblem(set);
-    if (problem != "") @panic(problem);
+    if (problem != "") panic(problem);
     if (rkI18nGet() != null)
-        @panic(
+        panic(
             "rakun i18n: the locale set is already registered - one application, one set",
         );
     return rkI18nPut(
@@ -145,7 +145,7 @@ pub fn clearLocales() -> i32 {
 pub fn locales() -> LocaleSet {
     val found: ?LocaleSet = rkI18nGet();
     if (found == null)
-        @panic(
+        panic(
             "rakun i18n: no locale set is registered - call registerLocales at boot",
         );
     return found;
@@ -408,7 +408,7 @@ fn dictionaryPolicy() -> CachePolicy {
 pub fn dictionaryBlob(locale: string) -> string {
     val set = locales();
     if (isSupported(set, locale) == false)
-        @panic(
+        panic(
             "rakun i18n: `"
                 + locale
                 + "` is not a declared locale ["
@@ -420,7 +420,7 @@ pub fn dictionaryBlob(locale: string) -> string {
     if (peek.found) return peek.value;
     val loader: ?fn(locale: string) -> string = rkI18nLoader();
     if (loader == null)
-        @panic(
+        panic(
             "rakun i18n: no dictionary loader is registered - call registerDictionaryLoader",
         );
     val load: fn(locale: string) -> string = loader;

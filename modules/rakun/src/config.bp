@@ -27,7 +27,7 @@
 ////     module also references a sibling erlang module. `env` and `fs` are reached
 ////     here beside rakun's own host cells, which is exactly that case.
 
-import {io.fs, io.env, io.random, json, json.Json, compiler, compiler.DeclKind} from "std";
+import {io.fs, io.env, io.random, json, json.Json, compiler, compiler.DeclKind, failure.panic} from "std";
 import {decorators.validated, derived, report.ValidationReport, report.Violation, table.constraintTableJson} from "validation";
 import {runtime.rkSetProp, runtime.rkProp, runtime.rkScan, runtime.rkConfigCheckRegister};
 import {config_check.configProblemOf};
@@ -266,7 +266,7 @@ fn joinKey(prefix: string, name: string) -> string {
 // scalar has no key and binds nothing. A malformed document is refused with
 // `json.decode`'s own `Error`, prefixed by the file it came from.
 
-pub fn parseJson(text: string, origin: string) -> @Result<Array<Doc>, string> {
+pub fn parseJson(text: string, origin: string) -> Result<Array<Doc>, string> {
     val root = json.decode(text);
     if (root.isError()) {
         val assert Error(e) = root;
@@ -329,7 +329,7 @@ fn jsonLeafText(v: Json) -> string {
 
 // A number's shortest text: an integral value (below 2^53) with no fraction,
 // anything else OTP's shortest round-tripping float.
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__F) -> case (__F == trunc(__F)) andalso (abs(__F) < 9007199254740992.0) of true -> integer_to_binary(trunc(__F)); false -> float_to_binary(__F, [short]) end end)($0)"""),
 )]
 declare fn numeralText(x: f64) -> string;
@@ -341,7 +341,7 @@ declare fn numeralText(x: f64) -> string;
 // never silently mis-parsed. A full YAML parser is not this front's work; saying
 // plainly what is not covered is.
 
-pub fn parseYaml(text: string, origin: string) -> @Result<Array<Doc>, string> {
+pub fn parseYaml(text: string, origin: string) -> Result<Array<Doc>, string> {
     var docs: Array<Doc> = [];
     var entries: Array<Entry> = [];
     var stackIndent: string[] = [];
@@ -557,7 +557,7 @@ fn yamlScalar(v: string) -> string {
 // One file per key, the body is the value — the shape a Kubernetes secret mount
 // has. The trailing newline a text file carries is stripped; nothing else is.
 
-pub fn readTree(dir: string) -> @Result<Array<Entry>, string> {
+pub fn readTree(dir: string) -> Result<Array<Entry>, string> {
     var out: Array<Entry> = [];
     val names = try fs.list(dir) catch [];
     for (names) { name ->
@@ -577,7 +577,7 @@ pub fn readTree(dir: string) -> @Result<Array<Entry>, string> {
 
 // ── one document, by extension ──────────────────────────────────────────────
 
-pub fn readDocument(path: string) -> @Result<Array<Doc>, string> {
+pub fn readDocument(path: string) -> Result<Array<Doc>, string> {
     val text = try fs.readText(path) catch "";
     if (path.endsWith(".properties")) return parseProperties(text, path);
     // `return try f()` double-wraps on the erlang row (the value comes back as
@@ -657,7 +657,7 @@ pub fn cliEntries(args: string[]) -> Array<Entry> {
 
 // -- row 2: RAKUN_APPLICATION_JSON -------------------------------------------
 
-pub fn applicationJsonEntries(raw: string) -> @Result<Array<Entry>, string> {
+pub fn applicationJsonEntries(raw: string) -> Result<Array<Entry>, string> {
     if (raw == "") return [] else {
         val docs = try parseJson(raw, "RAKUN_APPLICATION_JSON");
         var out: Array<Entry> = [];
@@ -785,9 +785,9 @@ pub fn extensions() -> string {
 
 // -- carriers ----------------------------------------------------------------
 // Everything below the public entry point answers a VALUE carrying its own
-// error rather than an `@Result`: `try` unwraps only in a `val` binding on the
+// error rather than an `Result`: `try` unwraps only in a `val` binding on the
 // erlang row, and a loop body is a lambda, so a fallible call inside one has no
-// way to propagate. The public `rkConfigLoad` is the single `-> @Result` seam
+// way to propagate. The public `rkConfigLoad` is the single `-> Result` seam
 // and throws the first error it is handed.
 
 pub type Loaded(
@@ -800,7 +800,7 @@ pub type Resolved(
     error: string,
 )
 
-fn loadedOf(r: @Result<Array<Doc>, string>) -> Loaded {
+fn loadedOf(r: Result<Array<Doc>, string>) -> Loaded {
     val empty: Array<Doc> = [];
     if (r.isError()) {
         val assert Error(e) = r;
@@ -1044,7 +1044,7 @@ fn documentsForProfiles(
 }
 
 // ── the loader ────────────────────────────────────────────────────────────
-// The ONE public entry point, and the only `-> @Result` seam in the chain: an
+// The ONE public entry point, and the only `-> Result` seam in the chain: an
 // error anywhere below is carried up as a value and thrown here, so a caller
 // writes `try rkConfigLoad();` in `main` and a bad location, a cyclic import, a
 // refused YAML construct or a self-referential profile group all refuse the boot
@@ -1055,7 +1055,7 @@ fn documentsForProfiles(
 // profile set. Pass 1 merges the sources that carry no condition and resolves
 // the set; pass 2 merges everything with the set known.
 
-pub fn rkConfigLoadFrom(args: string[]) -> @Result<i32, string> {
+pub fn rkConfigLoadFrom(args: string[]) -> Result<i32, string> {
     val cli = cliEntries(args);
     val rawJson: string = env.read("RAKUN_APPLICATION_JSON") ?? "";
     val appJson = try applicationJsonEntries(rawJson);
@@ -1106,7 +1106,7 @@ pub fn rkConfigLoadFrom(args: string[]) -> @Result<i32, string> {
     return written;
 }
 
-pub fn rkConfigLoad() -> @Result<i32, string> {
+pub fn rkConfigLoad() -> Result<i32, string> {
     val n = try rkConfigLoadFrom(env.args());
     return n;
 }
@@ -1405,7 +1405,7 @@ fn randomUuid() -> string {
 //
 // An unparsable value is a startup failure naming the key, the value and the
 // accepted forms — never a zero. `assert` is the halt: a typed reader is called
-// from an emitted factory, which has no `@Result` in its return, and a wrong
+// from an emitted factory, which has no `Result` in its return, and a wrong
 // configuration value must stop the program rather than be carried into a
 // request as a silent default.
 
@@ -1423,7 +1423,7 @@ pub type DataSize(
     bytes: i64,
 )
 
-#[@external(.Erlang("""(fun(__X) -> __X end)($0)"""))]
+#[compiler.external(.Erlang("""(fun(__X) -> __X end)($0)"""))]
 declare fn wide(n: i32) -> i64;
 
 fn durationUnitMillis(unit: string) -> i32 {
@@ -1507,7 +1507,7 @@ fn isoDurationMillis(raw: string) -> i64 {
 
 // The refusal MESSAGE is a function of its own, and the parser asserts on it.
 // `assert` is the halt — a typed reader is called from an emitted factory, which
-// has no `@Result` in its return, and a wrong configuration value has to stop the
+// has no `Result` in its return, and a wrong configuration value has to stop the
 // program rather than be carried into a request as a silent zero. Splitting the
 // message out is what lets a test read it without the halt taking the test with
 // it.
@@ -1608,7 +1608,7 @@ fn sizeSuffixBytes(suffix: string) -> i64 {
 fn sizeCount(digits: string, raw: string, key: string) -> i64 {
     return case digits.parseInt() {
         Ok(n) -> n;
-        Error(reason) -> @panic(
+        Error(reason) -> panic(
             "rakun config: `"
                 + key
                 + "` is `"

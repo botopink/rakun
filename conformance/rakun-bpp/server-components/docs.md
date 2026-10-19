@@ -5,7 +5,7 @@
 Promoted from a declaration file (front 28; there is none since decision
 575 (1)). The declaration file listed three
 blockers; all three are answered rather than carried. The async data layer is
-**not** gated any more — `fn … -> @Task<T>` with a statement-level
+**not** gated any more — `fn … -> Task<T>` with a statement-level
 `await` compiles and RUNS on both rows, `test` blocks included — `request()`
 keeps a host half and now ships it, and the `Http` phantom `@Context` base and
 the `Request` behavior are **gone** (see `AGENTS.md` § *The `Http` base, and why
@@ -60,7 +60,7 @@ there is nothing to look up by name in a single string.
 ```text
 pub fn enterRequest(req: RequestData) -> i32
 pub fn leaveRequest() -> i32
-pub fn request() -> @Component<RequestData>
+pub fn request() -> Component<RequestData>
 pub fn cookies() -> Array<#(string, string)>
 pub fn headers() -> Array<#(string, string)>
 ```
@@ -98,45 +98,45 @@ entered once and is constant for the whole render.
 62's and are called from there directly. `cookies()` and `headers()` are the
 only two shortcuts re-exported here.
 
-`request()` is a hook, `pub fn request() -> @Component<RequestData>`, activated `val r = use request()` inside a server component whose
-return is `@Component<Element>` (decisions 104/128 of botopink
-1.0.10-beta). Called without `use` it answers the same `@Component` — a Promise on
-commonJS — so a `@Task` body or a test `await`s it.
+`request()` is a hook, `pub fn request() -> Component<RequestData>`, activated `val r = use request()` inside a server component whose
+return is `Component<Element>` (decisions 104/128 of botopink
+1.0.10-beta). Called without `use` it answers the same `Component` — a Promise on
+commonJS — so a `Task` body or a test `await`s it.
 
 ## The server-component convention
 
 A server component that only loads data is a `pub fn` taking its route params
-and returning `@Task<Element>`. There is no decorator for it and there will not
+and returning `Task<Element>`. There is no decorator for it and there will not
 be one — the marker is the return type itself (decision 118 of botopink
 1.0.10-beta: the return is the annotation), and the language enforces it:
 
 | Written | Compiler says |
 |---|---|
-| `pub fn f() -> i32 { val p = await loadPost("x"); … }` | `effect-await-without-task` — `await` needs a `@Task` return or above |
-| `fn Page() -> @Task<Element> { val c = use state(0); … }` | `use-without-context-effect` — `use` needs a `@Component` return |
-| `fn Page() -> @Component<Element> { val p = try await load(); … }` | `effect-try-without-fallible-channel` — `Element` is not a `@Result` |
+| `pub fn f() -> i32 { val p = await loadPost("x"); … }` | `effect-await-without-task` — `await` needs a `Task` return or above |
+| `fn Page() -> Task<Element> { val c = use state(0); … }` | `use-without-context-effect` — `use` needs a `Component` return |
+| `fn Page() -> Component<Element> { val p = try await load(); … }` | `effect-try-without-fallible-channel` — `Element` is not a `Result` |
 | any of the six removed effect annotations on a fn | `effect-annotation-removed` (decision 127) |
 
 Row two is why the chain matters: a server component that activates a hook
-is `fn … -> @Component<Element>` — `@Component` extends `@Task`, so
+is `fn … -> Component<Element>` — `Component` extends `Task`, so
 the one return grants `use` and `await` (decision 128 of botopink 1.0.10-beta;
-a `@Task` body activates nothing). `renderComponent` renders its thunk. Both are
+a `Task` body activates nothing). `renderComponent` renders its thunk. Both are
 asserted in `test/server_test.bp`.
 
 Row three is the rule a page has to design for: **a component does not
-propagate errors** (decision 121). Only `@Result` fails, and a component returns
+propagate errors** (decision 121). Only `Result` fails, and a component returns
 `Element`, so a failed load is handled in the component's own body — `try … catch`
-with a fallback, a `case` over the `@Result`, or an error screen:
+with a fallback, a `case` over the `Result`, or an error screen:
 
 {server_component_catch/src/main.bp}
 
 ```text
-pub fn renderServerComponent(component: fn() -> @Task<Element>) -> @Task<string>
-pub fn renderComponent(component: fn() -> @Component<Element>) -> @Task<string>
+pub fn renderServerComponent(component: fn() -> Task<Element>) -> Task<string>
+pub fn renderComponent(component: fn() -> Component<Element>) -> Task<string>
 ```
 
 Awaits exactly once and renders synchronously afterwards. The parameter is an
-**unstarted thunk**, not an already-running `@Task<Element>`, so a page that
+**unstarted thunk**, not an already-running `Task<Element>`, so a page that
 grows a second loader moves to front 02 without changing what it hands anybody.
 
 > **Call it with a lambda, never with a bare function name.**
@@ -147,11 +147,11 @@ grows a second loader moves to front 02 without changing what it hands anybody.
 > around. It is the same rule rakun's front 23 records for the fields of its
 > `ElementView`.
 
-## The loader convention, and why `@Task` being eager changes it
+## The loader convention, and why `Task` being eager changes it
 
-A loader is an ordinary `fn name(args) -> @Task<T>` — or `@Task<@Result<T, E>>`
+A loader is an ordinary `fn name(args) -> Task<T>` — or `Task<Result<T, E>>`
 when it can fail, in which case its body may `throw` / `try` and its caller
-writes `try await` (to propagate, from a `@Result`-returning caller) or
+writes `try await` (to propagate, from a `Result`-returning caller) or
 `try await … catch …` (from a component). `server.bp` ships **no** loader
 machinery: `libs/std/src/http.bp` already has `fetch(url)`, a database loader is
 front 08's, and parallel awaiting (`all`, `race`, `allSettled`) is **front 02's**.
@@ -164,9 +164,9 @@ synchronously afterwards — not N awaits inside a `map`.
 
 {server_component_sequential/src/main.bp}
 
-**`@Task` is EAGER on the erlang row** (decision 120 of botopink 1.0.10-beta;
-`libs/std/src/http.bp:16-18`): a `@Task<T>` resolves to `T` and the caller's
-`await` is identity on that backend. Two `@Task` loaders do
+**`Task` is EAGER on the erlang row** (decision 120 of botopink 1.0.10-beta;
+`libs/std/src/http.bp:16-18`): a `Task<T>` resolves to `T` and the caller's
+`await` is identity on that backend. Two `Task` loaders do
 **not** load in parallel because they are Tasks — they run in the order the
 body reaches them and the page costs the **sum** of its loaders. Porting the
 Next.js pattern shape-for-shape and stopping there produces a page slower than

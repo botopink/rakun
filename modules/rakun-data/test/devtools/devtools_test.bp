@@ -3,27 +3,27 @@
 //// file a test writes is under BOTOPINK_TEST_TMPDIR; every key it sets is put
 //// back.
 
-import {testing.asserts} from "std";
+import {testing.asserts, compiler, failure.panic} from "std";
 import {async} from "std";
 import {io.fs, io.env} from "std";
 import {Request, Response, rkSetProp, rkProp, rkRouteCount, rkBuildCount, rkSingleton, rkRegisterRoute, rkServe, rkDispatchHttp} from "rakun";
 import {devtools.devtools.DevtoolsSettings, devtools.devtools.settings, devtools.devtools.defaultSettings, devtools.devtools.devtoolsWarnings, devtools.devtools.startWatcher, devtools.devtools.rkDevWatchStop, devtools.devtools.rkDevWatcherPid, devtools.devtools.rkDevReloads, devtools.devtools.rkDevDropModule, devtools.devtools.rkDevOwner, devtools.devtools.rkDevLoadDir, devtools.devtools.reloadProject, devtools.devtools.installDevDefaults, devtools.devtools.remoteLoad, devtools.devtools.traceCalls, devtools.devtools.rkDevTraceCount, devtools.devtools.constantTimeEquals, devtools.devtools.devtoolsKeys};
 
-#[@external(.Erlang("""(fun(__P) -> ok = filelib:ensure_dir(__P), 0 end)($0)"""))]
+#[compiler.external(.Erlang("""(fun(__P) -> ok = filelib:ensure_dir(__P), 0 end)($0)"""))]
 declare fn ensureDir(file: string) -> i32;
 
-#[@external(.Erlang("""(fun(__D) -> file:del_dir_r(__D), 0 end)($0)"""))]
+#[compiler.external(.Erlang("""(fun(__D) -> file:del_dir_r(__D), 0 end)($0)"""))]
 declare fn removeTree(dir: string) -> i32;
 
-#[@external(.Erlang("""(fun(__Ms) -> timer:sleep(__Ms), 0 end)($0)"""))]
+#[compiler.external(.Erlang("""(fun(__Ms) -> timer:sleep(__Ms), 0 end)($0)"""))]
 declare fn sleep(ms: i32) -> i32;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__K, __V) -> case __V of <<>> -> os:unsetenv(binary_to_list(__K)); _ -> os:putenv(binary_to_list(__K), binary_to_list(__V)) end, 0 end)($0, $1)"""),
 )]
 declare fn setEnv(key: string, value: string) -> i32;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun() -> case whereis(rakun_devtools_watcher) of undefined -> 0; __P -> exit(__P, kill), timer:sleep(100), 1 end end)()"""),
 )]
 declare fn killWatcher() -> i32;
@@ -31,7 +31,7 @@ declare fn killWatcher() -> i32;
 fn tmp(name: string) -> string {
     val dir: string = env.read("BOTOPINK_TEST_TMPDIR") ?? "";
     if (dir == "")
-        @panic("BOTOPINK_TEST_TMPDIR is not set - botopink test sets it");
+        panic("BOTOPINK_TEST_TMPDIR is not set - botopink test sets it");
     return dir + "/rakun-devtools/" + name;
 }
 
@@ -94,15 +94,15 @@ test "settings: a malformed global file is a named warning and the defaults stan
 
 // ── step 2: the watcher ─────────────────────────────────────────────────────
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__T) -> persistent_term:put(rakun_devtools_test_seen, persistent_term:get(rakun_devtools_test_seen, []) ++ [__T]), 0 end)($0)"""),
 )]
 declare fn seen(changed: string) -> i32;
 
-#[@external(.Erlang("""persistent_term:get(rakun_devtools_test_seen, [])"""))]
+#[compiler.external(.Erlang("""persistent_term:get(rakun_devtools_test_seen, [])"""))]
 declare fn seenList() -> string[];
 
-#[@external(.Erlang("""(fun() -> persistent_term:put(rakun_devtools_test_seen, []), 0 end)()"""))]
+#[compiler.external(.Erlang("""(fun() -> persistent_term:put(rakun_devtools_test_seen, []), 0 end)()"""))]
 declare fn seenReset() -> i32;
 
 fn watch(dir: string) -> bool {
@@ -203,25 +203,25 @@ fn project(dir: string, version: string) -> i32 {
     );
     return write(
         dir + "/src/main.bp",
-        "#[@external(.Erlang(\"\"\"(fun() -> timer:sleep(300), 0 end)()\"\"\"))]\ndeclare fn pause() -> i32;\n\n#[@external(.Erlang(\"\"\"(fun() -> receive stop -> 0 end end)()\"\"\"))]\ndeclare fn park() -> i32;\n\npub fn greet() -> string {\n    return \""
+        "import {compiler, io.terminal.print} from \"std\";\n#[compiler.external(.Erlang(\"\"\"(fun() -> timer:sleep(300), 0 end)()\"\"\"))]\ndeclare fn pause() -> i32;\n\n#[compiler.external(.Erlang(\"\"\"(fun() -> receive stop -> 0 end end)()\"\"\"))]\ndeclare fn park() -> i32;\n\npub fn greet() -> string {\n    return \""
             + version
             + "\";\n}\n\npub fn slow() -> string {\n    val _p = pause();\n    return \""
             + version
-            + "-slow\";\n}\n\npub fn hold() -> i32 {\n    return park();\n}\n\npub fn main() {\n    @print(greet());\n}\n",
+            + "-slow\";\n}\n\npub fn hold() -> i32 {\n    return park();\n}\n\npub fn main() {\n    print(greet());\n}\n",
     );
 }
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__F) -> try iolist_to_binary(apply('hot@main', binary_to_atom(__F), [])) catch _:_ -> <<"undef">> end end)($0)"""),
 )]
 declare fn callHot(name: string) -> string;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun() -> spawn(fun() -> 'hot@main':hold() end), timer:sleep(50), 0 end)()"""),
 )]
 declare fn parkInHot() -> i32;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun() -> [__P ! stop || __P <- erlang:processes(), erlang:check_process_code(__P, 'hot@main')], 0 end)()"""),
 )]
 declare fn releaseParked() -> i32;
@@ -336,12 +336,12 @@ fn service(dir: string, version: string) -> i32 {
 
 // Resolves the singleton; its build counts itself (the emitted constructor's
 // `rkEnter`/`rkDone` would bump `rkBuildCount` the same way).
-#[@external(
+#[compiler.external(
     .Erlang("""(fun() -> rakun_runtime:singleton(<<"DevSvc">>, fun() -> persistent_term:put(rakun_devsvc_builds, persistent_term:get(rakun_devsvc_builds, 0) + 1), dev_svc:make() end), 0 end)()"""),
 )]
 declare fn resolveDevSvc() -> i32;
 
-#[@external(.Erlang("""persistent_term:get(rakun_devsvc_builds, 0)"""))]
+#[compiler.external(.Erlang("""persistent_term:get(rakun_devsvc_builds, 0)"""))]
 declare fn devSvcBuilds() -> i32;
 
 test "reload: an unchanged controller reloaded twice keeps the route count; a moved route leaves only the new one" {
@@ -434,7 +434,7 @@ test "remote: refused without a dev profile, without a secret, without TLS, with
     }
 }
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__N) -> [lists:reverse([__I]) || __I <- lists:seq(1, __N)], timer:sleep(200), 0 end)($0)"""),
 )]
 declare fn callReverse(times: i32) -> i32;
@@ -451,17 +451,17 @@ test "trace: a trace stops by itself at its limit" {
 
 // ── the listener across a reload, and the trace signature ───────────────────
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__Port) -> {ok, __S} = gen_tcp:connect("127.0.0.1", __Port, [binary, {active, false}]), put(rakun_devtools_ka, __S), 0 end)($0)"""),
 )]
 declare fn openKeepAlive(port: i32) -> i32;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__Path) -> __S = get(rakun_devtools_ka), ok = gen_tcp:send(__S, [<<"GET ">>, __Path, <<" HTTP/1.1", 13, 10, "Host: x", 13, 10, 13, 10>>]), case gen_tcp:recv(__S, 0, 3000) of {ok, __B} -> [_, __St | _] = binary:split(__B, <<" ">>, [global]), __St; _ -> <<"closed">> end end)($0)"""),
 )]
 declare fn keepAliveGet(path: string) -> string;
 
-#[@external(.Erlang("""(fun() -> gen_tcp:close(get(rakun_devtools_ka)), 0 end)()"""))]
+#[compiler.external(.Erlang("""(fun() -> gen_tcp:close(get(rakun_devtools_ka)), 0 end)()"""))]
 declare fn closeKeepAlive() -> i32;
 
 fn pong(req: Request) -> Response {
@@ -498,7 +498,7 @@ test "trace: a call without the limit does not compile" {
     );
     val _s = write(
         dir + "/src/main.bp",
-        "import {traceCalls} from \"rakun-data\";\n\npub fn main() {\n    @print(traceCalls(\"lists\", \"reverse\").toString());\n}\n",
+        "import {traceCalls} from \"rakun-data\";\nimport {io.terminal.print} from \"std\";\n\npub fn main() {\n    print(traceCalls(\"lists\", \"reverse\").toString());\n}\n",
     );
     val out = reloadProject(dir);
     val _z = clean();

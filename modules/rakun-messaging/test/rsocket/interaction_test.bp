@@ -1,7 +1,7 @@
 //// rakun-rsocket — the responder and the requester over TCP (front 92
 //// steps 2-6).
 
-import {testing.asserts} from "std";
+import {testing.asserts, compiler, failure.panic} from "std";
 import {async} from "std";
 import {rkSetProp} from "rakun";
 import {messaging_host.rkMsgListeners, messaging_host.rkMsgWaitUntil, messaging_host.rkMsgArmConnect};
@@ -9,14 +9,14 @@ import {container.published};
 import {rsocket.rsocket_host.rsStreamProcs, rsocket.rsocket_host.rsWritten, rsocket.rsocket_host.rsConnect, rsocket.rsocket_host.rsClose};
 import {rsocket.rsocket.rsocketRoute, rsocket.rsocket.clearRoutes, rsocket.rsocket.startRSocketServer, rsocket.rsocket.stopRSocketServer, rsocket.rsocket.rsocketRequester, rsocket.rsocket.closeRequester, rsocket.rsocket.requestResponse, rsocket.rsocket.tryRequestResponse, rsocket.rsocket.fireAndForget, rsocket.rsocket.requestStream, rsocket.rsocket.request, rsocket.rsocket.next, rsocket.rsocket.cancelStream, rsocket.rsocket.rsocketConfigProblem, rsocket.rsocket.Requester};
 
-#[@external(.Erlang("""(fun(__Ms) -> timer:sleep(__Ms), 0 end)($0)"""))]
+#[compiler.external(.Erlang("""(fun(__Ms) -> timer:sleep(__Ms), 0 end)($0)"""))]
 declare fn pause(ms: i32) -> i32;
 
-#[@external(.Erlang("""erlang:monotonic_time(millisecond)"""))]
+#[compiler.external(.Erlang("""erlang:monotonic_time(millisecond)"""))]
 declare fn nowMs() -> i64;
 // A raw exchange: SETUP (with RESUME when `resume`), then an optional
 // request frame; answers the data of the first ERROR frame received.
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__P, __Resume, __Req) -> {ok, __S} = gen_tcp:connect("localhost", __P, [binary, {active, false}]), __Base = #{type => 1, stream => 0, interval => 1000, lifetime => 5000, data => <<>>}, ok = gen_tcp:send(__S, rakun_rsocket:encode(case __Resume of true -> __Base#{resume_token => <<"t">>}; false -> __Base end)), case __Req of true -> ok = gen_tcp:send(__S, rakun_rsocket:encode(#{type => 4, stream => 1, data => <<"x">>})); false -> ok end, __R = case gen_tcp:recv(__S, 0, 2000) of {ok, __B} -> case rakun_rsocket:decode(__B, 100000) of {ok, #{type := 11, data := __D}, _} -> __D; _ -> <<"not an error">> end; _ -> <<"no answer">> end, gen_tcp:close(__S), __R end)($0, $1, $2)"""),
 )]
 declare fn rawError(port: i32, resume: bool, request: bool) -> string;
@@ -29,12 +29,12 @@ fn setUp() -> i32 {
         d;
     });
     val _e = rsocketRoute("boom", "request-response", { d ->
-        if (true) @panic("handler failed");
+        if (true) panic("handler failed");
         d;
     });
     val _s = rsocketRoute("count", "stream", { d -> "1\n2\n3" });
     val _f = rsocketRoute("audit", "fnf", { d ->
-        if (d == "poison") @panic("unreadable");
+        if (d == "poison") panic("unreadable");
         ""
     });
     val _p = rkSetProp("rakun.rsocket.server.port", "0");
@@ -162,7 +162,7 @@ test "close: closing the connection terminates every stream process it owned" {
     assert live == 1 && gone == 0, live.toString() + "/" + gone.toString();
 }
 
-fn askSlow(r: Requester, d: string) -> @Task<string> {
+fn askSlow(r: Requester, d: string) -> Task<string> {
     val v = await requestResponse(r, "slow", d);
     return v;
 }

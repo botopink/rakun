@@ -19,24 +19,24 @@ import {streaming.Response, streaming.PageInput, streaming.App, streaming.app, s
 import {plugin.RenderPlugin, plugin.Json};
 import {routes.PageContext, routes.LayoutProps, routes.UiSegment, routes.segment, routes.withLayout, routes.withTemplate, routes.withError, routes.withLoading, routes.withNotFound};
 import {metadata.Metadata, metadata.Viewport, metadata.emptyMetadata};
-import {async, async.Gate} from "std";
+import {async, async.Gate, compiler} from "std";
 
 // ── the recorder ────────────────────────────────────────────────────────────
 
-#[@external(
-    .Node("""(globalThis.__jhRec = [], 0)"""),
+#[compiler.external(
+    .JavaScript("""(globalThis.__jhRec = [], 0)"""),
     .Erlang("""(fun() -> put(jh_rec, []), 0 end)()"""),
 )]
 declare fn recReset() -> i32;
 
-#[@external(
-    .Node("""((globalThis.__jhRec = (globalThis.__jhRec || []).concat([$0])), 0)"""),
+#[compiler.external(
+    .JavaScript("""((globalThis.__jhRec = (globalThis.__jhRec || []).concat([$0])), 0)"""),
     .Erlang("""(fun(__E) -> put(jh_rec, (case get(jh_rec) of undefined -> []; __L -> __L end) ++ [__E]), 0 end)($0)"""),
 )]
 declare fn recPush(event: string) -> i32;
 
-#[@external(
-    .Node("""(globalThis.__jhRec || [])"""),
+#[compiler.external(
+    .JavaScript("""(globalThis.__jhRec || [])"""),
     .Erlang("""(fun() -> case get(jh_rec) of undefined -> []; __L -> __L end end)()"""),
 )]
 declare fn recEvents() -> Array<string>;
@@ -49,18 +49,18 @@ fn recHeader(name: string, value: string) -> void {
     recPush("header " + name + " " + value);
 }
 
-fn recWrite(chunk: string) -> @Task<void> {
+fn recWrite(chunk: string) -> Task<void> {
     recPush("write " + chunk);
 }
 
 // A recorded write that also opens `afterAside` once the aside's fill (`h2`)
 // has been written — the signal `slowPosts` answers on.
-fn recWriteOpening(chunk: string, afterAside: Gate) -> @Task<void> {
+fn recWriteOpening(chunk: string, afterAside: Gate) -> Task<void> {
     recPush("write " + chunk);
     if (chunk.contains("data-jh-f=\"h2\"")) async.openGate(afterAside);
 }
 
-fn recClose() -> @Task<void> {
+fn recClose() -> Task<void> {
     recPush("close");
 }
 
@@ -125,7 +125,7 @@ val table = "L|/\nP|/blog/[slug]\nP|/login\nP|/blog\nP|/dashboard";
 fn inputOf(
     pattern: string,
     chain: Array<UiSegment>,
-    page: fn() -> @Component<Element>,
+    page: fn() -> Component<Element>,
 ) -> PageInput {
     return PageInput(
         build: "b1",
@@ -142,7 +142,7 @@ fn inputOf(
     );
 }
 
-fn outcomeText(r: @Result<void, string>) -> string {
+fn outcomeText(r: Result<void, string>) -> string {
     return case r {
         Ok(v) -> "ok";
         Error(message) -> message;
@@ -151,12 +151,12 @@ fn outcomeText(r: @Result<void, string>) -> string {
 
 // ── pages and layouts ───────────────────────────────────────────────────────
 
-fn RootLayout(props: LayoutProps) -> @Component<Element> {
+fn RootLayout(props: LayoutProps) -> Component<Element> {
     val depth = use selectedLayoutSegment();
     return main([props.children], attrs: [#("class", "root")]);
 }
 
-fn BlogPage() -> @Component<Element> {
+fn BlogPage() -> Component<Element> {
     val slug = use pathname();
     return p([text("post " + slug, attrs: [])], attrs: []);
 }
@@ -171,7 +171,7 @@ val gateBudget = 10000;
 // construction. A 30 ms `delay` said the same only while the machine was
 // idle: on erlang each boundary is its own process, and under load the aside's
 // process could be scheduled after the timer fired.
-fn slowPosts(afterAside: Gate) -> @Component<Element> {
+fn slowPosts(afterAside: Gate) -> Component<Element> {
     val opened = await async.awaitGate(afterAside, gateBudget);
     val rows = if (opened)
         ["a", "b"]
@@ -183,11 +183,11 @@ fn slowPosts(afterAside: Gate) -> @Component<Element> {
     );
 }
 
-fn fastAside() -> @Component<Element> {
+fn fastAside() -> Component<Element> {
     return span([text("aside", attrs: [])], attrs: []);
 }
 
-fn StreamedPage(afterAside: Gate) -> @Component<Element> {
+fn StreamedPage(afterAside: Gate) -> Component<Element> {
     return section(
         [
             h2([text("Blog", attrs: [])], attrs: []),
@@ -210,37 +210,37 @@ fn StreamedPage(afterAside: Gate) -> @Component<Element> {
     );
 }
 
-fn MissingPage() -> @Component<Element> {
+fn MissingPage() -> Component<Element> {
     notFound();
     return div([], attrs: []);
 }
 
-fn LoginRedirectPage() -> @Component<Element> {
+fn LoginRedirectPage() -> Component<Element> {
     redirect("/login");
     return div([], attrs: []);
 }
 
-fn NowhereRedirectPage() -> @Component<Element> {
+fn NowhereRedirectPage() -> Component<Element> {
     redirect("/nowhere");
     return div([], attrs: []);
 }
 
-fn EvilRedirectPage() -> @Component<Element> {
+fn EvilRedirectPage() -> Component<Element> {
     redirect("https://evil.example");
     return div([], attrs: []);
 }
 
-fn AccountsRedirectPage() -> @Component<Element> {
+fn AccountsRedirectPage() -> Component<Element> {
     redirect("https://accounts.example/");
     return div([], attrs: []);
 }
 
-fn pageRan() -> @Component<Element> {
+fn pageRan() -> Component<Element> {
     recPush("page ran");
     return div([], attrs: []);
 }
 
-fn SessionLayout(props: LayoutProps) -> @Component<Element> {
+fn SessionLayout(props: LayoutProps) -> Component<Element> {
     val jar = cookies();
     if (jar.length == 0) redirect("/login");
     return div([props.children], attrs: [#("class", "dash")]);
@@ -261,11 +261,11 @@ fn LoadingView() -> Element {
     return div([text("loading", attrs: [])], attrs: [#("class", "sk")]);
 }
 
-fn TemplateView(props: LayoutProps) -> @Component<Element> {
+fn TemplateView(props: LayoutProps) -> Component<Element> {
     return div([props.children], attrs: [#("class", "tpl")]);
 }
 
-fn LayoutView(props: LayoutProps) -> @Component<Element> {
+fn LayoutView(props: LayoutProps) -> Component<Element> {
     return section([props.children], attrs: [#("class", "layout")]);
 }
 
@@ -332,14 +332,14 @@ test "stream: fills come in completion order, each carrying its own markup" {
 // flight at the same time: a render that resolved them one after the other
 // leaves the first waiting on a gate the second has not opened, and it answers
 // "gate never opened".
-fn loader(mine: Gate, theirs: Gate, value: string) -> @Component<Element> {
+fn loader(mine: Gate, theirs: Gate, value: string) -> Component<Element> {
     async.openGate(mine);
     val opened = await async.awaitGate(theirs, gateBudget);
     val shown = if (opened) value else "gate never opened: " + value;
     return span([text(shown, attrs: [])], attrs: []);
 }
 
-fn TwoLoaders(a: Gate, b: Gate) -> @Component<Element> {
+fn TwoLoaders(a: Gate, b: Gate) -> Component<Element> {
     return div(
         [
             Suspense(
@@ -417,7 +417,7 @@ test "compose: a segment with no template contributes no wrapper" {
     );
 }
 
-fn depthLayout(props: LayoutProps) -> @Component<Element> {
+fn depthLayout(props: LayoutProps) -> Component<Element> {
     val here = use selectedLayoutSegment();
     return div([text("[" + here + "]", attrs: []), props.children], attrs: []);
 }
@@ -461,17 +461,17 @@ test "compose: two renders of one route give the template two keys" {
 
 // ── step 8: the request the render entered ──────────────────────────────────
 
-fn RequestEcho() -> @Component<Element> {
+fn RequestEcho() -> Component<Element> {
     val r = use request();
     return p([text(r.cookie("session"), attrs: [])], attrs: []);
 }
 
-fn readAfter() -> @Component<Element> {
+fn readAfter() -> Component<Element> {
     val r = use request();
     return p([], attrs: []);
 }
 
-fn readRequestOutside() -> @Task<i32> {
+fn readRequestOutside() -> Task<i32> {
     val r = await request();
     return r.cookies.length;
 }
@@ -611,22 +611,22 @@ test "signal: redirectAllowed checks relative targets against the table only" {
 
 // ── late signals: after the first chunk ─────────────────────────────────────
 
-fn lateMissing() -> @Component<Element> {
+fn lateMissing() -> Component<Element> {
     notFound();
     return div([], attrs: []);
 }
 
-fn lateLogin() -> @Component<Element> {
+fn lateLogin() -> Component<Element> {
     redirect("/blog");
     return div([], attrs: []);
 }
 
-fn lateNowhere() -> @Component<Element> {
+fn lateNowhere() -> Component<Element> {
     redirect("/nowhere");
     return div([], attrs: []);
 }
 
-fn LateNotFoundPage() -> @Component<Element> {
+fn LateNotFoundPage() -> Component<Element> {
     return div(
         [
             Suspense(
@@ -641,7 +641,7 @@ fn LateNotFoundPage() -> @Component<Element> {
     );
 }
 
-fn LateRedirectPage() -> @Component<Element> {
+fn LateRedirectPage() -> Component<Element> {
     return div(
         [
             Suspense(
@@ -656,7 +656,7 @@ fn LateRedirectPage() -> @Component<Element> {
     );
 }
 
-fn LateNowherePage() -> @Component<Element> {
+fn LateNowherePage() -> Component<Element> {
     return div(
         [
             Suspense(
@@ -713,7 +713,7 @@ test "late: a refused target after the shell fails the render and writes no mark
 
 // ── the response guard ──────────────────────────────────────────────────────
 
-fn statusAfterWrite() -> @Task<i32> {
+fn statusAfterWrite() -> Task<i32> {
     val g = guarded(recorder());
     val w = g.write;
     await w("x");
@@ -728,7 +728,7 @@ test "response: status after the first write fails, naming the call" {
     assert out.contains("status(500) after the first write");
 }
 
-fn site_attempt() -> @Task<string> {
+fn site_attempt() -> Task<string> {
     val r = await attemptTask({ -> statusAfterWrite() });
     return case r {
         Ok(v) -> "ok";
@@ -738,36 +738,36 @@ fn site_attempt() -> @Task<string> {
 
 // ── step 6: the render plugin and the order it is called in ─────────────────
 
-fn plHead() -> @Task<string> {
+fn plHead() -> Task<string> {
     recPush("plugin head");
     return "<style>.head{}</style>";
 }
 
-fn plChunk(holeId: string) -> @Task<string> {
+fn plChunk(holeId: string) -> Task<string> {
     recPush("plugin chunk " + holeId);
     val css = await async.delay(5, "<style>." + holeId + "{}</style>");
     return css;
 }
 
-fn plClose() -> @Task<@Result<void, string>> {
+fn plClose() -> Task<Result<void, string>> {
     recPush("plugin close");
     return;
 }
 
-fn plCloseFails() -> @Task<@Result<void, string>> {
+fn plCloseFails() -> Task<Result<void, string>> {
     throw "a class was registered after the last chunk";
 }
 
-fn plPayload() -> @Task<Array<#(string, Json)>> {
+fn plPayload() -> Task<Array<#(string, Json)>> {
     recPush("plugin payload");
     return [#("x", "[1]")];
 }
 
-fn plNoPayload() -> @Task<Array<#(string, Json)>> {
+fn plNoPayload() -> Task<Array<#(string, Json)>> {
     return [];
 }
 
-fn plRenderKey() -> @Task<Array<#(string, Json)>> {
+fn plRenderKey() -> Task<Array<#(string, Json)>> {
     return [#("t", "1")];
 }
 
@@ -791,11 +791,11 @@ fn quiet(name: string) -> RenderPlugin {
     );
 }
 
-fn quietHead() -> @Task<string> {
+fn quietHead() -> Task<string> {
     return "";
 }
 
-fn quietChunk(holeId: string) -> @Task<string> {
+fn quietChunk(holeId: string) -> Task<string> {
     return "";
 }
 
@@ -965,8 +965,8 @@ test "stream: a lang that is not a language tag is refused by app, naming it" {
 type ChunkSink(
     setStatus: fn(code: i32),
     setHeader: fn(name: string, value: string),
-    write: fn(chunk: string) -> @Task<void>,
-    close: fn() -> @Task<void>,
+    write: fn(chunk: string) -> Task<void>,
+    close: fn() -> Task<void>,
 )
 
 fn recordingSink() -> ChunkSink {
@@ -1042,22 +1042,22 @@ test "chunk writer: notFound() before the first chunk is 404 and the not-found d
 // ── the DYNAMIC mark: the query and the request are read through a marking
 // hook, and `PageContext` carries no `query` field to read around it ────────
 
-fn SortedPage() -> @Component<Element> {
+fn SortedPage() -> Component<Element> {
     val q = use searchParams();
     return p([text("rows " + q.length.toString(), attrs: [])], attrs: []);
 }
 
-fn CookiePage() -> @Component<Element> {
+fn CookiePage() -> Component<Element> {
     val r = use request();
     return p([text("hi " + r.cookie("session"), attrs: [])], attrs: []);
 }
 
-fn sortedChild() -> @Component<Element> {
+fn sortedChild() -> Component<Element> {
     val q = use searchParams();
     return span([text("sorted " + q.length.toString(), attrs: [])], attrs: []);
 }
 
-fn StreamedSortedPage() -> @Component<Element> {
+fn StreamedSortedPage() -> Component<Element> {
     return section(
         [
             Suspense(

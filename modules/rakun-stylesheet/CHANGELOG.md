@@ -138,8 +138,8 @@
 
 - **Front 24 — effects by return type** (botopink decisions 118 and 120). The
   `#[@future]` annotation leaves: `drainRules`, `flushWith` and `flush` are
-  `-> @Task<string>`, and the eight examples' `main` is `fn main() -> @Task<void>`.
-  None of them can fail, so no `@Result` enters the Task and every `await` stays a
+  `-> Task<string>`, and the eight examples' `main` is `fn main() -> Task<void>`.
+  None of them can fail, so no `Result` enters the Task and every `await` stays a
   bare `await` (no `try await`). The comments and `AGENTS.md` name the Task and the
   `test` block's implicit await channel instead of the future context.
   Measured against botopink-lang `front/24-effects-by-return` `86609a66`: every
@@ -1311,7 +1311,7 @@
   `drainRules()` takes its place: it hands back the registered entries as
   `name + "\t" + payload` records joined by `"\n"`, in insertion order, and
   clears the cell — the same per-render contract. `flushSheet` assembled the
-  `<style>` document **inside** the two `#[@External]` templates, once in
+  `<style>` document **inside** the two `#[compiler.external]` templates, once in
   JavaScript and once in Erlang, which is where the byte-level divergence risk
   lived and where nothing written in botopink could reach it. Keeping it as
   the spec's step 5 asks would have left exactly the duplicate assembly the
@@ -1557,7 +1557,7 @@
   `botopink format` is not applied: it reorders the variants and sections.
 
 - The erlang target runs: `register`, `flushSheet` and `hashHex` carry an
-  `@External.Erlang` form (process-dictionary sheet, the same djb2 hash), so
+  `compiler.external(.Erlang)` form (process-dictionary sheet, the same djb2 hash), so
   `botopink test --target erlang` passes 17/17 instead of stopping at
   `MissingExternalTarget`; `botopink.json` lists `erlang` in `targets`.
 
@@ -1609,7 +1609,7 @@
   `Active`, `Md`, `Lg`, `Xl`), `emilia(tokens: Token[]) -> string`
   entry point, `flush() -> string` per-render serializer, the
   `Stylesheet` host cell (commonJS only at v1 — folded into
-  `emilia.bp` because cross-module `#[@External.<targert>(...)]` symbol imports don't
+  `emilia.bp` because cross-module `#[compiler.external(.<target>(...))]` symbol imports don't
   lower at v0). Two-module package (`tokens` + `emilia`); `botopink
   test` green over 9 in-file blocks.
 - **F2** `tokenToCss` exhaustive `case` covering every v0 variant.

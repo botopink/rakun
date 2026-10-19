@@ -17,7 +17,7 @@
 ////   rakun.ssl.bundle.pem.<name>.reload-on-update
 ////
 //// WHY THIS IS BOTOPINK AND NOT A SIDECAR. The front's spec declares every host
-//// seam `#[@external(.Erlang("rakun_ssl:…"))]`, on the reasoning that `ssl` and
+//// seam `#[compiler.external(.Erlang("rakun_ssl:…"))]`, on the reasoning that `ssl` and
 //// `public_key` are OTP applications. That is true of `ssl:listen/2` and not of
 //// everything this module needs: the file reading and PEM parsing are botopink over `std`, and only the OTP
 //// half (`ssl`, `public_key`) is `src/sidecars/rakun_ssl.erl`. The module was
@@ -48,7 +48,7 @@
 // leading `/`); a Windows spelling — a drive letter (`C:\certs\server.pem`,
 // `C:/certs`) or a UNC share (`\\host\share`) — is recognised here, so it is
 // never joined onto the working directory.
-import {path, io.fs, io.process} from "std";
+import {path, io.fs, io.process, compiler, failure.panic, io.terminal.print} from "std";
 import {runtime.rkProp, runtime.rkSetProp};
 import {config.sub, config.toI32, config.rkValue, config.rkValueOr, config.rkPropIntOr, config.rkPropBool, config.rkPropList};
 
@@ -57,21 +57,21 @@ import {config.sub, config.toI32, config.rkValue, config.rkValueOr, config.rkPro
 // Both forms, always. The two-level registry, the X.509 reader and the key
 // correspondence check; nothing else.
 
-#[@external(.Erlang("rakun_ssl:put($0, $1, $2)"))]
+#[compiler.external(.Erlang("rakun_ssl:put($0, $1, $2)"))]
 pub declare fn rkSslPut(name: string, field: string, value: string) -> i32;
 
-#[@external(.Erlang("rakun_ssl:get($0, $1)"))]
+#[compiler.external(.Erlang("rakun_ssl:get($0, $1)"))]
 pub declare fn rkSslGet(name: string, field: string) -> string;
 
 // Registered names, `\n`-separated, in REGISTRATION order — which is property
 // order, because `sslRegisterAll` walks `sslBundleNames()`.
-#[@external(.Erlang("rakun_ssl:names()"))]
+#[compiler.external(.Erlang("rakun_ssl:names()"))]
 pub declare fn rkSslNames() -> string;
 
-#[@external(.Erlang("rakun_ssl:forget($0)"))]
+#[compiler.external(.Erlang("rakun_ssl:forget($0)"))]
 pub declare fn rkSslForget(name: string) -> i32;
 
-#[@external(.Erlang("rakun_ssl:reset()"))]
+#[compiler.external(.Erlang("rakun_ssl:reset()"))]
 pub declare fn rkSslReset() -> i32;
 
 // One PEM chain in, one blob out:
@@ -80,12 +80,12 @@ pub declare fn rkSslReset() -> i32;
 // canonicalised by both hosts to `CN=…,O=…` in certificate order, because node
 // answers newline-separated attributes and OTP answers an `rdnSequence` of OID
 // tuples, and one test has to be able to assert one string.
-#[@external(.Erlang("rakun_ssl:cert_info($0)"))]
+#[compiler.external(.Erlang("rakun_ssl:cert_info($0)"))]
 pub declare fn rkSslCertInfo(pem: string) -> string;
 
 // Does this private key belong to this certificate? A mismatch is a STARTUP
 // failure, not a first-handshake one, which is the whole reason this cell exists.
-#[@external(.Erlang("rakun_ssl:key_matches($0, $1)"))]
+#[compiler.external(.Erlang("rakun_ssl:key_matches($0, $1)"))]
 pub declare fn rkSslKeyMatches(certPem: string, keyPem: string) -> bool;
 
 // ── the five consumer seams ─────────────────────────────────────────────────
@@ -95,24 +95,24 @@ pub declare fn rkSslKeyMatches(certPem: string, keyPem: string) -> bool;
 // registry about what a bundle is.
 
 // Front 04's acceptor and front 76's management listener.
-#[@external(.Erlang("rakun_ssl:listener_opts($0)"))]
+#[compiler.external(.Erlang("rakun_ssl:listener_opts($0)"))]
 pub declare fn rkSslListenerOpts(bundle: string) -> string;
 
 // Fronts 08, 09, 13 and 15. `host` becomes `server_name_indication` and, under
 // `verify=full`, the hostname the chain is checked against.
-#[@external(.Erlang("rakun_ssl:client_opts($0, $1)"))]
+#[compiler.external(.Erlang("rakun_ssl:client_opts($0, $1)"))]
 pub declare fn rkSslClientOpts(bundle: string, host: string) -> string;
 
 // The health indicator and the info contributor.
-#[@external(.Erlang("rakun_ssl:expiry_days($0)"))]
+#[compiler.external(.Erlang("rakun_ssl:expiry_days($0)"))]
 pub declare fn rkSslExpiryDays(bundle: string) -> i32;
 
 // The info contributor.
-#[@external(.Erlang("rakun_ssl:subject($0)"))]
+#[compiler.external(.Erlang("rakun_ssl:subject($0)"))]
 pub declare fn rkSslSubject(bundle: string) -> string;
 
 // The health indicator; `""` when the last resolve succeeded.
-#[@external(.Erlang("rakun_ssl:last_error($0)"))]
+#[compiler.external(.Erlang("rakun_ssl:last_error($0)"))]
 pub declare fn rkSslLastError(bundle: string) -> string;
 
 // ── the blob ────────────────────────────────────────────────────────────────
@@ -448,7 +448,7 @@ pub fn fileProblem(name: string, leaf: string, given: string) -> string {
 
 pub fn checkFile(name: string, leaf: string, given: string) -> i32 {
     val p: string = fileProblem(name, leaf, given);
-    if (p != "") @panic(p);
+    if (p != "") panic(p);
     return 0;
 }
 
@@ -494,7 +494,7 @@ pub fn bundleProblem(b: SslBundle) -> string {
 // bundle that was never checked.
 pub fn validateBundle(b: SslBundle) -> i32 {
     val p: string = bundleProblem(b);
-    if (p != "") @panic(p);
+    if (p != "") panic(p);
     return 0;
 }
 
@@ -638,7 +638,7 @@ fn readTextOr(p: string) -> string {
     return try fs.readText(p) catch "";
 }
 
-fn statMtime(p: string) -> @Result<string, string> {
+fn statMtime(p: string) -> Result<string, string> {
     val st = try fs.stat(p);
     return "" + st.mtime;
 }
@@ -717,7 +717,7 @@ pub fn sslRegister(name: string) -> bool {
     val _r = rkSslPut(name, "error", "");
     if (b.verify == "none") {
         val _w = rkSslPut(name, "warning", verifyNoneWarning(name));
-        @print(verifyNoneWarning(name));
+        print(verifyNoneWarning(name));
     } else val _w = rkSslPut(name, "warning", "");
     return true;
 }
@@ -756,7 +756,7 @@ pub fn sslWarnings() -> string[] {
 pub fn sslBoot() -> i32 {
     val n = sslRegisterAll();
     val bad = sslFailures();
-    if (bad.length > 0) @panic(bad.at(0) ?? "");
+    if (bad.length > 0) panic(bad.at(0) ?? "");
     return n;
 }
 
@@ -790,7 +790,7 @@ pub fn sslReload(name: string) -> bool {
     return ok;
 }
 
-#[@external(.Erlang("rakun_ssl:clear_cache()"))]
+#[compiler.external(.Erlang("rakun_ssl:clear_cache()"))]
 pub declare fn rkSslClearCache() -> i32;
 
 // THE WATCHER, AND WHY IT IS A FUNCTION RATHER THAN A `gen_server`. The spec

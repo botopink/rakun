@@ -294,7 +294,7 @@ run_hooks([], _Tolerant, Acc) -> Acc;
 run_hooks([{_O, Seq, Record, Fun} | Rest], Tolerant, Acc) ->
     [{Seq, R0, F0, _}] = ets:lookup(?HOOKS, Seq),
     true = ets:insert(?HOOKS, {Seq, R0, F0, true}),
-    %% try/catch and not `catch`: a `@panic` lowers to one class on one row and
+    %% try/catch and not `catch`: a `panic` lowers to one class on one row and
     %% a bare `catch` of a `throw` hands back the thrown value, which is
     %% indistinguishable from a hook that returned it.
     Ok = try Fun(), true catch _:_ -> false end,

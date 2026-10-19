@@ -17,41 +17,41 @@
 //// against a 100 ms timeout. A sleep of 300 ms against a shutdown started at
 //// 60 ms said the same only while the machine was idle.
 
-import {async} from "std";
+import {async, compiler} from "std";
 import {Request, Response, rkSetProp, rkProp, rkRegisterRoute, rkServe, rkDispatchHttp, rkRegisterLifecycle, toI32, rkConnectionCount} from "rakun";
 import {shutdown.ShutdownReport, shutdown.gracefulShutdown, shutdown.rkNowMs, shutdown.rkOnSigterm, shutdown.rkOffSigterm};
 
 // ── host cells for the test ─────────────────────────────────────────────────
 
-#[@external(.Erlang("rakun_request_context:sleep($0)"))]
+#[compiler.external(.Erlang("rakun_request_context:sleep($0)"))]
 declare fn sleepMs(ms: i32) -> i32;
 
 // `status|body`, `closed` when the server closed the connection before a whole
 // response, `refused` when the connect failed.
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__Port, __Path) -> case gen_tcp:connect("127.0.0.1", __Port, [binary, {active, false}], 10000) of {error, _} -> <<"refused">>; {ok, __S} -> ok = gen_tcp:send(__S, [<<"GET ">>, __Path, <<" HTTP/1.1", 13, 10, "Host: x", 13, 10, 13, 10>>]), __Loop = fun __Loop(__Acc) -> case binary:split(__Acc, <<13, 10, 13, 10>>) of [__H, __B] -> case re:run(__H, <<"(?i)content-length: *([0-9]+)">>, [{capture, [1], binary}]) of {match, [__L]} -> case byte_size(__B) >= binary_to_integer(__L) of true -> {ok, __H, __B}; false -> case gen_tcp:recv(__S, 0, 5000) of {ok, __M} -> __Loop(<<__Acc/binary, __M/binary>>); _ -> closed end end; _ -> {ok, __H, __B} end; _ -> case gen_tcp:recv(__S, 0, 5000) of {ok, __M} -> __Loop(<<__Acc/binary, __M/binary>>); _ -> closed end end end, __R = __Loop(<<>>), gen_tcp:close(__S), case __R of closed -> <<"closed">>; {ok, __Hd, __Bd} -> [_, __St | _] = binary:split(__Hd, <<" ">>, [global]), <<__St/binary, "|", __Bd/binary>> end end end)($0, $1)"""),
 )]
 declare fn httpGet(port: i32, path: string) -> string;
 
 // A stand-in for front 76's `rakun_probes:readiness_drained/0`: it records when
 // readiness went false, then waits `ms` — the pre-drain period.
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__Ms) -> __Src = ["-module(rakun_probes).", "-export([readiness_drained/0]).", "readiness_drained() -> persistent_term:put(rakun_probe_ready_false_at, erlang:monotonic_time(millisecond)), timer:sleep(" ++ integer_to_list(__Ms) ++ "), ok."], __Forms = [begin {ok, __T, _} = erl_scan:string(__L), {ok, __F} = erl_parse:parse_form(__T), __F end || __L <- __Src], {ok, __Mod, __Bin} = compile:forms(__Forms), {module, __Mod} = code:load_binary(__Mod, "rakun_probes.erl", __Bin), 0 end)($0)"""),
 )]
 declare fn loadProbeStandIn(preDrainMs: i32) -> i32;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun() -> code:purge(rakun_probes), code:delete(rakun_probes), code:purge(rakun_probes), persistent_term:erase(rakun_probe_ready_false_at), 0 end)()"""),
 )]
 declare fn unloadProbeStandIn() -> i32;
 
-#[@external(.Erlang("""persistent_term:get(rakun_probe_ready_false_at, 0)"""))]
+#[compiler.external(.Erlang("""persistent_term:get(rakun_probe_ready_false_at, 0)"""))]
 declare fn probeReadyFalseAt() -> i64;
 
-#[@external(.Erlang("""(fun(__X) -> __X end)($0)"""))]
+#[compiler.external(.Erlang("""(fun(__X) -> __X end)($0)"""))]
 declare fn wide(n: i32) -> i64;
 
-#[@external(.Erlang("""(fun() -> os:cmd("kill -TERM " ++ os:getpid()), 0 end)()"""))]
+#[compiler.external(.Erlang("""(fun() -> os:cmd("kill -TERM " ++ os:getpid()), 0 end)()"""))]
 declare fn sendSigterm() -> i32;
 
 // ── the application under shutdown ──────────────────────────────────────────

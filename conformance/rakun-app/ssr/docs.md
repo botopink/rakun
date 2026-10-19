@@ -148,17 +148,17 @@ val page = searchParam(route, "page");   // sets the payload's `d` to true
 
 ## Slow sections: thunks, never started tasks
 
-`@Task<T>` lowers eagerly on erlang, so awaiting two tasks runs them one
+`Task<T>` lowers eagerly on erlang, so awaiting two tasks runs them one
 after the other at full latency. Concurrency comes from processes:
 
 ```text
-var loaders: Array<fn() -> @Task<Element>> = [];
+var loaders: Array<fn() -> Task<Element>> = [];
 loaders.push({ -> loadPosts() });
 loaders.push({ -> loadAuthor() });
 val resolved = await renderAll(loaders);   // one process per thunk, one await
 ```
 
-Never hand `renderAll` an already-started `@Task` — the parameter is a
+Never hand `renderAll` an already-started `Task` — the parameter is a
 function type, so it will not fit, which is the point.
 
 ## Streaming

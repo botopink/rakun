@@ -46,66 +46,67 @@ import {rkProp, toI32} from "rakun";
 import {param, Row, Rows, sqlTemplate} from "rakun-data";
 import {cron.rkI64};
 import {jobstore.store.jobClock, jobstore.store.cronAfter, jobstore.store.formatInstant, jobstore.store.runJobHandler, jobstore.store.jobStatusOn};
+import {compiler} from "std";
 
-#[@external(.Erlang("""(fun(__Ms) -> timer:sleep(__Ms), 0 end)($0)"""))]
+#[compiler.external(.Erlang("""(fun(__Ms) -> timer:sleep(__Ms), 0 end)($0)"""))]
 declare fn pause(ms: i32) -> i32;
 
-#[@external(.Erlang("""erlang:unique_integer([positive, monotonic])"""))]
+#[compiler.external(.Erlang("""erlang:unique_integer([positive, monotonic])"""))]
 declare fn freshId() -> i32;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__F) -> try {ok, __F()} catch _:{panic, __R} when is_binary(__R) -> {error, __R}; _:__R -> {error, iolist_to_binary(io_lib:format("~p", [__R]))} end end)($0)"""),
 )]
-declare fn guarded(work: fn() -> i32) -> @Result<i32, string>;
+declare fn guarded(work: fn() -> i32) -> Result<i32, string>;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__W, __Renew, __Ms) -> __Me = self(), __Ref = make_ref(), {__P, __M} = spawn_monitor(fun() -> __Me ! {__Ref, try {ok, __W()} catch _:{panic, __E} when is_binary(__E) -> {error, __E}; _:__E -> {error, iolist_to_binary(io_lib:format("~p", [__E]))} end} end), __Wait = fun __Wt() -> receive {__Ref, __Res} -> erlang:demonitor(__M, [flush]), __Res; {'DOWN', __M, process, __P, __Why} -> {error, iolist_to_binary(io_lib:format("~p", [__Why]))} after __Ms -> _ = __Renew(), __Wt() end end, __Wait() end)($0, $1, $2)"""),
 )]
 declare fn runRenewing(
     work: fn() -> string,
     renew: fn() -> i32,
     everyMs: i32,
-) -> @Result<string, string>;
+) -> Result<string, string>;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__N) -> case persistent_term:get({rakun_job_kill, __N}, false) of true -> persistent_term:erase({rakun_job_kill, __N}), exit(self(), kill); _ -> 0 end end)($0)"""),
 )]
 declare fn killHook(node: string) -> i32;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__N) -> persistent_term:put({rakun_job_kill, __N}, true), 0 end)($0)"""),
 )]
 pub declare fn killAfterAcquire(node: string) -> i32;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__N, __Every) -> erlang:phash2(__N, erlang:max(1, __Every div 4)) end)($0, $1)"""),
 )]
 declare fn phash(node: string, every: i32) -> i32;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__N, __T, __Ms) -> __P = spawn(fun() -> __Go = fun __G() -> _ = (try __T() catch _:_ -> 0 end), receive stop -> ok after __Ms -> __G() end end, __Go() end), persistent_term:put({rakun_job_loop, __N}, __P), 0 end)($0, $1, $2)"""),
 )]
 declare fn spawnLoop(node: string, tick: fn() -> i32, everyMs: i32) -> i32;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__N) -> case persistent_term:get({rakun_job_loop, __N}, undefined) of undefined -> 0; __P -> __P ! stop, persistent_term:erase({rakun_job_loop, __N}), 1 end end)($0)"""),
 )]
 pub declare fn stopJobScheduler(node: string) -> i32;
 
-#[@external(.Erlang("""(fun(__K) -> persistent_term:get({rakun_job_down, __K}, -1) end)($0)"""))]
+#[compiler.external(.Erlang("""(fun(__K) -> persistent_term:get({rakun_job_down, __K}, -1) end)($0)"""))]
 declare fn downSince(node: string) -> i64;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__K, __T) -> case __T of -1 -> persistent_term:erase({rakun_job_down, __K}); _ -> persistent_term:put({rakun_job_down, __K}, __T) end, 0 end)($0, $1)"""),
 )]
 declare fn setDownSince(node: string, at: i64) -> i32;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__T) -> logger:warning("~ts", [__T]), persistent_term:put(rakun_job_log, persistent_term:get(rakun_job_log, []) ++ [__T]), 0 end)($0)"""),
 )]
 declare fn logLine(line: string) -> i32;
 
-#[@external(.Erlang("""persistent_term:get(rakun_job_log, [])"""))]
+#[compiler.external(.Erlang("""persistent_term:get(rakun_job_log, [])"""))]
 pub declare fn jobLog() -> string[];
 
 fn intProp(key: string, fallback: i32) -> i32 {

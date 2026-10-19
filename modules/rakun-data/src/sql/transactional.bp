@@ -34,7 +34,7 @@
 //// the type needs a stereotype for `<Type>.make()`.
 ////
 //// SIGNATURES ARE REDECLARED VERBATIM. `@Decl` spells every parameter and
-//// return type as written (`i32[]`, `Array<string>`, `@Result<T, E>`, a
+//// return type as written (`i32[]`, `Array<string>`, `Result<T, E>`, a
 //// function type), so the proxy redeclares each method's signature as it
 //// reads it; a method with no return type is emitted as a void method.
 //// Every reflected method is forwarded: `Method` carries no visibility, so a
@@ -50,54 +50,60 @@ import {rkRegisterBean} from "rakun";
 pub fn transactional(syntax decl: unknown) {
     var methods: Array<string> = [];
     var refused = "";
-    compiler.methods(decl).forEach({ m ->
-        var plain = false;
-        var prop = "REQUIRED";
-        m.annotations.forEach({ a ->
-            val p = if (a.name == "noTransaction") true else plain;
-            plain = p;
-            val q = if (a.name == "propagation")
-                a.args.join("").replaceAll("\"", "").toUpper()
+    compiler
+        .methods(decl)
+        .forEach({ m ->
+            var plain = false;
+            var prop = "REQUIRED";
+            m.annotations.forEach({ a ->
+                val p = if (a.name == "noTransaction") true else plain;
+                plain = p;
+                val q = if (a.name == "propagation")
+                    a.args.join("").replaceAll("\"", "").toUpper()
+                else
+                    prop;
+                prop = q;
+            });
+            val badProp = if (prop != "REQUIRED" && refused == "")
+                compiler.name(decl)!
+                    + "."
+                    + m.name
+                    + " asks for propagation "
+                    + prop
             else
-                prop;
-            prop = q;
+                refused;
+            refused = badProp;
+            var params: Array<string> = [];
+            var args: Array<string> = [];
+            m.params.forEach({ p ->
+                if (p.name != "self") {
+                    params.push(p.name + ": " + p.typeName);
+                    args.push(p.name);
+                }
+            });
+            val ret = m.returnType;
+            val call = "self.inner." + m.name + "(" + args.join(", ") + ")";
+            val label = compiler.name(decl)! + "." + m.name;
+            val head = if (params.length > 0)
+                "pub fn " + m.name + "(self: Self, " + params.join(", ") + ")"
+            else
+                "pub fn " + m.name + "(self: Self)";
+            val sig = if (ret != "") head + " -> " + ret else head;
+            val wrapped = "rkTxRun(\""
+                + label
+                + "\", \"required\", { -> "
+                + call
+                + " })";
+            val voidWrapped = "val _tx = rkTxRun(\""
+                + label
+                + "\", \"required\", { -> "
+                + call
+                + "; 0 });";
+            val body = if (plain) {
+                if (ret != "") "return " + call + ";" else call + ";";
+            } else if (ret != "") "return " + wrapped + ";" else voidWrapped;
+            methods.push(sig + " {\n        " + body + "\n    }");
         });
-        val badProp = if (prop != "REQUIRED" && refused == "")
-            compiler.name(decl)! + "." + m.name + " asks for propagation " + prop
-        else
-            refused;
-        refused = badProp;
-        var params: Array<string> = [];
-        var args: Array<string> = [];
-        m.params.forEach({ p ->
-            if (p.name != "self") {
-                params.push(p.name + ": " + p.typeName);
-                args.push(p.name);
-            }
-        });
-        val ret = m.returnType;
-        val call = "self.inner." + m.name + "(" + args.join(", ") + ")";
-        val label = compiler.name(decl)! + "." + m.name;
-        val head = if (params.length > 0)
-            "pub fn " + m.name + "(self: Self, " + params.join(", ") + ")"
-        else
-            "pub fn " + m.name + "(self: Self)";
-        val sig = if (ret != "") head + " -> " + ret else head;
-        val wrapped = "rkTxRun(\""
-            + label
-            + "\", \"required\", { -> "
-            + call
-            + " })";
-        val voidWrapped = "val _tx = rkTxRun(\""
-            + label
-            + "\", \"required\", { -> "
-            + call
-            + "; 0 });";
-        val body = if (plain) {
-            if (ret != "") "return " + call + ";" else call + ";";
-        } else if (ret != "") "return " + wrapped + ";" else voidWrapped;
-        methods.push(sig + " {\n        " + body + "\n    }");
-    });
     val declName = compiler.name(decl)!;
     val txName = declName + ".Tx";
     val make = "pub fn make() -> "

@@ -123,7 +123,7 @@ guard(Work, OnDenied) ->
     end.
 
 %% `{ok, Work()}`, or `{error, Text}` for a raise — the text is the raise's
-%% message when it is a binary (a `@panic`), its `~p` rendering otherwise.
+%% message when it is a binary (a `panic`), its `~p` rendering otherwise.
 attempt(Work) ->
     try {ok, Work()}
     catch

@@ -2,7 +2,7 @@
 //// ordering against front 07 (front 76 steps 5 and 6). Probes are enabled by
 //// a property each test sets and puts back.
 
-import {testing.asserts} from "std";
+import {testing.asserts, compiler} from "std";
 import {async} from "std";
 import {Request, Response, rkDispatchHttp, rkSetProp, rkServe, event, publishEvent} from "rakun";
 import {rkRegisterListener} from "rakun/events";
@@ -11,18 +11,18 @@ import {shutdown.ShutdownReport, shutdown.gracefulShutdown, shutdown.rkNowMs};
 import {actuator.actuator.mountActuator};
 import {actuator.management.installManagement, actuator.management.setReadiness, actuator.management.rkProbesReset, actuator.management.rkProbesRefusingSince, actuator.management.rkProbesReadiness};
 
-#[@external(.Erlang("rakun_runtime:prop($0)"))]
+#[compiler.external(.Erlang("rakun_runtime:prop($0)"))]
 declare fn prop(key: string) -> string;
 
-#[@external(.Erlang("rakun_probes:readiness_drained()"))]
+#[compiler.external(.Erlang("rakun_probes:readiness_drained()"))]
 declare fn readinessDrained() -> i64;
 
-#[@external(.Erlang("""(fun(__Ms) -> timer:sleep(__Ms), 0 end)($0)"""))]
+#[compiler.external(.Erlang("""(fun(__Ms) -> timer:sleep(__Ms), 0 end)($0)"""))]
 declare fn sleep(ms: i32) -> i32;
 
 // `status|body` over a real socket (the body read to its Content-Length),
 // `closed` when the server closed first, `refused` when the connect failed.
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__Port, __Path) -> case gen_tcp:connect("127.0.0.1", __Port, [binary, {active, false}], 1000) of {error, _} -> <<"refused">>; {ok, __S} -> ok = gen_tcp:send(__S, [<<"GET ">>, __Path, <<" HTTP/1.1", 13, 10, "Host: x", 13, 10, 13, 10>>]), __Rd = fun __Rd(__Acc) -> case binary:split(__Acc, <<13, 10, 13, 10>>) of [__H, __B] -> case re:run(__H, <<"(?i)content-length: *([0-9]+)">>, [{capture, [1], binary}]) of {match, [__L]} -> case byte_size(__B) >= binary_to_integer(__L) of true -> {ok, __H, __B}; false -> case gen_tcp:recv(__S, 0, 3000) of {ok, __M} -> __Rd(<<__Acc/binary, __M/binary>>); _ -> closed end end; _ -> {ok, __H, __B} end; _ -> case gen_tcp:recv(__S, 0, 3000) of {ok, __M} -> __Rd(<<__Acc/binary, __M/binary>>); _ -> closed end end end, __R = __Rd(<<>>), gen_tcp:close(__S), case __R of closed -> <<"closed">>; {ok, __Hd, __Bd} -> [_, __St | _] = binary:split(__Hd, <<" ">>, [global]), <<__St/binary, "|", __Bd/binary>> end end end)($0, $1)"""),
 )]
 declare fn httpGet(port: i32, path: string) -> string;
@@ -212,7 +212,7 @@ test "probes: disabled, none of the four paths exists and the groups are still v
     val _u = set("rakun.management.endpoint.health.group.bad.include", "");
 }
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__F) -> __T0 = erlang:monotonic_time(millisecond), __F(), erlang:monotonic_time(millisecond) - __T0 end)($0)"""),
 )]
 declare fn timed(work: fn() -> i64) -> i32;
@@ -259,10 +259,10 @@ fn shutdownAfter(ms: i32) -> string {
     return r.stoppedAcceptingAt.toString();
 }
 
-#[@external(.Erlang("""(fun(__S) -> binary_to_integer(__S) end)($0)"""))]
+#[compiler.external(.Erlang("""(fun(__S) -> binary_to_integer(__S) end)($0)"""))]
 declare fn toInt(s: string) -> i64;
 
-#[@external(.Erlang("""(fun(__X) -> __X end)($0)"""))]
+#[compiler.external(.Erlang("""(fun(__X) -> __X end)($0)"""))]
 declare fn wide(n: i32) -> i64;
 
 test "probes: on shutdown readiness answers 503 at least the pre-drain period before the socket refuses" {

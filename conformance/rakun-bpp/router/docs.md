@@ -111,9 +111,9 @@ component outside a request is a legitimate thing to do, and it is how the
 package's own tests render the server pass.
 
 **Every cell carries both targets.** The front's spec calls for the five reads
-to be `#[@external(.Erlang(…))]` only; that is not writable. This module is compiled
+to be `#[compiler.external(.Erlang(…))]` only; that is not writable. This module is compiled
 on both rows of the core member, and an erlang-only cell reds the commonJS row
-at its *call site* (`` `__jhRoutePath` has no `#[@external(.<Target>(…))]` for the
+at its *call site* (`` `__jhRoutePath` has no `#[compiler.external(.<Target>(…))]` for the
 node backend ``) the moment `snapshot()` calls it — a declared and never-called
 cell is fine, which is why `client_runtime.bp`'s node-only `clientRender` does
 not red the erlang row. The dual form is also what the mechanism needs: the
@@ -129,12 +129,12 @@ Next.js splits route state into five hooks over one internal record
 and never a doubled `use usePathname()`.
 
 ```text
-pub fn router() -> @Component<RouterState>
-pub fn pathname() -> @Component<string>
-pub fn params() -> @Component<Array<#(string, string)>>
-pub fn searchParams() -> @Component<Array<#(string, string)>>
-pub fn selectedLayoutSegment() -> @Component<string>
-pub fn selectedLayoutSegments() -> @Component<Array<string>>
+pub fn router() -> Component<RouterState>
+pub fn pathname() -> Component<string>
+pub fn params() -> Component<Array<#(string, string)>>
+pub fn searchParams() -> Component<Array<#(string, string)>>
+pub fn selectedLayoutSegment() -> Component<string>
+pub fn selectedLayoutSegments() -> Component<Array<string>>
 ```
 
 `searchParams()` is the only way a page reads the query — `PageContext` has no
@@ -153,8 +153,8 @@ root-first and `segments` is derived from it by dropping the empty parts —
 nothing on the path reorders.
 
 **`use` is not decoration.** A hook called *without* `use` answers its
-`@Component<T>` — a Promise on commonJS, where every `@Component` body is an
-`async function` — so an ordinary caller `await`s it (a `@Task` body or a
+`Component<T>` — a Promise on commonJS, where every `Component` body is an
+`async function` — so an ordinary caller `await`s it (a `Task` body or a
 test):
 
 ```text
@@ -162,7 +162,7 @@ val ps = await params();
 pairValue(ps, "slug")
 ```
 
-Inside a `@Component` body `pairValue(use params(), …)` is exactly the array.
+Inside a `Component` body `pairValue(use params(), …)` is exactly the array.
 
 ## The navigation verbs
 
@@ -229,7 +229,7 @@ answers `pattern == ""` and no params.
 ## `clientApp` — a client-only app (`client_app.bp`)
 
 ```text
-clientApp(routes: routeTable, mount: "#root", allowedRedirects: []).start()   // -> @Task<@Result<void, string>>
+clientApp(routes: routeTable, mount: "#root", allowedRedirects: []).start()   // -> Task<Result<void, string>>
 ```
 
 An application with no server runs the same pages under the router alone

@@ -33,7 +33,7 @@
 
 import {Response} from "rakun";
 import {WebRequest, Chain, withHeader, registerFilter, orderSecurity, problemFor, problemResponse, ProblemDetail, registerAdvice, adviceTags, Matcher} from "rakun-service";
-import {regex.Regex} from "std";
+import {regex.Regex, compiler, failure.panic} from "std";
 import {principal.Authentication, principal.anonymous, principal.withAuthentication, principal.rkSecNoteDecision, principal.realm};
 import {policy.SecurityPolicy, policy.CompiledPolicy, policy.CompiledRule, policy.Decision, policy.providedPolicy, policy.compileOrFail, policy.decide, policy.admits, policy.requiredAuthority};
 import {jwt.verifyJwt, jwt.jwtConfig, jwt.jwtConfigProblem};
@@ -46,16 +46,16 @@ import {method_security.unauthorizedTag, method_security.forbiddenTag};
 
 // ── host cells ──────────────────────────────────────────────────────────────
 
-#[@external(.Erlang("rakun_security:guard($0, $1)"))]
+#[compiler.external(.Erlang("rakun_security:guard($0, $1)"))]
 pub declare fn rkSecGuard(
     work: fn() -> Response,
     onDenied: fn(tag: string, detail: string) -> Response,
 ) -> Response;
 
-#[@external(.Erlang("rakun_security:slot_put($0, $1)"))]
+#[compiler.external(.Erlang("rakun_security:slot_put($0, $1)"))]
 pub declare fn rkSecSlotPut(key: string, value: string) -> i32;
 
-#[@external(.Erlang("rakun_security:slot($0)"))]
+#[compiler.external(.Erlang("rakun_security:slot($0)"))]
 pub declare fn rkSecSlot(key: string) -> string;
 
 // ── authentication ──────────────────────────────────────────────────────────
@@ -64,7 +64,7 @@ pub declare fn rkSecSlot(key: string) -> string;
 // verified (always true when nothing was presented).
 pub type AuthOutcome(auth: Authentication, presented: bool, valid: bool)
 
-fn outcomeOf(r: @Result<Authentication, string>) -> AuthOutcome {
+fn outcomeOf(r: Result<Authentication, string>) -> AuthOutcome {
     if (r.isError())
         return AuthOutcome(auth: anonymous(), presented: true, valid: false);
     return AuthOutcome(
@@ -76,23 +76,23 @@ fn outcomeOf(r: @Result<Authentication, string>) -> AuthOutcome {
 
 // Front 79's resource server installs the bearer verifier (RS256 against an
 // issuer's JWKS); without one a bearer token is front 10's HS256 JWT.
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__F) -> persistent_term:put(rakun_security_bearer, __F), 0 end)($0)"""),
 )]
 pub declare fn installBearerVerifier(
-    verify: fn(token: string) -> @Result<Authentication, string>,
+    verify: fn(token: string) -> Result<Authentication, string>,
 ) -> i32;
 
-#[@external(.Erlang("""(fun() -> persistent_term:erase(rakun_security_bearer), 0 end)()"""))]
+#[compiler.external(.Erlang("""(fun() -> persistent_term:erase(rakun_security_bearer), 0 end)()"""))]
 pub declare fn clearBearerVerifier() -> i32;
 
-#[@external(.Erlang("""(persistent_term:get(rakun_security_bearer, undefined) =/= undefined)"""))]
+#[compiler.external(.Erlang("""(persistent_term:get(rakun_security_bearer, undefined) =/= undefined)"""))]
 pub declare fn bearerVerifierInstalled() -> bool;
 
-#[@external(.Erlang("""(fun(__T) -> (persistent_term:get(rakun_security_bearer))(__T) end)($0)"""))]
-declare fn runBearerVerifier(token: string) -> @Result<Authentication, string>;
+#[compiler.external(.Erlang("""(fun(__T) -> (persistent_term:get(rakun_security_bearer))(__T) end)($0)"""))]
+declare fn runBearerVerifier(token: string) -> Result<Authentication, string>;
 
-fn verifyBearer(token: string) -> @Result<Authentication, string> {
+fn verifyBearer(token: string) -> Result<Authentication, string> {
     return if (bearerVerifierInstalled())
         runBearerVerifier(token)
     else
@@ -175,7 +175,7 @@ fn rendered(d: Decision) -> string {
 // repository is installed; this module never imports the actuator. No event
 // carries a credential: the failure names the ATTEMPTED principal only.
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun() -> case get(rakun_conn_socket) of undefined -> <<>>; __S -> case (case get(rakun_transport) of ssl -> ssl:peername(__S); _ -> inet:peername(__S) end) of {ok, {__A, _}} -> list_to_binary(inet:ntoa(__A)); _ -> <<>> end end end)()"""),
 )]
 declare fn peerAddress() -> string;
@@ -296,11 +296,11 @@ pub fn lastPrincipal() -> string {
 // Every configuration refusal, in one place, run before the entry registers.
 pub fn securityBoot() -> i32 {
     val encoder: string = encoderProblem();
-    if (encoder != "") @panic(encoder);
+    if (encoder != "") panic(encoder);
     val users: string = usersProblem();
-    if (users != "") @panic(users);
+    if (users != "") panic(users);
     val jwt: string = jwtConfigProblem(jwtConfig());
-    if (jwt != "") @panic(jwt);
+    if (jwt != "") panic(jwt);
     return 0;
 }
 

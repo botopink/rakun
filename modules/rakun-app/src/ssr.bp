@@ -35,7 +35,7 @@
 //// buffers when it did not (`rkDispatchHttp` from a test): the dispatch then
 //// answers the buffer as one `Response`.
 
-import {collections.Dict, querystring} from "std";
+import {collections.Dict, querystring, compiler} from "std";
 import {Request, Response, rkProp} from "rakun";
 import {RequestPhase, RequestScope, beginRequest, endRequest, requestLive, requestPhase, setPhase} from "rakun/request_context";
 import {file_router.rkAppRegisterPage, file_router.rkAppTable, file_router.rkAppRender};
@@ -46,14 +46,14 @@ import {table.RouteEntry, table.parseTable, table.writeTable, match.RouteMatch, 
 pub type ChunkWriter(
     setStatus: fn(code: i32),
     setHeader: fn(name: string, value: string),
-    write: fn(chunk: string) -> @Task<void>,
-    close: fn() -> @Task<void>,
+    write: fn(chunk: string) -> Task<void>,
+    close: fn() -> Task<void>,
 )
 
 // A renderer's `Error(msg)` is answered like a raise (decision 130): 500 when
 // nothing was written, otherwise the response is closed; the message goes to
 // the log under a correlation digest, never on the wire.
-pub type PageRenderer = fn(req: Request, out: ChunkWriter) -> @Task<@Result<void, string>>;
+pub type PageRenderer = fn(req: Request, out: ChunkWriter) -> Task<Result<void, string>>;
 
 // The orchestrator's one call per page pattern, at boot. A second renderer for
 // one pattern fails here, naming it (front 22's `rkAppRegisterPage`).
@@ -63,7 +63,7 @@ pub fn page(pattern: string, render: PageRenderer) -> i32 {
 
 // The four doors as functions of this module — a renderer may call them or the
 // fields themselves (`out.write(chunk)`), from any module.
-pub fn writeTo(out: ChunkWriter, chunk: string) -> @Task<void> {
+pub fn writeTo(out: ChunkWriter, chunk: string) -> Task<void> {
     await out.write(chunk);
 }
 
@@ -77,65 +77,65 @@ pub fn setHeaderOn(out: ChunkWriter, name: string, value: string) -> i32 {
     return 0;
 }
 
-pub fn closeOut(out: ChunkWriter) -> @Task<void> {
+pub fn closeOut(out: ChunkWriter) -> Task<void> {
     await out.close();
 }
 
 // ── the host cells ──────────────────────────────────────────────────────────
 
-#[@external(.Erlang("rakun_ssr:begin_page()"))]
+#[compiler.external(.Erlang("rakun_ssr:begin_page()"))]
 pub declare fn rkSsrBegin() -> i32;
 
-#[@external(.Erlang("rakun_ssr:set_status($0)"))]
+#[compiler.external(.Erlang("rakun_ssr:set_status($0)"))]
 pub declare fn rkSsrSetStatus(code: i32) -> void;
 
-#[@external(.Erlang("rakun_ssr:set_header($0, $1)"))]
+#[compiler.external(.Erlang("rakun_ssr:set_header($0, $1)"))]
 pub declare fn rkSsrSetHeader(name: string, value: string) -> void;
 
-#[@external(.Erlang("rakun_ssr:write($0)"))]
-pub declare fn rkSsrWrite(chunk: string) -> @Task<void>;
+#[compiler.external(.Erlang("rakun_ssr:write($0)"))]
+pub declare fn rkSsrWrite(chunk: string) -> Task<void>;
 
-#[@external(.Erlang("rakun_ssr:close()"))]
-pub declare fn rkSsrClose() -> @Task<void>;
+#[compiler.external(.Erlang("rakun_ssr:close()"))]
+pub declare fn rkSsrClose() -> Task<void>;
 
-#[@external(.Erlang("rakun_ssr:status()"))]
+#[compiler.external(.Erlang("rakun_ssr:status()"))]
 pub declare fn rkSsrStatus() -> i32;
 
-#[@external(.Erlang("rakun_ssr:header($0)"))]
+#[compiler.external(.Erlang("rakun_ssr:header($0)"))]
 pub declare fn rkSsrHeader(name: string) -> string;
 
-#[@external(.Erlang("rakun_ssr:closed()"))]
+#[compiler.external(.Erlang("rakun_ssr:closed()"))]
 pub declare fn rkSsrClosed() -> bool;
 
-#[@external(.Erlang("rakun_ssr:started()"))]
+#[compiler.external(.Erlang("rakun_ssr:started()"))]
 pub declare fn rkSsrStarted() -> bool;
 
-#[@external(.Erlang("rakun_ssr:streamed()"))]
+#[compiler.external(.Erlang("rakun_ssr:streamed()"))]
 pub declare fn rkSsrStreamed() -> bool;
 
-#[@external(.Erlang("rakun_ssr:body()"))]
+#[compiler.external(.Erlang("rakun_ssr:body()"))]
 pub declare fn rkSsrBody() -> string;
 
 // Run `render`; the text it answers, or the reason it raised.
-#[@external(.Erlang("rakun_ssr:guard($0)"))]
-pub declare fn rkSsrGuard(render: fn() -> @Task<string>) -> string;
+#[compiler.external(.Erlang("rakun_ssr:guard($0)"))]
+pub declare fn rkSsrGuard(render: fn() -> Task<string>) -> string;
 
 // A failed render's reason, to the log under a correlation digest; answers the
 // digest.
-#[@external(.Erlang("rakun_ssr:log_failure($0)"))]
+#[compiler.external(.Erlang("rakun_ssr:log_failure($0)"))]
 pub declare fn rkSsrLogFailure(reason: string) -> string;
 
 // The request a renderer is handed: the page pattern's parameters
 // (`name\tvalue` lines), and a query read that marks the render dynamic.
-#[@external(.Erlang("rakun_ssr:page_request($0, $1)"))]
+#[compiler.external(.Erlang("rakun_ssr:page_request($0, $1)"))]
 pub declare fn rkSsrPageRequest(req: Request, paramsWire: string) -> Request;
 
-#[@external(.Erlang("rakun_ssr:set_fallback($0)"))]
+#[compiler.external(.Erlang("rakun_ssr:set_fallback($0)"))]
 pub declare fn rkSsrSetFallback(
-    dispatch: fn(req: Request) -> @Task<Response>,
+    dispatch: fn(req: Request) -> Task<Response>,
 ) -> i32;
 
-#[@external(.Erlang("rakun_ssr:clear_fallback()"))]
+#[compiler.external(.Erlang("rakun_ssr:clear_fallback()"))]
 pub declare fn rkSsrClearFallback() -> i32;
 
 // The writer a dispatch hands its renderer: four doors onto `rakun_ssr.erl`.
@@ -176,7 +176,7 @@ fn missingRenderer() -> PageRenderer {
     return { req, out -> notFoundStatus(out) };
 }
 
-fn notFoundStatus(out: ChunkWriter) -> @Task<@Result<void, string>> {
+fn notFoundStatus(out: ChunkWriter) -> Task<Result<void, string>> {
     out.setStatus(404);
     return;
 }
@@ -190,8 +190,8 @@ fn renderOutcome(
     render: PageRenderer,
     req: Request,
     out: ChunkWriter,
-) -> @Task<string> {
-    val r: @Result<void, string> = await render(req, out);
+) -> Task<string> {
+    val r: Result<void, string> = await render(req, out);
     return case r {
         Ok(_) -> "";
         Error(msg) -> renderErrorProblem(msg);
@@ -207,7 +207,7 @@ pub fn notFoundProblem(pathname: string) -> string {
 // The dispatch: one function, the status written. The renderer runs inside one
 // request scope in phase `Render`; a renderer that raised before writing is a
 // 500; the response is closed once.
-pub fn servePage(req: Request, out: ChunkWriter) -> @Task<i32> {
+pub fn servePage(req: Request, out: ChunkWriter) -> Task<i32> {
     val found: PageMatch = matchPage(req.path);
     if (found.record == "") {
         out.setStatus(404);
@@ -252,7 +252,7 @@ fn failRender(out: ChunkWriter) -> i32 {
     return 0;
 }
 
-fn closeIfOpen(out: ChunkWriter) -> @Task<i32> {
+fn closeIfOpen(out: ChunkWriter) -> Task<i32> {
     if (rkSsrClosed()) return 0;
     await out.close();
     return 0;
@@ -269,7 +269,7 @@ pub fn stopServingPages() -> i32 {
     return rkSsrClearFallback();
 }
 
-pub fn pageResponse(req: Request) -> @Task<Response> {
+pub fn pageResponse(req: Request) -> Task<Response> {
     val _b = rkSsrBegin();
     val status: i32 = await servePage(req, chunkWriter());
     return Response(status: status, body: rkSsrBody());
@@ -284,7 +284,7 @@ pub fn pageResponse(req: Request) -> @Task<Response> {
 // std-a). A later duplicate name wins. The build id is front 03's content hash
 // the orchestrator stamps.
 
-pub fn queryDict(query: string) -> @Result<Dict<string, string>, string> {
+pub fn queryDict(query: string) -> Result<Dict<string, string>, string> {
     val pairs = try querystring.parse(query);
     var d = Dict.empty();
     for (pairs) { pair ->

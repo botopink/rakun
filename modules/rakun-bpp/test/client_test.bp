@@ -8,7 +8,7 @@
 // is reachable at the application site, which must therefore import
 // `client`"**: the `import { client, clientProps } from "client";` below is
 // what makes `#[client]` applicable here at all, and the meta read further
-// down (`(@typeInfo(X).meta(ClientMark)?.component ?? "")`) is recorded by that application.
+// down (`(compiler.typeInfo(X).meta(ClientMark)?.component ?? "")`) is recorded by that application.
 //
 // The front's assigned target is **commonJS**, and every assertion below also
 // RUNS on the erlang row — not one is type-checked-only. That is the front's
@@ -27,7 +27,7 @@
 //
 //      #[client] on a `type`
 //        error: #[client] must annotate a function
-//      #[client] on `fn Srv() -> @Task<Element>`
+//      #[client] on `fn Srv() -> Task<Element>`
 //        error: #[client] must annotate a component returning Element
 //      #[clientProps] on an enum-shaped `type`
 //        error: #[clientProps] must annotate a record, not an enum
@@ -73,11 +73,12 @@ import {element.Element, element.div, element.h1, element.p, element.ul, element
 import {elements.button, elements.h2, elements.section};
 import {hooks.state};
 import {element.ElementBase};
+import {compiler} from "std";
 
 // ── step 1: `#[client]` — the marker, and the proof its meta was recorded ──
 //
 // A real client component: `#[client]` for the boundary, the
-// `@Component<Element>` return for the effect (decisions 118/128 — the
+// `Component<Element>` return for the effect (decisions 118/128 — the
 // return is the activation, and `#[client]` is a decorator rather than an effect,
 // so the two coexist). `use state` means
 // nothing on the server; the body renders its first-render value, which is all
@@ -90,7 +91,7 @@ pub type LikeProps(
 )
 
 #[client]
-pub fn LikeButton(props: LikeProps) -> @Component<Element> {
+pub fn LikeButton(props: LikeProps) -> Component<Element> {
     val c = use state(props.likes);
     return button(
         [
@@ -113,7 +114,7 @@ pub type ThemeProps(theme: string)
 pub fn ThemeProvider(
     props: ThemeProps,
     children: Children,
-) -> @Component<Element> {
+) -> Component<Element> {
     val current = use state(props.theme);
     return div(children, attrs: [#("class", "theme-" + current.value)]);
 }
@@ -126,14 +127,23 @@ pub fn StaticBadge(props: ThemeProps) -> Element {
 }
 
 test "client: the marker fires on a plain -> Element component too" {
-    assert (@typeInfo(StaticBadge).meta(ClientMark)?.component ?? "") == "StaticBadge";
+    assert (comptime compiler
+        .typeInfo(StaticBadge)
+        .meta(ClientMark)?.component ?? "")
+        == "StaticBadge";
     assert renderToString(StaticBadge(ThemeProps(theme: "dark")))
         == "<div class=\"badge\">dark</div>";
 }
 
 test "client: the marker records the component's name as comptime meta" {
-    assert (@typeInfo(LikeButton).meta(ClientMark)?.component ?? "") == "LikeButton";
-    assert (@typeInfo(ThemeProvider).meta(ClientMark)?.component ?? "") == "ThemeProvider";
+    assert (comptime compiler
+        .typeInfo(LikeButton)
+        .meta(ClientMark)?.component ?? "")
+        == "LikeButton";
+    assert (comptime compiler
+        .typeInfo(ThemeProvider)
+        .meta(ClientMark)?.component ?? "")
+        == "ThemeProvider";
 }
 
 test "client: the marker is a CONSTANT, not a call into a host registry" {
@@ -141,7 +151,9 @@ test "client: the marker is a CONSTANT, not a call into a host registry" {
     // called a Node-only cell would make every `#[client]` component fail to
     // link during the server render — the exact case the boundary exists to
     // support. Meta is a compile-time constant on every target.
-    val name = (@typeInfo(LikeButton).meta(ClientMark)?.component ?? "");
+    val name = (comptime compiler
+        .typeInfo(LikeButton)
+        .meta(ClientMark)?.component ?? "");
     assert name.length == 10;
 }
 
@@ -410,7 +422,7 @@ fn startNothing(raw: string, commit: fn(html: string) -> i32) -> i32 {
     return commit("<b>" + raw + "</b>");
 }
 
-fn loadNothing() -> @Task<i32> {
+fn loadNothing() -> Task<i32> {
     return 0;
 }
 

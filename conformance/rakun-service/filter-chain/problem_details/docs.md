@@ -5,7 +5,7 @@
 The reference text this cell shows (from [`../docs.md`](../docs.md), § Problem details):
 
 > The tag is a **string**, not a type name: botopink has no typed raise and
-> `try … catch` works over `@Result` alone. A raise nothing handles answers 500
+> `try … catch` works over `Result` alone. A raise nothing handles answers 500
 > with `about:blank` and a correlation digest; the reason goes to the log under
 > that digest and never into the body.
 

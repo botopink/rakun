@@ -104,7 +104,7 @@ says what the feature does and links the cells beside it.
 
 | Spring | rakun |
 |---|---|
-| `@Component` / `@Service` / `@Repository` | `#[component]` / `#[service]` / `#[repository]` |
+| `Component` / `@Service` / `@Repository` | `#[component]` / `#[service]` / `#[repository]` |
 | `@RestController` + `@RequestMapping("/api")` | `#[restController, route("/api")]` |
 | `@GetMapping("/x")` … | `#[getMapping("/x")]`, `#[postMapping]`, `#[putMapping]`, `#[patchMapping]`, `#[deleteMapping]` |
 | `@Autowired` (constructor) | a field of the `type` — injected by type |
@@ -136,7 +136,7 @@ form is the only one (decision 76). rakun has no library dependencies:
 the HTTP transport `Rakun.run` starts is its own `runtime.mjs` `serve`, over node's
 `http` module (commonJS only). The runtime `.mjs` files are shipped
 next to the emitted modules by the CLI (**G2**), so a consumer build resolves
-every `#[@external(.Node(…))]` require.
+every `#[compiler.external(.JavaScript(…))]` require.
 
 ## See also
 

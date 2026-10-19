@@ -64,8 +64,8 @@ says what the feature does and links the cells beside it.
   (comptime expansion to the builder pipeline). Author trees as `div([…])` or as
   `` html @`…` ``.
 - **Gated / declarative** (each a generic core gap, none rakun-bpp-specific):
-  - (closed) `use request()`: `request()` is `fn … -> @Component<RequestData>` (botopink decisions 104/128), activated inside a
-    `@Component<Element>` server component.
+  - (closed) `use request()`: `request()` is `fn … -> Component<RequestData>` (botopink decisions 104/128), activated inside a
+    `Component<Element>` server component.
     The server surface itself is no longer gated: `server.bp` is compiled with
     both host halves shipped (see *Server components*). `Link` and the form
     controls are no longer gated on an attribute slot either: `Element` carries
@@ -73,13 +73,13 @@ says what the feature does and links the cells beside it.
     `form`/`input`/`button`/`label`/`select`/`textarea`; `Link` is front 27's
     `src/link.bp`, compiled and pure — see *Client navigation*;
   - the **browser half** of client navigation. `link.bp` and `reconcile.bp`
-    ship the render-time half; the four `#[@external(.Node(…))]` cells
+    ship the render-time half; the four `#[compiler.external(.JavaScript(…))]` cells
     (`__jhLinkMount`, `__jhLinkPrefetch`, `__jhLinkStatus`,
     `__jhLinkRouteKind`), the `linkStatus()` hook and the transition driver
     `reconcile(current, target)` wait on front 68's generated bundle and front
     60's route-kind table, and are not stubbed;
   - the **build-time half** of the client boundary. `client.bp` ships the
-    markers, the island and the hole; the two `#[@external(.Node(…))]` cells
+    markers, the island and the hole; the two `#[compiler.external(.JavaScript(…))]` cells
     (`hydrate`, `islandProps`), the `propsFor(name)` wrapper over the second,
     and every "may not" rule — no `serverOnly` in the client graph, no request
     scope in a client module, a server component as a child and never a prop —
@@ -87,7 +87,7 @@ says what the feature does and links the cells beside it.
     and are not stubbed. **Today the boundary is a vocabulary with four
     comptime refusals, not a guarantee**: a secret read on the server still
     reaches the browser if it is written into an island's props;
-  - parallel loading. `@Task` is eager on the erlang row, so independent
+  - parallel loading. `Task` is eager on the erlang row, so independent
     loaders awaited in sequence cost the sum of their round trips; the
     spawn-and-gather over unstarted tasks is front 02's and rakun-bpp ships no
     second answer;

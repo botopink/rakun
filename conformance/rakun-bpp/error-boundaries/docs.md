@@ -3,15 +3,15 @@
 > Package: [`rakun-bpp`](../docs.md) · index: [`../../docs.md`](../../docs.md)
 
 Front 31. A boundary is a recovery point: its child is a **thunk** answering
-`@Result<Element, string>`, and the boundary is a `case` over what it answered.
+`Result<Element, string>`, and the boundary is a `case` over what it answered.
 
 ```text
 pub type ErrorInfo(message: string, digest: string)
 pub type ErrorBoundary(id: string, fallback: fn(info: ErrorInfo) -> Element,
-                       child: fn() -> @Result<Element, string>)
+                       child: fn() -> Result<Element, string>)
 
 pub fn renderBoundary(b: ErrorBoundary) -> Element                        // re-raises a signal
-pub fn renderBoundaryChecked(b: ErrorBoundary) -> @Result<Element, string> // Error(reason) for a signal
+pub fn renderBoundaryChecked(b: ErrorBoundary) -> Result<Element, string> // Error(reason) for a signal
 pub fn catchError(id, fallback, child) -> ErrorBoundary                   // the constructor, readably
 pub fn infoFor(message) -> ErrorInfo        // message "" + digest — what a fallback renders
 pub fn serverInfoFor(message) -> ErrorInfo  // message + the same digest — the logger's only
@@ -44,15 +44,15 @@ answered, and the stream fills each `Suspense` hole with the scope it was regist
 under (`Fill`). The root runs with `RenderScope.root()`.
 
 ```text
-pub fn renderComponent(c: @Component<Element>, scope: RenderScope) -> @Task<Walked>
-pub fn errorBoundaryNode(id: string, child: fn() -> @Component<Element>,
+pub fn renderComponent(c: Component<Element>, scope: RenderScope) -> Task<Walked>
+pub fn errorBoundaryNode(id: string, child: fn() -> Component<Element>,
                          fallback: fn(info: ErrorInfo) -> Element) -> Element
 ```
 
 **Signals are not errors.** `notFound()` and `redirect(url)` raise the `nav:`
 reasons of `contracts.md § 5b`, spelled by `routing`'s `navigation` (this file
 writes no `nav:` literal). A page, layout or template writes the call
-(`notFound();`) — a `@Component` body cannot `throw` — and a `@Result` thunk may
+(`notFound();`) — a `Component` body cannot `throw` — and a `Result` thunk may
 write `throw notFound();`; both raise. A boundary re-raises a signal instead of
 rendering a fallback; front 30's render turns it into a 404 / 307 before the
 first chunk and `data-jh-g` markup after it, and front 26's `clientApp` does the
@@ -64,7 +64,7 @@ same in the browser.
 | `not-found.bp` | `pub fn NotFound() -> Element` | a not-found signal reaches the segment | no |
 | `global-error.bp` | `pub fn GlobalError(info: ErrorInfo) -> Element` | the root segment fails, or no other boundary caught | **yes** — `htmlTag` and `body`, front 94's |
 
-`ErrorPage`, never `Error`: `Error(error: E)` is the `@Result` variant, and a
+`ErrorPage`, never `Error`: `Error(error: E)` is the `Result` variant, and a
 module-level `pub fn Error` would shadow it in every `case` arm of the file.
 
 The browser rules (fronts 29 and 68 implement them):
@@ -73,7 +73,7 @@ The browser rules (fronts 29 and 68 implement them):
    throws during render is replaced by the nearest one's fallback, from the
    same `ErrorInfo` shape.
 2. **Event-handler errors are not caught**: a handler is a `data-jh-on-click`
-   attribute, outside the `@Result` channel by construction.
+   attribute, outside the `Result` channel by construction.
 3. **`startTransition` errors are caught**: front 68's runtime routes the
    failure to the nearest `data-jh-e`, with a digest computed the same way.
 

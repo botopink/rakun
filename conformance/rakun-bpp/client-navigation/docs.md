@@ -105,14 +105,14 @@ and one hook are missing, all of them blocked on fronts that have not started:
 |---|---|
 | `__jhLinkMount()` — delegated click interception + an intersection observer over `[data-jh-l]` | front 68's generated client bundle (the module the cell binds to), which calls it once after hydrating the islands |
 | `__jhLinkPrefetch(href, mode)` — warms the client route cache | the same bundle |
-| `__jhLinkStatus() -> string` and `linkStatus() -> @Component<LinkStatus>` | the same bundle. The hook is then `return linkStatusOf(__jhLinkStatus());` |
+| `__jhLinkStatus() -> string` and `linkStatus() -> Component<LinkStatus>` | the same bundle. The hook is then `return linkStatusOf(__jhLinkStatus());` |
 | `__jhLinkRouteKind(href) -> string` | **front 60**'s route-kind table, emitted into that bundle |
 | `reconcile(current, target)` — the transition driver | front 68's DOM primitives (mount/unmount), plus front 60's flag for whether the target payload had to be fetched |
 
 Two measurements make stubbing them the wrong move rather than a shortcut:
 
 1. A **called** node-only cell reds the **erlang** build at its call site —
-   ``error: `__cellStatus` has no `#[@external(.<Target>(…))]` for the erlang
+   ``error: `__cellStatus` has no `#[compiler.external(.<Target>(…))]` for the erlang
    backend`` — and this module is compiled on both rows of the core member, so
    a `linkStatus()` wrapper would take every landed assertion off the erlang
    row. It is the mirror of the erlang-only → commonJS measurement `router.bp`

@@ -13,7 +13,7 @@ import {streaming.Chunk, streaming.resolve, streaming.fillHtml, render.shellHtml
 import {link.reconcile.layoutKeys, link.reconcile.sharedDepth};
 import {envelope.ActionEnvelope, envelope.writeEnvelope} from "actions";
 import {navigation.NavKind, navigation.NavOutcome, navigation.signalToWire} from "routing";
-import {encoding} from "std";
+import {encoding, compiler} from "std";
 import {} from "snap";
 
 // ── fixtures ────────────────────────────────────────────────────────────────
@@ -42,7 +42,7 @@ pub fn loadingFallback() -> Element {
     return p([text("Loading…")]);
 }
 
-fn pageOver(shell: Element, child: fn() -> @Component<Element>) -> @Component<Element> {
+fn pageOver(shell: Element, child: fn() -> Component<Element>) -> Component<Element> {
     val hole = Suspense(Boundary(id: holeId(1), fallback: loadingFallback(), child: child));
     val kids = shell.children.append([hole]);
     return Element(tag: shell.tag, value: shell.value, children: kids, attrs: shell.attrs);
@@ -51,7 +51,7 @@ fn pageOver(shell: Element, child: fn() -> @Component<Element>) -> @Component<El
 // A `PageInput` for `path` with no layout: the page is `shell` with one
 // boundary (`h1`, `loadingFallback()`) over `child` appended to its children;
 // build id `build-0001`, the table the one page.
-pub fn fixturePageOver(path: string, shell: Element, child: fn() -> @Component<Element>) -> PageInput {
+pub fn fixturePageOver(path: string, shell: Element, child: fn() -> Component<Element>) -> PageInput {
     return PageInput(
         build: "build-0001",
         pathname: path,
@@ -81,7 +81,7 @@ pub fn stubEnvelope(ok: bool, state: string, redirect: string) -> string {
 
 // The shell, then one fill per boundary in DECLARATION order — a harness has
 // no scheduler; front 30's completion order is its own test.
-pub fn renderToStream(shell: Element, boundaries: Array<Boundary>) -> @Task<Array<string>> {
+pub fn renderToStream(shell: Element, boundaries: Array<Boundary>) -> Task<Array<string>> {
     var chunks: Array<string> = [shellHtml(shell)];
     for (boundaries) { b ->
         val c = await resolve(b);
@@ -106,56 +106,56 @@ pub fn simulateNavigation(current: RouterState, target: RouterState) -> Navigati
 // The recording is test-process state (`put`/`get` on erlang, a `globalThis`
 // entry on node): the render writes from its own process, which is the test's.
 
-#[@external(
-    .Node("""(globalThis.jhonstartTestRecording = { status: 0, headers: [], chunks: [], closed: 0 }, 0)"""),
+#[compiler.external(
+    .JavaScript("""(globalThis.jhonstartTestRecording = { status: 0, headers: [], chunks: [], closed: 0 }, 0)"""),
     .Erlang("""(fun() -> put(jhonstart_test_recording, {0, [], [], 0}), 0 end)()"""),
 )]
 declare fn recordingReset() -> i32;
 
-#[@external(
-    .Node("""(globalThis.jhonstartTestRecording.status = $0, 0)"""),
+#[compiler.external(
+    .JavaScript("""(globalThis.jhonstartTestRecording.status = $0, 0)"""),
     .Erlang("""(fun(__C) -> {_, __H, __W, __X} = get(jhonstart_test_recording), put(jhonstart_test_recording, {__C, __H, __W, __X}), 0 end)($0)"""),
 )]
 declare fn recordStatus(code: i32) -> i32;
 
-#[@external(
-    .Node("""(globalThis.jhonstartTestRecording.headers.push($0 + ": " + $1), 0)"""),
+#[compiler.external(
+    .JavaScript("""(globalThis.jhonstartTestRecording.headers.push($0 + ": " + $1), 0)"""),
     .Erlang("""(fun(__N, __V) -> {__S, __H, __W, __X} = get(jhonstart_test_recording), put(jhonstart_test_recording, {__S, __H ++ [<<__N/binary, ": ", __V/binary>>], __W, __X}), 0 end)($0, $1)"""),
 )]
 declare fn recordHeader(name: string, value: string) -> i32;
 
-#[@external(
-    .Node("""(globalThis.jhonstartTestRecording.chunks.push($0), 0)"""),
+#[compiler.external(
+    .JavaScript("""(globalThis.jhonstartTestRecording.chunks.push($0), 0)"""),
     .Erlang("""(fun(__C) -> {__S, __H, __W, __X} = get(jhonstart_test_recording), put(jhonstart_test_recording, {__S, __H, __W ++ [__C], __X}), 0 end)($0)"""),
 )]
 declare fn recordChunk(chunk: string) -> i32;
 
-#[@external(
-    .Node("""(globalThis.jhonstartTestRecording.closed += 1, 0)"""),
+#[compiler.external(
+    .JavaScript("""(globalThis.jhonstartTestRecording.closed += 1, 0)"""),
     .Erlang("""(fun() -> {__S, __H, __W, __X} = get(jhonstart_test_recording), put(jhonstart_test_recording, {__S, __H, __W, __X + 1}), 0 end)()"""),
 )]
 declare fn recordClose() -> i32;
 
-#[@external(
-    .Node("""globalThis.jhonstartTestRecording.status"""),
+#[compiler.external(
+    .JavaScript("""globalThis.jhonstartTestRecording.status"""),
     .Erlang("""(fun() -> element(1, get(jhonstart_test_recording)) end)()"""),
 )]
 declare fn recordedStatus() -> i32;
 
-#[@external(
-    .Node("""globalThis.jhonstartTestRecording.headers"""),
+#[compiler.external(
+    .JavaScript("""globalThis.jhonstartTestRecording.headers"""),
     .Erlang("""(fun() -> element(2, get(jhonstart_test_recording)) end)()"""),
 )]
 declare fn recordedHeaders() -> Array<string>;
 
-#[@external(
-    .Node("""globalThis.jhonstartTestRecording.chunks"""),
+#[compiler.external(
+    .JavaScript("""globalThis.jhonstartTestRecording.chunks"""),
     .Erlang("""(fun() -> element(3, get(jhonstart_test_recording)) end)()"""),
 )]
 declare fn recordedChunks() -> Array<string>;
 
-#[@external(
-    .Node("""globalThis.jhonstartTestRecording.closed"""),
+#[compiler.external(
+    .JavaScript("""globalThis.jhonstartTestRecording.closed"""),
     .Erlang("""(fun() -> element(4, get(jhonstart_test_recording)) end)()"""),
 )]
 declare fn recordedCloses() -> i32;
@@ -168,11 +168,11 @@ fn onHeader(name: string, value: string) -> void {
     recordHeader(name, value);
 }
 
-fn onWrite(chunk: string) -> @Task<void> {
+fn onWrite(chunk: string) -> Task<void> {
     recordChunk(chunk);
 }
 
-fn onClose() -> @Task<void> {
+fn onClose() -> Task<void> {
     recordClose();
 }
 
@@ -201,12 +201,12 @@ pub fn recorded() -> RecordedResponse {
 // `render` (`streaming == false`) or `renderStream` over a recording
 // `Response`; the render's own outcome is dropped — a failure shows in the
 // recording (no status, no chunk, one close).
-fn renderOver(a: App, input: PageInput, req: RequestData, res: Response, streaming: bool) -> @Task<@Result<void, string>> {
+fn renderOver(a: App, input: PageInput, req: RequestData, res: Response, streaming: bool) -> Task<Result<void, string>> {
     if (streaming) return a.renderStream(input, req, res);
     return a.render(input, req, res);
 }
 
-pub fn renderRecorded(a: App, input: PageInput, req: RequestData, streaming: bool) -> @Task<RecordedResponse> {
+pub fn renderRecorded(a: App, input: PageInput, req: RequestData, streaming: bool) -> Task<RecordedResponse> {
     val res = recordingResponse();
     val outcome = await renderOver(a, input, req, res, streaming);
     return recorded();
@@ -214,7 +214,7 @@ pub fn renderRecorded(a: App, input: PageInput, req: RequestData, streaming: boo
 
 // `renderStream` over a recording `Response`: the chunks in the order `write`
 // received them.
-pub fn renderStreamCollect(a: App, input: PageInput, req: RequestData) -> @Task<Array<string>> {
+pub fn renderStreamCollect(a: App, input: PageInput, req: RequestData) -> Task<Array<string>> {
     val r = await renderRecorded(a, input, req, true);
     return r.chunks;
 }

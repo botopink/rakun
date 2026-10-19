@@ -32,7 +32,7 @@ No field is optional: an absent string is `""`, an absent list `[]`, and a
 | Segment export | Kind | Front 30 does |
 |---|---|---|
 | `metadata()` | static — a zero-argument `pub fn`, not a `pub val` | calls it, merges onto the parent's |
-| `generateMetadata(params, parent)` | `-> @Task<Metadata>` | awaits it, merges onto the parent's |
+| `generateMetadata(params, parent)` | `-> Task<Metadata>` | awaits it, merges onto the parent's |
 | both present | error | fails the build with a located message |
 | `viewport()` / `generateViewport(params)` | as above | merged independently of `Metadata` |
 

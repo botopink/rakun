@@ -5,36 +5,36 @@
 //// process to have done something waits for that event (`waitUntil`, bounded,
 //// failing loudly), never for a wall-clock pause.
 
-import {async} from "std";
+import {async, compiler, failure.panic} from "std";
 import {rkSetProp} from "rakun";
 import {startDataSource, param, Rows, sqlTemplate} from "rakun-data";
 import {jobstore.store.Trigger, jobstore.store.MisfirePolicy, jobstore.store.installJobStore, jobstore.store.registerTrigger, jobstore.store.registerJobHandler, jobstore.store.jobStatusOn, jobstore.store.setJobClock, jobstore.store.advanceJobClock, jobstore.store.clearJobClock, jobstore.store.instantOf, jobstore.store.jobClock};
 import {cron.rkI64};
 import {jobstore.scheduler.tickOn, jobstore.scheduler.historyOf, jobstore.scheduler.executionsOf, jobstore.scheduler.pruneHistory, jobstore.scheduler.killAfterAcquire, jobstore.scheduler.jitterMs, jobstore.scheduler.jobLog, jobstore.scheduler.startJobScheduler, jobstore.scheduler.stopJobScheduler};
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__N) -> persistent_term:put({rakun_jt_count, __N}, persistent_term:get({rakun_jt_count, __N}, 0) + 1), persistent_term:get({rakun_jt_count, __N}) end)($0)"""),
 )]
 declare fn bump(name: string) -> i32;
 
-#[@external(.Erlang("""(fun(__N) -> persistent_term:get({rakun_jt_count, __N}, 0) end)($0)"""))]
+#[compiler.external(.Erlang("""(fun(__N) -> persistent_term:get({rakun_jt_count, __N}, 0) end)($0)"""))]
 declare fn counted(name: string) -> i32;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__F) -> __Me = self(), {__Pid, __Mon} = spawn_monitor(fun() -> __F() end), receive {'DOWN', __Mon, process, __Pid, __R} -> case __R of killed -> <<"killed">>; normal -> <<"normal">>; _ -> <<"crashed">> end after 5000 -> <<"timeout">> end end)($0)"""),
 )]
 declare fn inProcess(work: fn() -> i32) -> string;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__N) -> persistent_term:put({rakun_jt_flag, __N}, true), 0 end)($0)"""),
 )]
 declare fn raiseFlag(name: string) -> i32;
 
-#[@external(.Erlang("""(fun(__N) -> persistent_term:get({rakun_jt_flag, __N}, false) end)($0)"""))]
+#[compiler.external(.Erlang("""(fun(__N) -> persistent_term:get({rakun_jt_flag, __N}, false) end)($0)"""))]
 declare fn flagged(name: string) -> bool;
 // Polls `probe` every 5 ms of wall time until it holds (true) or `ms` passed
 // (false) — the bounded wait on an event another process produces.
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__Ms, __P) -> __D = erlang:monotonic_time(millisecond) + __Ms, __W = fun __L() -> case __P() of true -> true; false -> case erlang:monotonic_time(millisecond) >= __D of true -> false; false -> timer:sleep(5), __L() end end end, __W() end)($0, $1)"""),
 )]
 declare fn waitUntil(ms: i32, probe: fn() -> bool) -> bool;
@@ -169,7 +169,7 @@ test "jobstore: a handler that outlives its lease renews it and is not taken ove
     val _h = registerJobHandler("jc3", "", { data ->
         val _r = raiseFlag("jc3-running");
         if (waitUntil(10000, { -> flagged("jc3-release") }) == false)
-            @panic("jc3: the other node never released the handler");
+            panic("jc3: the other node never released the handler");
         "slow"
     });
     val _t = registerTrigger(trig("jc3", "jc3", MisfirePolicy.FireNow, 0), "");
@@ -356,7 +356,7 @@ test "jobstore: a raising handler is retried to its ceiling, then failed with th
     val ds = fresh("jr1");
     val _h = registerJobHandler("jr1", "", { data ->
         val n = bump("jr1");
-        if (n <= 3) @panic("ledger locked");
+        if (n <= 3) panic("ledger locked");
         "ok"
     });
     val _t = registerTrigger(trig("jr1", "jr1", MisfirePolicy.FireNow, 2), "");
@@ -378,7 +378,7 @@ test "jobstore: retries stop when the next window is due - no retry storm" {
     val ds = fresh("jr2");
     val _h = registerJobHandler("jr2", "", { data ->
         val _a = advanceJobClock(12 * 3600000);
-        if (true) @panic("slow failure");
+        if (true) panic("slow failure");
         "never"
     });
     val _t = registerTrigger(trig("jr2", "jr2", MisfirePolicy.FireNow, 5), "");

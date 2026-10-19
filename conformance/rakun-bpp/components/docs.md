@@ -38,23 +38,23 @@ Nothing about rakun-bpp is embedded; the compiler core never names it.
 
 ## Component model
 
-A **component** that activates hooks is a `fn(...) -> @Component<Element>`
+A **component** that activates hooks is a `fn(...) -> Component<Element>`
 (one that activates none is an ordinary `fn … -> Element`). A **hook** is a
 function named by its **noun** — `state`, `effect`, `memo`, `ref`,
 `reducer`, `router`; never a `use` prefix in the name — returning
-`@Component<_>`. There is no annotation: **the return type is the
+`Component<_>`. There is no annotation: **the return type is the
 effect** (decisions 118 and 128 of botopink 1.0.10-beta). `Element` carries the
-tree: `implement @Renderable`. The keyword `use` is the activation:
+tree: `implement Renderable`. The keyword `use` is the activation:
 `val c = use state(0)` is legal only in a body whose return is
-`@Component<_>` — a component or a custom hook — and every
+`Component<_>` — a component or a custom hook — and every
 `use` sits in the body's **static prefix** — before any `if`, `case`, `loop` or
 `return`, at any nesting. A body with any other return that activates a hook is
 `use-without-context-effect`. All of this is the language's context-inference
-(decisions 88, 104, 118, 128 of 1.0.10-beta), not rakun-bpp. `@Component`
-extends `@Task`, so a component or hook may also `await`; it may `throw` / `try`
-only when its `T` is a `@Result` — a component returns `Element`, so it handles
+(decisions 88, 104, 118, 128 of 1.0.10-beta), not rakun-bpp. `Component`
+extends `Task`, so a component or hook may also `await`; it may `throw` / `try`
+only when its `T` is a `Result` — a component returns `Element`, so it handles
 errors in its own body (`try … catch`, `case`; decision 121). On commonJS every
-`@Component` body is an `async function`: a component's caller `await`s it.
+`Component` body is an `async function`: a component's caller `await`s it.
 
 {counter_ssr/src/main.bp}
 
@@ -175,7 +175,7 @@ pure bodies. The substitution itself is the client bundler's step (front 68,
 counter/client.mjs` runs the built `Counter` that way and prints the re-renders
 after `set(3)` and `set(-2)`. `modules/rakun-bpp/src/client_runtime.bp` carries
 the one bp-typed cell, `clientRender`, whose
-`#[@external(.Node(\"require('./client_runtime.mjs').render(…)\"))]`
+`#[compiler.external(.JavaScript(\"require('./client_runtime.mjs').render(…)\"))]`
 is what makes the CLI ship the sidecar (a miss is silent — see `AGENTS.md`
 § Known defect); the five nouns are not re-declared in
 bp, because a package's import surface is flat and a second `state` would

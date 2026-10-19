@@ -4,11 +4,11 @@
 > React/Next-style UI framework written in botopink — on the language's own
 > primitives. No compiler-core support; reached via `from "rakun-bpp"`.
 
-Components are functions returning `@Component<Element>`; hooks are nouns
-(`state`, `memo`, `router` — no `use` prefix) returning the `@Component<_>`
+Components are functions returning `Component<Element>`; hooks are nouns
+(`state`, `memo`, `router` — no `use` prefix) returning the `Component<_>`
 capability, activated by the `use` keyword; a server component that only loads data
-is `fn … -> @Task<Element>` — the return type is the effect, there is no annotation
-(botopink decisions 118–128). A component returns `Element`, not a `@Result`, so it
+is `fn … -> Task<Element>` — the return type is the effect, there is no annotation
+(botopink decisions 118–128). A component returns `Element`, not a `Result`, so it
 handles a failed load in its own body (`try await load() catch …`, `case`);
 the JSX-like `html """…"""` DSL reuses `expr-templates` (`@Expr<Element>`),
 expanding markup to the builder pipeline at comptime.
@@ -45,15 +45,15 @@ each depending on its members with `{ "<member>": { "workspace": true } }`. `bot
 ```bp
 import {ElementBase, div, p, text, state, renderToString} from "rakun-bpp";
 
-fn Counter() -> @Component<Element> {
+fn Counter() -> Component<Element> {
     val c = use state(0);
     return div([
         p([text("count: " + c.value.toString(), [])], []),
     ], []);
 }
 
-fn main() -> @Task<void> {
-    @print(renderToString(await Counter()));
+fn main() -> Task<void> {
+    print(renderToString(await Counter()));
 }
 ```
 

@@ -2,7 +2,7 @@
 // navigation signals a page raises (front 31 of 1.0.10-beta).
 //
 // A render used to have one failure mode: the whole thing. A boundary is the
-// recovery point — its child is a THUNK returning `@Result<Element, string>`,
+// recovery point — its child is a THUNK returning `Result<Element, string>`,
 // and the boundary is a `case` over what the thunk answered. A value passed in
 // has already run, and a boundary handed a value cannot catch anything that
 // happened while producing it.
@@ -27,13 +27,13 @@
 // with `routing`'s `isSignalReason` and RE-RAISES a signal rather than
 // rendering a fallback for it: a redirect is not "something went wrong".
 //
-// A page, layout or template is a `-> @Component<Element>` body
+// A page, layout or template is a `-> Component<Element>` body
 // and cannot `throw` (decision 121), so the signal is the CALL:
-// `notFound();` raises the reason (an abort, `@panic(reason)`) and never
-// returns. Inside a `-> @Result<…>` thunk `throw notFound();` reads naturally
+// `notFound();` raises the reason (an abort, `panic(reason)`) and never
+// returns. Inside a `-> Result<…>` thunk `throw notFound();` reads naturally
 // and raises the same way. Both forms reach the boundary through `__jhCapture`, the one host
 // cell that turns a raise into an `Error(reason)` value — botopink's own
-// `try … catch` unwraps a `@Result` and nothing else, so no `.bp` construct
+// `try … catch` unwraps a `Result` and nothing else, so no `.bp` construct
 // can swallow a signal (`contracts.md § 5b`).
 //
 // Front 30's render is what translates a signal that leaves every boundary:
@@ -45,7 +45,7 @@
 //      that throws during render is replaced by the nearest one's fallback,
 //      from the same `ErrorInfo` shape (front 29's hydrate, front 68's runtime).
 //   2. Event-handler errors are NOT caught: a handler is a `data-jh-on-click`
-//      attribute naming a handler, outside the boundary's `@Result` channel by
+//      attribute naming a handler, outside the boundary's `Result` channel by
 //      construction.
 //   3. `startTransition` errors ARE caught: front 68's runtime routes a
 //      transition failure to the nearest `data-jh-e`, with a digest computed
@@ -61,7 +61,7 @@
 // `refresh()`.
 
 import {element.Element};
-import {hash} from "std";
+import {hash, compiler, failure.panic} from "std";
 import {navigation.NavKind, navigation.NavOutcome, navigation.signalReason, navigation.isSignalReason} from "routing";
 
 pub type ErrorInfo(message: string, digest: string)
@@ -69,7 +69,7 @@ pub type ErrorInfo(message: string, digest: string)
 pub type ErrorBoundary(
     id: string,
     fallback: fn(info: ErrorInfo) -> Element,
-    child: fn() -> @Result<Element, string>,
+    child: fn() -> Result<Element, string>,
 )
 
 // ── step 1: the digest and the two infos ────────────────────────────────────
@@ -113,23 +113,23 @@ pub fn resetAttr(id: string) -> #(string, string) {
 // reason becomes `Error(reason)`, and any other raise becomes `Error` of its
 // message — so a component that crashed is caught like one that returned
 // `Error`.
-#[@external(.Node("require('./signal_runtime.mjs').capture($0)"), .Erlang("jhonstart_signal:capture($0)"))]
+#[compiler.external(.JavaScript("require('./signal_runtime.mjs').capture($0)"), .Erlang("jhonstart_signal:capture($0)"))]
 declare fn __jhCapture(
-    child: fn() -> @Result<Element, string>,
-) -> @Result<Element, string>;
+    child: fn() -> Result<Element, string>,
+) -> Result<Element, string>;
 
 // Raise a reason; never returns. Typed `-> string` so that `throw
-// notFound();` type-checks inside a `@Result` thunk. An abort whose message is
+// notFound();` type-checks inside a `Result` thunk. An abort whose message is
 // the reason: `__jhCapture` and std's `failure.attempt` read it back as that
 // text on every target.
 fn raiseReason(reason: string) -> string {
-    @panic(reason);
+    panic(reason);
 }
 
 // The child's outcome, through the capture cell. The function-valued field is
 // read into a local before it is handed on (the erlang row lowers `b.child()`
 // to a method call).
-pub fn outcomeOf(b: ErrorBoundary) -> @Result<Element, string> {
+pub fn outcomeOf(b: ErrorBoundary) -> Result<Element, string> {
     val child = b.child;
     return __jhCapture(child);
 }
@@ -192,7 +192,7 @@ pub fn redirect(url: string) -> string {
 // What front 30's `compose` calls around every segment: `Ok` of the wrapped
 // child, `Ok` of the wrapped fallback for an ordinary failure, and `Error` of
 // the reason, unchanged, for a signal — a boundary never swallows one.
-pub fn renderBoundaryChecked(b: ErrorBoundary) -> @Result<Element, string> {
+pub fn renderBoundaryChecked(b: ErrorBoundary) -> Result<Element, string> {
     val outcome = outcomeOf(b);
     val failure = case outcome {
         Ok(tree) -> "";
@@ -214,7 +214,7 @@ pub fn renderBoundaryChecked(b: ErrorBoundary) -> @Result<Element, string> {
 pub fn catchError(
     id: string,
     fallback: fn(info: ErrorInfo) -> Element,
-    child: fn() -> @Result<Element, string>,
+    child: fn() -> Result<Element, string>,
 ) -> ErrorBoundary {
     return ErrorBoundary(id: id, fallback: fallback, child: child);
 }

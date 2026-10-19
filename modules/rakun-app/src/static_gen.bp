@@ -39,7 +39,7 @@
 //// parameters, or a target outside `<out>` fails the export. No flag
 //// downgrades any of that.
 
-import {hash, path, io.fs, json.object, json.quote, json.decode, json.Json} from "std";
+import {hash, path, io.fs, json.object, json.quote, json.decode, json.Json, failure.panic, compiler} from "std";
 import {route_kinds.RouteKind, route_kinds.writeKinds, table.RouteEntry, table.parseTable, segment.fillPattern} from "routing";
 import {Request, rkProp, rkMakeRequest, toI32, beginRequest, endRequest, RequestScope, RequestPhase, isDynamic, dynamicReason, requestLive, draftBypass} from "rakun";
 import {file_router.rkAppTable, file_router.rkAppRender};
@@ -105,20 +105,19 @@ pub fn duplicateParamsProblem(pattern: string) -> string {
 
 pub fn registerStaticParams(
     seg: string,
-    produce: fn() -> @Task<StaticParams[]>,
+    produce: fn() -> Task<StaticParams[]>,
 ) -> i32 {
     val pattern = normalizePattern(seg);
-    if (patternInTable(pattern) == false)
-        @panic(unknownPatternProblem(pattern));
+    if (patternInTable(pattern) == false) panic(unknownPatternProblem(pattern));
     if (rkStaticParamsPut(pattern, produce) == 0)
-        @panic(duplicateParamsProblem(pattern));
+        panic(duplicateParamsProblem(pattern));
     return 1;
 }
 
-// `@Task` is eager on the BEAM: applying the producer IS running it.
-#[@external(.Erlang("""(fun(__F) -> __F() end)($0)"""))]
+// `Task` is eager on the BEAM: applying the producer IS running it.
+#[compiler.external(.Erlang("""(fun(__F) -> __F() end)($0)"""))]
 declare fn rkStaticProduce(
-    produce: fn() -> @Task<StaticParams[]>,
+    produce: fn() -> Task<StaticParams[]>,
 ) -> StaticParams[];
 
 pub fn isDynamicPattern(pattern: string) -> bool {
@@ -135,10 +134,10 @@ pub fn expandParams(pattern: string, rows: StaticParams[]) -> string[] {
             row.bindings.map({ b -> #(b.name, b.value) }),
         ) {
             Ok(filled) -> filled;
-            Error(reason) -> @panic(reason);
+            Error(reason) -> panic(reason);
         };
         if (out.filter({ q -> q == p }).length > 0)
-            @panic(
+            panic(
                 "rakun static: two generateStaticParams rows for `"
                     + pattern
                     + "` produce `"
@@ -216,7 +215,7 @@ fn texts(j: Json) -> Array<string> {
     };
 }
 
-#[@external(.Erlang("""(fun(__S) -> try binary_to_integer(__S) catch _:_ -> -1 end end)($0)"""))]
+#[compiler.external(.Erlang("""(fun(__S) -> try binary_to_integer(__S) catch _:_ -> -1 end end)($0)"""))]
 declare fn rkStaticI64(text: string) -> i64;
 
 pub fn decodeEntry(s: string) -> ?PrerenderEntry {
@@ -238,7 +237,7 @@ pub fn decodeEntry(s: string) -> ?PrerenderEntry {
     );
 }
 
-fn writeNothing(out: ChunkWriter) -> @Task<@Result<void, string>> {
+fn writeNothing(out: ChunkWriter) -> Task<Result<void, string>> {
     await writeTo(out, "");
     return;
 }
@@ -248,8 +247,8 @@ fn outcomeOf(
     render: PageRenderer,
     req: Request,
     out: ChunkWriter,
-) -> @Task<string> {
-    val r: @Result<void, string> = await render(req, out);
+) -> Task<string> {
+    val r: Result<void, string> = await render(req, out);
     return case r {
         Ok(_) -> "";
         Error(msg) -> msg;
@@ -267,7 +266,7 @@ pub type Rendered(status: i32, touched: bool, reason: string, failure: string, b
 pub fn renderOnce(path: string, strict: bool) -> Rendered {
     val found: PageMatch = matchPage(path);
     if (found.record == "")
-        @panic("rakun static: no page answers `" + path + "`");
+        panic("rakun static: no page answers `" + path + "`");
     val render: PageRenderer = rkAppRender(found.record, noRenderer());
     val _f = beginRequest(
         RequestScope(
@@ -301,7 +300,7 @@ pub fn renderOnce(path: string, strict: bool) -> Rendered {
 }
 
 // Runs `work` with the connection's socket hidden from the chunk writer.
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__W) -> __S = erase(rakun_conn_socket), try __W() after case __S of undefined -> ok; _ -> put(rakun_conn_socket, __S) end end end)($0)"""),
 )]
 declare fn rkStaticHidden<T>(work: fn() -> T) -> T;
@@ -323,7 +322,7 @@ fn patternOfPath(path: string) -> string {
 pub fn prerenderPath(path: string, strict: bool) -> PrerenderEntry {
     val r: Rendered = renderOnce(path, strict);
     if (r.failure != "")
-        @panic(
+        panic(
             "rakun static: prerendering `" + path + "` raised: " + r.failure,
         );
     val config: SegmentConfig = configFor(patternOfPath(path));
@@ -375,7 +374,7 @@ fn candidatesOf(pattern: string) -> Array<Candidate> {
                 patternDynamic: false,
             ),
         ];
-    val produce: ?fn() -> @Task<StaticParams[]> = rkStaticParamsGet(pattern);
+    val produce: ?fn() -> Task<StaticParams[]> = rkStaticParamsGet(pattern);
     if (produce == null) return [];
     val rows: StaticParams[] = rkStaticProduce(produce);
     return expandParams(pattern, rows).map(
@@ -383,7 +382,7 @@ fn candidatesOf(pattern: string) -> Array<Candidate> {
     );
 }
 
-fn noRows() -> @Task<StaticParams[]> {
+fn noRows() -> Task<StaticParams[]> {
     val none: StaticParams[] = [];
     return none;
 }
@@ -539,7 +538,7 @@ pub fn payloadFileName() -> string {
 
 fn writeInside(outDir: string, file: string, contents: string) -> i32 {
     if (path.isInside(outDir, file) == false)
-        @panic(
+        panic(
             "rakun static: the export refuses to write `"
                 + file
                 + "` outside `"
@@ -548,7 +547,7 @@ fn writeInside(outDir: string, file: string, contents: string) -> i32 {
         );
     val _d = rkStaticEnsureDir(file);
     val w = fs.writeText(file, contents);
-    if (w.isError()) @panic("rakun static: cannot write `" + file + "`");
+    if (w.isError()) panic("rakun static: cannot write `" + file + "`");
     return 1;
 }
 
@@ -556,7 +555,7 @@ pub fn staticExport(outDir: string) -> PrerenderReport {
     val entries: RouteEntry[] = parseTable(rkAppTable());
     for (entries) { e ->
         if (e.kind == "R")
-            @panic(
+            panic(
                 "rakun static: `"
                     + e.pattern
                     + "` is a route handler (route.bp) - an endpoint cannot be exported as a file",
@@ -566,7 +565,7 @@ pub fn staticExport(outDir: string) -> PrerenderReport {
     var stored = 0;
     for (pagePatterns()) { pattern ->
         if (isDynamicPattern(pattern) && rkStaticParamsGet(pattern) == null)
-            @panic(
+            panic(
                 "rakun static: `"
                     + pattern
                     + "` is dynamic and has no generateStaticParams - the export cannot enumerate its paths",
@@ -574,7 +573,7 @@ pub fn staticExport(outDir: string) -> PrerenderReport {
         for (candidatesOf(pattern)) { c ->
             val r: Rendered = renderOnce(c.path, true);
             if (r.failure != "")
-                @panic(
+                panic(
                     "rakun static: the export of `"
                         + c.path
                         + "` failed: "

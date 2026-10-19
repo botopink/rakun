@@ -1,8 +1,8 @@
 //// rakun-service — RFC 9457 problem details, and what an "exception" is here.
 ////
 //// botopink has no exception hierarchy. `throw` is legal only inside a
-//// function with a `@Result` in its return and produces an `Error(e)` VALUE, not a raise
-//// (`libs/std/src/builtins.d.bp:52-54`); `try … catch` works over `@Result`
+//// function with a `Result` in its return and produces an `Error(e)` VALUE, not a raise
+//// (`libs/std/src/builtins.d.bp:52-54`); `try … catch` works over `Result`
 //// and nothing else. So `#[exceptionHandler("NotFoundException")]` as the
 //// 1.0.6 draft wrote it has nothing to catch.
 ////
@@ -19,51 +19,51 @@
 //// environment asked for it.
 
 import {Response} from "rakun";
-import {json, io.fs} from "std";
+import {json, io.fs, compiler, failure.panic} from "std";
 import {negotiation.prefersHtml};
 import {rkProp} from "rakun";
 import {filter.WebRequest, filter.Chain, filter.withHeader};
 
 // ── the host cells ──────────────────────────────────────────────────────────
 
-#[@external(.Erlang("rakun_chain:raise_problem($0, $1)"))]
+#[compiler.external(.Erlang("rakun_chain:raise_problem($0, $1)"))]
 pub declare fn rkRaiseProblem(tag: string, detail: string) -> i32;
 
-#[@external(.Erlang("rakun_chain:run_guarded($0, $1)"))]
+#[compiler.external(.Erlang("rakun_chain:run_guarded($0, $1)"))]
 pub declare fn rkRunGuarded<T>(
     work: fn() -> T,
     onProblem: fn(tag: string, detail: string) -> T,
 ) -> T;
 
-#[@external(.Erlang("rakun_chain:advice_register($0, $1, $2)"))]
+#[compiler.external(.Erlang("rakun_chain:advice_register($0, $1, $2)"))]
 pub declare fn rkAdviceRegister<T>(
     tag: string,
     owner: string,
     handler: fn(detail: string) -> T,
 ) -> i32;
 
-#[@external(.Erlang("rakun_chain:advice_owner($0)"))]
+#[compiler.external(.Erlang("rakun_chain:advice_owner($0)"))]
 pub declare fn rkAdviceOwner(tag: string) -> string;
 
-#[@external(.Erlang("rakun_chain:advice_invoke($0, $1)"))]
+#[compiler.external(.Erlang("rakun_chain:advice_invoke($0, $1)"))]
 pub declare fn rkAdviceInvoke<T>(tag: string, detail: string) -> ?T;
 
-#[@external(.Erlang("rakun_chain:advice_tags()"))]
+#[compiler.external(.Erlang("rakun_chain:advice_tags()"))]
 pub declare fn rkAdviceTags() -> string;
 
-#[@external(.Erlang("rakun_chain:advice_reset()"))]
+#[compiler.external(.Erlang("rakun_chain:advice_reset()"))]
 pub declare fn rkAdviceReset() -> i32;
 
-#[@external(.Erlang("rakun_chain:problem_log()"))]
+#[compiler.external(.Erlang("rakun_chain:problem_log()"))]
 pub declare fn rkProblemLog() -> string;
 
-#[@external(.Erlang("rakun_chain:problem_log_reset()"))]
+#[compiler.external(.Erlang("rakun_chain:problem_log_reset()"))]
 pub declare fn rkProblemLogReset() -> i32;
 
-#[@external(.Erlang("rakun_chain:problem_digest($0)"))]
+#[compiler.external(.Erlang("rakun_chain:problem_digest($0)"))]
 pub declare fn rkProblemDigest(text: string) -> string;
 
-#[@external(.Erlang("rakun_chain:problem_note($0)"))]
+#[compiler.external(.Erlang("rakun_chain:problem_note($0)"))]
 pub declare fn rkProblemNote(line: string) -> i32;
 
 // ── the record ──────────────────────────────────────────────────────────────
@@ -156,7 +156,7 @@ pub fn problemResponse(p: ProblemDetail) -> Response {
 
 pub fn raiseProblem(tag: string, detail: string) -> i32 {
     if (tag == "")
-        @panic(
+        panic(
             "rakun-service: raiseProblem needs a tag - an untagged raise is what "
                 + "the error entry turns into a 500 with a digest, and asking for "
                 + "one deliberately would be asking for an unreadable response",
@@ -186,9 +186,9 @@ pub fn registerAdvice<T>(
     owner: string,
     handler: fn(detail: string) -> T,
 ) -> i32 {
-    if (tag == "") @panic("rakun-service: an #[exceptionHandler] needs a tag");
+    if (tag == "") panic("rakun-service: an #[exceptionHandler] needs a tag");
     val first: string = rkAdviceOwner(tag);
-    if (first != "") @panic(duplicateAdviceProblem(tag, first, owner));
+    if (first != "") panic(duplicateAdviceProblem(tag, first, owner));
     return rkAdviceRegister(tag, owner, handler);
 }
 

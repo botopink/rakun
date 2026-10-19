@@ -437,7 +437,7 @@ ten scaffolds and the three examples — declare `"targets": ["erlang"]`, and ea
 per-member whitelist `botopink-lib-test` reads). `botopink test` / `build` / `run` default
 to erlang here. The node host halves (`runtime.mjs`, `context.mjs`, `request_context.mjs`,
 `autoconfig.mjs`, `ssl_bundle.mjs`, `rakun-app`'s `file_router.mjs` / `ssr.mjs`, `rakun-service`'s
-`chain.mjs`) are deleted and no `#[@external(.Node(…))]` form remains in any member: every host
+`chain.mjs`) are deleted and no `#[@external(.JavaScript(…))]` form remains in any member: every host
 cell is one `@external(.Erlang(…))` form. What both a browser and the server run is not a rakun
 member — the matcher and the navigation vocabulary are the library `routing`, the action
 protocol `actions`, validation `validation` (decisions 115, 116). The sections below that
@@ -579,7 +579,7 @@ on the warm path.
 
 (Written while the core still ran on commonJS; since the erlang-only move an
 erlang-only cell CAN be asserted from a `.bp` test.) `runtime.mjs` was frozen for the milestone, so four pieces of the erlang host
-module have no `@external(.Node(…))` counterpart and therefore no `rk*` cell:
+module have no `@external(.JavaScript(…))` counterpart and therefore no `rk*` cell:
 `set_reply_header/2`, `reply_headers_json/0`, `boot/1` and `add_failure/3`.
 They are reached from erlang (by the acceptor, and by later fronts' sidecars),
 not from `.bp`. **A cell that is erlang-only cannot be asserted from a `.bp`
@@ -933,7 +933,7 @@ draft on the site.
 **Two deviations from the front's text, both from before front 01 landed.**
 The signature is `hash.hmacSha256` (hex, not base64url; was `crypto.hmacSha256`)
 and the token is `random.randomBytes(16)` from `io.random` (hex too; was
-`crypto.randomBytes`). Both carry an `@external(.Node(…))` and an
+`crypto.randomBytes`). Both carry an `@external(.JavaScript(…))` and an
 `@external(.Erlang(…))` form and answer identically on the two rows, which is the
 property that matters; the encoding is wider on the wire and nothing else. When
 front 01 lands, `draftSign` is the one function to change.
@@ -1407,7 +1407,7 @@ rather than waived:
 - **Every cell carries both forms.** `rkBeanStore`, `rkBeanTable`, `rkBeanCount`,
   `rkBeanHasRecord`, `rkBeanInvoke`, `rkBeanTouch`, `rkBeanReset`,
   `rkRequestScoped`, `rkRequestScopeEnd` and the five test-seam cells each
-  declare an `@external(.Node(\"require('./context.mjs').…\"))` and an
+  declare an `@external(.JavaScript(\"require('./context.mjs').…\"))` and an
   `@external(.Erlang("rakun_context:…"))`. Neither row has a call with no binding,
   so neither row reds.
 - **`runtime.mjs` is untouched.** The freeze is on a file, not on the idea of a
@@ -5017,7 +5017,7 @@ completed handshake.
   `bootstrap.bp`). Nothing is declaration-only (decision 575 (1)). `Request.param`/`query`/`header` return a plain `string` (`""` when
   absent), not `?string` — behavior-method optional returns don't yet get the
   `@Option` lowering, and a required path var / empty default is the cleaner contract.
-- **Host state behind `#[@external(.Node(…))]`.** The one mutable seam is `runtime.mjs`; the
+- **Host state behind `#[@external(.JavaScript(…))]`.** The one mutable seam is `runtime.mjs`; the
   core never sees it. Decorator bodies obey the comptime constraints (no sibling
   calls, `if`-expr, bare-`if` only last, block-lambdas) — see
   [`../botopink-lang/modules/compiler-core/src/comptime/AGENTS.md`](../botopink-lang/modules/compiler-core/src/comptime/AGENTS.md).

@@ -122,7 +122,7 @@ identical.
   - Both require an attribute slot on `Element` first (rakun-bpp spec
     follow-up) and the generic decorator-on-call-site machinery in the
     compiler.
-- **`stylesheet.bp` split** — the v0 build folds the `#[@external(.<Target>(…))]`
+- **`stylesheet.bp` split** — the v0 build folds the `#[compiler.external(.<Target>(…))]`
   surface into `emilia.bp`. The 3-module split (`tokens` /
   `stylesheet` / `emilia`) type-checks but `import { register }` from a
   sibling module resolves at type level only — the runtime symbol is

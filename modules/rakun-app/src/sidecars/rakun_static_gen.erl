@@ -7,7 +7,7 @@
 %%%     kind decided for each pattern at the last prerender;
 %%%   * the bounded FAN-OUT: `run_bounded(N, Thunks)` runs unstarted thunks in
 %%%     at most N processes at once and answers their results by index (an
-%%%     `@Task` is eager on the BEAM, so only an unstarted thunk can run
+%%%     `Task` is eager on the BEAM, so only an unstarted thunk can run
 %%%     concurrently);
 %%%   * the SINGLE FLIGHT of a regeneration: one process per stale path,
 %%%     claimed with `ets:insert_new/2`, so fifty concurrent requests start one;

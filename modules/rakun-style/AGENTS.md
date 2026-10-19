@@ -4,8 +4,8 @@
 
 The `rakun-style` package (decision 338; its `` styled @`…` `` template function keeps its name): the base for building CSS components. `` styled @`…` `` and
 `` styledProperty @`…` `` are template functions (over the template text, `syntax css: string`) that read a CSS rule body at build and answer a
-component in the language's model — `@Component<Styled>` (`StyledView`) and
-`@Component<StyledProperty>` (`StyledPropertyView`); the layered `Sheet` holds
+component in the language's model — `Component<Styled>` (`StyledView`) and
+`Component<StyledProperty>` (`StyledPropertyView`); the layered `Sheet` holds
 components in `@layer`s; the theme mechanism (`Theme`, `entry`, `clear`, `clearNs`, `clearAll`,
 `extendTheme`, `#[theme]`) is what `@variant md` and `--theme(…)` read. The middle of the three
 CSS layers: it imports `css` (the reader's character walk) and `std`, and knows no file kind, no
@@ -37,7 +37,7 @@ fn code() -> StyledView {
 "branch": "feat" } }`; this package declares `css` the same way. Inside the meta checkout a
 `git` entry resolves by name through the `repository/` root, elsewhere through the install store.
 
-No `#[@external(…)]` cell of its own: the run-time half calls std's `hash.contentHash`, the build-time
+No `#[compiler.external(…)]` cell of its own: the run-time half calls std's `hash.contentHash`, the build-time
 half is pure botopink run on the comptime runtime (decision 331).
 
 ## Tree

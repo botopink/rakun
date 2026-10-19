@@ -21,9 +21,9 @@
 // (decision 67 — a boundary that warns is a boundary that is ignored):
 //
 //   1. `#[client]` on anything but a `fn` — refused, located at the annotation.
-//   2. `#[client]` on a fn whose return type is neither `Element` nor `@Component<Element>` — refused. A
-//      server component that only loads data is `fn … -> @Task<Element>`,
-//      whose reflected `returnType` is `"@Task<Element>"`, so it cannot be
+//   2. `#[client]` on a fn whose return type is neither `Element` nor `Component<Element>` — refused. A
+//      server component that only loads data is `fn … -> Task<Element>`,
+//      whose reflected `returnType` is `"Task<Element>"`, so it cannot be
 //      marked client.
 //   3. `#[clientProps]` on anything but a record — refused (an enum-shaped
 //      `type` has `variants`, a `fn` is not `DeclKind.Type`).
@@ -71,7 +71,7 @@
 // ── The marker is a PURE function, deliberately ─────────────────────────────
 //
 // `#[client]` records comptime meta — `decl.setMeta("component", <Name>)`,
-// read as `@typeInfo(<Name>).meta.client.component` (decision 216) — and no
+// read as `compiler.typeInfo(<Name>).meta.client.component` (decision 216) — and no
 // run-time code at all: not a call into a runtime registry, which would make
 // every `#[client]` component fail to link during the erlang server render (a
 // Node-only cell called on every target) — the exact case the boundary exists
@@ -96,26 +96,26 @@ import {globals.globals};
 //
 // `decl.returnType` is the return type as the source spells it: a
 // `fn … -> Element` reflects as `"Element"`, a component as
-// `"@Component<Element>"` (any `@Component<R>` passes check 2), and a data-loading server component as
-// `"@Task<Element>"`. That is what makes check 2 reject a server component.
+// `"Component<Element>"` (any `Component<R>` passes check 2), and a data-loading server component as
+// `"Task<Element>"`. That is what makes check 2 reject a server component.
 //
 // `botopink check` runs the decorator like `build` and `test` do, so
 // the meta is recorded under `check` too.
-// What `#[client]` records: the component's name, read `@typeInfo(X).meta(ClientMark)?.component`.
+// What `#[client]` records: the component's name, read `compiler.typeInfo(X).meta(ClientMark)?.component`.
 pub type ClientMark(component: string)
 
 pub fn client(syntax decl: unknown) {
     compiler.setMeta(ClientMark(component: compiler.name(decl)!));
     if (compiler.kind(decl) != DeclKind.Fn)
         compiler.fail("#[client] must annotate a function", at: decl);
-    // Decision 354: a component is a `@Component<R>` whose `R` implements
-    // `@Renderable`, whatever `R` is named.
-    // LANGUAGE GAP: a decorator cannot read whether the `R` of a `@Component<R>` return implements `@Renderable` — any `@Component<…>` is accepted here.
+    // Decision 354: a component is a `Component<R>` whose `R` implements
+    // `Renderable`, whatever `R` is named.
+    // LANGUAGE GAP: a decorator cannot read whether the `R` of a `Component<R>` return implements `Renderable` — any `Component<…>` is accepted here.
     if (compiler.returnType(decl) != "Element"
-        && !(compiler.returnType(decl).startsWith("@Component<")
+        && !(compiler.returnType(decl).startsWith("Component<")
             && compiler.returnType(decl).endsWith(">")))
         compiler.fail(
-            "#[client] must annotate a component returning Element or @Component<R>",
+            "#[client] must annotate a component returning Element or Component<R>",
             at: decl,
         );
 }
@@ -327,11 +327,11 @@ pub fn serverOnly() -> i32 {
 
 // ── step 4: the hydrate point and the props cell ────────────────────────────
 
-#[@external(.Node("require('./island_runtime.mjs').hydrate($0, $1)"), .Erlang("jhonstart_island:hydrate($0, $1)"))]
+#[compiler.external(.JavaScript("require('./island_runtime.mjs').hydrate($0, $1)"), .Erlang("jhonstart_island:hydrate($0, $1)"))]
 declare fn __jhHydrate(payloadName: string, tableName: string) -> i32;
 
-#[@external(
-    .Node("require('./island_runtime.mjs').registerStarter($0, $1, $2)"),
+#[compiler.external(
+    .JavaScript("require('./island_runtime.mjs').registerStarter($0, $1, $2)"),
     .Erlang("jhonstart_island:register_starter($0, $1, $2)"),
 )]
 declare fn __jhRegisterStarter(
@@ -340,30 +340,30 @@ declare fn __jhRegisterStarter(
     start: fn(raw: string, commit: fn(html: string) -> i32) -> i32,
 ) -> i32;
 
-#[@external(
-    .Node("require('./island_runtime.mjs').registerRouteStarters($0, $1, $2)"),
+#[compiler.external(
+    .JavaScript("require('./island_runtime.mjs').registerRouteStarters($0, $1, $2)"),
     .Erlang("jhonstart_island:register_route_starters($0, $1, $2)"),
 )]
 declare fn __jhRegisterRouteStarters(
     tableName: string,
     pattern: string,
-    load: fn() -> @Task<i32>,
+    load: fn() -> Task<i32>,
 ) -> i32;
 
-#[@external(
-    .Node("require('./island_runtime.mjs').starterNames($0)"),
+#[compiler.external(
+    .JavaScript("require('./island_runtime.mjs').starterNames($0)"),
     .Erlang("jhonstart_island:starter_names($0)"),
 )]
 declare fn __jhStarterNames(tableName: string) -> string[];
 
-#[@external(
-    .Node("require('./island_runtime.mjs').routeLoaders($0)"),
+#[compiler.external(
+    .JavaScript("require('./island_runtime.mjs').routeLoaders($0)"),
     .Erlang("jhonstart_island:route_loaders($0)"),
 )]
 declare fn __jhRouteLoaders(tableName: string) -> string[];
 
-#[@external(
-    .Node("require('./island_runtime.mjs').islandProps($0, $1)"),
+#[compiler.external(
+    .JavaScript("require('./island_runtime.mjs').islandProps($0, $1)"),
     .Erlang("jhonstart_island:island_props($0, $1)"),
 )]
 declare fn __jhClientPropsRaw(payloadName: string, name: string) -> string;
@@ -404,7 +404,7 @@ pub fn registerStarter(
 
 // One loader per route pattern (the pattern the payload's `r` carries, the
 // manifest's `R` record — contract 6): a second one fails, naming it.
-pub fn registerRouteStarters(pattern: string, load: fn() -> @Task<i32>) -> i32 {
+pub fn registerRouteStarters(pattern: string, load: fn() -> Task<i32>) -> i32 {
     assert registeredRouteStarters().contains(pattern)
         == false, "rakun-bpp: a starter loader for route `"
         + pattern

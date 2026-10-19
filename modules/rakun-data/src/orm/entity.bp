@@ -6,7 +6,7 @@
 //// `Row`, `Param`, `param`, `SqlTemplate`, `Tx`, `EntityMeta`, `Revision` and
 //// `rkRegisterEntity`:
 ////
-////     meta     @typeInfo(City).meta(EntityMapping)?.table / .columns   "cities" / "id|name|state_name"
+////     meta     compiler.typeInfo(City).meta(EntityMapping)?.table / .columns   "cities" / "id|name|state_name"
 ////     type     City.Columns(<field>: string, …)
 ////     members  City.columns() -> City.Columns       the column-name constants
 ////              City.entityMeta() -> EntityMeta      (registered for front 77)
@@ -33,6 +33,7 @@
 //// id, `update` one with the incremented version; a stale version affects no
 //// row and raises naming the table, the id and both versions.
 
+import {failure.panic} from "std";
 import {rkPropIntOr} from "rakun";
 import {sql.params.Param, sql.params.param};
 import {sql.rows.Row, sql.rows.Rows};
@@ -40,7 +41,7 @@ import {sql.template.SqlTemplate, sql.template.Tx, sql.template.sqlTemplate};
 import {orm.host.rkOrmRegister, orm.host.rkOrmNames, orm.host.rkOrmTable, orm.host.rkOrmColumns, orm.host.rkOrmColumnType, orm.host.rkOrmTables, orm.host.rkOrmNowCell, orm.host.rkOrmPrincipalCell, orm.host.rkOrmSortCell};
 import {compiler, compiler.DeclKind, compiler.Field} from "std";
 
-// What `#[entity]` records: the table and its columns, read `@typeInfo(X).meta(EntityMapping)`.
+// What `#[entity]` records: the table and its columns, read `compiler.typeInfo(X).meta(EntityMapping)`.
 pub type EntityMapping(table: string, columns: string)
 
 pub type EntityMeta(
@@ -174,7 +175,9 @@ pub fn entity(syntax decl: unknown, comptime table: string) {
     val verType = versions.map({ f -> f.typeName }).at(0) ?? "";
     val verCol = versions.map({ f -> columnOf(f) }).at(0) ?? "";
     val generated = ids.filter({ f -> marked(f, "generated") }).length > 0;
-    val audited = compiler.annotations(decl).filter({ a -> a.name == "revisions" }).length
+    val audited = compiler
+        .annotations(decl)
+        .filter({ a -> a.name == "revisions" }).length
         > 0;
     val n = compiler.name(decl)!;
     val badType = cols.filter(
@@ -182,10 +185,12 @@ pub fn entity(syntax decl: unknown, comptime table: string) {
     );
     val colNames = cols.map({ f -> columnOf(f) });
     val types = cols.map({ f -> columnOf(f) + ":" + sqlType(f.typeName) });
-    val ctorFromRow = compiler.fields(decl).map({ f ->
-        val value = if (marked(f, "transient")) defaultOf(f) else readOf(f);
-        return f.name + ": " + value;
-    });
+    val ctorFromRow = compiler
+        .fields(decl)
+        .map({ f ->
+            val value = if (marked(f, "transient")) defaultOf(f) else readOf(f);
+            return f.name + ": " + value;
+        });
     val params = cols.map(
         { f -> "param(\"" + columnOf(f) + "\", " + textOf(f, "c." + f.name) + ")" },
     );
@@ -227,17 +232,19 @@ pub fn entity(syntax decl: unknown, comptime table: string) {
         + idCol
         + " = :__id"
         + versionGuard;
-    val updStamp = compiler.fields(decl).map({ f ->
-        val value = if (marked(f, "updatedAt"))
-            "now"
-        else if (marked(f, "updatedBy"))
-            "who"
-        else if (verName == f.name)
-            "c." + f.name + " + 1"
-        else
-            "c." + f.name;
-        return f.name + ": " + value;
-    });
+    val updStamp = compiler
+        .fields(decl)
+        .map({ f ->
+            val value = if (marked(f, "updatedAt"))
+                "now"
+            else if (marked(f, "updatedBy"))
+                "who"
+            else if (verName == f.name)
+                "c." + f.name + " + 1"
+            else
+                "c." + f.name;
+            return f.name + ": " + value;
+        });
     val deleteSql = "DELETE FROM "
         + table
         + " WHERE "
@@ -290,7 +297,9 @@ pub fn entity(syntax decl: unknown, comptime table: string) {
     );
     compiler.addType(
         "Columns",
-        compiler.buildType("(" + cols.map({ f -> f.name + ": string" }).join(", ") + ")"),
+        compiler.buildType("("
+            + cols.map({ f -> f.name + ": string" }).join(", ")
+            + ")"),
     );
     compiler.addMember(
         "pub fn columns() -> "
@@ -348,7 +357,8 @@ pub fn entity(syntax decl: unknown, comptime table: string) {
     );
     val transientArgs = if (compiler.fields(decl).length > cols.length)
         ", "
-            + compiler.fields(decl)
+            + compiler
+                .fields(decl)
                 .filter({ f -> marked(f, "transient") })
                 .map({ f -> f.name + ": c0." + f.name })
                 .join(", ")
@@ -368,15 +378,17 @@ pub fn entity(syntax decl: unknown, comptime table: string) {
             + n
             + ".insertIn(t, c) });\n}",
     );
-    val storedFields = compiler.fields(decl).map({ f ->
-        val value = if (f.name == idName)
-            "(rows.first() ?? Row(columns: [], values: [])).int(\""
-                + idCol
-                + "\")"
-        else
-            "c." + f.name;
-        return f.name + ": " + value;
-    });
+    val storedFields = compiler
+        .fields(decl)
+        .map({ f ->
+            val value = if (f.name == idName)
+                "(rows.first() ?? Row(columns: [], values: [])).int(\""
+                    + idCol
+                    + "\")"
+            else
+                "c." + f.name;
+            return f.name + ": " + value;
+        });
     val storedText = if (generated)
         n + "(" + storedFields.join(", ") + ")"
     else
@@ -432,7 +444,7 @@ pub fn entity(syntax decl: unknown, comptime table: string) {
             + versionPush
             + "val n = t.update(\""
             + updateSql
-            + "\", ps);\n    if (n == 0) @panic("
+            + "\", ps);\n    if (n == 0) panic("
             + n
             + ".stale(t, c));\n    val _r = "
             + n
@@ -471,7 +483,7 @@ pub fn entity(syntax decl: unknown, comptime table: string) {
             + ".deleteIn(t, c) });\n}",
     );
     val staleCheck = if (verCol != "")
-        "if (n == 0) @panic(" + n + ".stale(t, c));\n    "
+        "if (n == 0) panic(" + n + ".stale(t, c));\n    "
     else
         "";
     compiler.addMember(
@@ -555,7 +567,8 @@ pub fn entity(syntax decl: unknown, comptime table: string) {
                 + ".fromRow(Row(columns: [], values: []))));\n    if (last.kind == \"delete\") return null;\n    return last.entity;\n}",
         );
     }
-    if (compiler.kind(decl) != DeclKind.Type || compiler.variants(decl).length > 0)
+    if (compiler.kind(decl) != DeclKind.Type
+        || compiler.variants(decl).length > 0)
         compiler.fail(
             "#[entity] must annotate a record type - its fields are the columns",
             at: decl,

@@ -5,7 +5,7 @@
 
 import {assets.font.Font, assets.font.GoogleFontOptions, assets.font.GoogleFace, assets.font.FontBuild, assets.font.LocalFontSource, assets.font.LocalFontOptions, assets.font.googleFontWith, assets.font.googleCssUrl, assets.font.parseGoogleCss, assets.font.fallbackFace, assets.font.fontHead, assets.font.localFont};
 import {assets.font_metrics.FontMetrics, assets.font_metrics.MetricsRow, assets.font_metrics.metricsOf, assets.font_metrics.metricsSidecar};
-import {io.fs, io.process, io.clock, path, io.env} from "std";
+import {io.fs, io.process, io.clock, path, io.env, compiler} from "std";
 import {assertAs} from "snap";
 
 // The run's own scratch directory — `botopink test` names it in
@@ -49,14 +49,14 @@ fn googleCss() -> string {
     ].join("\n");
 }
 
-fn fixtureCss(url: string) -> @Result<string, string> {
+fn fixtureCss(url: string) -> Result<string, string> {
     if (url.startsWith("https://fonts.googleapis.com/css2?family=Inter:")
         == false)
         throw "unexpected url " + url;
     return googleCss();
 }
 
-fn fixtureDownload(url: string, dest: string) -> @Result<void, string> {
+fn fixtureDownload(url: string, dest: string) -> Result<void, string> {
     val w = try fs.writeText(dest, "woff2 bytes of " + url);
     return;
 }
@@ -75,7 +75,7 @@ fn interOpts() -> GoogleFontOptions {
     return GoogleFontOptions(weights: ["400", "700"], styles: ["normal"], subsets: ["latin"], display: "swap", preload: true, variable: "--font-inter", fallback: ["system-ui", "sans-serif"], adjustFontFallback: true);
 }
 
-fn errorOf(r: @Result<Font, string>) -> string {
+fn errorOf(r: Result<Font, string>) -> string {
     return case r {
         Ok(f) -> "ok";
         Error(e) -> "error: " + e;
@@ -86,14 +86,14 @@ fn noProbe(file: string) -> ?FontMetrics {
     return null;
 }
 
-#[@external(
-    .Node("""((globalThis.__onzeFontLog = (globalThis.__onzeFontLog || []).concat([$0])), 0)"""),
+#[compiler.external(
+    .JavaScript("""((globalThis.__onzeFontLog = (globalThis.__onzeFontLog || []).concat([$0])), 0)"""),
     .Erlang("""(fun(__E) -> put(onze_font_log, (case get(onze_font_log) of undefined -> []; __L -> __L end) ++ [__E]), 0 end)($0)"""),
 )]
 declare fn logLine(line: string) -> i32;
 
-#[@external(
-    .Node("""(globalThis.__onzeFontLog || [])"""),
+#[compiler.external(
+    .JavaScript("""(globalThis.__onzeFontLog || [])"""),
     .Erlang("""(fun() -> case get(onze_font_log) of undefined -> []; __L -> __L end end)()"""),
 )]
 declare fn logged() -> Array<string>;
@@ -110,7 +110,7 @@ test "font: google ---- Inter 400 and 700, latin, swap, adjusted" {
         .unwrapOr([])
         .filter({ n -> n.endsWith(".metrics.txt") });
     assert sidecars.length == 2;
-    try assertAs(@src(), "font", ["== family / className / variable", f.family
+    try assertAs(comptime compiler.src, "font", ["== family / className / variable", f.family
         + " / "
         + f.className
         + " / "
@@ -125,14 +125,14 @@ test "font: head ---- preload before faces, one face per family and weight" {
     val head = fontHead([a, b]);
     assert head.indexOf("<link rel=\"preload\"") < head.indexOf("<style>");
     assert head.split("@font-face").length - 1 == 3;
-    try assertAs(@src(), "head", head);
+    try assertAs(comptime compiler.src, "head", head);
     val gone = process.run("rm", ["-rf", dir]);
 }
 
 test "font: refusals ---- empty subsets, unknown display, unknown family" {
     val dir = scratch();
     val base = interOpts();
-    try assertAs(@src(), "refusals", [
+    try assertAs(comptime compiler.src, "refusals", [
         "#1 Inter              "
             + errorOf(googleFontWith("Inter", GoogleFontOptions(weights: ["400"], styles: ["normal"], subsets: [], display: "swap", preload: false, variable: "", fallback: [], adjustFontFallback: false), build(dir))),
         "#2 Inter              "
@@ -152,7 +152,7 @@ test "font: the fallback descriptors ---- Inter over Arial, and identity" {
     assert face.contains("line-gap-override:0.00%");
     val same = fallbackFace("Arial", "Arial", arial, arial);
     assert same.contains("size-adjust:100.00%");
-    try assertAs(@src(), "fallback", face + "\n" + same);
+    try assertAs(comptime compiler.src, "fallback", face + "\n" + same);
 }
 
 test "font: without adjustFontFallback the family list is the configured one" {

@@ -6,7 +6,7 @@
 // registries are process-wide, so the boot happens once (`running()`), and
 // every later test reads what it left.
 
-import {io.env, io.fs, io.process, path} from "std";
+import {io.env, io.fs, io.process, path, compiler} from "std";
 import {rkDispatchHttp, rkProp, rkSetProp, Response as RakunResponse} from "rakun";
 import {rkAppTable} from "rakun-app";
 import {staticRootCount} from "rakun-service";
@@ -19,23 +19,23 @@ import {AssetRoot} from "rakun-ssr";
 // ── the app ─────────────────────────────────────────────────────────────────
 
 #[layout("")]
-pub fn shell(props: LayoutProps) -> @Component<Element> {
+pub fn shell(props: LayoutProps) -> Component<Element> {
     return main([props.children], attrs: [#("class", "shell")]);
 }
 
 #[page("")]
-pub fn home(route: PageContext) -> @Component<Element> {
+pub fn home(route: PageContext) -> Component<Element> {
     return p([text("home page", attrs: [])], attrs: []);
 }
 
 #[page("dashboard")]
-pub fn dashboard(route: PageContext) -> @Component<Element> {
+pub fn dashboard(route: PageContext) -> Component<Element> {
     redirect("/login");
     return p([text("never", attrs: [])], attrs: []);
 }
 
 #[page("login")]
-pub fn login(route: PageContext) -> @Component<Element> {
+pub fn login(route: PageContext) -> Component<Element> {
     return p([text("sign in", attrs: [])], attrs: []);
 }
 
@@ -55,7 +55,7 @@ fn config() -> OnzeConfig {
     return OnzeConfig(..d, name: "fixture", publicDir: path.join([scratch(), "public"]), outDir: path.join([scratch(), ".onze"]));
 }
 
-fn writeBuild() -> @Result<void, string> {
+fn writeBuild() -> Result<void, string> {
     val out = config().outDir;
     val made = try process.run("mkdir", ["-p", path.join([out, "static", "b1"]), path.join([scratch(), "public"]), path.join([scratch(), "content"])]);
     val a = try fs.writeText(path.join([out, "build-id"]), "b1\n");
@@ -68,7 +68,7 @@ fn writeBuild() -> @Result<void, string> {
 // `Onze.run` once per process: rakun's tables and the listener outlive a test.
 // `rakun.main.keep-alive = false` makes `Rakun.run` return once it listens,
 // instead of holding the process (rakun front 04).
-fn running() -> @Result<void, string> {
+fn running() -> Result<void, string> {
     if (rkProp("onze.test.running") == "") {
         try writeBuild();
         val _k = rkSetProp("rakun.main.keep-alive", "false");
@@ -82,7 +82,7 @@ fn get(pathname: string) -> RakunResponse {
     return rkDispatchHttp("GET", pathname, "{}", "{}", "");
 }
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__Port, __Path) -> case gen_tcp:connect("127.0.0.1", __Port, [binary, {active, false}], 3000) of {ok, __S} -> ok = gen_tcp:send(__S, [<<"GET ">>, __Path, <<" HTTP/1.1", 13, 10, "Host: localhost", 13, 10, 13, 10>>]), __Loop = fun __Loop(__Acc) -> case binary:match(__Acc, <<"0", 13, 10, 13, 10>>) of nomatch -> case gen_tcp:recv(__S, 0, 3000) of {ok, __M} -> __Loop(<<__Acc/binary, __M/binary>>); _ -> __Acc end; _ -> __Acc end end, __All = __Loop(<<>>), gen_tcp:close(__S), __All; {error, __E} -> iolist_to_binary(io_lib:format("connect failed: ~p", [__E])) end end)($0, $1)"""),
 )]
 declare fn rawGet(port: i32, pathname: string) -> string;

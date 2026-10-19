@@ -1,13 +1,13 @@
 //// rakun-app — static generation (front 60 steps 2–5, 7). Step 6's codec is
 //// `routing`'s and asserted there on both targets; `routeKinds()` is here.
 
-import {testing.asserts} from "std";
+import {testing.asserts, compiler, failure.panic} from "std";
 import {io.fs, io.env} from "std";
 import {Request, rkSetProp, rkProp, beginRequest, endRequest, RequestScope, RequestPhase, rkReqPutSlot, cookies} from "rakun";
 import {file_router.rkAppReset, file_router.rkAppRegisterPage, route_handler.registerRoute};
 import {ssr.PageRenderer, ssr.ChunkWriter, ssr.writeTo};
 
-fn textBody(out: ChunkWriter, text: string) -> @Task<@Result<void, string>> {
+fn textBody(out: ChunkWriter, text: string) -> Task<Result<void, string>> {
     await writeTo(out, text);
     return;
 }
@@ -18,7 +18,7 @@ import {segment_config.SegmentConfig, segment_config.DynamicMode, segment_config
 import {static_gen.KindDecision, static_gen.decideKind, static_gen.kindLetter, static_gen.ParamBinding, static_gen.StaticParams, static_gen.registerStaticParams, static_gen.expandParams, static_gen.PrerenderEntry, static_gen.PrerenderReport, static_gen.prerenderAll, static_gen.prerenderPath, static_gen.lookupPrerendered, static_gen.serveStatic, static_gen.isStale, static_gen.regenerate, static_gen.regenerationFailures, static_gen.routeKinds, static_gen.staticExport, static_gen.exportFileOf, static_gen.payloadFileName, static_gen.prerenderPolicy};
 import {static_host.rkStaticReset, static_host.rkStaticBump, static_host.rkStaticCount, static_host.rkStaticGaugeEnter, static_host.rkStaticGaugeExit, static_host.rkStaticGaugeMax, static_host.rkStaticDrain, static_host.rkStaticRunBounded, static_host.rkStaticNowMs};
 
-#[@external(.Erlang("""(fun(__Ms) -> receive after __Ms -> 0 end end)($0)"""))]
+#[compiler.external(.Erlang("""(fun(__Ms) -> receive after __Ms -> 0 end end)($0)"""))]
 declare fn sleepMs(ms: i32) -> i32;
 
 // ── renderers ───────────────────────────────────────────────────────────────
@@ -31,9 +31,9 @@ fn propPage(key: string) -> PageRenderer {
     return { req, out -> propBody(out, key) };
 }
 
-fn propBody(out: ChunkWriter, key: string) -> @Task<@Result<void, string>> {
+fn propBody(out: ChunkWriter, key: string) -> Task<Result<void, string>> {
     val _c = rkStaticBump("renders:" + key);
-    if (rkProp(key + ".fail") == "1") @panic("regeneration failed on purpose");
+    if (rkProp(key + ".fail") == "1") panic("regeneration failed on purpose");
     val slow = rkProp(key + ".slow");
     val _s = if (slow != "") sleepMs(3000) else 0;
     await writeTo(out, "v=" + rkProp(key));
@@ -44,7 +44,7 @@ fn cookiePage() -> PageRenderer {
     return { req, out -> cookieBody(out) };
 }
 
-fn cookieBody(out: ChunkWriter) -> @Task<@Result<void, string>> {
+fn cookieBody(out: ChunkWriter) -> Task<Result<void, string>> {
     val c = cookies().get("session");
     await writeTo(out, "session");
     return;
@@ -54,7 +54,7 @@ fn sleepyPage(ms: i32) -> PageRenderer {
     return { req, out -> sleepyBody(out, ms) };
 }
 
-fn sleepyBody(out: ChunkWriter, ms: i32) -> @Task<@Result<void, string>> {
+fn sleepyBody(out: ChunkWriter, ms: i32) -> Task<Result<void, string>> {
     val _g = rkStaticGaugeEnter("renders");
     val _s = sleepMs(ms);
     val _x = rkStaticGaugeExit("renders");
@@ -72,7 +72,7 @@ fn fresh() -> i32 {
 fn tmpRoot() -> string {
     val dir: string = env.read("BOTOPINK_TEST_TMPDIR") ?? "";
     if (dir == "")
-        @panic(
+        panic(
             "BOTOPINK_TEST_TMPDIR is not set - botopink test sets it, and a test writes nowhere else",
         );
     return dir;
@@ -512,7 +512,7 @@ test "static: the export writes index.html per path and the payload beside it, b
     assert fs.readText(out + "/blog/hello/index.html").unwrapOr("") == post;
 }
 
-fn helloRows() -> @Task<StaticParams[]> {
+fn helloRows() -> Task<StaticParams[]> {
     val rows: StaticParams[] = [
         StaticParams(bindings: [ParamBinding(name: "slug", value: "hello")]),
     ];

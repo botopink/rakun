@@ -24,7 +24,7 @@
 //// UNSUPPORTED_SETUP.
 ////
 //// REQUESTER: `rsocketRequester("tcp://host:port")`; `requestResponse` is a
-//// `@Task<string>` (eager on BEAM — concurrency comes from issuing thunks,
+//// `Task<string>` (eager on BEAM — concurrency comes from issuing thunks,
 //// front 02's pattern); `fireAndForget` returns once the frame is written;
 //// `requestStream` / `request` / `next` / `cancel`. Under a lease a request
 //// past the budget is rejected locally, writing nothing.
@@ -34,8 +34,9 @@ import {registry.rkRegisterListenerAs};
 import {messaging_host.rkMsgPublish, messaging_host.rkMsgWide};
 import {reliability.policy.DeadLetter, reliability.policy.deadLetterJson};
 import {rsocket.rsocket_host.rsServe, rsocket.rsocket_host.rsStop, rsocket.rsocket_host.rsConnect, rsocket.rsocket_host.rsClose, rsocket.rsocket_host.rsRequestResponse, rsocket.rsocket_host.rsFireAndForget, rsocket.rsocket_host.rsRequestStream, rsocket.rsocket_host.rsRequestN, rsocket.rsocket_host.rsNext, rsocket.rsocket_host.rsCancel};
+import {compiler, failure.panic} from "std";
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__R, __K, __F) -> __L = persistent_term:get(rakun_rsocket_routes, []), case lists:keyfind(__R, 1, __L) of {__R, _, _} -> 0; false -> persistent_term:put(rakun_rsocket_routes, __L ++ [{__R, __K, __F}]), 1 end end)($0, $1, $2)"""),
 )]
 declare fn storeRoute(
@@ -44,13 +45,13 @@ declare fn storeRoute(
     handler: fn(data: string) -> string,
 ) -> i32;
 
-#[@external(.Erlang("""persistent_term:get(rakun_rsocket_routes, [])"""))]
+#[compiler.external(.Erlang("""persistent_term:get(rakun_rsocket_routes, [])"""))]
 declare fn routes() -> Array<#(string, string, fn(data: string) -> string)>;
 
-#[@external(.Erlang("""(fun() -> persistent_term:erase(rakun_rsocket_routes), 0 end)()"""))]
+#[compiler.external(.Erlang("""(fun() -> persistent_term:erase(rakun_rsocket_routes), 0 end)()"""))]
 pub declare fn clearRoutes() -> i32;
 
-#[@external(.Erlang("""(fun(__S) -> try binary_to_integer(__S) catch _:_ -> 0 end end)($0)"""))]
+#[compiler.external(.Erlang("""(fun(__S) -> try binary_to_integer(__S) catch _:_ -> 0 end end)($0)"""))]
 declare fn toInt(s: string) -> i32;
 
 pub fn routeKinds() -> string[] {
@@ -67,7 +68,7 @@ pub fn rsocketRoute(
     handler: fn(data: string) -> string,
 ) -> i32 {
     if (routeKinds().indexOf(kind) < 0)
-        @panic(
+        panic(
             "rakun rsocket: route "
                 + route
                 + " has the kind `"
@@ -75,7 +76,7 @@ pub fn rsocketRoute(
                 + "` - fnf, request-response or stream",
         );
     if (storeRoute(route, wireKind(kind), handler) == 0)
-        @panic(
+        panic(
             "rakun rsocket: the route "
                 + route
                 + " is declared twice - one handler per route",
@@ -129,7 +130,7 @@ pub fn rsocketConfigProblem() -> string {
 // Binds the configured port; 0 when no port is configured.
 pub fn startRSocketServer() -> i32 {
     val problem = rsocketConfigProblem();
-    if (problem != "") @panic(problem);
+    if (problem != "") panic(problem);
     val raw = rkProp("rakun.rsocket.server.port").trim();
     if (raw == "") return 0;
     return rsServe(
@@ -153,7 +154,7 @@ pub type StreamHandle(conn: string, id: i32)
 
 pub fn rsocketRequester(url: string) -> Requester {
     if (url.startsWith("tcp://") == false)
-        @panic(
+        panic(
             "rakun rsocket: `"
                 + url
                 + "` - the requester speaks tcp://host:port (ws:// and wss:// wait on front 20's transport)",
@@ -169,7 +170,7 @@ pub fn rsocketRequester(url: string) -> Requester {
         if (lifetime == 0) 90000 else lifetime,
     );
     if (c.startsWith("error:"))
-        @panic(
+        panic(
             "rakun rsocket: cannot connect to "
                 + url
                 + " - "
@@ -186,14 +187,14 @@ pub fn requestResponse(
     r: Requester,
     route: string,
     data: string,
-) -> @Task<string> {
+) -> Task<string> {
     val out = rsRequestResponse(r.conn, route, data, 5000);
     if (out.isError()) {
         val reason = case out {
             Ok(v) -> "";
             Error(e) -> e;
         };
-        @panic("rakun rsocket: " + route + " - " + reason);
+        panic("rakun rsocket: " + route + " - " + reason);
     }
     return out.unwrapOr("");
 }
@@ -203,7 +204,7 @@ pub fn tryRequestResponse(
     r: Requester,
     route: string,
     data: string,
-) -> @Result<string, string> {
+) -> Result<string, string> {
     return rsRequestResponse(r.conn, route, data, 5000);
 }
 

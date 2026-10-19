@@ -8,9 +8,9 @@
 ////     import {rakun.Service, rakun.inject, rakun.onStop} from "rakun";
 ////
 ////     #[rakun.module]
-////     pub component fn web() -> @Component<Service> {
+////     pub component fn web() -> Component<Service> {
 ////         val store = use inject("store");
-////         use onStop({ -> @print("web stops") });
+////         use onStop({ -> print("web stops") });
 ////         return Service(name: "web");
 ////     }
 ////
@@ -36,7 +36,7 @@
 //// the package reads it with `configOf("ZetaConfig", ZetaConfig())`, its own
 //// defaults when the program declares none.
 
-import {compiler, compiler.DeclKind} from "std";
+import {compiler, compiler.DeclKind, failure.panic} from "std";
 import {context.RenderScope} from "std";
 import {io.clock.sleep} from "std";
 import {runtime.rkSingleton};
@@ -55,7 +55,7 @@ pub type Lifecycle {
 
 /// One module of the program: its name (the annotated function's), when it
 /// starts, and the component function that starts it.
-pub type Module(name: string, lifecycle: Lifecycle, make: fn() -> @Component<Service>)
+pub type Module(name: string, lifecycle: Lifecycle, make: fn() -> Component<Service>)
 
 // ── the registry the executors write (decisions 575 (3), 580) ────────────────
 
@@ -108,12 +108,12 @@ pub val registry: Registry = Registry();
 
 // ── the decorators ──────────────────────────────────────────────────────────
 
-/// Marks a package's module: a `component fn() -> @Component<Service>`. Its
+/// Marks a package's module: a `component fn() -> Component<Service>`. Its
 /// executor adds `Module(name, lifecycle, make)` to the registry before
 /// `main`, `make` the annotated function itself.
 pub fn module(syntax decl: unknown, comptime lifecycle: Lifecycle = .Eager) {
     val shaped = compiler.kind(decl) == DeclKind.Fn
-        && compiler.returnType(decl) == "@Component<Service>"
+        && compiler.returnType(decl) == "Component<Service>"
         && compiler.params(decl).length == 0;
     if (!shaped)
         compiler.fail("#[module] goes on a component fn() -> Component<Service>", at: decl);
@@ -160,7 +160,7 @@ pub type ServiceScope(render: RenderScope) {
     pub fn mount(self: Self, m: Module) -> Service {
         val known = startedService(m.name);
         if (known != null) return known;
-        val c: @Component<Service> = m.make();
+        val c: Component<Service> = m.make();
         val r = c.run(self.render);
         started.push(Started(name: m.name, service: r.value));
         return r.value;
@@ -170,7 +170,7 @@ pub type ServiceScope(render: RenderScope) {
 fn moduleNamed(name: string) -> Module {
     val m = registry.find(name);
     if (m == null)
-        @panic("rakun: no module named `"
+        panic("rakun: no module named `"
             + name
             + "` - add the package that declares it to botopink.json");
     return m;
@@ -178,17 +178,17 @@ fn moduleNamed(name: string) -> Module {
 
 /// The service of the module named `name`, started once, on demand: a module
 /// that injects another starts after it.
-pub fn inject(name: string) -> @Component<Service> {
+pub fn inject(name: string) -> Component<Service> {
     val known = startedService(name);
     if (known != null) return known;
-    val c: @Component<Service> = moduleNamed(name).make();
+    val c: Component<Service> = moduleNamed(name).make();
     val s = await c;
     started.push(Started(name: name, service: s));
     return s;
 }
 
 /// Runs `f` when the program calls `stop()`.
-pub fn onStop(f: fn()) -> @Component<void> {
+pub fn onStop(f: fn()) -> Component<void> {
     stops.push(f);
 }
 
@@ -244,7 +244,7 @@ fn afterOf(m: Module) -> i32 {
 
 /// Starts the module named `name` (a `.Manual` one, or any not started yet);
 /// an error naming it when no package declares it.
-pub fn start(name: string) -> @Result<void, string> {
+pub fn start(name: string) -> Result<void, string> {
     val m = registry.find(name);
     if (m == null) throw "rakun: no module named `" + name + "`";
     val _s = ServiceScope.root().mount(m);

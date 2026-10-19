@@ -62,7 +62,7 @@ import {runtime.rkScan, runtime.rkSingleton, runtime.rkEnter, runtime.rkDone, ru
 import {config.rkPropList};
 import {conditions.evaluateBlob, conditions.Verdict};
 import {autoconfig_registry.rkAutoRegister, autoconfig_registry.rkAutoProvides, autoconfig_registry.rkAutoProvided, autoconfig_registry.rkAutoNames, autoconfig_registry.rkAutoCount, autoconfig_registry.rkAutoConditions, autoconfig_registry.rkAutoBefore, autoconfig_registry.rkAutoAfter, autoconfig_registry.rkAutoKnown, autoconfig_registry.rkAutoDecide, autoconfig_registry.rkAutoState, autoconfig_registry.rkAutoReason, autoconfig_registry.rkAutoSeal, autoconfig_registry.rkAutoSealed, autoconfig_registry.rkAutoOrder, autoconfig_registry.rkAutoUnseal, autoconfig_registry.rkAutoReset};
-import {compiler, compiler.DeclKind} from "std";
+import {compiler, compiler.DeclKind, failure.panic} from "std";
 
 // ── the states ──────────────────────────────────────────────────────────────
 
@@ -314,7 +314,7 @@ fn checkExclusions(names: string[], excluded: string[]) -> i32 {
     var n = 0;
     for (excluded) { e ->
         if (holdsName(names, e) == false)
-            @panic(unknownExclusionProblem(e, names))
+            panic(unknownExclusionProblem(e, names))
         else
             n = n + 1;
     }
@@ -330,7 +330,7 @@ pub fn rkAutoApply(excluded: string) -> i32 {
     val names = registeredList();
     val order = sortNames(names);
     if (order.length < names.length)
-        @panic(cycleProblem(missingFrom(names, order)));
+        panic(cycleProblem(missingFrom(names, order)));
     val drop = splitList(excluded);
     val _c = checkExclusions(names, drop);
     val seed: string[] = [];
@@ -363,9 +363,9 @@ pub fn rkAutoMatched(name: string) -> bool {
 }
 
 pub fn rkAutoGate(name: string) -> i32 {
-    if (rkAutoSealed() == false) @panic(neverAppliedProblem());
+    if (rkAutoSealed() == false) panic(neverAppliedProblem());
     if (rkAutoState(name) == appliedState()) return 0;
-    @panic(gateProblem(name, rkAutoReason(name)));
+    panic(gateProblem(name, rkAutoReason(name)));
 }
 
 // ── the application surface ─────────────────────────────────────────────────
@@ -441,35 +441,37 @@ pub fn autoConfiguration(syntax decl: unknown) {
     var before: Array<string> = [];
     var after: Array<string> = [];
     var bad = "";
-    compiler.annotations(decl).forEach({ a ->
-        val raw = a.args.join("").split("\"").join("");
-        val a0 = a.args.slice(0, 1).join("").split("\"").join("");
-        val a1 = a.args.slice(1, 2).join("").split("\"").join("");
-        val rec = if (a.name == "conditionalOnModule")
-            "M|" + raw
-        else if (a.name == "conditionalOnProperty")
-            "P|" + a0 + "|" + a1
-        else if (a.name == "conditionalOnBean")
-            "B|" + raw
-        else if (a.name == "conditionalOnMissingBean")
-            "X|" + raw
-        else if (a.name == "profile")
-            "F|" + raw
-        else
-            "";
-        val bef = if (a.name == "autoConfigureBefore") raw else "";
-        val aft = if (a.name == "autoConfigureAfter") raw else "";
-        val dirty = (raw.indexOf(";") >= 0 || raw.indexOf("|") >= 0)
-            && (rec != "" || bef != "" || aft != "");
-        val nb = if (dirty) raw else bad;
-        bad = nb;
-        if (rec != "")
-            conds.push(rec)
-        else if (bef != "")
-            before.push(bef)
-        else if (aft != "")
-            after.push(aft);
-    });
+    compiler
+        .annotations(decl)
+        .forEach({ a ->
+            val raw = a.args.join("").split("\"").join("");
+            val a0 = a.args.slice(0, 1).join("").split("\"").join("");
+            val a1 = a.args.slice(1, 2).join("").split("\"").join("");
+            val rec = if (a.name == "conditionalOnModule")
+                "M|" + raw
+            else if (a.name == "conditionalOnProperty")
+                "P|" + a0 + "|" + a1
+            else if (a.name == "conditionalOnBean")
+                "B|" + raw
+            else if (a.name == "conditionalOnMissingBean")
+                "X|" + raw
+            else if (a.name == "profile")
+                "F|" + raw
+            else
+                "";
+            val bef = if (a.name == "autoConfigureBefore") raw else "";
+            val aft = if (a.name == "autoConfigureAfter") raw else "";
+            val dirty = (raw.indexOf(";") >= 0 || raw.indexOf("|") >= 0)
+                && (rec != "" || bef != "" || aft != "");
+            val nb = if (dirty) raw else bad;
+            bad = nb;
+            if (rec != "")
+                conds.push(rec)
+            else if (bef != "")
+                before.push(bef)
+            else if (aft != "")
+                after.push(aft);
+        });
     val declName = compiler.name(decl)!;
     val condBlob = conds.join(";");
     val beforeList = before.join(",");
@@ -478,19 +480,21 @@ pub fn autoConfiguration(syntax decl: unknown) {
     compiler.init({ -> rkAutoProvides(declName, declName); });
     compiler.init({ -> rkScan(declName); });
     var gargs: Array<string> = [];
-    compiler.fields(decl).forEach({ f ->
-        var valKey = "";
-        f.annotations.forEach(
-            { a -> if (a.name == "value") valKey = a.args.join("") },
-        );
-        val expr = if (valKey != "") {
-            if (f.typeName == "i32")
-                "rkPropInt(" + valKey + ")"
-            else
-                "rkProp(" + valKey + ")";
-        } else "rkResolve(\"" + f.typeName + "\")";
-        gargs.push(f.name + ": " + expr);
-    });
+    compiler
+        .fields(decl)
+        .forEach({ f ->
+            var valKey = "";
+            f.annotations.forEach(
+                { a -> if (a.name == "value") valKey = a.args.join("") },
+            );
+            val expr = if (valKey != "") {
+                if (f.typeName == "i32")
+                    "rkPropInt(" + valKey + ")"
+                else
+                    "rkProp(" + valKey + ")";
+            } else "rkResolve(\"" + f.typeName + "\")";
+            gargs.push(f.name + ": " + expr);
+        });
     compiler.addMember(
         "pub fn make() -> "
             + compiler.name(decl)!
@@ -507,69 +511,71 @@ pub fn autoConfiguration(syntax decl: unknown) {
             + "\"); v }); }",
     );
     var beans: Array<string> = [];
-    compiler.methods(decl).forEach({ m ->
-        var isBean = false;
-        var mc: Array<string> = [];
-        var mbad = "";
-        m.annotations.forEach({ a ->
-            val raw = a.args.join("").split("\"").join("");
-            val a0 = a.args.slice(0, 1).join("").split("\"").join("");
-            val a1 = a.args.slice(1, 2).join("").split("\"").join("");
-            val b = if (a.name == "bean") true else isBean;
-            isBean = b;
-            val rec = if (a.name == "conditionalOnModule")
-                "M|" + raw
-            else if (a.name == "conditionalOnProperty")
-                "P|" + a0 + "|" + a1
-            else if (a.name == "conditionalOnBean")
-                "B|" + raw
-            else if (a.name == "conditionalOnMissingBean")
-                "X|" + raw
-            else if (a.name == "profile")
-                "F|" + raw
-            else
-                "";
-            val dirty = (raw.indexOf(";") >= 0 || raw.indexOf("|") >= 0)
-                && rec != "";
-            val nm = if (dirty) raw else mbad;
-            mbad = nm;
-            if (rec != "") mc.push(rec);
+    compiler
+        .methods(decl)
+        .forEach({ m ->
+            var isBean = false;
+            var mc: Array<string> = [];
+            var mbad = "";
+            m.annotations.forEach({ a ->
+                val raw = a.args.join("").split("\"").join("");
+                val a0 = a.args.slice(0, 1).join("").split("\"").join("");
+                val a1 = a.args.slice(1, 2).join("").split("\"").join("");
+                val b = if (a.name == "bean") true else isBean;
+                isBean = b;
+                val rec = if (a.name == "conditionalOnModule")
+                    "M|" + raw
+                else if (a.name == "conditionalOnProperty")
+                    "P|" + a0 + "|" + a1
+                else if (a.name == "conditionalOnBean")
+                    "B|" + raw
+                else if (a.name == "conditionalOnMissingBean")
+                    "X|" + raw
+                else if (a.name == "profile")
+                    "F|" + raw
+                else
+                    "";
+                val dirty = (raw.indexOf(";") >= 0 || raw.indexOf("|") >= 0)
+                    && rec != "";
+                val nm = if (dirty) raw else mbad;
+                mbad = nm;
+                if (rec != "") mc.push(rec);
+            });
+            val carried = if (mbad != "") mbad else bad;
+            bad = carried;
+            val full = compiler.name(decl)! + "." + m.name;
+            if (isBean) {
+                beans.push(
+                    "rkAutoRegister(\""
+                        + full
+                        + "\", \""
+                        + mc.join(";")
+                        + "\", \"\", \"\");",
+                );
+                beans.push(
+                    "rkAutoProvides(\""
+                        + full
+                        + "\", \""
+                        + m.returnType
+                        + "\");",
+                );
+                beans.push(
+                    "rkRegisterBean(\""
+                        + m.returnType
+                        + "\", \"\", \"singleton\", false, false, \""
+                        + full
+                        + "\", { -> rkSingleton(\""
+                        + m.returnType
+                        + "\", { -> val _g = rkAutoGate(\""
+                        + full
+                        + "\"); "
+                        + compiler.name(decl)!
+                        + ".make()."
+                        + m.name
+                        + "() }) });",
+                );
+            }
         });
-        val carried = if (mbad != "") mbad else bad;
-        bad = carried;
-        val full = compiler.name(decl)! + "." + m.name;
-        if (isBean) {
-            beans.push(
-                "rkAutoRegister(\""
-                    + full
-                    + "\", \""
-                    + mc.join(";")
-                    + "\", \"\", \"\");",
-            );
-            beans.push(
-                "rkAutoProvides(\""
-                    + full
-                    + "\", \""
-                    + m.returnType
-                    + "\");",
-            );
-            beans.push(
-                "rkRegisterBean(\""
-                    + m.returnType
-                    + "\", \"\", \"singleton\", false, false, \""
-                    + full
-                    + "\", { -> rkSingleton(\""
-                    + m.returnType
-                    + "\", { -> val _g = rkAutoGate(\""
-                    + full
-                    + "\"); "
-                    + compiler.name(decl)!
-                    + ".make()."
-                    + m.name
-                    + "() }) });",
-            );
-        }
-    });
     if (beans.length > 0) {
         compiler.addMember("pub fn rkAutoBeans() { " + beans.join(" ") + " }");
         compiler.init({ -> decl.rkAutoBeans(); });

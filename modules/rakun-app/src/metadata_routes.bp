@@ -22,7 +22,7 @@
 //// (`setImageRenderer`); without one the route answers 501 naming front 70,
 //// and its `ImageMeta` is still produced.
 
-import {escape, path, json.object, json.quote, json.array} from "std";
+import {escape, path, json.object, json.quote, json.array, compiler, failure.panic} from "std";
 import {io.fs} from "std";
 import {Request, rkProp} from "rakun";
 import {table.RouteEntry, table.parseTable, match.attempt} from "routing";
@@ -30,36 +30,36 @@ import {file_router.rkAppTable, file_router.appDirOf};
 import {ssr.PageRenderer, ssr.chunkWriter, ssr.rkSsrBegin, ssr.rkSsrBody};
 import {route_handler.HandlerResponse, route_handler.registerRoute};
 
-#[@external(.Erlang("rakun_metadata_routes:read($0)"))]
+#[compiler.external(.Erlang("rakun_metadata_routes:read($0)"))]
 declare fn rkMetaRead(file: string) -> string;
 
-#[@external(.Erlang("rakun_metadata_routes:hash($0)"))]
+#[compiler.external(.Erlang("rakun_metadata_routes:hash($0)"))]
 declare fn rkMetaHash(file: string) -> string;
 
-#[@external(.Erlang("rakun_metadata_routes:hash_text($0)"))]
+#[compiler.external(.Erlang("rakun_metadata_routes:hash_text($0)"))]
 declare fn rkMetaHashText(text: string) -> string;
 
-#[@external(.Erlang("rakun_metadata_routes:exists($0)"))]
+#[compiler.external(.Erlang("rakun_metadata_routes:exists($0)"))]
 declare fn rkMetaExists(file: string) -> bool;
 
 // The registrations, one `persistent_term` list per family.
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__K, __V) -> persistent_term:put({rakun_meta, __K}, persistent_term:get({rakun_meta, __K}, []) ++ [__V]), 0 end)($0, $1)"""),
 )]
 declare fn rkMetaAdd<T>(family: string, value: T) -> i32;
 
-#[@external(.Erlang("""persistent_term:get({rakun_meta, $0}, [])"""))]
+#[compiler.external(.Erlang("""persistent_term:get({rakun_meta, $0}, [])"""))]
 declare fn rkMetaAll<T>(family: string) -> T[];
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun() -> [persistent_term:erase(K) || {{rakun_meta, _} = K, _} <- persistent_term:get()], 0 end)()"""),
 )]
 declare fn rkMetaReset() -> i32;
 
-#[@external(.Erlang("rakun_ssr:begin_handler()"))]
+#[compiler.external(.Erlang("rakun_ssr:begin_handler()"))]
 declare fn rkMetaBeginHandler() -> i32;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__W) -> __S = erase(rakun_conn_socket), try __W() after case __S of undefined -> ok; _ -> put(rakun_conn_socket, __S) end end end)($0)"""),
 )]
 declare fn rkMetaHidden<T>(work: fn() -> T) -> T;
@@ -73,7 +73,7 @@ pub fn resetMetadataRoutes() -> i32 {
 fn notYet(family: string) -> i32 {
     val existing: string[] = rkMetaAll(family);
     if (existing.length > 0)
-        @panic(
+        panic(
             "rakun metadata: a "
                 + family
                 + " is already registered - one application, one "
@@ -95,7 +95,7 @@ fn typed(body: string, contentType: string) -> HandlerResponse {
     );
 }
 
-fn noTask(h: HandlerResponse) -> @Task<HandlerResponse> {
+fn noTask(h: HandlerResponse) -> Task<HandlerResponse> {
     return h;
 }
 
@@ -202,13 +202,13 @@ pub fn renderSitemapIndex(shards: i32, origin: string) -> string {
         + "</sitemapindex>\n";
 }
 
-#[@external(.Erlang("""(fun(__F) -> __F() end)($0)"""))]
+#[compiler.external(.Erlang("""(fun(__F) -> __F() end)($0)"""))]
 declare fn rkMetaRunSitemap(
-    produce: fn() -> @Task<SitemapEntry[]>,
+    produce: fn() -> Task<SitemapEntry[]>,
 ) -> SitemapEntry[];
 
 fn sitemapShards() -> Array<SitemapEntry[]> {
-    val producers: Array<fn() -> @Task<SitemapEntry[]>> = rkMetaAll(
+    val producers: Array<fn() -> Task<SitemapEntry[]>> = rkMetaAll(
         "sitemap-producer",
     );
     var entries: SitemapEntry[] = [];
@@ -220,7 +220,7 @@ fn sitemapShards() -> Array<SitemapEntry[]> {
     return shardEntries(entries);
 }
 
-fn sitemapRoot(req: Request) -> @Task<HandlerResponse> {
+fn sitemapRoot(req: Request) -> Task<HandlerResponse> {
     val shards = sitemapShards();
     val body = if (shards.length > 1)
         renderSitemapIndex(shards.length, rkProp("rakun.metadata.origin"))
@@ -229,7 +229,7 @@ fn sitemapRoot(req: Request) -> @Task<HandlerResponse> {
     return typed(body, "application/xml");
 }
 
-fn sitemapShard(req: Request) -> @Task<HandlerResponse> {
+fn sitemapShard(req: Request) -> Task<HandlerResponse> {
     val name = req.param("shard");
     val n = if (name.endsWith(".xml")) name.slice(0, name.length() - 4) else "";
     val shards = sitemapShards();
@@ -252,11 +252,11 @@ fn toIndex(s: string) -> i32 {
     return n;
 }
 
-pub fn registerSitemap(produce: fn() -> @Task<SitemapEntry[]>) -> i32 {
+pub fn registerSitemap(produce: fn() -> Task<SitemapEntry[]>) -> i32 {
     val _o = notYet("sitemap");
     for (rkMetaRunSitemap(produce)) { e ->
         val p = sitemapEntryProblem(e);
-        if (p != "") @panic(p);
+        if (p != "") panic(p);
     }
     val _c = rkMetaAdd("sitemap", "sitemap");
     val _p = rkMetaAdd("sitemap-producer", produce);
@@ -320,13 +320,13 @@ pub fn robotsProblem(r: Robots) -> string {
         "rakun metadata: a robots value holds a line break - an injected line is an injected rule";
 }
 
-#[@external(.Erlang("""(fun(__F) -> __F() end)($0)"""))]
-declare fn rkMetaRunRobots(produce: fn() -> @Task<Robots>) -> Robots;
+#[compiler.external(.Erlang("""(fun(__F) -> __F() end)($0)"""))]
+declare fn rkMetaRunRobots(produce: fn() -> Task<Robots>) -> Robots;
 
-pub fn registerRobots(produce: fn() -> @Task<Robots>) -> i32 {
+pub fn registerRobots(produce: fn() -> Task<Robots>) -> i32 {
     val _o = notYet("robots");
     val p = robotsProblem(rkMetaRunRobots(produce));
-    if (p != "") @panic(p);
+    if (p != "") panic(p);
     val _c = rkMetaAdd("robots", "robots");
     val _a = registerRoute(
         "GET",
@@ -372,16 +372,16 @@ pub fn renderManifest(m: WebManifest) -> string {
     );
 }
 
-#[@external(.Erlang("""(fun(__F) -> __F() end)($0)"""))]
+#[compiler.external(.Erlang("""(fun(__F) -> __F() end)($0)"""))]
 declare fn rkMetaRunManifest(
-    produce: fn() -> @Task<WebManifest>,
+    produce: fn() -> Task<WebManifest>,
 ) -> WebManifest;
 
-pub fn registerManifest(produce: fn() -> @Task<WebManifest>) -> i32 {
+pub fn registerManifest(produce: fn() -> Task<WebManifest>) -> i32 {
     val _o = notYet("manifest");
     val m = rkMetaRunManifest(produce);
     if (displays().filter({ d -> d == m.display }).length == 0)
-        @panic(
+        panic(
             "rakun metadata: display `"
                 + m.display
                 + "` is not one of "
@@ -436,7 +436,7 @@ fn checkFile(file: string) -> string {
     val appDir = appDirOf();
     val full = fileOf(appDir, file);
     if (path.isInside(appDir, file) == false)
-        @panic(
+        panic(
             "rakun metadata: `"
                 + file
                 + "` escapes the app directory `"
@@ -444,7 +444,7 @@ fn checkFile(file: string) -> string {
                 + "`",
         );
     if (rkMetaExists(full) == false)
-        @panic(
+        panic(
             "rakun metadata: `"
                 + file
                 + "` does not exist under `"
@@ -582,12 +582,12 @@ fn imageRouteOf(pattern: string, kind: ImageKind) -> string {
     return prefix + "/" + imageFileName(kind);
 }
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__K, __R) -> persistent_term:put({rakun_meta_renderer, __K}, __R), 0 end)($0, $1)"""),
 )]
 declare fn rkMetaPutRenderer(key: string, render: PageRenderer) -> i32;
 
-#[@external(.Erlang("""persistent_term:get({rakun_meta_renderer, $0}, undefined)"""))]
+#[compiler.external(.Erlang("""persistent_term:get({rakun_meta_renderer, $0}, undefined)"""))]
 declare fn rkMetaRenderer(key: string) -> ?PageRenderer;
 
 fn rendererKey(kind: ImageKind, pattern: string) -> string {
@@ -670,7 +670,7 @@ pub fn setImageRenderer(
     ).length
         > 0;
     if (known == false)
-        @panic(
+        panic(
             "rakun metadata: no dynamic "
                 + imageFileName(kind)
                 + " is registered at `"
@@ -687,7 +687,7 @@ fn renderedBody(kind: ImageKind, pattern: string, pagePath: string) -> ?string {
     return rkMetaHidden({ -> renderInto(render, pagePath) });
 }
 
-fn noWrite() -> @Task<@Result<void, string>> {
+fn noWrite() -> Task<Result<void, string>> {
     return;
 }
 
@@ -699,7 +699,7 @@ fn renderInto(render: PageRenderer, pagePath: string) -> string {
     return body;
 }
 
-#[@external(
+#[compiler.external(
     .Erlang("""rakun_runtime:make_request(<<"GET">>, $0, <<"{}">>, <<"{}">>, <<"{}">>, <<>>)"""),
 )]
 declare fn rkMakeReq(pathname: string) -> Request;

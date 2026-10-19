@@ -20,7 +20,7 @@
 //// command; with no probe the face is emitted unadjusted and the degradation
 //// is logged once, naming the family.
 
-import {io.fs, io.process, path, hash} from "std";
+import {io.fs, io.process, path, hash, compiler} from "std";
 import {assets.font_metrics.FontMetrics, assets.font_metrics.MetricsRow, assets.font_metrics.metricsOf, assets.font_metrics.metricsSidecar};
 
 pub type Font(family: string, className: string, variable: string, css: string, preload: string, style: string)
@@ -58,29 +58,29 @@ pub type GoogleFace(subset: string, style: string, weight: string, url: string, 
 pub type FontBuild(
     buildId: string,
     outDir: string,
-    fetchCss: fn(url: string) -> @Result<string, string>,
-    download: fn(url: string, dest: string) -> @Result<void, string>,
+    fetchCss: fn(url: string) -> Result<string, string>,
+    download: fn(url: string, dest: string) -> Result<void, string>,
 )
 
 pub fn displays() -> string[] {
     return ["swap", "block", "fallback", "optional"];
 }
 
-#[@external(
-    .Node("""(Number($0) / Number($1) * 100).toFixed(2)"""),
+#[compiler.external(
+    .JavaScript("""(Number($0) / Number($1) * 100).toFixed(2)"""),
     .Erlang("""float_to_binary($0 / $1 * 100, [{decimals, 2}])"""),
 )]
 declare fn percentOf(num: f64, den: f64) -> string;
 
-#[@external(.Node("""Number($0)"""), .Erlang("""float($0)"""))]
+#[compiler.external(.JavaScript("""Number($0)"""), .Erlang("""float($0)"""))]
 declare fn toF64(n: i32) -> f64;
 
 fn pct(num: i32, den: i32) -> string {
     return percentOf(toF64(num), toF64(den)) + "%";
 }
 
-#[@external(
-    .Node("""(Number($0) * Number($3) / (Number($1) * Number($2)) * 100).toFixed(2)"""),
+#[compiler.external(
+    .JavaScript("""(Number($0) * Number($3) / (Number($1) * Number($2)) * 100).toFixed(2)"""),
     .Erlang("""float_to_binary($0 * $3 / ($1 * $2) * 100, [{decimals, 2}])"""),
 )]
 declare fn ratioPercent(a: f64, upmA: f64, b: f64, upmB: f64) -> string;
@@ -243,7 +243,7 @@ fn assemble(family: string, faces: Array<#(string, string, string, string)>, dis
 // `googleFont` over explicit build seams: fetch the CSS, keep the requested
 // subsets' faces, download each into the static tree, write its metrics
 // sidecar, assemble the `Font`.
-pub fn googleFontWith(family: string, opts: GoogleFontOptions, build: FontBuild) -> @Result<Font, string> {
+pub fn googleFontWith(family: string, opts: GoogleFontOptions, build: FontBuild) -> Result<Font, string> {
     val problem = refusal(family, opts);
     if (problem != "") throw problem;
     val fetch = build.fetchCss;
@@ -296,7 +296,7 @@ fn adjustedFor(family: string) -> string {
     return fallbackFace(family, r.localFallback, r.metrics, l.metrics);
 }
 
-fn curlText(url: string) -> @Result<string, string> {
+fn curlText(url: string) -> Result<string, string> {
     val r = try process.run("curl", ["-fsSL", "-A", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36", url]);
     if (r.status != 0)
         throw "curl "
@@ -308,7 +308,7 @@ fn curlText(url: string) -> @Result<string, string> {
     return r.stdout;
 }
 
-fn curlFile(url: string, dest: string) -> @Result<void, string> {
+fn curlFile(url: string, dest: string) -> Result<void, string> {
     val r = try process.run("curl", ["-fsSL", "-o", dest, url]);
     if (r.status != 0)
         throw "curl "
@@ -325,7 +325,7 @@ pub fn curlBuild(buildId: string, outDir: string) -> FontBuild {
     return FontBuild(buildId: buildId, outDir: outDir, fetchCss: { url -> curlText(url) }, download: { url, dest -> curlFile(url, dest) });
 }
 
-pub fn googleFont(family: string, opts: GoogleFontOptions, buildId: string, outDir: string) -> @Result<Font, string> {
+pub fn googleFont(family: string, opts: GoogleFontOptions, buildId: string, outDir: string) -> Result<Font, string> {
     return try googleFontWith(family, opts, curlBuild(buildId, outDir));
 }
 
@@ -333,7 +333,7 @@ pub fn googleFont(family: string, opts: GoogleFontOptions, buildId: string, outD
 // hash. `root` is the project root (a source must stay inside it); `probe`
 // answers a face's metrics, `null` when no probe is available — then the face
 // is unadjusted and `logged` receives one line naming the family.
-pub fn localFont(family: string, opts: LocalFontOptions, root: string, buildId: string, outDir: string, probe: fn(file: string) -> ?FontMetrics, logged: fn(line: string) -> i32) -> @Result<Font, string> {
+pub fn localFont(family: string, opts: LocalFontOptions, root: string, buildId: string, outDir: string, probe: fn(file: string) -> ?FontMetrics, logged: fn(line: string) -> i32) -> Result<Font, string> {
     if (displays().contains(opts.display) == false)
         throw "display \""
             + opts.display

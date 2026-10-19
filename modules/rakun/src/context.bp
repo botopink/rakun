@@ -33,7 +33,7 @@
 //// call a sibling function. When `decorators.bp` unfreezes, this body folds
 //// into the six stereotypes and the extra line goes away.
 
-import {collections.Dict, compiler, compiler.DeclKind} from "std";
+import {collections.Dict, compiler, compiler.DeclKind, failure.panic} from "std";
 import {runtime.rkScan, runtime.rkSingleton, runtime.rkProp, runtime.rkConfigCheckRun};
 import {events.Event, events.event, events.publishEvent, events.bootEventNames, events.bootEventPayloads, events.applicationFailedEvent};
 import {lifecycle.postConstructFailure, lifecycle.postConstructProblem};
@@ -80,7 +80,7 @@ pub fn scopeOf(name: string) -> Scope {
             Scope.Request
         }
         _ {
-            @panic(scopeProblem(name))
+            panic(scopeProblem(name))
         }
     };
 }
@@ -218,63 +218,63 @@ pub fn parseBeans(wire: string) -> Bean[] {
 
 // ── the host cells ──────────────────────────────────────────────────────────
 //
-// Every cell carries one `@external(.Erlang(…))` form: rakun is erlang-only
+// Every cell carries one `compiler.external(.Erlang(…))` form: rakun is erlang-only
 // (decision 113), so there is no second row to pair a cell for.
 
-#[@external(.Erlang("rakun_context:bean_register($0, $1)"))]
+#[compiler.external(.Erlang("rakun_context:bean_register($0, $1)"))]
 pub declare fn rkBeanStore<T>(record: string, factory: fn() -> T) -> i32;
 
-#[@external(.Erlang("rakun_context:bean_table()"))]
+#[compiler.external(.Erlang("rakun_context:bean_table()"))]
 pub declare fn rkBeanTable() -> string;
 
-#[@external(.Erlang("rakun_context:bean_count()"))]
+#[compiler.external(.Erlang("rakun_context:bean_count()"))]
 pub declare fn rkBeanCount() -> i32;
 
-#[@external(.Erlang("rakun_context:bean_has_record($0)"))]
+#[compiler.external(.Erlang("rakun_context:bean_has_record($0)"))]
 pub declare fn rkBeanHasRecord(record: string) -> bool;
 
 // The factory stored under this EXACT line, invoked. botopink chose the line
 // out of `rkBeanTable()`; the host does an equality test and a call.
-#[@external(.Erlang("rakun_context:bean_invoke($0)"))]
+#[compiler.external(.Erlang("rakun_context:bean_invoke($0)"))]
 pub declare fn rkBeanInvoke<T>(record: string) -> ?T;
 
 // The same call with the value discarded, for the eager pass: the caller has no
 // type to bind the answer to, and a construction that raises must still raise.
-#[@external(.Erlang("rakun_context:bean_touch($0)"))]
+#[compiler.external(.Erlang("rakun_context:bean_touch($0)"))]
 pub declare fn rkBeanTouch(record: string) -> i32;
 
 // The eager pass needs the FAILURE, not the halt: `bootSequence` publishes
 // `ApplicationFailed` instead of the tail and only then raises, so it has to see
 // a construction fail without being taken down by it. `""` is success.
-#[@external(.Erlang("rakun_context:bean_try($0)"))]
+#[compiler.external(.Erlang("rakun_context:bean_try($0)"))]
 pub declare fn rkBeanTry(record: string) -> string;
 
-#[@external(.Erlang("rakun_context:bean_reset()"))]
+#[compiler.external(.Erlang("rakun_context:bean_reset()"))]
 pub declare fn rkBeanReset() -> i32;
 
 // Decision 256's catalogue: the factories the application's entry point
 // collects at comptime, one per bean name, stored as the `unknown` values they
 // are. `rkResolve<T>` narrows an entry with `is fn() -> T` when it reads it.
-#[@external(.Erlang("rakun_context:catalogue_put($0, $1)"))]
+#[compiler.external(.Erlang("rakun_context:catalogue_put($0, $1)"))]
 pub declare fn rkCatalogueStore(name: string, factory: unknown) -> i32;
 
-#[@external(.Erlang("rakun_context:catalogue_get($0)"))]
+#[compiler.external(.Erlang("rakun_context:catalogue_get($0)"))]
 pub declare fn rkCatalogueEntry(name: string) -> unknown;
 
-#[@external(.Erlang("rakun_context:catalogue_names()"))]
+#[compiler.external(.Erlang("rakun_context:catalogue_names()"))]
 pub declare fn rkCatalogueNames() -> string;
 
-#[@external(.Erlang("rakun_context:catalogue_reset()"))]
+#[compiler.external(.Erlang("rakun_context:catalogue_reset()"))]
 pub declare fn rkCatalogueReset() -> i32;
 
 // `rkSingleton` one scope down. On the BEAM this is the process dictionary, so
 // two concurrent requests are two processes and get their own instance for
 // free; node is single-threaded, so the scope is the bracket the dispatcher
 // opens and `rkRequestScopeEnd` closes.
-#[@external(.Erlang("rakun_context:request_scoped($0, $1)"))]
+#[compiler.external(.Erlang("rakun_context:request_scoped($0, $1)"))]
 pub declare fn rkRequestScoped<T>(key: string, build: fn() -> T) -> T;
 
-#[@external(.Erlang("rakun_context:request_scope_end()"))]
+#[compiler.external(.Erlang("rakun_context:request_scope_end()"))]
 pub declare fn rkRequestScopeEnd() -> i32;
 
 // ── the test seam ───────────────────────────────────────────────────────────
@@ -286,19 +286,19 @@ pub declare fn rkRequestScopeEnd() -> i32;
 // counter or it is nothing. Both are host state for the same reason the
 // registry is: botopink has no top-level mutable state.
 
-#[@external(.Erlang("rakun_context:note($0)"))]
+#[compiler.external(.Erlang("rakun_context:note($0)"))]
 pub declare fn rkCtxNote(line: string) -> i32;
 
-#[@external(.Erlang("rakun_context:note_log()"))]
+#[compiler.external(.Erlang("rakun_context:note_log()"))]
 pub declare fn rkCtxNotes() -> string;
 
-#[@external(.Erlang("rakun_context:note_reset()"))]
+#[compiler.external(.Erlang("rakun_context:note_reset()"))]
 pub declare fn rkCtxNoteReset() -> i32;
 
-#[@external(.Erlang("rakun_context:bump($0)"))]
+#[compiler.external(.Erlang("rakun_context:bump($0)"))]
 pub declare fn rkCtxBump(key: string) -> i32;
 
-#[@external(.Erlang("rakun_context:counted($0)"))]
+#[compiler.external(.Erlang("rakun_context:counted($0)"))]
 pub declare fn rkCtxCount(key: string) -> i32;
 
 // ── registration ────────────────────────────────────────────────────────────
@@ -341,13 +341,13 @@ pub fn rkRegisterBeanAt<T>(
     owner: string,
     factory: fn() -> T,
 ) -> i32 {
-    if (typeName == "") @panic(beanNameProblem());
-    if (unwritable(typeName)) @panic(beanFieldProblem("type name", typeName));
-    if (unwritable(qualifier)) @panic(beanFieldProblem("qualifier", qualifier));
-    if (unwritable(owner)) @panic(beanFieldProblem("owner", owner));
+    if (typeName == "") panic(beanNameProblem());
+    if (unwritable(typeName)) panic(beanFieldProblem("type name", typeName));
+    if (unwritable(qualifier)) panic(beanFieldProblem("qualifier", qualifier));
+    if (unwritable(owner)) panic(beanFieldProblem("owner", owner));
     val clash = existing(path, typeName, qualifier);
     if (clash != "")
-        @panic(duplicateBeanProblem(typeName, qualifier, clash, owner));
+        panic(duplicateBeanProblem(typeName, qualifier, clash, owner));
     val _s = scopeOf(scope);
     return rkBeanStore(
         beanLine(
@@ -437,8 +437,8 @@ pub fn chooseBean(path: string, typeName: string) -> string {
             return beanLine(primaries.at(0) ?? emptyBean())
         else {
             if (primaries.length == 0)
-                @panic(ambiguousBeanProblem(typeName, ownerList(rows)));
-            @panic(twoPrimariesProblem(typeName, ownerList(primaries)));
+                panic(ambiguousBeanProblem(typeName, ownerList(rows)));
+            panic(twoPrimariesProblem(typeName, ownerList(primaries)));
         }
     }
 }
@@ -515,7 +515,7 @@ pub fn rkAddBean(
     name: string,
     factory: unknown,
 ) -> Dict<string, unknown> {
-    if (beans.hasKey(name)) @panic(duplicateCatalogueProblem(name));
+    if (beans.hasKey(name)) panic(duplicateCatalogueProblem(name));
     return beans.insert(name, factory);
 }
 
@@ -545,11 +545,11 @@ pub fn rkInstalledBeans() -> string[] {
 pub fn rkResolve<T>(name: string) -> T {
     val entry = rkCatalogueEntry(name);
     if (entry is fn() -> T) return rkSingleton("bean:" + name, entry);
-    if (entry != null) @panic(beanTypeProblem(name));
+    if (entry != null) panic(beanTypeProblem(name));
     val record = chooseBean("", name);
-    if (record == "") @panic(missingBeanProblem(name));
+    if (record == "") panic(missingBeanProblem(name));
     val built: ?T = rkBeanInvoke(record);
-    if (built == null) @panic(missingBeanProblem(name));
+    if (built == null) panic(missingBeanProblem(name));
     return built;
 }
 
@@ -658,8 +658,8 @@ pub type Context(
     // A context whose `resolve` looks in its own registry first and delegates
     // upward on a miss. Front 62 builds the per-request scope on it.
     pub fn child(self: Self, name: string) -> Context {
-        if (name == "") @panic(childNameProblem());
-        if (name.contains("/")) @panic(childNameProblem());
+        if (name == "") panic(childNameProblem());
+        if (name.contains("/")) panic(childNameProblem());
         return Context(scopePath: self.scopePath + "/" + name);
     }
 
@@ -790,7 +790,7 @@ pub fn bootSequenceFor(source: string) -> i32 {
 
 fn bootFailure(source: string, reason: string, published: i32) -> i32 {
     val _x = publishEvent(event(applicationFailedEvent(), source, reason));
-    @panic(bootFailedProblem(reason));
+    panic(bootFailedProblem(reason));
 }
 
 // ── `#[managed]` ────────────────────────────────────────────────────────────

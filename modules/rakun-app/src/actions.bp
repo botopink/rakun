@@ -48,7 +48,7 @@
 //// slot, which rakun-cache writes; `n` is `routing`'s `signalToWire` of the
 //// captured outcome, and the envelope derives `redirect` from it.
 
-import {hash, encoding, compiler, compiler.DeclKind} from "std";
+import {hash, encoding, compiler, compiler.DeclKind, failure.panic} from "std";
 import {id.deriveActionId} from "actions";
 import {actions.ActionEnvelope, actions.writeEnvelope, actions.writeState, actions.parseRpcBody, actions.RpcCall, actions.refreshValue} from "actions";
 import {navigation.NavOutcome, navigation.NavKind, navigation.signalToWire} from "routing";
@@ -96,17 +96,17 @@ pub type ActionOutcome(
 
 // ── the host cells ──────────────────────────────────────────────────────────
 
-#[@external(.Erlang("rakun_actions:register($0, $1)"))]
+#[compiler.external(.Erlang("rakun_actions:register($0, $1)"))]
 pub declare fn rkRegisterAction<T>(
     name: string,
     run: fn(form: FormData) -> T,
 ) -> i32;
 
 // `module|name`, sorted.
-#[@external(.Erlang("rakun_actions:registered()"))]
+#[compiler.external(.Erlang("rakun_actions:registered()"))]
 pub declare fn rkActionsRegistered() -> string[];
 
-#[@external(.Erlang("rakun_actions:run_of($0, $1)"))]
+#[compiler.external(.Erlang("rakun_actions:run_of($0, $1)"))]
 declare fn rkActionRunOf<T>(
     module: string,
     name: string,
@@ -114,82 +114,82 @@ declare fn rkActionRunOf<T>(
 
 // `ok` or `failed`; the value is kept for `rkActionResult` / `rkActionFailure`.
 // A navigation signal is re-thrown untouched.
-#[@external(.Erlang("rakun_actions:call($0, $1)"))]
+#[compiler.external(.Erlang("rakun_actions:call($0, $1)"))]
 declare fn rkActionCall<T>(
     run: fn(form: FormData) -> T,
     form: FormData,
 ) -> string;
 
-#[@external(.Erlang("rakun_actions:result()"))]
+#[compiler.external(.Erlang("rakun_actions:result()"))]
 declare fn rkActionResult() -> ActionResult;
 
-#[@external(.Erlang("rakun_actions:failure()"))]
+#[compiler.external(.Erlang("rakun_actions:failure()"))]
 declare fn rkActionFailure() -> string;
 
-#[@external(.Erlang("rakun_actions:install_body_hook($0)"))]
+#[compiler.external(.Erlang("rakun_actions:install_body_hook($0)"))]
 declare fn rkActionsInstallBodyHook(
     hook: fn(verb: string, path: string, headersJson: string) -> string,
 ) -> i32;
 
-#[@external(.Erlang("rakun_actions:uninstall_body_hook()"))]
+#[compiler.external(.Erlang("rakun_actions:uninstall_body_hook()"))]
 pub declare fn rkActionsUninstallBodyHook() -> i32;
 
 // How many request bodies the hook let the listener read.
-#[@external(.Erlang("rakun_actions:admitted()"))]
+#[compiler.external(.Erlang("rakun_actions:admitted()"))]
 pub declare fn rkActionsAdmitted() -> i32;
 
-#[@external(.Erlang("rakun_actions:reset()"))]
+#[compiler.external(.Erlang("rakun_actions:reset()"))]
 pub declare fn rkActionsReset() -> i32;
 
-#[@external(.Erlang("rakun_ssr:begin_handler()"))]
+#[compiler.external(.Erlang("rakun_ssr:begin_handler()"))]
 declare fn rkActBeginHandler() -> i32;
 
 // Runs `work` with the connection's socket hidden from the chunk writer, so a
 // page rendered for an envelope or a re-render is buffered, not streamed.
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__W) -> __S = erase(rakun_conn_socket), try __W() after case __S of undefined -> ok; _ -> put(rakun_conn_socket, __S) end end end)($0)"""),
 )]
 declare fn rkActWithoutSocket<T>(work: fn() -> T) -> T;
 
 // A header of the JSON object front 04 hands the body hook (names lowercased).
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__J, __N) -> case catch json:decode(__J) of #{} = __M -> case maps:get(__N, __M, <<>>) of __V when is_binary(__V) -> __V; _ -> <<>> end; _ -> <<>> end end)($0, $1)"""),
 )]
 declare fn rkActHeaderOf(headersJson: string, name: string) -> string;
 
-#[@external(.Erlang("rakun_ssr:set_fallback($0)"))]
+#[compiler.external(.Erlang("rakun_ssr:set_fallback($0)"))]
 declare fn rkActSetFallback(
-    dispatch: fn(req: Request) -> @Task<Response>,
+    dispatch: fn(req: Request) -> Task<Response>,
 ) -> i32;
 
-#[@external(.Erlang("""(fun(__R) -> maps:get(verb, __R) end)($0)"""))]
+#[compiler.external(.Erlang("""(fun(__R) -> maps:get(verb, __R) end)($0)"""))]
 declare fn rkActVerb(req: Request) -> string;
 
 // ── the marker ──────────────────────────────────────────────────────────────
 //
-// `#[serverAction]` on `pub fn name(form: FormData) -> @Task<ActionResult>`
-// (or `-> @Task<@Result<ActionResult, E>>`, whose `Error` is a failed action)
+// `#[serverAction]` on `pub fn name(form: FormData) -> Task<ActionResult>`
+// (or `-> Task<Result<ActionResult, E>>`, whose `Error` is a failed action)
 // compiles `rkRegisterAction("<name>", <name>)` into the init list
 // (`compiler.compile`, run before `main`). Reflection spells the
-// return type as written, so any other return — `@Task<i32>` included — is
+// return type as written, so any other return — `Task<i32>` included — is
 // refused here. A decorator body is comment-free and calls no function.
 
 pub fn serverAction(syntax decl: unknown) {
     if (compiler.kind(decl) != DeclKind.Fn)
         compiler.fail(
-            "#[serverAction] must annotate a function - an action is fn(form: FormData) -> @Task<ActionResult>",
+            "#[serverAction] must annotate a function - an action is fn(form: FormData) -> Task<ActionResult>",
             at: decl,
         );
     val rt = compiler.returnType(decl).replaceAll(" ", "");
-    val okReturn = rt == "@Task<ActionResult>"
-        || (rt.startsWith("@Task<@Result<ActionResult,") && rt.endsWith(">>"));
+    val okReturn = rt == "Task<ActionResult>"
+        || (rt.startsWith("Task<Result<ActionResult,") && rt.endsWith(">>"));
     if (okReturn == false)
         compiler.fail(
             "#[serverAction] "
                 + compiler.name(decl)!
                 + " returns `"
                 + compiler.returnType(decl)
-                + "` - an action returns @Task<ActionResult> or @Task<@Result<ActionResult, E>>, so the dispatcher always awaits it",
+                + "` - an action returns Task<ActionResult> or Task<Result<ActionResult, E>>, so the dispatcher always awaits it",
             at: decl,
         );
     val declName = compiler.name(decl)!;
@@ -254,7 +254,7 @@ pub fn unknownActionProblem(name: string) -> string {
 // raises. Two modules registering one name: the first in module order.
 pub fn actionIdOf(name: string) -> string {
     val hits = rkActionsRegistered().filter({ e -> nameOf(e) == name });
-    if (hits.length == 0) @panic(unknownActionProblem(name));
+    if (hits.length == 0) panic(unknownActionProblem(name));
     val entry = hits.at(0) ?? "";
     return deriveActionId(
         rkProp("rakun.actions.secret"),
@@ -379,7 +379,7 @@ fn envelopeOf(
     );
 }
 
-fn renderPage(pathname: string) -> @Task<i32> {
+fn renderPage(pathname: string) -> Task<i32> {
     val _b = rkSsrBegin();
     val status: i32 = await servePage(
         rkMakeRequest("GET", pathname, "{}", "{}", "{}", ""),
@@ -389,7 +389,7 @@ fn renderPage(pathname: string) -> @Task<i32> {
 }
 
 // The page at `pathname` re-rendered (phase `Render`, front 23), buffered.
-fn rerender(pathname: string) -> @Task<ActionOutcome> {
+fn rerender(pathname: string) -> Task<ActionOutcome> {
     val status: i32 = await rkActWithoutSocket({ -> renderPage(pathname) });
     return outcome(status, rkSsrHeader("content-type"), rkSsrBody());
 }
@@ -446,9 +446,9 @@ pub fn dispatchAction(
     contentType: string,
     body: string,
     header: string,
-) -> @Task<ActionOutcome> {
+) -> Task<ActionOutcome> {
     val problem = actionsConfigProblem();
-    if (problem != "") @panic(problem);
+    if (problem != "") panic(problem);
     val early = preBodyRefusal(origin, host, contentType, body.length());
     if (early != "") return refusal(early);
     val opened = requestLive() == false;
@@ -487,7 +487,7 @@ fn dispatchInFrame(
     contentType: string,
     body: string,
     header: string,
-) -> @Task<ActionOutcome> {
+) -> Task<ActionOutcome> {
     val scripted = header != "";
     if (scripted && header == refreshValue()) {
         val page: ActionOutcome = await rerender(pathname);
@@ -542,7 +542,7 @@ fn dispatchInFrame(
 
 // ── the app path ────────────────────────────────────────────────────────────
 
-pub fn actionsResponse(req: Request) -> @Task<Response> {
+pub fn actionsResponse(req: Request) -> Task<Response> {
     if (rkActVerb(req) != "POST" || isPage(req.path) == false) {
         val app: Response = await appResponse(req);
         return app;
@@ -584,7 +584,7 @@ fn writeOutcome(o: ActionOutcome) -> Response {
 // app fallback and the body hook in front of the listener's body read.
 pub fn serveActions() -> i32 {
     val problem = actionsConfigProblem();
-    if (problem != "") @panic(problem);
+    if (problem != "") panic(problem);
     val _h = rkActionsInstallBodyHook(
         { verb, path, headersJson -> bodyHook(verb, path, headersJson) },
     );

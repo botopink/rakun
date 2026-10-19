@@ -6,6 +6,7 @@
 //// topologies never share `count`. `lookup` answers null for an absent key.
 
 import {param, Row, Rows, sqlTemplate} from "rakun-data";
+import {compiler} from "std";
 
 pub behavior StateStore {
     fn lookup(self: Self, key: string) -> ?string;
@@ -18,37 +19,37 @@ pub behavior StateStore {
     ) -> string;
 }
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun() -> case ets:whereis(rakun_stream_state) of undefined -> __Me = self(), spawn(fun() -> ets:new(rakun_stream_state, [named_table, public, ordered_set]), __Me ! rakun_state_ready, receive stop -> ok end end), receive rakun_state_ready -> ok after 2000 -> ok end, 0; _ -> 0 end end)()"""),
 )]
 declare fn etsEnsure() -> i32;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__K) -> case ets:lookup(rakun_stream_state, __K) of [{_, __V}] -> __V; [] -> undefined end end)($0)"""),
 )]
 declare fn etsGet(key: string) -> ?string;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__K, __V) -> ets:insert(rakun_stream_state, {__K, __V}), 1 end)($0, $1)"""),
 )]
 declare fn etsPut(key: string, value: string) -> i32;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__P) -> [__V || {__K, __V} <- ets:tab2list(rakun_stream_state), binary:match(__K, __P) =:= {0, byte_size(__P)}] end)($0)"""),
 )]
 declare fn etsValues(prefix: string) -> string[];
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__P) -> [ets:delete(rakun_stream_state, __K) || {__K, _} <- ets:tab2list(rakun_stream_state), binary:match(__K, __P) =:= {0, byte_size(__P)}], 0 end)($0)"""),
 )]
 pub declare fn etsForget(prefix: string) -> i32;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__T) -> logger:warning("~ts", [__T]), persistent_term:put(rakun_stream_log, persistent_term:get(rakun_stream_log, []) ++ [__T]), 0 end)($0)"""),
 )]
 pub declare fn streamLog(line: string) -> i32;
 
-#[@external(.Erlang("""persistent_term:get(rakun_stream_log, [])"""))]
+#[compiler.external(.Erlang("""persistent_term:get(rakun_stream_log, [])"""))]
 pub declare fn streamLogLines() -> string[];
 
 pub type EtsState(pipeline: string) implement StateStore {

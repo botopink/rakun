@@ -42,7 +42,7 @@
 //// (`withAuthentication`).
 ////
 //// REFLECTION spells every parameter and return type as written (`i32[]`,
-//// `@Result<User, string>`), so — exactly as for `<Type>Tx` — the proxy
+//// `Result<User, string>`), so — exactly as for `<Type>Tx` — the proxy
 //// redeclares each method's signature verbatim, and every reflected method is
 //// forwarded (`Method` carries no visibility).
 
@@ -103,7 +103,8 @@ pub fn secured(syntax decl: unknown, comptime authorities: string) {
         || bare.contains(" ")
         || bare.contains("'")
         || bare.contains("#");
-    if (compiler.kind(decl) != DeclKind.Method && compiler.kind(decl) != DeclKind.Type)
+    if (compiler.kind(decl) != DeclKind.Method
+        && compiler.kind(decl) != DeclKind.Type)
         compiler.fail(
             "#[secured] must annotate a method, or the type, of a #[methodSecurity] type",
             at: decl,
@@ -121,7 +122,8 @@ pub fn secured(syntax decl: unknown, comptime authorities: string) {
 }
 
 pub fn permitAll(syntax decl: unknown) {
-    if (compiler.kind(decl) != DeclKind.Method && compiler.kind(decl) != DeclKind.Type)
+    if (compiler.kind(decl) != DeclKind.Method
+        && compiler.kind(decl) != DeclKind.Type)
         compiler.fail(
             "#[permitAll] must annotate a method, or the type, of a #[methodSecurity] type",
             at: decl,
@@ -137,61 +139,65 @@ pub fn preAuthorize(syntax decl: unknown, comptime expression: string) {
 
 pub fn methodSecurity(syntax decl: unknown) {
     var typeRequirement = "authenticated";
-    compiler.annotations(decl).forEach({ a ->
-        val s = if (a.name == "secured")
-            a.args.join("").replaceAll("\"", "").replaceAll(" ", "")
-        else
-            typeRequirement;
-        typeRequirement = s;
-        val p = if (a.name == "permitAll") "permitAll" else typeRequirement;
-        typeRequirement = p;
-    });
-    var methods: Array<string> = [];
-    var expression = "";
-    compiler.methods(decl).forEach({ m ->
-        var required = typeRequirement;
-        m.annotations.forEach({ a ->
+    compiler
+        .annotations(decl)
+        .forEach({ a ->
             val s = if (a.name == "secured")
                 a.args.join("").replaceAll("\"", "").replaceAll(" ", "")
             else
-                required;
-            required = s;
-            val p = if (a.name == "permitAll") "permitAll" else required;
-            required = p;
-            val e = if (a.name == "preAuthorize" && expression == "")
-                compiler.name(decl)! + "." + m.name
+                typeRequirement;
+            typeRequirement = s;
+            val p = if (a.name == "permitAll") "permitAll" else typeRequirement;
+            typeRequirement = p;
+        });
+    var methods: Array<string> = [];
+    var expression = "";
+    compiler
+        .methods(decl)
+        .forEach({ m ->
+            var required = typeRequirement;
+            m.annotations.forEach({ a ->
+                val s = if (a.name == "secured")
+                    a.args.join("").replaceAll("\"", "").replaceAll(" ", "")
+                else
+                    required;
+                required = s;
+                val p = if (a.name == "permitAll") "permitAll" else required;
+                required = p;
+                val e = if (a.name == "preAuthorize" && expression == "")
+                    compiler.name(decl)! + "." + m.name
+                else
+                    expression;
+                expression = e;
+            });
+            var params: Array<string> = [];
+            var args: Array<string> = [];
+            m.params.forEach({ p ->
+                if (p.name != "self") {
+                    params.push(p.name + ": " + p.typeName);
+                    args.push(p.name);
+                }
+            });
+            val ret = m.returnType;
+            val call = "self.inner." + m.name + "(" + args.join(", ") + ")";
+            val head = if (params.length > 0)
+                "pub fn " + m.name + "(self: Self, " + params.join(", ") + ")"
             else
-                expression;
-            expression = e;
+                "pub fn " + m.name + "(self: Self)";
+            val sig = if (ret != "") head + " -> " + ret else head;
+            val guard = "val _sec = rkRequireAuthority(\""
+                + compiler.name(decl)!
+                + "."
+                + m.name
+                + "\", \""
+                + required
+                + "\");";
+            val body = if (ret != "")
+                guard + "\n        return " + call + ";"
+            else
+                guard + "\n        " + call + ";";
+            methods.push(sig + " {\n        " + body + "\n    }");
         });
-        var params: Array<string> = [];
-        var args: Array<string> = [];
-        m.params.forEach({ p ->
-            if (p.name != "self") {
-                params.push(p.name + ": " + p.typeName);
-                args.push(p.name);
-            }
-        });
-        val ret = m.returnType;
-        val call = "self.inner." + m.name + "(" + args.join(", ") + ")";
-        val head = if (params.length > 0)
-            "pub fn " + m.name + "(self: Self, " + params.join(", ") + ")"
-        else
-            "pub fn " + m.name + "(self: Self)";
-        val sig = if (ret != "") head + " -> " + ret else head;
-        val guard = "val _sec = rkRequireAuthority(\""
-            + compiler.name(decl)!
-            + "."
-            + m.name
-            + "\", \""
-            + required
-            + "\");";
-        val body = if (ret != "")
-            guard + "\n        return " + call + ";"
-        else
-            guard + "\n        " + call + ";";
-        methods.push(sig + " {\n        " + body + "\n    }");
-    });
     val declName = compiler.name(decl)!;
     val secName = declName + ".Sec";
     val make = "pub fn make() -> "

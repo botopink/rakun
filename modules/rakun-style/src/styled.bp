@@ -7,7 +7,7 @@
 //// each hole's expression spliced into the code it builds and typed where
 //// the call stands (577 (1)) — and each answers a component in the
 //// language's model (decision 128, the pattern of 276's `View`):
-//// `@Component<Styled>` (`StyledView`) and `@Component<StyledProperty>`
+//// `Component<Styled>` (`StyledView`) and `Component<StyledProperty>`
 //// (`StyledPropertyView`).
 ////
 //// A component's class is the layer's prefix (`s_`) and the content hash of
@@ -20,7 +20,7 @@
 //// the provider's, `styled` holds no store. A `${p}` splice and a literal
 //// computed at build register nothing.
 
-import {hash, context.createContext, context.provide, context.context, compiler, compiler.CustomNode, compiler.Span} from "std";
+import {hash, context.createContext, context.provide, context.context, compiler, compiler.CustomNode, compiler.Span, failure.panic} from "std";
 import {theme.baseTheme};
 import {reader.Source, reader.readBlock, reader.firstNonDeclaration, reader.classMark};
 import {hash.classHash};
@@ -44,13 +44,13 @@ pub type StyledSheet(layer: string, add: fn(layer: string, item: Styled))
 pub val styledContext = createContext(StyledSheet(layer: "", add: missingProvider));
 
 fn missingProvider(layer: string, item: Styled) -> void {
-    @panic("styled: no StyledContext provider — the render's root provides it");
+    panic("styled: no StyledContext provider — the render's root provides it");
 }
 
 // A component: its class and its rules (`.s_<hash>{…}` and its nested rules, in
 // source order — decision 368).
 // LANGUAGE GAP: a wrapper's type alias cannot implement a behavior (a type's conformance is its own clause), so `Styleable` is implemented by the records `Styled` and `StyledProperty`, not by `StyledView` and `StyledPropertyView`.
-pub type Styled(className: string, rules: string) implement Styleable, @Renderable {
+pub type Styled(className: string, rules: string) implement Styleable, Renderable {
     fn toStyled(self: Self) -> StyledView {
         return styledConstant(self.className, self.rules);
     }
@@ -58,15 +58,15 @@ pub type Styled(className: string, rules: string) implement Styleable, @Renderab
 
 // A declarations-only component: its class, its rules (`.s_<hash>{…}`) and
 // its declarations, which a `${p}` hole of another literal inlines.
-pub type StyledProperty(className: string, rules: string, declarations: string) implement Styleable, @Renderable {
+pub type StyledProperty(className: string, rules: string, declarations: string) implement Styleable, Renderable {
     fn toStyled(self: Self) -> StyledView {
         return styledConstant(self.className, self.rules);
     }
 }
 
-pub type StyledView = @Component<Styled>;
+pub type StyledView = Component<Styled>;
 
-pub type StyledPropertyView = @Component<StyledProperty>;
+pub type StyledPropertyView = Component<StyledProperty>;
 
 // ── the run-time half: what the template's code calls ───────────────────────
 
@@ -76,7 +76,7 @@ fn checkedPrefix(prefix: string) -> string {
         && body != ""
         && body.chars().all({ c -> "abcdefghijklmnopqrstuvwxyz".contains(c) });
     if (!ok)
-        @panic(
+        panic(
             "styled: a layer prefix is lowercase letters and `_`: '"
                 + prefix
                 + "'",
@@ -93,7 +93,7 @@ fn withClass(text: string, className: string) -> string {
 }
 
 // A component computed at build: the class and the rules are constants.
-pub fn styledConstant(className: string, rules: string) -> @Component<Styled> {
+pub fn styledConstant(className: string, rules: string) -> Component<Styled> {
     return Styled(className: className, rules: rules);
 }
 
@@ -101,7 +101,7 @@ pub fn propertyConstant(
     className: string,
     rules: string,
     declarations: string,
-) -> @Component<StyledProperty> {
+) -> Component<StyledProperty> {
     return StyledProperty(
         className: className,
         rules: rules,
@@ -110,7 +110,7 @@ pub fn propertyConstant(
 }
 
 // The text between holes, each spliced property's declarations in its place.
-fn spliced(texts: string[], views: StyledPropertyView[]) -> @Component<string> {
+fn spliced(texts: string[], views: StyledPropertyView[]) -> Component<string> {
     var out = texts.at(0) ?? "";
     var k = 0;
     for (views) { v ->
@@ -129,7 +129,7 @@ pub fn styledComputed(
     prefix: string,
     texts: string[],
     views: StyledPropertyView[],
-) -> @Component<Styled> {
+) -> Component<Styled> {
     val sheet = use context(StyledSheet);
     val text = await spliced(texts, views);
     val className = classFor(prefix, text);
@@ -142,7 +142,7 @@ pub fn propertyComputed(
     prefix: string,
     texts: string[],
     views: StyledPropertyView[],
-) -> @Component<StyledProperty> {
+) -> Component<StyledProperty> {
     val sheet = use context(StyledSheet);
     val declarations = await spliced(texts, views);
     val text = classMark() + "{" + declarations + "}";
@@ -159,7 +159,7 @@ pub fn propertyComputed(
 // A `${p}` hole's property, run under a provider that keeps nothing: a splice
 // inlines `p`'s declarations and registers no class of its own (352, 338) —
 // `p`, computed at render, would otherwise add its class when it runs.
-pub fn splice(view: fn() -> StyledPropertyView) -> @Component<StyledProperty> {
+pub fn splice(view: fn() -> StyledPropertyView) -> Component<StyledProperty> {
     use provide(createContext(StyledSheet(layer: "", add: discard)));
     val p = await view();
     return p;

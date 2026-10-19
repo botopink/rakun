@@ -8,7 +8,7 @@
 //// socket (`rkDispatchHttp`); the body hook's cells go over front 04's
 //// listener with a raw client, because the hook runs before a body is read.
 
-import {testing.asserts} from "std";
+import {testing.asserts, failure.panic, compiler} from "std";
 import {io.fs, io.process} from "std";
 import {json.object, json.quote, json.decode} from "std";
 import {Request, Response, rkSetProp, rkProp, rkDispatchHttp, rkServe, toI32} from "rakun";
@@ -16,7 +16,7 @@ import {cookies, cookieDefaults, requestPhase, phaseName} from "rakun/request_co
 import {file_router.rkAppReset, file_router.rkAppRegisterPage};
 import {ssr.PageRenderer, ssr.ChunkWriter, ssr.writeTo, ssr.rkSsrHeader, ssr.buildId};
 
-fn textBody(out: ChunkWriter, text: string) -> @Task<@Result<void, string>> {
+fn textBody(out: ChunkWriter, text: string) -> Task<Result<void, string>> {
     await writeTo(out, text);
     return;
 }
@@ -29,7 +29,7 @@ import {actions.FormData, actions.ActionResult, actions.formValue, actions.serve
 // ── the actions ─────────────────────────────────────────────────────────────
 
 #[serverAction]
-pub fn createPost(form: FormData) -> @Task<ActionResult> {
+pub fn createPost(form: FormData) -> Task<ActionResult> {
     val title = formValue(form, "title");
     if (title.length() < 3) return ActionResult.invalid("title", "Too short");
     val _s = rkSetProp("blog.posts", rkProp("blog.posts") + title + ";");
@@ -38,36 +38,36 @@ pub fn createPost(form: FormData) -> @Task<ActionResult> {
 }
 
 #[serverAction]
-pub fn failingPost(form: FormData) -> @Task<@Result<ActionResult, string>> {
+pub fn failingPost(form: FormData) -> Task<Result<ActionResult, string>> {
     throw "database down";
 }
 
 #[serverAction]
-pub fn raisingPost(form: FormData) -> @Task<ActionResult> {
-    @panic("exploded");
+pub fn raisingPost(form: FormData) -> Task<ActionResult> {
+    panic("exploded");
     return ActionResult.done();
 }
 
 #[serverAction]
-pub fn redirectPost(form: FormData) -> @Task<ActionResult> {
+pub fn redirectPost(form: FormData) -> Task<ActionResult> {
     val _r = redirect(formValue(form, "to"));
     return ActionResult.done();
 }
 
 #[serverAction]
-pub fn missingPost(form: FormData) -> @Task<ActionResult> {
+pub fn missingPost(form: FormData) -> Task<ActionResult> {
     val _n = notFound();
     return ActionResult.done();
 }
 
 #[serverAction]
-pub fn cookiePost(form: FormData) -> @Task<ActionResult> {
+pub fn cookiePost(form: FormData) -> Task<ActionResult> {
     val _c = cookies().set("flash", "saved", cookieDefaults());
     return ActionResult.done();
 }
 
 // A `pub fn` with the action shape and no marker: never reachable.
-pub fn unmarkedPost(form: FormData) -> @Task<ActionResult> {
+pub fn unmarkedPost(form: FormData) -> Task<ActionResult> {
     return ActionResult.saying("should never run");
 }
 
@@ -81,7 +81,7 @@ fn cookieInRender() -> PageRenderer {
     return { req, out -> renderWithCookie(out) };
 }
 
-fn renderWithCookie(out: ChunkWriter) -> @Task<@Result<void, string>> {
+fn renderWithCookie(out: ChunkWriter) -> Task<Result<void, string>> {
     val _c = cookies().set("late", "x", cookieDefaults());
     await writeTo(out, "unreachable");
     return;
@@ -172,7 +172,7 @@ fn rpc(body: string) -> Response {
 
 // ── step 1 — the marker ─────────────────────────────────────────────────────
 
-test "actions: #[serverAction] registers a @Task<ActionResult> fn and a fallible one, and nothing unmarked" {
+test "actions: #[serverAction] registers a Task<ActionResult> fn and a fallible one, and nothing unmarked" {
     val entries = rkActionsRegistered().map({ e -> e.split("|").at(1) ?? "" });
     assert entries.filter({ n -> n == "createPost" }).length == 1;
     assert entries.filter({ n -> n == "failingPost" }).length == 1;
@@ -532,7 +532,7 @@ test "actions: the refresh value re-renders the current route into the payload w
 
 // Sends the head, then up to `bodyBytes` of body in 16 KiB pieces until the
 // server stops taking them; answers `<status line>|<bytes of body sent>`.
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__Port, __Head, __N) -> {ok, __S} = gen_tcp:connect("127.0.0.1", __Port, [binary, {active, false}, {sndbuf, 16384}]), ok = gen_tcp:send(__S, __Head), __Me = self(), __Piece = binary:copy(<<"a">>, 16384), __Send = fun __Send(__Sent) -> case __Sent >= __N of true -> __Sent; false -> case gen_tcp:send(__S, __Piece) of ok -> __Send(__Sent + 16384); _ -> __Sent end end end, _ = spawn(fun() -> __Me ! {sent, __Send(0)} end), __Resp = case gen_tcp:recv(__S, 0, 3000) of {ok, __R} -> __R; _ -> <<>> end, __Sent = receive {sent, __X} -> __X after 5000 -> -1 end, gen_tcp:close(__S), [__Line | _] = binary:split(__Resp, <<13, 10>>), iolist_to_binary([__Line, "|", integer_to_binary(__Sent)]) end)($0, $1, $2)"""),
 )]
 declare fn rawPost(port: i32, head: string, bodyBytes: i32) -> string;

@@ -36,7 +36,7 @@
 //// everywhere.
 
 import {rkProp, rkSetProp, active} from "rakun";
-import {hash} from "std";
+import {hash, compiler, failure.panic, io.terminal.print} from "std";
 import {io.fs} from "std";
 import {sql.params.Param, sql.params.param};
 import {sql.rows.Row, sql.rows.Rows};
@@ -49,7 +49,7 @@ import {EndpointResponse, rkRegisterEndpoint} from "rakun";
 
 // Stable sorts by a comparator answering <0, 0 or >0 (std has none), one per
 // element type so the comparator's field reads are static.
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__L, __F) -> lists:sort(fun(__A, __B) -> __F(__A, __B) =< 0 end, __L) end)($0, $1)"""),
 )]
 declare fn sortFiles(
@@ -57,7 +57,7 @@ declare fn sortFiles(
     cmp: fn(a: MigrationFile, b: MigrationFile) -> i32,
 ) -> MigrationFile[];
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__L, __F) -> lists:sort(fun(__A, __B) -> __F(__A, __B) =< 0 end, __L) end)($0, $1)"""),
 )]
 declare fn sortMigrations(
@@ -65,13 +65,13 @@ declare fn sortMigrations(
     cmp: fn(a: Migration, b: Migration) -> i32,
 ) -> Migration[];
 
-#[@external(.Erlang("""(fun(__L) -> lists:sort(__L) end)($0)"""))]
+#[compiler.external(.Erlang("""(fun(__L) -> lists:sort(__L) end)($0)"""))]
 declare fn sortStrings(xs: string[]) -> string[];
 
-#[@external(.Erlang("""(node() =:= 'nonode@nohost')"""))]
+#[compiler.external(.Erlang("""(node() =:= 'nonode@nohost')"""))]
 declare fn standalone() -> bool;
 
-#[@external(.Erlang("""(fun(__S) -> try binary_to_integer(__S) catch _:_ -> 0 end end)($0)"""))]
+#[compiler.external(.Erlang("""(fun(__S) -> try binary_to_integer(__S) catch _:_ -> 0 end end)($0)"""))]
 declare fn toInt(s: string) -> i32;
 
 pub type Migration(
@@ -227,7 +227,7 @@ pub fn discoverMigrations() -> MigrationFile[] {
             }
         }
     }
-    if (problem != "") @panic(problem);
+    if (problem != "") panic(problem);
     val ordered = sortFiles(
         versioned,
         { a, b -> compareVersions(a.version, b.version) },
@@ -252,7 +252,7 @@ pub fn migrationEnabled() -> bool {
     val files = discoverMigrations();
     if (raw == "false") return false;
     if (raw == "true" && files.length == 0)
-        @panic(
+        panic(
             "rakun migration: rakun.migration.enabled=true and no migration was found in "
                 + migrationLocations().join(", "),
         );
@@ -414,7 +414,7 @@ pub fn plan(files: MigrationFile[], history: Migration[]) -> MigrationFile[] {
                 if (top != ""
                     && compareVersions(f.version, top) < 0
                     && flag("rakun.migration.out-of-order", false) == false)
-                    @panic(
+                    panic(
                         "rakun migration: `"
                             + f.script
                             + "` (version "
@@ -466,7 +466,7 @@ fn applyFile(ds: string, f: MigrationFile, rank: i32) -> i32 {
         rkMigTry({ -> applyInTx(ds, f, rank, started) });
     if (err != "") {
         val _f = recordOutside(ds, rank, f, rkMigNowMs() - started, false);
-        @panic(
+        panic(
             "rakun migration: `"
                 + f.script
                 + "` failed and the run stopped - "
@@ -487,7 +487,7 @@ fn baseline(
         || flag("rakun.migration.baseline-on-migrate", false) == false)
         return history;
     if (rkMigTableCount(ds) == 0)
-        @panic(
+        panic(
             "rakun migration: rakun.migration.baseline-on-migrate=true against an empty database - baselining nothing is always a mistake; run the migrations instead",
         );
     val raw = rkProp("rakun.migration.baseline-version").trim();
@@ -541,7 +541,7 @@ fn migrateLocked(
     val history = baseline(ds, files, history0);
     if (flag("rakun.migration.validate-on-migrate", true)) {
         val problem = validate(files, history);
-        if (problem != "") @panic(problem);
+        if (problem != "") panic(problem);
     }
     val todo = plan(files, history);
     var rank = nextRank(history);
@@ -562,16 +562,16 @@ pub fn migrate() -> MigrationReport {
     return migrateOn(migrationDataSource());
 }
 
-pub fn tryMigrate() -> @Result<MigrationReport, string> {
+pub fn tryMigrate() -> Result<MigrationReport, string> {
     val err = rkMigTry({ -> keep(migrate()) });
     if (err != "") throw err;
     return lastReport();
 }
 
-#[@external(.Erlang("""(fun(__R) -> put(rakun_migration_last, __R), 0 end)($0)"""))]
+#[compiler.external(.Erlang("""(fun(__R) -> put(rakun_migration_last, __R), 0 end)($0)"""))]
 declare fn keep(r: MigrationReport) -> i32;
 
-#[@external(.Erlang("""get(rakun_migration_last)"""))]
+#[compiler.external(.Erlang("""get(rakun_migration_last)"""))]
 declare fn lastReport() -> MigrationReport;
 
 // ── dry run ─────────────────────────────────────────────────────────────────
@@ -586,7 +586,7 @@ pub fn dryRunOn(ds: string) -> i32 {
         lockTimeoutMillis(),
         { -> planLines(ds, files) },
     );
-    @print(
+    print(
         if (pending.length == 0)
             "rakun migration: dry run - nothing to apply"
         else
@@ -627,7 +627,7 @@ pub fn repairMigration(script: string) -> i32 {
     val ds = migrationDataSource();
     val files = discoverMigrations().filter({ f -> f.script == script });
     if (files.length == 0)
-        @panic(
+        panic(
             "rakun migration: repair names `"
                 + script
                 + "`, which no location holds",
@@ -666,7 +666,7 @@ pub fn ddlAuto() -> string {
     val raw = rkProp("rakun.migration.ddl-auto").trim();
     val v = if (raw == "") "none" else raw;
     if (["none", "validate", "create", "create-drop"].indexOf(v) < 0)
-        @panic(
+        panic(
             "rakun migration: rakun.migration.ddl-auto is `"
                 + v
                 + "` - the values are none, validate, create and create-drop",
@@ -796,11 +796,11 @@ pub fn ddlDropOn(ds: string) -> i32 {
 // Runs the configured ddl-auto on `ds` (after its refusals).
 pub fn ddlAutoOn(ds: string) -> i32 {
     val problem = ddlAutoProblem();
-    if (problem != "") @panic(problem);
+    if (problem != "") panic(problem);
     val mode = ddlAuto();
     if (mode == "validate") {
         val diff = ddlValidateOn(ds);
-        if (diff != "") @panic(diff);
+        if (diff != "") panic(diff);
     }
     if (mode == "create" || mode == "create-drop") val _c = ddlCreateOn(ds);
     if (mode == "create-drop")
@@ -877,7 +877,7 @@ pub fn registerMigrationsEndpoint() -> i32 {
     );
 }
 
-#[@external(.Erlang("""(fun(__C) -> erlang:halt(__C) end)($0)"""))]
+#[compiler.external(.Erlang("""(fun(__C) -> erlang:halt(__C) end)($0)"""))]
 declare fn halt(code: i32) -> i32;
 
 // The boot step: refuses a bad ddl-auto, then — when migrations are on —

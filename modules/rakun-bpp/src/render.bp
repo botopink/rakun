@@ -44,7 +44,7 @@
 
 import {element.Element, element.ElementBase};
 import {elements.isVoidTag, elements.isRawTextTag};
-import {escape, json, encoding, failure} from "std";
+import {escape, json, encoding, failure, compiler, failure.panic} from "std";
 import {router.fill, router.snapshot};
 import {client.islandId, client.islandAttr, client.Island, client.clientMount, client.islandEntry};
 import {error_boundary.ErrorInfo, error_boundary.infoFor, error_boundary.isSignal, error_boundary.notFoundReason, error_boundary.wrap};
@@ -57,62 +57,62 @@ import {context.createContext, context.provide, context.RenderScope} from "std";
 
 // ── the per-render state (render.mjs / sidecars/jhonstart_render.erl) ───────
 
-#[@external(.Node("require('./render.mjs').stateReset()"), .Erlang("jhonstart_render:state_reset()"))]
+#[compiler.external(.JavaScript("require('./render.mjs').stateReset()"), .Erlang("jhonstart_render:state_reset()"))]
 pub declare fn __jhStateReset() -> i32;
 
-#[@external(.Node("require('./render.mjs').takeBoundaries()"), .Erlang("jhonstart_render:take_boundaries()"))]
+#[compiler.external(.JavaScript("require('./render.mjs').takeBoundaries()"), .Erlang("jhonstart_render:take_boundaries()"))]
 pub declare fn __jhTakeBoundaries() -> Array<Boundary>;
 
-#[@external(
-    .Node("require('./render.mjs').nextIslandOrdinal()"),
+#[compiler.external(
+    .JavaScript("require('./render.mjs').nextIslandOrdinal()"),
     .Erlang("jhonstart_render:next_island_ordinal()"),
 )]
 declare fn __jhNextIslandOrdinal() -> i32;
 
-#[@external(.Node("require('./render.mjs').pushIsland($0)"), .Erlang("jhonstart_render:push_island($0)"))]
+#[compiler.external(.JavaScript("require('./render.mjs').pushIsland($0)"), .Erlang("jhonstart_render:push_island($0)"))]
 declare fn __jhPushIsland(row: #(string, string, string)) -> i32;
 
-#[@external(.Node("require('./render.mjs').islands()"), .Erlang("jhonstart_render:islands()"))]
+#[compiler.external(.JavaScript("require('./render.mjs').islands()"), .Erlang("jhonstart_render:islands()"))]
 pub declare fn __jhIslands() -> Array<#(string, string, string)>;
 
-#[@external(
-    .Node("require('./render.mjs').setIslandBase($0)"),
+#[compiler.external(
+    .JavaScript("require('./render.mjs').setIslandBase($0)"),
     .Erlang("jhonstart_render:set_island_base($0)"),
 )]
 pub declare fn __jhSetIslandBase(n: i32) -> i32;
 
-#[@external(
-    .Node("require('./render.mjs').stashNotFound($0)"),
+#[compiler.external(
+    .JavaScript("require('./render.mjs').stashNotFound($0)"),
     .Erlang("jhonstart_render:stash_not_found($0)"),
 )]
 declare fn __jhStashNotFound(e: Element) -> i32;
 
-#[@external(
-    .Node("require('./render.mjs').stashedNotFound($0)"),
+#[compiler.external(
+    .JavaScript("require('./render.mjs').stashedNotFound($0)"),
     .Erlang("jhonstart_render:stashed_not_found($0)"),
 )]
 pub declare fn __jhStashedNotFound(fallback: Element) -> Element;
 
-#[@external(.Node("require('./render.mjs').nextNav()"), .Erlang("jhonstart_render:next_nav()"))]
+#[compiler.external(.JavaScript("require('./render.mjs').nextNav()"), .Erlang("jhonstart_render:next_nav()"))]
 declare fn __jhNextNav() -> i32;
 
-#[@external(.Node("require('./render.mjs').setHooks($0)"), .Erlang("jhonstart_render:set_hooks($0)"))]
+#[compiler.external(.JavaScript("require('./render.mjs').setHooks($0)"), .Erlang("jhonstart_render:set_hooks($0)"))]
 declare fn __jhSetHooks(h: RenderHooks) -> void;
 
-#[@external(.Node("require('./render.mjs').hooks($0)"), .Erlang("jhonstart_render:hooks($0)"))]
+#[compiler.external(.JavaScript("require('./render.mjs').hooks($0)"), .Erlang("jhonstart_render:hooks($0)"))]
 declare fn __jhHooks(fallback: RenderHooks) -> RenderHooks;
 
-#[@external(.Node("require('./render.mjs').pushNode($0)"), .Erlang("jhonstart_render:push_node($0)"))]
-declare fn __jhPushNode(n: fn(scope: RenderScope) -> @Task<Walked>) -> i32;
+#[compiler.external(.JavaScript("require('./render.mjs').pushNode($0)"), .Erlang("jhonstart_render:push_node($0)"))]
+declare fn __jhPushNode(n: fn(scope: RenderScope) -> Task<Walked>) -> i32;
 
-#[@external(.Node("require('./render.mjs').nodeAt($0)"), .Erlang("jhonstart_render:node_at($0)"))]
-declare fn __jhNodeAt(index: string) -> fn(scope: RenderScope) -> @Task<Walked>;
+#[compiler.external(.JavaScript("require('./render.mjs').nodeAt($0)"), .Erlang("jhonstart_render:node_at($0)"))]
+declare fn __jhNodeAt(index: string) -> fn(scope: RenderScope) -> Task<Walked>;
 
 // Raises `reason` and never returns: a signal or a failure that leaves the
 // boundary it was caught at goes on as an abort whose message is the reason,
 // which `failure.attempt` reads back as `Failure.message` on every target.
 fn raiseElement(reason: string) -> Element {
-    @panic(reason);
+    panic(reason);
 }
 
 // The per-render state reached from OUTSIDE this directory goes through these
@@ -133,7 +133,7 @@ pub fn registeredBoundaries() -> Array<Boundary> {
 
 // `f`'s task under std's `failure.attemptTask` (botopink decisions 431, 494):
 // its value, or `Error(reason)` — the message of the raise it crashed with.
-pub fn attemptTask<T>(f: fn() -> @Task<T>) -> @Task<@Result<T, string>> {
+pub fn attemptTask<T>(f: fn() -> Task<T>) -> Task<Result<T, string>> {
     val out = await failure.attemptTask(f);
     return case out {
         Ok(v) -> v;
@@ -144,9 +144,9 @@ pub fn attemptTask<T>(f: fn() -> @Task<T>) -> @Task<@Result<T, string>> {
 // A component's run walked with `scope`, under `attemptTask` —
 // `Error(reason)` for a raise.
 pub fn componentOutcome(
-    f: fn() -> @Component<Element>,
+    f: fn() -> Component<Element>,
     scope: RenderScope,
-) -> @Task<@Result<Walked, string>> {
+) -> Task<Result<Walked, string>> {
     val out = await attemptTask({ -> renderComponent(f(), scope) });
     return try out;
 }
@@ -169,7 +169,7 @@ pub fn componentOutcome(
 // `data-jh-e` unless the segment streams, `wrapped`).
 pub type ErrorBoundaryNode(
     id: string,
-    child: fn() -> @Component<Element>,
+    child: fn() -> Component<Element>,
     view: fn(info: ErrorInfo) -> Element,
     wrapped: bool,
 )
@@ -178,7 +178,7 @@ pub type ErrorBoundaryNode(
 // stashed as the nearest not-found tree when a not-found signal leaves it.
 pub type NotFoundBoundaryNode(
     pattern: string,
-    child: fn() -> @Component<Element>,
+    child: fn() -> Component<Element>,
     view: fn() -> Element,
 )
 
@@ -196,7 +196,7 @@ pub type Walked(tree: Element, fills: Fill[])
 // re-raising a signal.
 pub fn errorBoundaryNode(
     id: string,
-    child: fn() -> @Component<Element>,
+    child: fn() -> Component<Element>,
     fallback: fn(info: ErrorInfo) -> Element,
 ) -> Element {
     return errorNode(
@@ -214,7 +214,7 @@ fn notFoundNode(b: NotFoundBoundaryNode) -> Element {
     return nodePlaceholder({ scope -> renderNotFound(b, scope) });
 }
 
-fn nodePlaceholder(n: fn(scope: RenderScope) -> @Task<Walked>) -> Element {
+fn nodePlaceholder(n: fn(scope: RenderScope) -> Task<Walked>) -> Element {
     val index = __jhPushNode(n);
     return Element(
         tag: "#node",
@@ -227,9 +227,9 @@ fn nodePlaceholder(n: fn(scope: RenderScope) -> @Task<Walked>) -> Element {
 // Run `c` with `scope`, then every boundary node of its tree with the scope
 // its run answered.
 pub fn renderComponent(
-    c: @Component<Element>,
+    c: Component<Element>,
     scope: RenderScope,
-) -> @Task<Walked> {
+) -> Task<Walked> {
     val r = await c.run(scope);
     val own = __jhTakeBoundaries().map(
         { b -> Fill(boundary: b, scope: r.scope) },
@@ -238,7 +238,7 @@ pub fn renderComponent(
     return Walked(tree: inner.tree, fills: own.append(inner.fills));
 }
 
-fn resolveTree(e: Element, scope: RenderScope) -> @Task<Walked> {
+fn resolveTree(e: Element, scope: RenderScope) -> Task<Walked> {
     if (e.tag == "#node") {
         val run = __jhNodeAt(e.value);
         val walked = await run(scope);
@@ -262,7 +262,7 @@ fn resolveTree(e: Element, scope: RenderScope) -> @Task<Walked> {
     );
 }
 
-fn failureOf(outcome: @Result<Walked, string>) -> string {
+fn failureOf(outcome: Result<Walked, string>) -> string {
     return case outcome {
         Ok(w) -> "";
         Error(message) -> message;
@@ -272,7 +272,7 @@ fn failureOf(outcome: @Result<Walked, string>) -> string {
 pub fn renderErrorBoundary(
     b: ErrorBoundaryNode,
     scope: RenderScope,
-) -> @Task<Walked> {
+) -> Task<Walked> {
     val outcome = await componentOutcome(b.child, scope);
     val failure = failureOf(outcome);
     if (isSignal(failure))
@@ -290,7 +290,7 @@ pub fn renderErrorBoundary(
 pub fn renderNotFound(
     b: NotFoundBoundaryNode,
     scope: RenderScope,
-) -> @Task<Walked> {
+) -> Task<Walked> {
     val outcome = await componentOutcome(b.child, scope);
     val failure = failureOf(outcome);
     if (failure == notFoundReason()) {
@@ -310,7 +310,7 @@ pub fn renderNotFound(
 
 // `f` under std's `failure.attempt` (botopink decision 431): its value, or
 // `Error(reason)` — the message of the raise it crashed with.
-pub fn attemptRender<T>(f: fn() -> T) -> @Result<T, string> {
+pub fn attemptRender<T>(f: fn() -> T) -> Result<T, string> {
     val out = failure.attempt(f);
     return case out {
         Ok(v) -> v;
@@ -478,7 +478,7 @@ fn layoutOf(
     seg: UiSegment,
     route: PageContext,
     depth: i32,
-) -> @Component<Element> {
+) -> Component<Element> {
     enterDepth(route, depth);
     if (seg.hasLayout == false) return childrenMarker();
     val view = seg.layoutView;
@@ -486,7 +486,7 @@ fn layoutOf(
     return tree;
 }
 
-fn templateOf(seg: UiSegment, route: PageContext) -> @Component<Element> {
+fn templateOf(seg: UiSegment, route: PageContext) -> Component<Element> {
     if (seg.hasTemplate == false) return childrenMarker();
     val view = seg.templateView;
     val tree = await view(propsFor(route));
@@ -506,8 +506,8 @@ fn templateOf(seg: UiSegment, route: PageContext) -> @Component<Element> {
 pub fn compose(
     chain: Array<UiSegment>,
     route: PageContext,
-    page: fn() -> @Component<Element>,
-) -> @Component<Element> {
+    page: fn() -> Component<Element>,
+) -> Component<Element> {
     use provide(createContext(renderSheet()));
     val tree = await composeAt(chain, 0, route, page);
     return tree;
@@ -517,8 +517,8 @@ fn composeAt(
     chain: Array<UiSegment>,
     i: i32,
     route: PageContext,
-    page: fn() -> @Component<Element>,
-) -> @Component<Element> {
+    page: fn() -> Component<Element>,
+) -> Component<Element> {
     if (i >= chain.length) {
         val leaf = await page();
         return leaf;
@@ -539,13 +539,13 @@ fn errorLevel(
     chain: Array<UiSegment>,
     i: i32,
     route: PageContext,
-    page: fn() -> @Component<Element>,
-) -> @Component<Element> {
+    page: fn() -> Component<Element>,
+) -> Component<Element> {
     val seg = segmentOf(chain, i);
     if (seg.hasLoading) {
         val loading = seg.loadingView;
         val hole = holeId(nextHoleOrdinal());
-        val child: fn() -> @Component<Element> = { -> caughtBelow(chain, i, route, page) };
+        val child: fn() -> Component<Element> = { -> caughtBelow(chain, i, route, page) };
         val placeholder = Suspense(
             Boundary(id: hole, fallback: loading(), child: child),
         );
@@ -563,8 +563,8 @@ fn caughtBelow(
     chain: Array<UiSegment>,
     i: i32,
     route: PageContext,
-    page: fn() -> @Component<Element>,
-) -> @Component<Element> {
+    page: fn() -> Component<Element>,
+) -> Component<Element> {
     val seg = segmentOf(chain, i);
     if (seg.hasError == false) {
         val plain = await notFoundLevel(chain, i, route, page);
@@ -587,8 +587,8 @@ fn notFoundLevel(
     chain: Array<UiSegment>,
     i: i32,
     route: PageContext,
-    page: fn() -> @Component<Element>,
-) -> @Component<Element> {
+    page: fn() -> Component<Element>,
+) -> Component<Element> {
     val seg = segmentOf(chain, i);
     if (seg.hasNotFound == false) {
         val plain = await composeAt(chain, i + 1, route, page);
@@ -613,8 +613,8 @@ pub fn notFoundAnchor(pattern: string, tree: Element) -> Element {
     );
 }
 
-#[@external(
-    .Node("require('./render.mjs').nextHoleOrdinal()"),
+#[compiler.external(
+    .JavaScript("require('./render.mjs').nextHoleOrdinal()"),
     .Erlang("jhonstart_render:next_hole_ordinal()"),
 )]
 declare fn __jhNextHoleOrdinal() -> i32;

@@ -6,7 +6,7 @@ import {release.package.scanForSecrets, release.package.missingAssets, release.p
 import {release.lifecycle.DrainReport, release.lifecycle.Lifecycle, release.lifecycle.shutdown, release.lifecycle.shutdownOrder, release.lifecycle.readinessChecks, release.lifecycle.isReady, release.lifecycle.describeDrain, release.lifecycle.exitCodeOf};
 import {release.static_export.ExportRoute, release.static_export.staticExport};
 import {bundler.manifest.ClientBundleManifest, bundler.manifest.ChunkRef, bundler.manifest.formatManifest, bundler.manifest.staticUrl};
-import {io.fs, io.process, io.clock, path, io.env} from "std";
+import {io.fs, io.process, io.clock, path, io.env, compiler} from "std";
 import {assertAs} from "snap";
 
 // The run's own scratch directory — `botopink test` names it in
@@ -22,7 +22,7 @@ fn manifest() -> ClientBundleManifest {
     return ClientBundleManifest(version: "1", buildId: "b7f2a1", entry: ChunkRef(id: "entry", url: staticUrl("b7f2a1", "entry.9c1d40.js"), hash: "9c1d40", bytes: 10), shared: [ChunkRef(id: "shared", url: staticUrl("b7f2a1", "shared.41ab08.js"), hash: "41ab08", bytes: 10)], chunks: [ChunkRef(id: "route:/blog/[slug]", url: staticUrl("b7f2a1", "r1.7e0055.js"), hash: "7e0055", bytes: 10)], routes: [], styles: [ChunkRef(id: "styles", url: staticUrl("b7f2a1", "app.2b91cc.css"), hash: "2b91cc", bytes: 10)], publicEnv: []);
 }
 
-fn errorOf(r: @Result<Array<string>, string>) -> string {
+fn errorOf(r: Result<Array<string>, string>) -> string {
     return case r {
         Ok(v) -> "ok " + v.join(",");
         Error(e) -> e;
@@ -31,20 +31,20 @@ fn errorOf(r: @Result<Array<string>, string>) -> string {
 
 // ── the recording lifecycle double ──────────────────────────────────────────
 
-#[@external(
-    .Node("""(globalThis.__onzeLife = [], 0)"""),
+#[compiler.external(
+    .JavaScript("""(globalThis.__onzeLife = [], 0)"""),
     .Erlang("""(fun() -> put(onze_life, []), 0 end)()"""),
 )]
 declare fn lifeReset() -> i32;
 
-#[@external(
-    .Node("""((globalThis.__onzeLife = (globalThis.__onzeLife || []).concat([$0])), 0)"""),
+#[compiler.external(
+    .JavaScript("""((globalThis.__onzeLife = (globalThis.__onzeLife || []).concat([$0])), 0)"""),
     .Erlang("""(fun(__E) -> put(onze_life, (case get(onze_life) of undefined -> []; __L -> __L end) ++ [__E]), 0 end)($0)"""),
 )]
 declare fn lifePush(event: string) -> i32;
 
-#[@external(
-    .Node("""(globalThis.__onzeLife || [])"""),
+#[compiler.external(
+    .JavaScript("""(globalThis.__onzeLife || [])"""),
     .Erlang("""(fun() -> case get(onze_life) of undefined -> []; __L -> __L end end)()"""),
 )]
 declare fn lifeEvents() -> Array<string>;
@@ -85,7 +85,7 @@ test "release: shutdown ---- the five steps and a clean drain" {
     assert exitCodeOf(stuck) == 1;
     assert isReady(readinessChecks(["default"]), ["route-table", "client-manifest"])
         == false;
-    try assertAs(@src(), "shutdown", [
+    try assertAs(comptime compiler.src, "shutdown", [
         "readinessChecks: " + readinessChecks(["default"]).join(", "),
         "shutdownOrder: " + shutdownOrder().join(" > "),
         "drain(5000): " + describeDrain(clean),
@@ -138,7 +138,7 @@ test "release: packageAssets copies the static tree and public/ verbatim" {
     val cleaned = process.run("rm", ["-rf", dir]);
 }
 
-fn exportError(r: @Result<Array<#(string, string)>, string>) -> string {
+fn exportError(r: Result<Array<#(string, string)>, string>) -> string {
     return case r {
         Ok(files) -> files.map({ f -> f._0 }).join("\n");
         Error(e) -> "error: " + e;
@@ -155,5 +155,5 @@ test "release: static export ---- three routes out, a dynamic route refused" {
     val ok = exportError(staticExport(routes, assets));
     val refused = exportError(staticExport(routes.append([ExportRoute(pattern: "/blog/[slug]", authoredPath: "app/blog/[slug]/page.bp", html: "", prerenderable: false)]), assets));
     assert ok.contains("bin/") == false;
-    try assertAs(@src(), "export", ["== without app/blog/[slug]", ok, "== with app/blog/[slug]", refused].join("\n"));
+    try assertAs(comptime compiler.src, "export", ["== without app/blog/[slug]", ok, "== with app/blog/[slug]", refused].join("\n"));
 }

@@ -17,7 +17,7 @@ import {sql.params.Param, sql.params.param};
 import {sql.rows.Row, sql.rows.Rows};
 import {sql.template.SqlTemplate, sql.template.Tx, sql.template.sqlTemplate, sql.template.rkSqlSpawnBorrower};
 
-fn errorOf(r: @Result<Rows, string>) -> string {
+fn errorOf(r: Result<Rows, string>) -> string {
     return case r {
         Ok(_rows) -> "";
         Error(e) -> e;
@@ -26,21 +26,21 @@ fn errorOf(r: @Result<Rows, string>) -> string {
 
 // A statement from ANOTHER process, which has no transaction mark and so must
 // check a connection out of the pool.
-fn fromElsewhere(sql: SqlTemplate) -> @Task<string> {
+fn fromElsewhere(sql: SqlTemplate) -> Task<string> {
     return errorOf(sql.tryQuery("SELECT 1", []));
 }
 
-fn raiseElsewhere(sql: SqlTemplate) -> @Task<i32> {
+fn raiseElsewhere(sql: SqlTemplate) -> Task<i32> {
     return sql.query("SELECT 1", []).rowCount();
 }
 
 // What each transaction thunk below runs. `await` is legal only in a
-// `-> @Task` fn or a test block, not in a lambda, so the thunks call these.
-fn probeInside(sql: SqlTemplate) -> @Task<string[]> {
+// `-> Task` fn or a test block, not in a lambda, so the thunks call these.
+fn probeInside(sql: SqlTemplate) -> Task<string[]> {
     return await async.runAll([{ -> fromElsewhere(sql) }]);
 }
 
-fn raiseInside(sql: SqlTemplate) -> @Task<i32> {
+fn raiseInside(sql: SqlTemplate) -> Task<i32> {
     val counts = await async.runAll([{ -> raiseElsewhere(sql) }]);
     return counts.length;
 }
@@ -53,22 +53,22 @@ fn raiseInside(sql: SqlTemplate) -> @Task<i32> {
 // clock — a 60 ms sleep before the read, against a 150 ms checkout timeout,
 // measured the machine's load as much as the pool.
 
-fn holding(sql: SqlTemplate, held: Gate, observed: Gate) -> @Task<string> {
+fn holding(sql: SqlTemplate, held: Gate, observed: Gate) -> Task<string> {
     return await sql.transaction({ tx -> holdUntilObserved(held, observed) });
 }
 
-fn holdUntilObserved(held: Gate, observed: Gate) -> @Task<string> {
+fn holdUntilObserved(held: Gate, observed: Gate) -> Task<string> {
     async.openGate(held);
     val seen = await async.awaitGate(observed, 10000);
     return if (seen) "held" else "never observed";
 }
 
-fn borrowWhenHeld(sql: SqlTemplate, held: Gate) -> @Task<string> {
+fn borrowWhenHeld(sql: SqlTemplate, held: Gate) -> Task<string> {
     val _h = await async.awaitGate(held, 10000);
     return await fromElsewhere(sql);
 }
 
-fn observeWaiting(name: string, held: Gate, observed: Gate) -> @Task<string> {
+fn observeWaiting(name: string, held: Gate, observed: Gate) -> Task<string> {
     val _h = await async.awaitGate(held, 10000);
     val seen = busyAndWaiting(name);
     async.openGate(observed);

@@ -27,7 +27,7 @@
 //// a client bundle) uses front 50's `rakun-ssr`, which drives rakun's run path;
 //// rakun never starts a bundler or writes client output.
 
-import {io.fs, io.process, io.env} from "std";
+import {io.fs, io.process, io.env, compiler, failure.panic} from "std";
 import {rkProp} from "rakun";
 import {sanitizePatterns} from "rakun-service/actuator/management";
 import {release.release.Release, release.release.VmArgs, release.release.buildTarball};
@@ -40,46 +40,46 @@ pub type Command(
     usage: string,
 )
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__L) -> io:format("~ts~n", [__L]), persistent_term:put(rakun_cli_out, persistent_term:get(rakun_cli_out, []) ++ [__L]), 0 end)($0)"""),
 )]
 pub declare fn say(line: string) -> i32;
 
-#[@external(.Erlang("""persistent_term:get(rakun_cli_out, [])"""))]
+#[compiler.external(.Erlang("""persistent_term:get(rakun_cli_out, [])"""))]
 pub declare fn cliOutput() -> string[];
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun() -> persistent_term:erase(rakun_cli_out), persistent_term:erase(rakun_cli_invocations), 0 end)()"""),
 )]
 pub declare fn clearCliOutput() -> i32;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__L) -> persistent_term:put(rakun_cli_invocations, persistent_term:get(rakun_cli_invocations, []) ++ [__L]), 0 end)($0)"""),
 )]
 declare fn noteInvocation(line: string) -> i32;
 
-#[@external(.Erlang("""persistent_term:get(rakun_cli_invocations, [])"""))]
+#[compiler.external(.Erlang("""persistent_term:get(rakun_cli_invocations, [])"""))]
 pub declare fn cliInvocations() -> string[];
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__F) -> try {ok, __F()} catch _:{panic, __R} when is_binary(__R) -> {error, __R}; _:__R -> {error, iolist_to_binary(io_lib:format("~p", [__R]))} end end)($0)"""),
 )]
-declare fn guarded(run: fn() -> i32) -> @Result<i32, string>;
+declare fn guarded(run: fn() -> i32) -> Result<i32, string>;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__P) -> ok = filelib:ensure_dir(unicode:characters_to_list(__P)), 0 end)($0)"""),
 )]
 declare fn ensureDir(file: string) -> i32;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__N) -> case os:find_executable(unicode:characters_to_list(__N)) of false -> <<>>; __P -> unicode:characters_to_binary(__P) end end)($0)"""),
 )]
 declare fn which(name: string) -> string;
 
-#[@external(.Erlang("""erlang:unique_integer([positive, monotonic])"""))]
+#[compiler.external(.Erlang("""erlang:unique_integer([positive, monotonic])"""))]
 declare fn freshId() -> i32;
 
-#[@external(.Erlang("""lists:sort($0)"""))]
+#[compiler.external(.Erlang("""lists:sort($0)"""))]
 declare fn sortStrings(xs: string[]) -> string[];
 
 pub fn builtinCommands() -> Array<Command> {
@@ -260,7 +260,7 @@ fn runNew(args: Array<string>) -> i32 {
     );
     val source = templateRoot() + "/" + template;
     val files: string[] = fs.walk(source).unwrapOr([]);
-    if (files.length == 0) @panic("rakun-cli: no template at " + source);
+    if (files.length == 0) panic("rakun-cli: no template at " + source);
     val vars = [#("name", name), #("rakun", rakunPath)];
     for (files) { f ->
         val text = fs.readText(source + "/" + f).unwrapOr("");
@@ -438,8 +438,8 @@ pub fn inspectSource(
         + "."
         + entryFn
         + "};\n";
-    val cells = "#[@external(.Erlang(\"\"\"(fun(__L) -> io:format(\"~ts~n\", [__L]), 0 end)($0)\"\"\"))]\ndeclare fn out(line: string) -> i32;\n"
-        + "#[@external(.Erlang(\"\"\"[<<__K/binary, \"=\", __V/binary>> || {__K, __V} <- lists:sort(ets:tab2list(rakun_props))]\"\"\"))]\ndeclare fn props() -> string[];\n";
+    val cells = "import {compiler} from \"std\";\n#[compiler.external(.Erlang(\"\"\"(fun(__L) -> io:format(\"~ts~n\", [__L]), 0 end)($0)\"\"\"))]\ndeclare fn out(line: string) -> i32;\n"
+        + "#[compiler.external(.Erlang(\"\"\"[<<__K/binary, \"=\", __V/binary>> || {__K, __V} <- lists:sort(ets:tab2list(rakun_props))]\"\"\"))]\ndeclare fn props() -> string[];\n";
     val argList = "["
         + cliArgs
             .map(
@@ -480,7 +480,7 @@ fn inspect(args: Array<string>, what: string) -> Inspection {
     val scratch = dir + "/.rakun-cli/inspect-" + freshId().toString();
     val e = entryFunction(dir);
     if (e._1 == "")
-        @panic(
+        panic(
             "rakun-cli: "
                 + dir
                 + "/src/"

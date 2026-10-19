@@ -19,6 +19,6 @@ deps)`). Client re-render reactivity is the **client runtime**'s job: see
 | `reducer<S,A>(reduce, init)` | `#(state: S, dispatch: fn(action: A))` | reducer state |
 
 Custom hooks compose the primitives — a noun for a name and a
-`@Component<_>` return:
+`Component<_>` return:
 
 {hook_noun_custom/src/main.bp}

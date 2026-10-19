@@ -2,8 +2,8 @@
 %%%
 %%% A signal is a host-level THROW of a string reason beginning `nav:` (the
 %%% bundled library `routing`'s `signalReason`), not a returned sentinel: it
-%%% composes through nested calls and through `await` (an eager `@Task` on the
-%%% BEAM), and botopink's `try … catch` — which unwraps a `@Result` and nothing
+%%% composes through nested calls and through `await` (an eager `Task` on the
+%%% BEAM), and botopink's `try … catch` — which unwraps a `Result` and nothing
 %%% else — cannot swallow it. This module throws and catches; which reasons are
 %%% signals is `routing`'s `isSignalReason`, decided in `navigation.bp`.
 %%%

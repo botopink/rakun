@@ -110,7 +110,7 @@
   std's `escape`, `compose`, the payload through std's `json` and
   `escape.scriptJson`, `RenderHooks`), `streaming.bp` (`resolve` / `fillHtml`,
   `Response` and its guard, `App.render` / `renderStream` →
-  `@Task<@Result<void, string>>`, navigation signals before and after the first
+  `Task<Result<void, string>>`, navigation signals before and after the first
   chunk, the redirect-target check), `suspense.bp`, `plugin.bp`, `globals.bp`,
   `routes.bp` (`#[page]` / `#[layout]` / `#[template]` / `#[defaultView]`,
   `uiTable()`, `UiSegment`) with their host halves, and the new member
@@ -137,7 +137,7 @@
   through std's `escape`. Core 147 → 163 on both rows.
 
 - **Front 31 — error boundaries** (`error_boundary.bp`). A boundary's child is a
-  `@Result` thunk called exactly once through `__jhCapture`, the one host cell
+  `Result` thunk called exactly once through `__jhCapture`, the one host cell
   that turns a raise into a value (`signal_runtime.mjs` /
   `sidecars/jhonstart_signal.erl`); an ordinary failure renders the fallback
   with a message-free `ErrorInfo` whose digest is std's `contentHash`, a
@@ -169,23 +169,23 @@
 
 - **Front 24 — effects by return type** (botopink decisions 118–128). The
   return type is the effect and the `#[@use]` / `#[@future]` annotations leave:
-  every hook and component keeps its `-> @Component<ElementBase, T>` return and
+  every hook and component keeps its `-> Component<ElementBase, T>` return and
   loses the annotation line; every data-loading server component, loader and
-  render entry that returned `@Future<T>` returns `@Task<T>` —
-  `renderServerComponent(component: fn() -> @Task<Element>) -> @Task<string>`,
-  `renderComponent(component: fn() -> @Component<ElementBase, Element>) -> @Task<string>`.
+  render entry that returned `@Future<T>` returns `Task<T>` —
+  `renderServerComponent(component: fn() -> Task<Element>) -> Task<string>`,
+  `renderComponent(component: fn() -> Component<ElementBase, Element>) -> Task<string>`.
   No `@Future` here carried an error and no body throws, so every Task is a plain
-  `@Task<T>` and every `await` stays a bare `await` — no `try await` was needed
+  `Task<T>` and every `await` stays a bare `await` — no `try await` was needed
   in the compiled members. The aspirational `examples/jhonstart-app` sketch (not
   a member, not built) shows the new failure rule instead: its loader is
-  `@Task<@Result<…, string>>` over `try await fetch(…)`, and its page, a
+  `Task<Result<…, string>>` over `try await fetch(…)`, and its page, a
   component returning `Element`, handles the failure with `try await … catch …`
   rather than propagating it (decision 121). `docs.md` § *Server components*
   gains the same rule and example; the recorded compile errors in
   `test/server_test.bp` and `docs.md` are the front-24 codes
   (`effect-await-without-task`, `use-without-context-effect`,
   `effect-try-without-fallible-channel`, `effect-annotation-removed`). Four test
-  names spell `@Task` / `@Component` instead of the annotation. The `#[client]`
+  names spell `Task` / `Component` instead of the annotation. The `#[client]`
   refusal now names the data-loading component's reflected `"Task"`.
   `client_test.bp`, `server_test.bp` and `examples/jhonstart-counter` import
   `ElementBase`, which they named without importing since the decision-128
@@ -195,7 +195,7 @@
   `jhonstart` 120/120 on commonJS and erlang, `jhonstart-html` 5/5, `jhonstart-markup`
   7/7, `jhonstart-test` 1/1, `jhonstart-todo` 3/3 on both rows, `jhonstart-counter`
   4/4 on commonJS (its erlang row stays the pinned `set/2` defect); every hook,
-  component and `@Task` fn still lowers to an `async function` on commonJS. The
+  component and `Task` fn still lowers to an `async function` on commonJS. The
   four compile errors recorded in `test/server_test.bp` were reproduced by code.
 
 - **Front 95 — the package cut: `jhonstart-html` and `jhonstart-test` members.**
@@ -213,15 +213,15 @@
 
 - **botopink front 21 — the effect chain (decisions 102–104).** `Element`
   implements the owner marker `@Context<ElementBase>` (a phantom
-  `type ElementBase`), every hook is `#[@use] fn … -> @Component<ElementBase, T>`,
-  every component that activates a hook is `#[@use] fn … -> @Component<ElementBase, Element>`
+  `type ElementBase`), every hook is `#[@use] fn … -> Component<ElementBase, T>`,
+  every component that activates a hook is `#[@use] fn … -> Component<ElementBase, Element>`
   (one that activates none — `Link`, `NavBar` — is an ordinary `fn … -> Element`),
   and `request()` is a hook. A `#[@future]` body no longer activates a hook
   (decisions 89/90 revoked): the server component that uses and awaits is
-  `#[@use] … -> @Component<ElementBase, Element>`, rendered by the new `renderComponent`.
+  `#[@use] … -> Component<ElementBase, Element>`, rendered by the new `renderComponent`.
   On commonJS every `#[@use]` body is an `async function`, so a test or a
   `#[@future]` body `await`s a hook or component it calls without `use`.
-  `#[client]` accepts `@Component<ElementBase, Element>`. Counts unchanged on both rows.
+  `#[client]` accepts `Component<ElementBase, Element>`. Counts unchanged on both rows.
 
 - **Front 29 — the server/client boundary: `client.bp`.** Next.js `'use client'`
   is a string literal the bundler reads; botopink has no directive syntax and
@@ -322,7 +322,7 @@
   silently drop `href`". That reason expired with `element.bp`'s `attrs`, and
   the anchor is now ordinary botopink. Both files are **pure**: they declare no
   host cell of any target, which is stronger than the front's "no
-  `#[@External.Erlang]` cell" acceptance row, so all 35 new assertions run on
+  `#[compiler.external(.Erlang)]` cell" acceptance row, so all 35 new assertions run on
   **both** rows and `Link` renders in the server pass exactly as in the browser.
   - **`LinkProps` + `linkProps(href)` + five `with*` helpers.** The props are a
     record because `Link(href, children, prefetch = true, …)` does not work for
@@ -359,9 +359,9 @@
   directions:
   - **A called node-only cell reds the ERLANG build at its call site.** Measured
     2026-09-21 against compiler `2e6bb4ac`: `pub fn statusOf() { return
-    __cellStatus(); }` over a `#[@External.Node]`-only cell builds on commonJS
+    __cellStatus(); }` over a `#[compiler.external(.JavaScript)]`-only cell builds on commonJS
     and fails erlang with ``error: `__cellStatus` has no
-    `#[@External.<Target>(…)]` for the erlang backend``. It is the mirror of the
+    `#[compiler.external(.<Target>(…))]` for the erlang backend``. It is the mirror of the
     erlang-only → commonJS measurement fronts 26 and 28 both carry, and it
     applies because these modules land in the core member, compiled on both
     rows — a `linkStatus()` wrapper would take all 103 assertions off erlang.
@@ -432,7 +432,7 @@
   the spec binds them to front 62's `rakun_request_context` with no Node cell,
   and neither half is writable. Measured against compiler `2e6bb4ac`: an
   erlang-only cell reds the **commonJS compile** at its call site (`` `__jhReqMethod`
-  has no `#[@External.<Target>(…)]` for the node backend ``), taking the whole
+  has no `#[compiler.external(.<Target>(…))]` for the node backend ``), taking the whole
   core member down on a row it is not even gated on; and `rakun_request_context`
   has no BEAM row to bind to at all, because rakun's member is
   `targets: ["commonJS"]`, so on erlang — this front's *assigned* target — every
@@ -554,9 +554,9 @@
     a component outside a request is how this package's own tests render the
     server pass.
   - **Every cell carries both targets**, where the front's spec asks for the
-    five reads to be `#[@External.Erlang]` only. Measured: an erlang-only cell
+    five reads to be `#[compiler.external(.Erlang)]` only. Measured: an erlang-only cell
     reds the commonJS row at its *call site* (`` `__jhRoutePath` has no
-    `#[@External.<Target>(…)]` for the node backend ``) the moment `snapshot()`
+    `#[compiler.external(.<Target>(…))]` for the node backend ``) the moment `snapshot()`
     calls it, and this module is compiled on both rows of the core member. A
     declared and never-called cell is fine — which is why `client_runtime.bp`'s
     node-only `clientRender` does not red the erlang row. The dual form is also
@@ -627,10 +627,10 @@
   compiled, so no test ran*. Reproduced, and they are **two unrelated
   defects**, not the single cross-module one `AGENTS.md` claimed:
   - `function print/1 undefined`, in both, was **ours**: `main` wrote
-    `print(…)` where the language reference only ever shows `@print(…)`. The
+    `print(…)` where the language reference only ever shows `print(…)`. The
     bare call type-checks on every target and only commonJS lowers it (erlang
     emits an undefined local, beam an `unresolved_call`, wasm a trap), which
-    is why the sibling `jhonstart-html` — already written with `@print` — was
+    is why the sibling `jhonstart-html` — already written with `print` — was
     green on erlang all along. Fixed in both examples and in `docs.md`'s
     quickstart. It was never a test-mode problem: `botopink run --target
     erlang` failed the same way, and `botopink build --target erlang` exited 0

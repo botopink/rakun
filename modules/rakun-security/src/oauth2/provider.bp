@@ -12,6 +12,7 @@
 
 import {RestClient, ClientResponse} from "rakun-restclient";
 import {oauth2_host.oauthClaim, oauth2_host.oauthCounterBump, oauth2_host.oauthCounter};
+import {compiler, failure.panic} from "std";
 
 pub type OAuth2Provider(
     id: string,
@@ -35,27 +36,27 @@ pub type ProviderEndpoints(
     issuer: string,
 )
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__P) -> __Id = element(2, __P), __L = persistent_term:get(rakun_oauth2_ids, []), case lists:member(__Id, __L) of true -> 0; false -> persistent_term:put({rakun_oauth2_provider, __Id}, __P), persistent_term:put(rakun_oauth2_ids, __L ++ [__Id]), 1 end end)($0)"""),
 )]
 declare fn storeProvider(p: OAuth2Provider) -> i32;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__Id) -> case persistent_term:get({rakun_oauth2_provider, __Id}, undefined) of undefined -> undefined; __P -> __P end end)($0)"""),
 )]
 declare fn loadProvider(id: string) -> ?OAuth2Provider;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun() -> [persistent_term:erase({rakun_oauth2_provider, __I}) || __I <- persistent_term:get(rakun_oauth2_ids, [])], persistent_term:erase(rakun_oauth2_ids), [persistent_term:erase(__K) || {{rakun_oauth2_disc, _} = __K, _} <- persistent_term:get()], 0 end)()"""),
 )]
 pub declare fn clearProviders() -> i32;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__I, __E) -> persistent_term:put({rakun_oauth2_disc, __I}, __E), 0 end)($0, $1)"""),
 )]
 declare fn storeEndpoints(issuer: string, e: ProviderEndpoints) -> i32;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__I) -> persistent_term:get({rakun_oauth2_disc, __I}, undefined) end)($0)"""),
 )]
 declare fn cachedEndpoints(issuer: string) -> ?ProviderEndpoints;
@@ -93,7 +94,7 @@ pub fn discover(p: OAuth2Provider) -> ProviderEndpoints {
         .get(issuer + "/.well-known/openid-configuration")
         .retrieve();
     if (res.isOk() == false)
-        @panic(
+        panic(
             "rakun oauth2: the discovery document of "
                 + issuer
                 + " could not be fetched (status "
@@ -102,7 +103,7 @@ pub fn discover(p: OAuth2Provider) -> ProviderEndpoints {
         );
     val announced = trimmed(oauthClaim(res.body, "issuer"));
     if (announced != issuer)
-        @panic(
+        panic(
             "rakun oauth2: the discovery document of provider `"
                 + p.id
                 + "` announces the issuer `"
@@ -141,9 +142,9 @@ pub fn providerProblem(p: OAuth2Provider) -> string {
 // fails the boot rather than the first login.
 pub fn registerProvider(p: OAuth2Provider) -> i32 {
     val problem = providerProblem(p);
-    if (problem != "") @panic(problem);
+    if (problem != "") panic(problem);
     if (loadProvider(p.id) != null)
-        @panic(
+        panic(
             "rakun oauth2: a provider `"
                 + p.id
                 + "` is already registered - one id, one provider",

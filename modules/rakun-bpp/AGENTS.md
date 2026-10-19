@@ -4,11 +4,11 @@
 
 botopink's **React/Next-style** UI framework, written *in* botopink on the
 language's own primitives — **no jhonstart-specific compiler features**.
-Components are functions returning `@Component<Element>`; hooks are nouns
-(`state`, `router` — never `useState`) returning the `@Component<_>`
+Components are functions returning `Component<Element>`; hooks are nouns
+(`state`, `router` — never `useState`) returning the `Component<_>`
 capability, activated by the `use` keyword (decision 88 of 1.0.10-beta:
 `use f(x)` lowers to `f(x)` on every backend); a server component that only
-loads data is `fn … -> @Task<Element>` (the return type is the effect — botopink
+loads data is `fn … -> Task<Element>` (the return type is the effect — botopink
 decisions 118–128, front 24; the `#[@<effect>]` annotations and `@Future` left, and
 `*fn` before them); the JSX-like
 `` html @`…` `` DSL is a template function over the template text (`syntax template: string`, `-> Element`), expanding markup
@@ -62,12 +62,12 @@ repository/rakun-bpp/
 │   │   ├── src/
 │   │   │   ├── AGENTS.md
 │   │   │   ├── root.bp        ← module-tree root: `pub mod element; pub mod hooks; pub mod router; pub mod server; pub mod client; pub mod suspense; pub mod streaming; pub mod render; pub mod plugin; pub mod globals; pub mod routes; pub mod error_boundary; pub mod metadata; pub mod elements; pub mod html_attrs; pub mod node; pub mod prelude; mod client_runtime;`
-│   │   │   ├── element.bp     ← COMPILED CORE: `type ElementBase()` (the empty-record phantom decision 128's wrapper named, until `ElementContext` retires it — 354 (7)) + type Element (`implement @Renderable`) + `pub type View = @Component<Element>` (decision 276, front 118) + builders (Children) + renderToString + test {}
+│   │   │   ├── element.bp     ← COMPILED CORE: `type ElementBase()` (the empty-record phantom decision 128's wrapper named, until `ElementContext` retires it — 354 (7)) + type Element (`implement Renderable`) + `pub type View = Component<Element>` (decision 276, front 118) + builders (Children) + renderToString + test {}
 │   │   │   ├── node.bp        ← COMPILED (front 118), PURE: `pub type Node = string | i32 | i64 | f32 | f64 | bool | Element | Element[]` — what a template hole and a `children` field hold (decisions 191, 223)
-│   │   │   ├── hooks.bp       ← COMPILED: State<T> + state/effect/memo/ref/reducer (@Component<_>, pure server-pass bodies) + test {} (imports `Element`)
+│   │   │   ├── hooks.bp       ← COMPILED: State<T> + state/effect/memo/ref/reducer (Component<_>, pure server-pass bodies) + test {} (imports `Element`)
 │   │   │   ├── prelude.bp     ← COMPILED (front 118): the `.bpp` prelude (decision 270) — `import` items of the core's own modules only (`Element`, `ElementBase`, `View`, `Node`, `raw`, `el`, every builder; `timeTag as time`), and the marker `#[bpp.htmlPrelude] pub val prelude = bpp.Prelude();` by which the toolchain finds it (decision 361, std's `bpp`)
 │   │   │   ├── elements.bp    ← COMPILED: the element surface (front 94) — `el`/`voidEl`, `isVoidTag`/`isRawTextTag`, and the tags `element.bp` does not declare
-│   │   │   ├── client_runtime.bp  ← COMPILED: the `clientRender` `#[@external(.Node(\"require('./client_runtime.mjs').render(…)\"))]` cell — ships the sidecar
+│   │   │   ├── client_runtime.bp  ← COMPILED: the `clientRender` `#[compiler.external(.JavaScript(\"require('./client_runtime.mjs').render(…)\"))]` cell — ships the sidecar
 │   │   │   ├── client_runtime.mjs ← HOST: the client build's hooks (state/effect/memo/ref/reducer + render) over rakun-bpp's own re-render loop
 │   │   │   ├── router.bp      ← COMPILED: the route snapshot (front 26) — `RouterState`, `pairValue`, `snapshot`/`fill`, `navigationFor`/`applySignal` (the envelope's `n`, through `routing`), `resolveRoute` (`routing`'s `matchPath` over the payload's `t`)
 │   │   │   ├── client_app.bp  ← COMPILED (front 26 Step 6): `ClientApp` / `clientApp(routes, mount, allowedRedirects).start()` — a client-only app over `routing`'s matcher, front 30's `compose` and the one browser write `__jhMount`; `notFound` / `redirect` handled as the server render handles them. Host halves `client_app.mjs` / `sidecars/jhonstart_client_app.erl` (a module store when there is no `window`)
@@ -79,10 +79,10 @@ repository/rakun-bpp/
 │   │   │   ├── server_runtime.mjs ← HOST (js): the request store, the twin of `jhonstart_server.erl` cell for cell
 │   │   │   ├── html_attrs.bp  ← COMPILED (front 48 of the CSS track), PURE: `classAttr` (the `class` pair spelled once), `withAttrs` (append, base first — `renderToString` writes attrs in array order), `attrValue` (the last pair of a name, `""` when absent). Imports only `element` and names no styling library: the styling side hands over a `#(string, string)` pair and merges its own class names
 │   │   │   ├── client.bp      ← COMPILED (front 29): `#[client]` + `#[clientProps]` (comptime markers, four refusals), `islandId`/`islandAttrOf`/`islandAttr` (decision 77 — the ONE spelling of `data-jh-i`), `Island` + `clientMount` + `islandEntry` + `propsOf`, `serverSlotAttr`/`serverSlot`, `serverOnly`, `hydrate()` / `propsFor(name)` and the starter table (`registerStarter`, `registerRouteStarters`, `registeredStarters`, `registeredRouteStarters` into `globals.starters`) over dual-target cells (`island_runtime.mjs` / `sidecars/jhonstart_island.erl`). The graph walk is front 68's
-│   │   │   ├── suspense.bp    ← COMPILED (front 30): `Boundary(id, fallback, child: fn() -> @Component<…>)` (an UNSTARTED thunk), `Suspense` (the `data-jh-h` hole; registers the boundary with the render), `holeId`
+│   │   │   ├── suspense.bp    ← COMPILED (front 30): `Boundary(id, fallback, child: fn() -> Component<…>)` (an UNSTARTED thunk), `Suspense` (the `data-jh-h` hole; registers the boundary with the render), `holeId`
 │   │   │   ├── styled_sheet.bp ← COMPILED (front 119 step 1, decisions 352, 354 (7), 361): the render's `styled` sheet — `renderSheet()` (the `StyledSheet` `compose` provides as `styled`'s `StyledContext`, writing to layer `styled`), `renderedStyles()`, `styledLayer()`; the `Sheet` value kept in the per-render state (`render.mjs` / `jhonstart_render.erl`), so a component rendered twenty times is written once
 │   │   │   ├── render.bp      ← COMPILED (front 30): `renderNode` (the escaping, void-aware walker over std `escape`), `raw`, `shellHtml`, `mountIsland` (i0, i1 … through front 29's `islandAttr`), `compose` (layout > template > error > loading > not-found > page; layouts run first; the root of a page render, it provides `StyledContext`), `Payload`/`writePayload` (std `json` + `escape.scriptJson`), `RenderHooks`/`setHooks`, the document
-│   │   │   ├── streaming.bp   ← COMPILED (front 30): `Chunk`/`resolve`/`fillHtml`, the late-signal markup, `Response` + `guarded`, `PageInput`, `App`/`app` with `render` / `renderStream` (→ `@Task<@Result<void, string>>`), the signal translation and the redirect-target check
+│   │   │   ├── streaming.bp   ← COMPILED (front 30): `Chunk`/`resolve`/`fillHtml`, the late-signal markup, `Response` + `guarded`, `PageInput`, `App`/`app` with `render` / `renderStream` (→ `Task<Result<void, string>>`), the signal translation and the redirect-target check
 │   │   │   ├── plugin.bp      ← COMPILED (front 30): `RenderPlugin(name, head, chunk, close, payload)` — a record of async functions, called in `app`'s order
 │   │   │   ├── globals.bp     ← COMPILED (front 30): the registry `payload, fill, signal, starters` → `__bp0/1/2/3`, the fields of `pub val globals`; `readPayload` (std `json.decode`), `registerFill`, `registerSignal`
 │   │   │   ├── routes.bp      ← COMPILED (front 30): `#[page]`/`#[layout]`/`#[template]`/`#[defaultView]`, `PageContext`, `LayoutProps`, the UI registry (`jhPage`… `uiTable()`; the markers record meta `seg` and the entry point registers them with `jhRegisterRoutes(@TypeInfo.all(with: page), …)`, decision 216); `#[page]`'s parameter accessor reads a segment's names from `routing`'s `segment.paramNamesOf` and which of them is a list from `parseSegment` / `kindName` (front 102), `UiSegment` + `segment`/`with*`/`segmentFor`
@@ -92,7 +92,7 @@ repository/rakun-bpp/
 │   │   │   ├── sidecars/jhonstart_routes.erl ← HOST (BEAM): the UI registry, an ETS table with an owner process
 │   │   │   ├── error_boundary.bp ← COMPILED (front 31): `ErrorInfo`/`ErrorBoundary`, `renderBoundary`/`renderBoundaryChecked`/`catchError`, the digest (std `hash.contentHash`), `notFound`/`redirect` raising `routing`'s `nav:` reasons, `isSignal`
 │   │   │   ├── metadata.bp    ← COMPILED (front 32), PURE: `Metadata`/`OpenGraph`/`TwitterCard`/`Icons`/`Viewport`, the merge rule, `renderHead`/`renderViewport` over std `escape`
-│   │   │   ├── signal_runtime.mjs ← HOST (js): `capture` — a boundary's raise as a `@Result` value; the renderer's other catches are std's `failure.attempt` / `attemptTask`
+│   │   │   ├── signal_runtime.mjs ← HOST (js): `capture` — a boundary's raise as a `Result` value; the renderer's other catches are std's `failure.attempt` / `attemptTask`
 │   │   │   └── sidecars/jhonstart_signal.erl ← HOST (BEAM): the same cell
 │   │   └── test/
 │   │       ├── render_test.bp ← `botopink test` flat suite: the walker, the hole, the fill, the globals, the payload (front 30) — both rows
@@ -103,7 +103,7 @@ repository/rakun-bpp/
 │   │       ├── error_boundary_test.bp ← `botopink test` flat suite: the catch, the digest, signals passing through, the file conventions (front 31) — both rows
 │   │       ├── client_app_test.bp ← `botopink test` flat suite: `clientApp` start, the two signals, the target check (front 26 Step 6) — both rows
 │   │       ├── router_test.bp   ← `botopink test` flat suite: the route snapshot, its accessors and the pair decoder (front 26) — both rows
-│   │       ├── server_test.bp   ← `botopink test` flat suite: the request record, the six cells, the `@Task` component and loader conventions (front 28) — both rows
+│   │       ├── server_test.bp   ← `botopink test` flat suite: the request record, the six cells, the `Task` component and loader conventions (front 28) — both rows
 │   │       └── client_test.bp   ← `botopink test` flat suite: the `#[client]` emit, a whitelisted props record, the island, the hole and the poison pill (front 29) — both rows
 │   ├── rakun-stylesheet/ ← MEMBER (front 30, additive): the bridge — `plugin() -> RenderPlugin` over emilia's `flush()`, contributing the payload's `s`; the ONE member naming both rakun-bpp and emilia
 │   │   ├── botopink.json  ← name rakun-stylesheet, files [root.bp], dependencies { rakun-bpp, rakun-bpp: { workspace: true }, emilia: { path: ../../../emilia/modules/rakun-stylesheet } } — `rakun-bpp` for the tests' DSL cell only
@@ -125,18 +125,18 @@ repository/rakun-bpp/
 │   │       ├── template_test.bp ← front 118 steps 1–5 through `renderNode`: attributes, holes, void/self-closing tags, fragments, comments, raw-text bodies, markup in `if`/`case`/lambdas, components and slots, `raw`, `classList`, `#[isRaw]`
 │   │       ├── template_expressions_example_test.bp · components_and_slots_example_test.bp · directives_example_test.bp ← the front's three spec examples, landed
 │   │       ├── defects_test.bp  ← the four defects front 118 measured (static attribute, spaced value, nested self-closing tag, Element hole)
-│   │       ├── view_test.bp     ← `-> View` and `-> @Component<Element>` accept one another (decision 276)
+│   │       ├── view_test.bp     ← `-> View` and `-> Component<Element>` accept one another (decision 276)
 │   │       └── platform_test.bp ← what a template body may write, on both comptime runtimes (front 118 step 0)
 │   ├── rakun-bpp/ ← MEMBER (front 27's code, relocated by front 95): client navigation's render-time half — what `from "rakun-bpp"` gives a consumer; the core does not depend on it
 │   │   ├── botopink.json  ← name rakun-bpp, src src/, entry root.bp, target commonJS (inherits [commonJS, erlang]), files [root.bp, link.bp, reconcile.bp], dependencies { rakun-bpp: { workspace: true } }
 │   │   ├── src/
 │   │   │   ├── root.bp        ← `pub mod link; pub mod reconcile;`
 │   │   │   ├── link.bp        ← COMPILED (front 27): `LinkProps` + `linkProps` + five `with*`, `Link`, `prefetchMode`, `layoutKey`, `LinkStatus`/`linkStatusOf`, and the browser half `linkMount` / `linkPrefetch` / `linkRouteKind` / the `linkStatus` hook over four DUAL-target cells (`link_runtime.mjs` / `sidecars/jhonstart_link.erl`); imports `Element` from "rakun-bpp"
-│   │   │   └── reconcile.bp   ← COMPILED (front 27), PURE: `layoutKeys` + `sharedDepth` + `Navigation`/`navigationOf`/`replaceDepth` — the remount decision of a client transition — and the driver `applyTransition(current, target, dom: DomOps) -> @Task<@Result<Navigation, string>>` over the entry's six functions (`markup`, `replaceSubtree`, `startIslands`, `mountCount`, `scrollTo`, `markPending` — `data-jh-pending`, decision 363); imports `RouterState` from "rakun-bpp"; no host cell
+│   │   │   └── reconcile.bp   ← COMPILED (front 27), PURE: `layoutKeys` + `sharedDepth` + `Navigation`/`navigationOf`/`replaceDepth` — the remount decision of a client transition — and the driver `applyTransition(current, target, dom: DomOps) -> Task<Result<Navigation, string>>` over the entry's six functions (`markup`, `replaceSubtree`, `startIslands`, `mountCount`, `scrollTo`, `markPending` — `data-jh-pending`, decision 363); imports `RouterState` from "rakun-bpp"; no host cell
 │   │   └── test/
 │   │       ├── link_test.bp     ← `botopink test` flat suite: the props, the anchor's seven attribute rows, the prefetch table, the layout key, and `use linkStatus()` read by a `#[client]` component (front 27) — both rows
 │   │       └── reconcile_test.bp ← `botopink test` flat suite: `layoutKeys`/`sharedDepth`, and `applyTransition` over a RECORDING `DomOps` (inline `put`/`get` · `globalThis` cells; a three-island page counting mounts): the replaced depth, the call order, `data-jh-pending` set first and cleared last, a failed markup (front 27) — both rows
-│   ├── jhonstart-dom-test/ ← MEMBER (front 30's browser half; targets [commonJS]): `src/fake_dom.mjs` — a minimal document (parser for the render's markup, `querySelector(All)` over `tag` / `[attr]` / `[attr="v"]`, `template` content, `replaceChildren`, a serializer; `history` / `location` / `dispatchEvent` recorded) reached through `src/root.bp`'s `#[@external(.Node(…))]` cells and its `callFill(name, id)` / `callSignal(name)` wrappers — and `test/dom_test.bp`: the fill function (replaces its hole, idempotent, a missing hole dropped), `readPayload` (the last payload script, a refused text an `Error`), the signal function (relative redirect = `replaceState` + `popstate`, a listed absolute one `location.replace`, an unlisted one nothing, not-found swaps `[data-jh-root]` and drops later fills). No DOM on the BEAM, hence commonJS only (`decisions-pending.md` 30-g) — a structural restriction under `00-gate` gate-d: `botopink build --target erlang` refuses the member with `` `callGlobal` has no `#[@external(.<Target>(…))]` for the erlang backend `` at `src/root.bp:37`
+│   ├── jhonstart-dom-test/ ← MEMBER (front 30's browser half; targets [commonJS]): `src/fake_dom.mjs` — a minimal document (parser for the render's markup, `querySelector(All)` over `tag` / `[attr]` / `[attr="v"]`, `template` content, `replaceChildren`, a serializer; `history` / `location` / `dispatchEvent` recorded) reached through `src/root.bp`'s `#[compiler.external(.JavaScript(…))]` cells and its `callFill(name, id)` / `callSignal(name)` wrappers — and `test/dom_test.bp`: the fill function (replaces its hole, idempotent, a missing hole dropped), `readPayload` (the last payload script, a refused text an `Error`), the signal function (relative redirect = `replaceState` + `popstate`, a listed absolute one `location.replace`, an unlisted one nothing, not-found swaps `[data-jh-root]` and drops later fills). No DOM on the BEAM, hence commonJS only (`decisions-pending.md` 30-g) — a structural restriction under `00-gate` gate-d: `botopink build --target erlang` refuses the member with `` `callGlobal` has no `#[compiler.external(.<Target>(…))]` for the erlang backend `` at `src/root.bp:37`
 │   └── rakun-bpp/ ← MEMBER (front 95; the helpers of `specs/1.0.10-beta/04-jhonstart/modules.md` § 5): `assert<Subject>(loc, …)` over `snap`'s `assertAs`, each with a pure `<subject>Text` twin, plus fixtures and the render harness
 │       ├── botopink.json  ← name rakun-bpp, files [root.bp, harness.bp, assert_*.bp], dependencies { rakun-bpp, rakun-bpp, rakun-bpp: { workspace: true } }
 │       ├── src/root.bp    ← `pub mod` per helper file + one inline `test` proving the core resolves
@@ -155,7 +155,7 @@ repository/rakun-bpp/
 ├── refusals/               ← NOT members: one project per compile-time refusal of the library, each with the `expect.txt` its `botopink check` must print (stage 6 of the gate, `scripts/check-refusals.sh`)
 │   ├── layout_plain_element/   ← `#[layout]` on `-> Element` (decision 117; the guide's `OldLayout`)
 │   ├── page_plain_element/     ← `#[page]` on `-> Element`
-│   ├── template_task_element/  ← `#[template]` on `-> @Task<Element>`
+│   ├── template_task_element/  ← `#[template]` on `-> Task<Element>`
 │   └── html_*/                 ← front 118: the `` html @`…` `` refusals — a `?T`, a record, a function in a hole; markup as an operand; `[name]={…}`; `class:list`; `set:html`; `slot="…"`; an unbound component and an unbound annotation; content to a component without `children`; a narrower `children`; two `#[isRaw]`; a mismatched closing tag; a kebab-case attribute but `data-*`, an event attribute, a spread on an element and a non-`string` `data-*` value (decision 351); `<style>` in markup (decision 338)
 ```
 
@@ -163,7 +163,7 @@ repository/rakun-bpp/
 (`specs/1.0.10-beta/02-packaging/README.md` § 5): it stands on the
 `snap` library (`import {assertAs} from "snap"`, a git dependency of the member and of every
 example that records a snapshot; decision 391) — a helper computes its text (the `<subject>Text`
-twin) and hands it to `assertAs(loc, "<subject>", text)` with the CALLER's `@src()` — and
+twin) and hands it to `assertAs(loc, "<subject>", text)` with the CALLER's `compiler.src` — and
 re-exports nothing from std or `snap`. A snapshot is accepted by renaming its `.snap.new`
 after comparing it with `test-snap.md`'s literal; never by a flag.
 
@@ -172,7 +172,7 @@ their two suites, moved out of the core by front 95 as a relocation only: the
 one edit is `import {Element, ElementBase} from "rakun-bpp";` in `link.bp` (and
 the same line in `link_test.bp`); nothing in the core imported either module.
 The member declares no `targets`, so it inherits both rows — its code is pure;
-the four `#[@external(.Node(…))]` cells front 68 brings reopen that question
+the four `#[compiler.external(.JavaScript(…))]` cells front 68 brings reopen that question
 (`specs/1.0.10-beta/04-jhonstart/modules.md` § 4).
 
 The other members `specs/1.0.10-beta/04-jhonstart/modules.md` § 1 plans —
@@ -248,16 +248,16 @@ were promoted rather than filled in. A host-bound module here is now an ordinary
 - Builders take a `Children` arg (`div([a, b])` / single / `string` — the G4
   coercion); the **list form** is what V1 renders and what `html` emits. The
   trailing-lambda sugar (`div { [a, b] }`) is a recorded follow-up.
-- A hook is `pub fn <noun>(…) -> @Component<R>` — the noun, never a
+- A hook is `pub fn <noun>(…) -> Component<R>` — the noun, never a
   `use` prefix (`counter`, `router`, `toggle`; not `useCounter`). Activation is
   `val x = use <noun>(…)` in the static prefix of a body whose return is
-  `@Component<_>` (the return is the effect) — a
-  component (`-> @Component<Element>`) or a custom hook (`-> @Component<_>`);
+  `Component<_>` (the return is the effect) — a
+  component (`-> Component<Element>`) or a custom hook (`-> Component<_>`);
   the binding never reuses the hook's name (`val r = use router()`).
 - Hook bodies are pure/synchronous (the server pass / first render): `state`
   yields its initial value, `memo` computes eagerly, `effect` is a no-op. Hook
   bodies are unit-tested by **direct call** (no `use`) in `test {}`, awaited —
-  on commonJS every `@Component` body is an `async function` (botopink decisions
+  on commonJS every `Component` body is an `async function` (botopink decisions
   104/128) — and a component called and awaited renders the server pass. Client reactivity is
   `modules/rakun-bpp/src/client_runtime.mjs`
   (the same nouns over rakun-bpp's own loop), which the client build resolves
@@ -291,7 +291,7 @@ rakun-bpp is a *consumer*. What it relies on:
   walk uses a stack + `indexOf` span recovery rather than a recursive descent —
   see `html.bp`'s header.
 - **Still gated** (router / server, all generic core work):
-  - (closed) the server data layer. `fn … -> @Task<T>` (then spelled with the
+  - (closed) the server data layer. `fn … -> Task<T>` (then spelled with the
     pre-front-24 annotation) with a statement-level `await` compiles and RUNS on
     both rows, `test` blocks included — measured for front 28 against compiler
     `2e6bb4ac`. What remains
@@ -322,7 +322,7 @@ all read the answer it produces. This is the surface they may rely on; none of
 it changes without a note here. Everything below is reached by a consumer as
 `import { … } from "rakun-bpp"` and is green on **both** rows — measured with a
 `path` dependency on `modules/rakun-bpp/` from a package outside this tree,
-rendering a `@Component<Element>` component through `use pathname()` /
+rendering a `Component<Element>` component through `use pathname()` /
 `use selectedLayoutSegment()` / `use params()` and asserting the markup.
 
 | What | Where | Shape |
@@ -334,7 +334,7 @@ rendering a `@Component<Element>` component through `use pathname()` /
 | The segment readers | `patternSegments(pattern)` · `segmentAt(segments, i)` | typed-parameter readers |
 | The build | `snapshot()` | five cells in, the record out. No `?T` unwrap that can fail |
 | **The writer** | `fill(path, params, search, pattern, selected)` | the ONE way route state is installed, and the seam fronts 27/28/29 need. `params`/`search` go in querystring-encoded, exactly as the payload's `m` and `q` carry them. Every field at once — a half-updated snapshot is a component reading the previous route's params against the next route's pattern |
-| The six hooks | `router` · `pathname` · `params` · `searchParams` · `selectedLayoutSegment` · `selectedLayoutSegments` | each `-> @Component<T>`, each one read of `snapshot()`. `selectedLayoutSegments()` is root-first |
+| The six hooks | `router` · `pathname` · `params` · `searchParams` · `selectedLayoutSegment` · `selectedLayoutSegments` | each `-> Component<T>`, each one read of `snapshot()`. `selectedLayoutSegments()` is root-first |
 | The six verbs | `push` · `replace` · `back` · `forward` · `refresh` · `prefetch` | free functions over one cell, `-> i32` nobody reads. Free and not methods: records are immutable and there is no assignment to a `self` field anywhere in this tree |
 | What a verb recorded | `lastNavigation()` | `"<kind> <href>"`, `""` when nothing has. On erlang this is the 307 front 28's dispatcher writes; in the browser the last href the History API was handed |
 | The host halves | `src/router_runtime.mjs` · `src/sidecars/jhonstart_router.erl` | cell for cell, so one set of assertions runs on both rows. The BEAM store is the CALLING PROCESS's dictionary: a request is a process, the snapshot dies with it, two concurrent renders cannot see each other's route |
@@ -343,7 +343,7 @@ A function-valued record field is called in place (`v.tagOf(e)` applies the
 field on every row).
 
 **One rule that shows on both** — a hook called WITHOUT `use` keeps its
-`@Component<T>` type. The type is transparent to a property or a method
+`Component<T>` type. The type is transparent to a property or a method
 (`ps.length`, `segs.join("/")`, `r.param("slug")`) and **not** to a typed
 parameter: `pairValue(params(), "slug")` is `type mismatch: expected array, got
 Context`, and binding through a `val` does not change it. Only `use` strips the
@@ -414,8 +414,8 @@ registry (decision 114); `status.md` records it.
 `server.d.bp` carried a `behavior Request` with three bodyless methods and a
 phantom `@Context` base called `Http` — "no members … supplied by the host, the
 server-side mirror of `Element`". Front 28 dropped both: a server component is
-`fn Page() -> @Component<Element>` (botopink decision 354 — `Element implement
-@Renderable`, no base in the wrapper), a client hook is type-legal inside a server
+`fn Page() -> Component<Element>` (botopink decision 354 — `Element implement
+Renderable`, no base in the wrapper), a client hook is type-legal inside a server
 component, and the client boundary is front 29's `#[client]` rule rather than a
 type. What a body reads from above it is a context (`use context(…)`), and the
 render's own root context is `ElementContext` (354 (7), front 26).
@@ -431,7 +431,7 @@ no built consumer existed to break.
 ### Why the request cells are rakun-bpp's own
 
 Front 28's README binds the six cells to front 62's
-`#[@external(.Erlang("rakun_request_context:…"))]` and says there is to be no
+`#[compiler.external(.Erlang("rakun_request_context:…"))]` and says there is to be no
 Node cell in the file. Neither half is writable, and both halves were measured
 against compiler `2e6bb4ac` on 2026-09-21:
 
@@ -440,7 +440,7 @@ against compiler `2e6bb4ac` on 2026-09-21:
    expected to fail at the first cell", and it is worse than that:
 
    ```text
-   error: `__jhReqMethod` has no `#[@external(.<Target>(…))]` for the node backend
+   error: `__jhReqMethod` has no `#[compiler.external(.<Target>(…))]` for the node backend
     --> src/main.bp:5:12
    ```
 
@@ -477,7 +477,7 @@ for the whole render. Folding them would make "the request" mutate mid-page.
    replacement: a stand-in would be a second answer to "what is an escaped `&`"
    the day the real one lands. `test/server_test.bp` PINS the unescaped answer,
    so the change shows as a red cell rather than a silent difference.
-2. **Parallel awaiting.** No `awaitAll`, no `race`, no `allSettled`. `@Task`
+2. **Parallel awaiting.** No `awaitAll`, no `race`, no `allSettled`. `Task`
    is eager on the erlang row (botopink decision 120), so two loaders
    awaited in sequence cost the **sum** of their round trips even when their
    results are independent. The fix is front 02's spawn-and-gather over
@@ -507,7 +507,7 @@ question, not a code one.
 | The build | `request()` | six cells in, the record out. A plain function, not a hook, until front 19 step 2 |
 | **The writer pair** | `enterRequest(req)` · `leaveRequest()` | the ONE way request state is installed and removed, called by front 30's render once per render. The four pair lists are stored `encoding.formStringify`-encoded. Between the two `request()`/`cookies()`/`headers()` read it; outside them they RAISE |
 | The shortcuts | `cookies()` · `headers()` | the only two re-exported. `after`, `connection`, `draftMode` and memoization are front 62's, called from there |
-| The render entry | `renderServerComponent(component) -> @Task<string>` | takes an **unstarted thunk** `fn() -> @Task<Element>`, awaits exactly once, renders synchronously afterwards; `renderComponent` takes a `fn() -> @Component<Element>` thunk |
+| The render entry | `renderServerComponent(component) -> Task<string>` | takes an **unstarted thunk** `fn() -> Task<Element>`, awaits exactly once, renders synchronously afterwards; `renderComponent` takes a `fn() -> Component<Element>` thunk |
 | The host halves | `src/server_runtime.mjs` · `src/sidecars/jhonstart_server.erl` | cell for cell, so one set of assertions runs on both rows. The BEAM store is the CALLING PROCESS's dictionary: a request is a process, it dies with it, two concurrent renders cannot see each other's cookies |
 
 **Two call-site rules.** The first only shows on the erlang row and is a compiler
@@ -518,9 +518,9 @@ on both rows while `renderServerComponent(Page)` compiles on commonJS and fails
 records for the fields of its `ElementView` and it is **reported, not worked
 around**. The second shows on both: a function has one return and so one effect
 (botopink decision 118), so a server component that loads data is
-`fn … -> @Task<Element>`, and one that also activates a hook is
-`fn … -> @Component<Element>` (decision 128: `@Component` extends
-`@Task`). Neither is a `@Result`, so neither can propagate a failed load with
+`fn … -> Task<Element>`, and one that also activates a hook is
+`fn … -> Component<Element>` (decision 128: `Component` extends
+`Task`). Neither is a `Result`, so neither can propagate a failed load with
 `try` — a component handles the error in its body (`try await load() catch …`,
 `case`, an error screen; decision 121).
 
@@ -553,7 +553,7 @@ is what the browser half queries on.
 |---|---|---|
 | `__jhLinkMount()` | 68 | delegated click interception + an intersection observer over `[data-jh-l]`. The generated entry calls it ONCE, after hydrating the islands, alongside front 67's `__jhFormMount()`. Front 29 owns the per-island hydrate point, not the entry, and does not call this |
 | `__jhLinkPrefetch(href, mode)` | 68 | warms the client route cache; `mode` is `prefetchMode`'s answer |
-| `__jhLinkStatus()` and `linkStatus() -> @Component<LinkStatus>` | 68 · 26 step 8 | the hook is `return linkStatusOf(__jhLinkStatus());`; `#[clientOnly]` and the deletion of its erlang twin wait on 26 step 8's markers (`01-checker` step 23's `Decl.hooks`), and so does the refusal of a `use linkStatus()` outside a `#[client]` component (decision 363) |
+| `__jhLinkStatus()` and `linkStatus() -> Component<LinkStatus>` | 68 · 26 step 8 | the hook is `return linkStatusOf(__jhLinkStatus());`; `#[clientOnly]` and the deletion of its erlang twin wait on 26 step 8's markers (`01-checker` step 23's `Decl.hooks`), and so does the refusal of a `use linkStatus()` outside a `#[client]` component (decision 363) |
 | `__jhLinkRouteKind(href)` | 60 | reads the route-kind table front 60 emits into the bundle |
 | the entry's `DomOps` | `07-onze/50` step 6 | the six functions `applyTransition` calls: `replaceChildren` on the segment root the render marks, the route's starters, the route cache (front 22's kind flag says whether the markup had to be fetched), `data-jh-pending` on the links to the target; front 29's `data-jh-s` adoption and front 31's `data-jh-e` re-anchoring are the entry's `replaceSubtree` |
 
@@ -564,7 +564,7 @@ they point in opposite directions:
    2026-09-21 against compiler `2e6bb4ac`, smallest program:
 
    ```bp
-   #[@external(.Node(\"require('./rt.mjs').status(…)\"))]
+   #[compiler.external(.JavaScript(\"require('./rt.mjs').status(…)\"))]
    declare fn __cellStatus() -> string;
    pub fn statusOf() -> string { return __cellStatus(); }
    ```
@@ -572,7 +572,7 @@ they point in opposite directions:
    ```text
    $ botopink build --target commonJS     # Compiled in 95.64ms
    $ botopink build --target erlang
-   error: `__cellStatus` has no `#[@external(.<Target>(…))]` for the erlang backend
+   error: `__cellStatus` has no `#[compiler.external(.<Target>(…))]` for the erlang backend
     --> src/main.bp:5:12
    ```
 
@@ -598,7 +598,7 @@ server pass exactly as it renders in the browser.
 
 | What | Where | Shape |
 |---|---|---|
-| The marker | `#[client]` | a `syntax decl: unknown`-first comptime fn. Records the meta `component` as a typed `ClientMark(component)` record (`@typeInfo(<Name>).meta(ClientMark)?.component`, decision 216) — a compile-time constant, never a call into a host registry, because a Node-only call would break the erlang server render |
+| The marker | `#[client]` | a `syntax decl: unknown`-first comptime fn. Records the meta `component` as a typed `ClientMark(component)` record (`compiler.typeInfo(<Name>).meta(ClientMark)?.component`, decision 216) — a compile-time constant, never a call into a host registry, because a Node-only call would break the erlang server render |
 | The props rule | `#[clientProps]` | on the props RECORD, because the declaration handle (`syntax decl: unknown`) does not expose a function's parameters. Whitelist: `string` · `i32` · `f64` · `bool` |
 | The island marker | `islandId(n)` · `islandAttrOf(id)` · `islandAttr(n)` | decision 77: `islandAttrOf` is the ONE occurrence of `"data-jh-i"` in this tree. Front 23 fills `RenderHooks.islandAttr` from `islandAttr`; front 68's entry imports the same function |
 | The island | `Island(id, component, props)` · `clientMount(island, children)` | the placeholder carries the id and NOTHING else; the component name and encoded props go to the payload's `i` row |
@@ -610,8 +610,8 @@ server pass exactly as it renders in the browser.
 **What is enforced today** — four comptime refusals, no flag that turns them off
 (decision 67), each located at the annotation: `#[client]` on a non-`fn`;
 `#[client]` on a fn whose reflected `returnType` is not `Element` or
-`@Component<Element>` (a `-> @Task<Element>` server component
-reflects as `"@Task<Element>"`); `#[clientProps]` on an
+`Component<Element>` (a `-> Task<Element>` server component
+reflects as `"Task<Element>"`); `#[clientProps]` on an
 enum; a field outside the four-scalar whitelist.
 
 **What is NOT enforced by anything in this tree**, and it is the front's whole
@@ -661,7 +661,7 @@ client module graph).
 `form`, `link`, `title` and `body` are all exported tag constructors). The rule
 was forced: a local `val` leaked into the module scope the checker saw for
 every top-level declaration after its body, so `val p = LikeProps(…)` in a
-`test {}` redded a `@Component` component declared further down with `type
+`test {}` redded a `Component` component declared further down with `type
 mismatch: expected Element, got LikeProps`. The checker now ends a local with
 its body (`unbound variable 'v' — `v` is a local of `holder`, and a local ends
 with its body`; measured 2026-09-26 with the compiler pinned for front 101), so

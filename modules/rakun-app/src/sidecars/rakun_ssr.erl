@@ -60,7 +60,7 @@ add_header(Name, Value) ->
             ok
     end.
 
-%% Front 25's `streamed`: every thunk is SPAWNED at once (an `@Task` is eager on
+%% Front 25's `streamed`: every thunk is SPAWNED at once (an `Task` is eager on
 %% the BEAM, so only an unstarted thunk can run concurrently), and each result is
 %% written as a chunk IN INDEX ORDER as soon as it and every earlier one are in.
 %% A thunk that raises ends the stream: the chunks already written stand and the

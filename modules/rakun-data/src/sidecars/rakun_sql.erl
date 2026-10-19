@@ -16,7 +16,7 @@
 %%%
 %%% ONE MODULE, THREE CALLBACK ROLES. The supervisor (`rakun_pool_sup`) and the
 %%% connection processes are both implemented here, because a sidecar ships as
-%%% one `.erl` per `#[@External.Erlang]` atom. `init/1` dispatches on its
+%%% one `.erl` per `#[compiler.external(.Erlang)]` atom. `init/1` dispatches on its
 %%% argument: `pool_sup` answers the supervisor spec, `{conn, Ds, Slot}` the
 %%% connection state. No `-behaviour` attribute is declared for either, so the
 %%% two callback sets do not warn about each other.
@@ -386,7 +386,7 @@ checkin(Pid) ->
 
 %% ═══ statements ══════════════════════════════════════════════════════════════
 %% `exec/3` answers the record `SqlOutcome` as a map. It does NOT raise: the
-%% raising `query` and the `@Result` `tryQuery` are both decided in botopink
+%% raising `query` and the `Result` `tryQuery` are both decided in botopink
 %% from this one answer, so they cannot disagree about what failed.
 %%
 %% LAZY ACQUISITION. This is the only place a connection is checked out outside

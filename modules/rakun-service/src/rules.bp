@@ -32,7 +32,7 @@
 //// `routing`'s (`url_rules`), imported by the browser too (decision 115).
 
 import {Response, rkProp, rkRoutePaths} from "rakun";
-import {regex, regex.Regex, encoding} from "std";
+import {regex, regex.Regex, encoding, compiler} from "std";
 import {url_rules.PathRules, url_rules.RedirectRule, url_rules.canonicalize, url_rules.clientHref, url_rules.writeRedirectTable, table.parseTable, match.matchPath} from "routing";
 import {filter.WebRequest, filter.Chain, filter.withHeader, filter.retarget, filter.registerFilter, filter.orderUrlRules, filter.sentinelStatus};
 
@@ -70,7 +70,7 @@ pub fn isRawRegex(source: string) -> bool {
 }
 
 // Source in, anchored regex plus capture names (declaration order) out.
-pub fn sourceToPattern(source: string) -> @Result<#(string, string[]), string> {
+pub fn sourceToPattern(source: string) -> Result<#(string, string[]), string> {
     if (source.startsWith("/") == false)
         throw "rakun-service: a rule source starts with a slash, and `"
             + source
@@ -101,7 +101,7 @@ pub fn matcherProblem(source: string, why: string) -> string {
         + why;
 }
 
-pub fn matcher(source: string) -> @Result<Matcher, string> {
+pub fn matcher(source: string) -> Result<Matcher, string> {
     val translated = sourceToPattern(source);
     if (translated.isError()) {
         val assert Error(e) = translated;
@@ -121,7 +121,7 @@ pub fn matcher(source: string) -> @Result<Matcher, string> {
     );
 }
 
-#[@external(.Erlang("""undefined"""))]
+#[compiler.external(.Erlang("""undefined"""))]
 declare fn noHandle() -> unknown;
 
 pub fn matches(m: Matcher, pathname: string) -> bool {
@@ -305,7 +305,7 @@ fn offListOriginProblem(destination: string, host: string) -> string {
 
 // The route table front 22 keeps, read through its host when `rakun-app` is in
 // the build (rakun-service does not depend on it), `""` otherwise.
-#[@external(
+#[compiler.external(
     .Erlang("""(fun() -> case code:ensure_loaded(rakun_file_router) of {module, _} -> rakun_file_router:table(); _ -> <<>> end end)()"""),
 )]
 declare fn appTableWire() -> string;
@@ -427,7 +427,7 @@ fn mustMatcher(source: string) -> Matcher {
 
 // Every matcher compiled once; the first bad rule an `Error` naming it, and
 // nothing half-registered.
-pub fn compileRules(rules: UrlRules) -> @Result<CompiledRules, string> {
+pub fn compileRules(rules: UrlRules) -> Result<CompiledRules, string> {
     val problem: string = rulesProblem(rules);
     if (problem != "") throw problem;
     return CompiledRules(
@@ -505,7 +505,7 @@ pub fn applyRules(c: CompiledRules, pathname: string) -> RuleOutcome {
 // content type and its body; hop-by-hop headers (`Connection`,
 // `Transfer-Encoding`, `Upgrade`) are dropped in both directions. Answers
 // `status\ncontent-type\nbody`.
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__Method, __Url) -> _ = application:ensure_all_started(inets), _ = application:ensure_all_started(ssl), __M = list_to_atom(string:lowercase(binary_to_list(__Method))), case httpc:request(__M, {binary_to_list(__Url), []}, [{timeout, 10000}], [{body_format, binary}]) of {ok, {{_, __S, _}, __H, __B}} -> __CT = case lists:keyfind("content-type", 1, __H) of {_, __V} -> list_to_binary(__V); false -> <<>> end, iolist_to_binary([integer_to_binary(__S), 10, __CT, 10, __B]); {error, __R} -> iolist_to_binary([<<"502">>, 10, <<"text/plain">>, 10, io_lib:format("~p", [__R])]) end end)($0, $1)"""),
 )]
 declare fn relay(method: string, url: string) -> string;
@@ -520,20 +520,20 @@ pub fn proxied(method: string, url: string) -> Response {
     if (ct == "") return res else return withHeader(res, "Content-Type", ct);
 }
 
-#[@external(.Erlang("""binary_to_integer($0)"""))]
+#[compiler.external(.Erlang("""binary_to_integer($0)"""))]
 declare fn toStatus(s: string) -> i32;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__F) -> case persistent_term:get(rakun_web_proxy, undefined) of undefined -> persistent_term:put(rakun_web_proxy, __F), 0; _ -> erlang:error({panic, <<"rakun-service: a proxy is already registered - proxy.bp is one function">>}) end end)($0)"""),
 )]
 declare fn rkProxyStore(handler: fn(req: WebRequest) -> RuleOutcome) -> i32;
 
-#[@external(.Erlang("""persistent_term:get(rakun_web_proxy, $0)"""))]
+#[compiler.external(.Erlang("""persistent_term:get(rakun_web_proxy, $0)"""))]
 declare fn rkProxyOr(
     fallback: fn(req: WebRequest) -> RuleOutcome,
 ) -> fn(req: WebRequest) -> RuleOutcome;
 
-#[@external(.Erlang("""(fun() -> _ = persistent_term:erase(rakun_web_proxy), 0 end)()"""))]
+#[compiler.external(.Erlang("""(fun() -> _ = persistent_term:erase(rakun_web_proxy), 0 end)()"""))]
 pub declare fn rkProxyClear() -> i32;
 
 // `proxy.bp`'s function (§ 20): one per application, over the same outcomes as

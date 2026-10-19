@@ -134,7 +134,7 @@ collect({Id, Ref, Pid, Deadline, Ms}) ->
         receive {Ref, Late} -> {Id, Late} after 0 -> {Id, <<"timeout\t", (integer_to_binary(Ms))/binary>>} end
     end.
 
-%% The readable text of a raise: a `@panic` message, an `error(Binary)`, or the
+%% The readable text of a raise: a `panic` message, an `error(Binary)`, or the
 %% `~p` of anything else. Never a stack trace — `details` may not carry one.
 reason_text(R) when is_binary(R) -> R;
 reason_text(R) when is_list(R) ->

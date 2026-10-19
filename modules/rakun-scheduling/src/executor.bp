@@ -13,7 +13,7 @@
 //// would either do nothing or introduce a queue that does not otherwise exist.
 //// Spring's and Quartz's thread-count properties are not ported, on purpose.
 ////
-//// `@Task` IS NOT THE PARALLELISM. `@Task<T>` lowers eagerly on erlang; a task
+//// `Task` IS NOT THE PARALLELISM. `Task<T>` lowers eagerly on erlang; a task
 //// returning a future would gain nothing. Parallelism is process count.
 ////
 //// THE KEYS (read by `startScheduling()`, after configuration is loaded):
@@ -54,10 +54,11 @@ import {rkProp} from "rakun";
 import {shutdownTimeout} from "rakun-service";
 import {cron.Cron, cron.cronProblem, cron.compileCron, cron.cronWire};
 import {registry.TaskInfo, registry.taskNames, registry.rkTaskInfo};
+import {compiler, failure.panic} from "std";
 
 // ── the host cells ──────────────────────────────────────────────────────────
 
-#[@external(.Erlang("rakun_scheduling:configure($0, $1, $2, $3, $4)"))]
+#[compiler.external(.Erlang("rakun_scheduling:configure($0, $1, $2, $3, $4)"))]
 pub declare fn rkSchedConfigure(
     name: string,
     enabled: bool,
@@ -67,65 +68,65 @@ pub declare fn rkSchedConfigure(
 ) -> i32;
 
 // `names` is newline-joined; answers how many timers started.
-#[@external(.Erlang("rakun_scheduling:start($0, $1, $2)"))]
+#[compiler.external(.Erlang("rakun_scheduling:start($0, $1, $2)"))]
 pub declare fn rkSchedStart(
     names: string,
     enabled: bool,
     offsetMinutes: i32,
 ) -> i32;
 
-#[@external(.Erlang("rakun_scheduling:stop()"))]
+#[compiler.external(.Erlang("rakun_scheduling:stop()"))]
 pub declare fn rkSchedStop() -> i32;
 
-#[@external(.Erlang("rakun_scheduling:started()"))]
+#[compiler.external(.Erlang("rakun_scheduling:started()"))]
 pub declare fn rkSchedStarted() -> bool;
 
-#[@external(.Erlang("rakun_scheduling:global_enabled()"))]
+#[compiler.external(.Erlang("rakun_scheduling:global_enabled()"))]
 pub declare fn rkSchedGlobalEnabled() -> bool;
 
 // Moves the (virtual) clock to `at` and lets every started timer fire what is
 // due; answers how many runs started. Does not wait for them.
-#[@external(.Erlang("rakun_scheduling:tick($0)"))]
+#[compiler.external(.Erlang("rakun_scheduling:tick($0)"))]
 pub declare fn rkSchedTick(at: i64) -> i32;
 
 // Waits until no run is in flight, up to `timeoutMillis`; answers how many are.
-#[@external(.Erlang("rakun_scheduling:await_idle($0)"))]
+#[compiler.external(.Erlang("rakun_scheduling:await_idle($0)"))]
 pub declare fn rkSchedAwaitIdle(timeoutMillis: i32) -> i32;
 
-#[@external(.Erlang("rakun_scheduling:in_flight($0)"))]
+#[compiler.external(.Erlang("rakun_scheduling:in_flight($0)"))]
 pub declare fn rkSchedInFlight(name: string) -> i32;
 
-#[@external(.Erlang("rakun_scheduling:clock_set($0)"))]
+#[compiler.external(.Erlang("rakun_scheduling:clock_set($0)"))]
 pub declare fn rkSchedClockSet(at: i64) -> i32;
 
-#[@external(.Erlang("rakun_scheduling:clock_clear()"))]
+#[compiler.external(.Erlang("rakun_scheduling:clock_clear()"))]
 pub declare fn rkSchedClockClear() -> i32;
 
-#[@external(.Erlang("rakun_scheduling:now()"))]
+#[compiler.external(.Erlang("rakun_scheduling:now()"))]
 pub declare fn rkSchedNow() -> i64;
 
-#[@external(.Erlang("rakun_scheduling:timer_alive($0)"))]
+#[compiler.external(.Erlang("rakun_scheduling:timer_alive($0)"))]
 pub declare fn rkSchedTimerAlive(name: string) -> bool;
 
 // Kills a task's timer and waits for its supervisor to start another; 1 when a
 // different, live timer took its place.
-#[@external(.Erlang("rakun_scheduling:kill_timer($0)"))]
+#[compiler.external(.Erlang("rakun_scheduling:kill_timer($0)"))]
 pub declare fn rkSchedKillTimer(name: string) -> i32;
 
 // The process a task body runs in, as text.
-#[@external(.Erlang("rakun_scheduling:run_pid()"))]
+#[compiler.external(.Erlang("rakun_scheduling:run_pid()"))]
 pub declare fn rkTaskRunPid() -> string;
 
 // A named latch: `rkSchedGateWait` blocks until `rkSchedGateOpen` is called for
 // the key, or answers false after `timeoutMillis`. How a test holds a run in
 // flight, or proves two runs overlap, without sleeping.
-#[@external(.Erlang("rakun_scheduling:gate_wait($0, $1)"))]
+#[compiler.external(.Erlang("rakun_scheduling:gate_wait($0, $1)"))]
 pub declare fn rkSchedGateWait(key: string, timeoutMillis: i32) -> bool;
 
-#[@external(.Erlang("rakun_scheduling:gate_open($0)"))]
+#[compiler.external(.Erlang("rakun_scheduling:gate_open($0)"))]
 pub declare fn rkSchedGateOpen(key: string) -> i32;
 
-#[@external(.Erlang("rakun_scheduling:gate_reset($0)"))]
+#[compiler.external(.Erlang("rakun_scheduling:gate_reset($0)"))]
 pub declare fn rkSchedGateReset(key: string) -> i32;
 
 // ── the refusals ────────────────────────────────────────────────────────────
@@ -180,7 +181,7 @@ fn flag(key: string) -> bool {
     val t = raw.toLower();
     if ((t == "") || (t == "true")) return true;
     if (t == "false") return false;
-    @panic(flagProblem(key, raw));
+    panic(flagProblem(key, raw));
     return false;
 }
 
@@ -190,7 +191,7 @@ pub fn overlapOf(name: string) -> string {
     val t = raw.toLower();
     if ((t == "") || (t == "skip")) return "skip";
     if (t == "allow") return "allow";
-    @panic(overlapProblem(key, raw));
+    panic(overlapProblem(key, raw));
     return "skip";
 }
 
@@ -218,10 +219,10 @@ pub fn timezoneOffsetMinutes() -> i32 {
         && (h2 >= 0)
         && (m1 >= 0)
         && (m2 >= 0);
-    if (shaped == false) @panic(timezoneProblem(raw));
+    if (shaped == false) panic(timezoneProblem(raw));
     val hours = h1 * 10 + h2;
     val minutes = m1 * 10 + m2;
-    if ((hours > 14) || (minutes > 59)) @panic(timezoneProblem(raw));
+    if ((hours > 14) || (minutes > 59)) panic(timezoneProblem(raw));
     val total = hours * 60 + minutes;
     return if (sign == "-") 0 - total else total;
 }
@@ -232,9 +233,9 @@ fn cronOverride(name: string, trigger: string) -> string {
     val key = "rakun.scheduling." + name + ".cron";
     val raw: string = rkProp(key).trim();
     if (raw == "") return "";
-    if (trigger != "cron") @panic(cronOnFixedProblem(key, trigger));
+    if (trigger != "cron") panic(cronOnFixedProblem(key, trigger));
     val problem: string = cronProblem(raw);
-    if (problem != "") @panic(cronOverrideProblem(key, raw, problem));
+    if (problem != "") panic(cronOverrideProblem(key, raw, problem));
     return raw;
 }
 

@@ -21,7 +21,7 @@ component** (here), and **front 68 walks the module graph** (not here).
 
 It is an ordinary `@Decl`-first comptime function. It records **comptime
 meta** — `decl.setMeta("component", "LikeButton")`, read as
-`@typeInfo(LikeButton).meta.client.component` — and checks placement.
+`compiler.typeInfo(LikeButton).meta.client.component` — and checks placement.
 
 The marker is a compile-time constant and **not** a call into a runtime
 registry, deliberately: a call into a Node-only cell would make every
@@ -30,10 +30,10 @@ case the boundary exists to support. Meta is the same on every target and
 carries the same information; front 68 reads the set of client components with
 `@TypeInfo.all(with: client)`.
 
-`#[client]` is a decorator and the `@Component<Element>` return is
+`#[client]` is a decorator and the `Component<Element>` return is
 the effect (decisions 118/128), so the two coexist on one component. A **server**
-component that only loads data is `fn … -> @Task<Element>` and cannot be marked
-client: its reflected `returnType` is `"@Task<Element>"`, which the second check
+component that only loads data is `fn … -> Task<Element>` and cannot be marked
+client: its reflected `returnType` is `"Task<Element>"`, which the second check
 below rejects.
 
 Applying it requires importing it — `import { client.client, clientProps } from
@@ -181,7 +181,7 @@ All three are module-**graph** predicates and there is no graph here.
 |---|---|
 | `hydrate()` | walks every `[data-jh-i]`, finds that island's `i` row in the payload and starts the starter registered for its component, handing it the encoded props and `commit(html)`; calls the loader registered for the payload's matched pattern `r` once and runs again when it resolves; idempotent; mounts no link and no form |
 | `registerStarter(name, start: fn(raw: string, commit: fn(html: string) -> i32) -> i32)` | the starter for one client component; a second one for the same name fails, naming it |
-| `registerRouteStarters(pattern, load: fn() -> @Task<i32>)` | the loader of one route's chunk, which registers that route's starters — the bundle splits by route; one loader per pattern |
+| `registerRouteStarters(pattern, load: fn() -> Task<i32>)` | the loader of one route's chunk, which registers that route's starters — the bundle splits by route; one loader per pattern |
 | `registeredStarters()` / `registeredRouteStarters()` | the names in the table, in registration order |
 | `propsFor(name)` | `propsOf` over the payload's first `i` row for `name` |
 

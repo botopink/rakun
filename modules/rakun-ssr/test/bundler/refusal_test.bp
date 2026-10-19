@@ -6,6 +6,7 @@ import {bundler.graph.AppModule, bundler.graph.ClientGraph, bundler.graph.GraphN
 import {bundler.refusal.BuildReport, bundler.refusal.BuildRefusal, bundler.refusal.checkBuild, bundler.refusal.describeReport, bundler.refusal.refusalMessage, bundler.refusal.emiliaCallsOf, bundler.refusal.StyleProbe, bundler.refusal.styleProbeSource, bundler.refusal.parseStyleProbe, bundler.refusal.styleParity};
 import {types.AliasMap, config.OnzeConfig, config.defaultConfig, config.loadConfig};
 import {assertAs} from "snap";
+import {compiler} from "std";
 
 fn aliases() -> AliasMap {
     return AliasMap(entries: [#("@/components", "components"), #("@/lib", "lib")]);
@@ -15,33 +16,33 @@ fn fakeEnv(name: string) -> string {
     return if (name == "ONZE_PUBLIC_API_URL") "https://api.example.com" else "";
 }
 
-fn reportWith(tree: string, cfg: OnzeConfig) -> @Result<BuildReport, string> {
+fn reportWith(tree: string, cfg: OnzeConfig) -> Result<BuildReport, string> {
     val modules = try loadModules(parseFixture(tree));
     val graph = clientGraph(modules, aliases(), "app");
     return checkBuild(graph, modules, cfg, { n -> fakeEnv(n) });
 }
 
-fn report(tree: string) -> @Result<BuildReport, string> {
+fn report(tree: string) -> Result<BuildReport, string> {
     return try reportWith(tree, defaultConfig());
 }
 
 fn page(component: string) -> string {
     return ["== app/page.bp", "import { "
         + component
-        + " } from \"@/components.w\";", "#[page(\"\")] pub fn home(route: PageContext) -> @Component<Element> { return p([]); }", "== components/w.bp", "#[client]"].join("\n");
+        + " } from \"@/components.w\";", "#[page(\"\")] pub fn home(route: PageContext) -> Component<Element> { return p([]); }", "== components/w.bp", "#[client]"].join("\n");
 }
 
 test "refusal: server-only ---- the chain from the root" {
-    val r = try report(["== app/page.bp", "import { Status } from \"@/components.status\";", "#[page(\"\")] pub fn home(route: PageContext) -> @Component<Element> { return p([]); }", "== components/status.bp", "#[client]", "import { fmt } from \"@/lib.format\";", "pub fn Status(props: P) -> Element { return p([]); }", "== lib/format.bp", "import { listPosts } from \"@/lib.db\";", "pub fn fmt() -> string { return \"\"; }", "== lib/db.bp", "import { serverOnly } from \"rakun-bpp\";", "pub fn listPosts() -> Post[] { return []; }"].join("\n"));
+    val r = try report(["== app/page.bp", "import { Status } from \"@/components.status\";", "#[page(\"\")] pub fn home(route: PageContext) -> Component<Element> { return p([]); }", "== components/status.bp", "#[client]", "import { fmt } from \"@/lib.format\";", "pub fn Status(props: P) -> Element { return p([]); }", "== lib/format.bp", "import { listPosts } from \"@/lib.db\";", "pub fn fmt() -> string { return \"\"; }", "== lib/db.bp", "import { serverOnly } from \"rakun-bpp\";", "pub fn listPosts() -> Post[] { return []; }"].join("\n"));
     val text = describeReport(r);
     assert text.contains("components.status > lib.format > lib.db");
-    try assertAs(@src(), "refusals", text);
+    try assertAs(comptime compiler.src, "refusals", text);
 }
 
 test "refusal: request scope ---- cookies from a client module" {
     val r = try report(page("W")
         + "\nimport { cookies } from \"rakun-bpp\";\npub fn W(props: P) -> Element { return p([]); }");
-    try assertAs(@src(), "refusals", describeReport(r));
+    try assertAs(comptime compiler.src, "refusals", describeReport(r));
 }
 
 test "refusal: env ---- every row of the environment table" {
@@ -63,7 +64,7 @@ test "refusal: env ---- every row of the environment table" {
     val text = describeReport(r);
     assert text.contains("DATABASE_URL");
     assert text.contains("components.w");
-    try assertAs(@src(), "refusals", text);
+    try assertAs(comptime compiler.src, "refusals", text);
 }
 
 test "refusal: adversarial config ---- no setting relaxes anything" {
@@ -74,7 +75,7 @@ test "refusal: adversarial config ---- no setting relaxes anything" {
     val adversarial = try reportWith(tree, loose);
     assert describeReport(adversarial) == describeReport(plain);
     val keys = ["allowEnv", "publicEnvPrefix", "strict", "bundler"].map({ k -> k + ": " + loadError(k) });
-    try assertAs(@src(), "refusals", keys.join("\n")
+    try assertAs(comptime compiler.src, "refusals", keys.join("\n")
         + "\n"
         + describeReport(adversarial));
 }
@@ -101,7 +102,7 @@ test "refusal: emilia ---- non-literal tokens, a client flush, a hash split" {
             "    return span([text(\"x\", attrs: [])], attrs: [#(\"class\", cls)]);",
             "}",
         ].join("\n"));
-    try assertAs(@src(), "refusals", describeReport(r));
+    try assertAs(comptime compiler.src, "refusals", describeReport(r));
 }
 
 test "refusal: the styleMap probe ---- its source, and the two backends compared" {
@@ -123,6 +124,6 @@ test "refusal: the styleMap probe ---- its source, and the two backends compared
 }
 
 test "refusal: a module outside the client graph is never checked" {
-    val r = try report(["== app/page.bp", "import { io.env } from \"std\";", "import { serverOnly } from \"rakun-bpp\";", "val secret = env.read(\"DATABASE_URL\");", "#[page(\"\")] pub fn home(route: PageContext) -> @Component<Element> { return p([]); }"].join("\n"));
+    val r = try report(["== app/page.bp", "import { io.env } from \"std\";", "import { serverOnly } from \"rakun-bpp\";", "val secret = env.read(\"DATABASE_URL\");", "#[page(\"\")] pub fn home(route: PageContext) -> Component<Element> { return p([]); }"].join("\n"));
     assert r.refusals.length == 0;
 }

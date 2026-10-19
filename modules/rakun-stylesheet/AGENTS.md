@@ -320,7 +320,7 @@ sanitise, no opt-out.** A payload that could close a rule (`}`) or the `<style>`
 element (`<`) is refused twice — at COMPTIME by the template validators
 (`cssValue`/`cssIdent`/`cssSelector`/`cssQuery`/`cssLength`, which fail the
 build with the text) and at RUN TIME by the builders and again by the dispatcher
-helpers (`@panic`), because a bare `Token.Arb(…)` constructor cannot be made
+helpers (`panic`), because a bare `Token.Arb(…)` constructor cannot be made
 private. `arbitrary.bp` cannot import `emilia.bp` (which imports it), so the
 `Token[]`-carrying helpers take the inner list already folded to a `Sheet`, and
 the rendering tests live in `emilia.bp` under the front's banner.
@@ -570,8 +570,8 @@ attachment syntaxes.
   (`&:hover`) and/or an at-rule (`@media (width >= 48rem)`), so a modified
   token becomes a SIBLING rule of the class, never text nested in its body.
 - **Lowering to JS.** v0 lowers to plain `function emilia(tokens) {
-  ... }` + a host expression per `#[@external(.<Target>(…))]` declaration. There is
-  **no compiler change** beyond what was already in `feat` (`@external`
+  ... }` + a host expression per `#[compiler.external(.<Target>(…))]` declaration. There is
+  **no compiler change** beyond what was already in `feat` (`compiler.external`
   templates, `case`/exhaustiveness, enum payload destructuring with
   named fields).
 
@@ -604,7 +604,7 @@ Both hooks are **emilia-agnostic** — rakun-bpp owns the mechanism.
 
 - **Not a compiler change.** No new `#[@…]` annotation in the core, no
   AST node, no codegen hook. The entire DSL is `pub fn` + `case` +
-  `#[@external(.<Target>(…))]` — already shipped primitives.
+  `#[compiler.external(.<Target>(…))]` — already shipped primitives.
 - **Not a CSS processor.** emilia reads no author CSS: author CSS is the
   `css` library's, components are `styled`'s (decision 338), and emilia is
   the layer of typed tokens over them. No preprocessor pipeline. Since front
@@ -744,7 +744,7 @@ emilia/
 │           │                the body. Prefer the docblock anyway
 │           └── emilia.bp  ← `emilia(tokens) -> string` + `flush()` + the
 │                            `tokenToCss`/`tokensToCss` dispatchers + the
-│                            `#[@external(.<Target>(…))]` host cells
+│                            `#[compiler.external(.<Target>(…))]` host cells
 │                            (`register`, `flushSheet`) + the 17 inline
 │                            tests. It imports `Token` as
 │                            `import {tokens.Token};` — naming the
@@ -1038,10 +1038,10 @@ here), `runExamplesGate "$bin" <t>`, `runRefusalsGate` (no `refusals/` here).
   `emilia-card` reaches through `{ "emilia": { "workspace": true } }` and what
   an outside consumer reaches through the git form — a member is reached by
   its manifest `name`, never by its path (decision 75).
-- **Cross-module `#[@external(.<Target>(…))]` symbol imports don't lower at v0** —
+- **Cross-module `#[compiler.external(.<Target>(…))]` symbol imports don't lower at v0** —
   `import { register };` from a sibling module resolves the type but
   the runtime symbol is `undefined`. Until the codegen path closes
-  that gap, keep all `#[@external(.<Target>(…))]` host-cell expressions in the
+  that gap, keep all `#[compiler.external(.<Target>(…))]` host-cell expressions in the
   module that USES them (currently `emilia.bp`).
 - **`extend` is a language keyword, so the theme's composer is `extendTheme`.**
   `Name extend Type { … }` is the type-extension block, which makes `fn
@@ -1409,8 +1409,8 @@ here), `runExamplesGate "$bin" <t>`, `runRefusalsGate` (no `refusals/` here).
     keyframes);
   - 5 cascade tests (the conflict rule, list order, call order, an
     unrelated reorder, a variant following the rule it varies).
-  The async `flush()` returns `@Task<string>` (it cannot fail, so no
-  `@Result` and a bare `await`); tests `await flush()` via the implicit
+  The async `flush()` returns `Task<string>` (it cannot fail, so no
+  `Result` and a bare `await`); tests `await flush()` via the implicit
   await channel of a `test {…}` block (bot-lang's `test-runner-async` commit).
 - `examples/emilia-backgrounds/` is the member `emilia-backgrounds` and is
   front 39's worked example: the seven keyword sub-sections of `Bg` as one rule
@@ -1616,7 +1616,7 @@ here), `runExamplesGate "$bin" <t>`, `runRefusalsGate` (no `refusals/` here).
 | F1 — fill out `Token` | DONE (V1 nested-section landed `3f77623`) |
 | F2 — `tokenToCss` exhaustive | DONE for V1 (re-pinned under v0.beta.22 ecosystem-and-snap-tail F2) |
 | F3 — modifier composition | DONE for V1 (re-pinned alongside F2) |
-| F4 — `flush()` per-render | DONE — async (`@Task<string>`); test bodies await via the implicit await channel of a `test` block (bot-lang `<test-runner-async>` commit) |
+| F4 — `flush()` per-render | DONE — async (`Task<string>`); test bodies await via the implicit await channel of a `test` block (bot-lang `<test-runner-async>` commit) |
 | F5 — example + docs sweep | DONE — `examples/emilia-card/` migrated to V1 enum-section paths (`.Pad.All.__4`, `.Color.Red.__500`, …) + `await flush()` |
 | 1.0.10-beta front 56 — cascade and output | DONE — `output.bp` + the host-cell and public-entry half of `emilia.bp` + `examples/emilia-cascade/`; steps 1–8. `flushSheet` is gone, `drainRules` takes its place, and document assembly happens once in botopink. Fronts 33–47 adapt with `declSheet(…)`, front 34 writes the variant table, fronts 35/40 write `…TokenToSheet`, front 44 writes `blockSheet`, front 55 writes `withBase`, front 59 writes the components layer |
 | 1.0.10-beta front 34 — modifiers | DONE — the variant table in `tokens.bp` + `emilia.bp` under the front's banner; 83 modifiers; steps 1-7. One `Variant`-returning fn per name and no wrapping logic: front 56's `nestVariant` applies them |

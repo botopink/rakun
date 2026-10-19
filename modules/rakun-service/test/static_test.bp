@@ -6,7 +6,7 @@
 //// the root, one pointing out of it and a 200 MB sparse file. Nothing is
 //// checked in: a checked-in symlink escaping its directory is a landmine.
 
-import {io.fs} from "std";
+import {io.fs, compiler} from "std";
 import {Response, rkSetProp, rkServe, rkDispatchHttp, toI32} from "rakun";
 import {filter.resetChain, filter.runChain, filter.rkChainSetTerminal, filter.rkChainSetRunner, filter.headerValue, filter.orderCompression, filter.orderMetrics};
 import {static.StaticRoot, static.registerStaticRoot, static.resetStaticRoots, static.installStatic, static.contentTypeOf, static.fingerprint, static.fingerprintText, static.cacheHeader, static.rkStaticFsCalls, static.rkStaticHashFile, static.orderStatic, static.defaultStaticRoots};
@@ -18,35 +18,35 @@ import {static.StaticRoot, static.registerStaticRoot, static.resetStaticRoots, s
 // unique within ONE VM only, so under the member's directory two gates over one
 // checkout counted from the same start and wrote the same `static-<n>`.
 // Outside `botopink test` the variable is unset and the match fails loudly.
-#[@external(
+#[compiler.external(
     .Erlang("""(fun() -> __T = os:getenv("BOTOPINK_TEST_TMPDIR"), true = is_list(__T), iolist_to_binary([__T, "/static-", integer_to_binary(erlang:unique_integer([positive]))]) end)()"""),
 )]
 declare fn freshDir() -> string;
 
-#[@external(.Erlang("""(fun(__D) -> ok = filelib:ensure_dir(<<__D/binary, "/x">>), 0 end)($0)"""))]
+#[compiler.external(.Erlang("""(fun(__D) -> ok = filelib:ensure_dir(<<__D/binary, "/x">>), 0 end)($0)"""))]
 declare fn mkdirs(dir: string) -> i32;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__T, __L) -> case file:make_symlink(__T, __L) of ok -> 0; _ -> -1 end end)($0, $1)"""),
 )]
 declare fn symlink(target: string, link: string) -> i32;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__P, __Ago) -> ok = file:change_time(__P, calendar:system_time_to_local_time(os:system_time(second) - __Ago, second)), 0 end)($0, $1)"""),
 )]
 declare fn ageFile(path: string, secondsAgo: i32) -> i32;
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__P, __N) -> {ok, __F} = file:open(__P, [write, raw, binary]), {ok, _} = file:position(__F, __N - 1), ok = file:write(__F, <<0>>), ok = file:close(__F), 0 end)($0, $1)"""),
 )]
 declare fn sparseFile(path: string, bytes: i32) -> i32;
 
-#[@external(.Erlang("""(fun() -> erlang:garbage_collect(), erlang:memory(total) end)()"""))]
+#[compiler.external(.Erlang("""(fun() -> erlang:garbage_collect(), erlang:memory(total) end)()"""))]
 declare fn memoryTotal() -> i32;
 
 // One exchange over a socket, the body counted and kept only when small:
 // `status|content-length|body-bytes|etag|content-range|content-encoding|vary|cache-control|accept-ranges|body`.
-#[@external(
+#[compiler.external(
     .Erlang("""(fun(__Port, __Req) -> {ok, __S} = gen_tcp:connect("127.0.0.1", __Port, [binary, {active, false}]), ok = gen_tcp:send(__S, __Req), __Get = fun(__Hd, __N) -> __Hits = [string:trim(__V) || __L <- binary:split(__Hd, <<"\r\n">>, [global]), [__K, __V] <- [binary:split(__L, <<":">>)], string:lowercase(__K) =:= __N], case __Hits of [__X | _] -> __X; [] -> <<>> end end, __Head = fun __Head(__Acc) -> case binary:split(__Acc, <<"\r\n\r\n">>) of [__H, __B] -> {__H, __B}; _ -> {ok, __M} = gen_tcp:recv(__S, 0, 5000), __Head(<<__Acc/binary, __M/binary>>) end end, {__H, __B0} = __Head(<<>>), __Len = binary_to_integer(case __Get(__H, <<"content-length">>) of <<>> -> <<"0">>; __CL -> __CL end), __Body = fun __Body(__Got, __Keep) -> case __Got >= __Len of true -> {__Got, __Keep}; false -> case gen_tcp:recv(__S, 0, 5000) of {ok, __M} -> __Body(__Got + byte_size(__M), case __Got < 4096 of true -> <<__Keep/binary, __M/binary>>; false -> __Keep end); _ -> {__Got, __Keep} end end end, {__N, __Kept} = __Body(byte_size(__B0), __B0), gen_tcp:close(__S), [_, __St | _] = binary:split(hd(binary:split(__H, <<"\r\n">>)), <<" ">>, [global]), __Shown = case __N =< 4096 of true -> __Kept; false -> <<>> end, iolist_to_binary([__St, "|", __Get(__H, <<"content-length">>), "|", integer_to_binary(__N), "|", __Get(__H, <<"etag">>), "|", __Get(__H, <<"content-range">>), "|", __Get(__H, <<"content-encoding">>), "|", __Get(__H, <<"vary">>), "|", __Get(__H, <<"cache-control">>), "|", __Get(__H, <<"accept-ranges">>), "|", __Shown]) end)($0, $1)"""),
 )]
 declare fn wire(port: i32, request: string) -> string;

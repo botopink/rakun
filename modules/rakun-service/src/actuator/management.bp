@@ -41,7 +41,7 @@
 
 import {Request, Response, HttpMethod, rkProp, rkRegisterRoute, rkDispatchHttp, toI32, event, publishEvent} from "rakun";
 import {rkRegisterListener} from "rakun/events";
-import {json} from "std";
+import {json, compiler, failure.panic} from "std";
 import {error.problemFor, error.problemResponse, filter.withHeader};
 import {EndpointResponse, Health, rkRegisterEndpoint, rkRegisterHealthIndicator, endpointIds, healthIndicatorIds} from "rakun";
 import {actuator.endpoint_host.installExposure, actuator.endpoint_host.basePath, actuator.endpoint_host.idForSegment, actuator.endpoint_host.notFoundProblem, actuator.endpoint_host.render, actuator.endpoint_host.readEndpoint, actuator.endpoint_host.filtered};
@@ -49,28 +49,28 @@ import {actuator.health.HealthReport, actuator.health.ComponentHealth, actuator.
 
 // ── host cells ──────────────────────────────────────────────────────────────
 
-#[@external(.Erlang("rakun_probes:readiness()"))]
+#[compiler.external(.Erlang("rakun_probes:readiness()"))]
 pub declare fn rkProbesReadiness() -> string;
 
-#[@external(.Erlang("rakun_probes:set_readiness($0)"))]
+#[compiler.external(.Erlang("rakun_probes:set_readiness($0)"))]
 declare fn rkProbesSetReadiness(accepting: bool) -> i32;
 
-#[@external(.Erlang("rakun_probes:liveness()"))]
+#[compiler.external(.Erlang("rakun_probes:liveness()"))]
 pub declare fn rkProbesLiveness() -> string;
 
-#[@external(.Erlang("rakun_probes:set_liveness($0)"))]
+#[compiler.external(.Erlang("rakun_probes:set_liveness($0)"))]
 declare fn rkProbesSetLiveness(correct: bool) -> i32;
 
-#[@external(.Erlang("rakun_probes:refusing_since()"))]
+#[compiler.external(.Erlang("rakun_probes:refusing_since()"))]
 pub declare fn rkProbesRefusingSince() -> i64;
 
-#[@external(.Erlang("rakun_probes:role()"))]
+#[compiler.external(.Erlang("rakun_probes:role()"))]
 pub declare fn rkProbesRole() -> string;
 
-#[@external(.Erlang("rakun_probes:set_role($0)"))]
+#[compiler.external(.Erlang("rakun_probes:set_role($0)"))]
 declare fn rkProbesSetRole(role: string) -> i32;
 
-#[@external(.Erlang("rakun_probes:sanitize($0, $1, $2, $3)"))]
+#[compiler.external(.Erlang("rakun_probes:sanitize($0, $1, $2, $3)"))]
 declare fn rkProbesSanitize(
     body: string,
     mode: string,
@@ -78,42 +78,42 @@ declare fn rkProbesSanitize(
     patterns: string[],
 ) -> string;
 
-#[@external(.Erlang("rakun_probes:authorities()"))]
+#[compiler.external(.Erlang("rakun_probes:authorities()"))]
 pub declare fn rkProbesAuthorities() -> string[];
 
-#[@external(.Erlang("rakun_probes:filter_put($0)"))]
+#[compiler.external(.Erlang("rakun_probes:filter_put($0)"))]
 declare fn rkProbesFilterPut(
     filter: fn(id: string, body: string) -> string,
 ) -> i32;
 
-#[@external(.Erlang("rakun_probes:env_json()"))]
+#[compiler.external(.Erlang("rakun_probes:env_json()"))]
 declare fn rkProbesEnvJson() -> string;
 
-#[@external(.Erlang("rakun_probes:prop_keys($0)"))]
+#[compiler.external(.Erlang("rakun_probes:prop_keys($0)"))]
 declare fn rkProbesPropKeys(prefix: string) -> string[];
 
-#[@external(.Erlang("rakun_probes:warn($0)"))]
+#[compiler.external(.Erlang("rakun_probes:warn($0)"))]
 declare fn rkProbesWarn(text: string) -> i32;
 
-#[@external(.Erlang("rakun_probes:warnings()"))]
+#[compiler.external(.Erlang("rakun_probes:warnings()"))]
 pub declare fn rkProbesWarnings() -> string[];
 
-#[@external(.Erlang("rakun_probes:later($0, $1)"))]
+#[compiler.external(.Erlang("rakun_probes:later($0, $1)"))]
 declare fn rkProbesLater(millis: i32, work: fn() -> i32) -> i32;
 
-#[@external(.Erlang("rakun_probes:reset()"))]
+#[compiler.external(.Erlang("rakun_probes:reset()"))]
 pub declare fn rkProbesReset() -> i32;
 
-#[@external(.Erlang("rakun_runtime:serve_management($0, $1)"))]
+#[compiler.external(.Erlang("rakun_runtime:serve_management($0, $1)"))]
 declare fn rkServeManagement(
     port: i32,
     dispatcher: fn(method: string, path: string, headersJson: string, queryJson: string, body: string) -> Response,
 ) -> i32;
 
-#[@external(.Erlang("rakun_runtime:stop_management()"))]
+#[compiler.external(.Erlang("rakun_runtime:stop_management()"))]
 pub declare fn rkStopManagement() -> i32;
 
-#[@external(.Erlang("rakun_runtime:management_port()"))]
+#[compiler.external(.Erlang("rakun_runtime:management_port()"))]
 pub declare fn rkManagementPort() -> i32;
 
 fn csv(raw: string) -> string[] {
@@ -176,7 +176,7 @@ pub fn accessLevelProblem(key: string, value: string) -> string {
 fn level(key: string, fallback: string) -> string {
     val raw = rkProp(key).trim();
     val v = if (raw == "") fallback else raw;
-    if (rank(v) < 0) @panic(accessLevelProblem(key, v));
+    if (rank(v) < 0) panic(accessLevelProblem(key, v));
     return v;
 }
 
@@ -317,14 +317,14 @@ pub fn shutdownRead(req: Request) -> EndpointResponse {
     );
 }
 
-#[@external(
+#[compiler.external(
     .Erlang("""(fun() -> case persistent_term:get(rakun_probes_shutdown, undefined) of undefined -> init:stop(), 0; F -> F() end end)()"""),
 )]
 declare fn runShutdown() -> i32;
 
 // What a `POST <base>/shutdown` runs, 50 ms after it answers (default: the
 // node's orderly stop, which runs front 07's graceful shutdown hook).
-#[@external(.Erlang("""(fun(F) -> persistent_term:put(rakun_probes_shutdown, F), 0 end)($0)"""))]
+#[compiler.external(.Erlang("""(fun(F) -> persistent_term:put(rakun_probes_shutdown, F), 0 end)($0)"""))]
 pub declare fn setShutdownRunner(run: fn() -> i32) -> i32;
 
 // ── sanitization ────────────────────────────────────────────────────────────
@@ -622,10 +622,10 @@ pub fn accessRead(req: Request) -> EndpointResponse {
 
 // ── boot ────────────────────────────────────────────────────────────────────
 
-#[@external(.Erlang("rakun_actuator:meta_get($0)"))]
+#[compiler.external(.Erlang("rakun_actuator:meta_get($0)"))]
 declare fn metaGet(key: string) -> string;
 
-#[@external(.Erlang("rakun_actuator:meta_put($0, $1)"))]
+#[compiler.external(.Erlang("rakun_actuator:meta_put($0, $1)"))]
 declare fn metaPut(key: string, value: string) -> i32;
 
 fn once(key: string) -> bool {
@@ -708,9 +708,9 @@ pub fn installManagement() -> i32 {
         );
     }
     val e = exposureProblem();
-    if (e != "") @panic(e);
+    if (e != "") panic(e);
     val g = groupProblem();
-    if (g != "") @panic(g);
+    if (g != "") panic(g);
     for (groupNames()) { name ->
         val _a = additionalPath(name);
     }
