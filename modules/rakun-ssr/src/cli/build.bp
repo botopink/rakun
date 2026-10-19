@@ -394,8 +394,11 @@ fn evaluateStyles(
     return parity._0;
 }
 
-// `erlc` over the server's Erlang modules into `<server>/beam/` — what
-// `rakun-ssr start` loads. A refusal fails the build with erlc's own message.
+// The server's `.beam` files in `<server>/beam/` — what `rakun-ssr start`
+// loads. `botopink build` leaves each dependency's `.beam` beside its `.erl`
+// (decision 767), so those are copied and `erlc` runs only over the `.erl`
+// with no `.beam` beside them — the app's own modules. A refusal fails the
+// build with erlc's own message.
 // One `erlc` compiles its files one after another on one scheduler, and a
 // scaffold's server is some four thousand modules (~80 s in one `erlc`), so
 // the files are dealt to one `erlc` per CPU, an equal share each; `xargs`
@@ -408,7 +411,7 @@ fn compileBeam(server: string) -> Result<void, string> {
             "-c",
             "cd '"
                 + server
-                + "' && mkdir -p beam && p=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4) && n=$(printf '%s\\n' erl/*.erl | wc -l) && printf '%s\\n' erl/*.erl | xargs -n $(( (n + p - 1) / p )) -P \"$p\" erlc -o beam 2>&1",
+                + "' && mkdir -p beam && { cp -f erl/*.beam beam/ 2>/dev/null; true; } && p=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4) && todo=$(for f in erl/*.erl; do [ -f \"\${f%.erl}.beam\" ] || printf '%s\\n' \"$f\"; done) && { [ -z \"$todo\" ] && exit 0; n=$(printf '%s\\n' \"$todo\" | wc -l); printf '%s\\n' \"$todo\" | xargs -n $(( (n + p - 1) / p )) -P \"$p\" erlc -o beam 2>&1; }",
         ],
     );
     if (r.status != 0)
