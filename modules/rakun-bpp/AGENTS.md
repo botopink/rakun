@@ -163,7 +163,7 @@ repository/rakun-bpp/
 (`specs/1.0.10-beta/02-packaging/README.md` § 5): it stands on the
 `snap` library (`import {assertAs} from "snap"`, a git dependency of the member and of every
 example that records a snapshot; decision 391) — a helper computes its text (the `<subject>Text`
-twin) and hands it to `assertAs(loc, "<subject>", text)` with the CALLER's `compiler.src` — and
+twin) and hands it to `assertAs(loc, "<subject>", text)` with the CALLER's `compiler.src()` — and
 re-exports nothing from std or `snap`. A snapshot is accepted by renaming its `.snap.new`
 after comparing it with `test-snap.md`'s literal; never by a flag.
 
