@@ -1,0 +1,48 @@
+//// Decision 716 — The declared type of a decorator's `syntax decl` parameter is the contract the annotated declaration must meet, and every tree the decorator writes is checked once, against that type; `decl` is the declaration as code in every tree, a member included.
+
+import {compiler, io.terminal.print} from "std";
+import {Request, Response, rkRegisterRoute, rkDispatch, rkCatalogueStore, rkCatalogueNames} from "rakun";
+
+// The contract a `#[configured]` type meets: the decorator calls `make()`
+// and `key()`, so its `decl` is typed by this behavior.
+pub behavior Configurable {
+    fn make() -> Self;
+    fn key(self: Self) -> string;
+}
+
+// `decl: Configurable` admits a type that implements the behavior; the
+// executor and the added member are checked once, here, against it.
+fn configured(syntax decl: Configurable) -> void {
+    compiler.init({ -> rkCatalogueStore(decl.make().key(), decl.make()); });
+    compiler.addMember("bound", fn() -> string {
+        return "bound to " + decl.make().key();
+    });
+}
+
+// `decl: fn(req: Request) -> Response` admits a function, and `decl` is
+// callable in the tree as that function.
+fn route(syntax decl: fn(req: Request) -> Response, comptime path: string) -> void {
+    compiler.init({ -> rkRegisterRoute("GET", path, { req -> decl(req) }); });
+}
+
+#[configured]
+pub type ServerConfig(host: string) implement Configurable {
+    pub fn make() -> Self {
+        return ServerConfig(host: "localhost");
+    }
+
+    pub fn key(self: Self) -> string {
+        return "server";
+    }
+}
+
+#[route("/status")]
+pub fn status(req: Request) -> Response {
+    return Response.ok("up");
+}
+
+pub fn main() -> void {
+    print(ServerConfig.bound());
+    print(rkCatalogueNames());
+    print(rkDispatch("GET", "/status").body);
+}

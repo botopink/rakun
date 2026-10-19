@@ -1,0 +1,93 @@
+//// Decision 318 — One decorator per role, in rakun's own names; Spring's synonyms go.
+
+import {component, provides, controller, route, getMapping, config, Request, Response, rkDispatch} from "rakun";
+import {transactional} from "rakun-data";
+import {listen, Destination} from "rakun-messaging";
+import {httpClient, get, HttpError} from "rakun-restclient";
+import {io.terminal.print} from "std";
+
+// The typed config records (299).
+#[config("app")]
+pub type AppConfig(zone: string = "UTC")
+
+#[config("inventory")]
+pub type InventoryConfig(baseUrl: string = "http://localhost:9090")
+
+pub type Clock(zone: string) {
+    pub fn stamp(self: Self) -> string {
+        return "<now@" + self.zone + ">";
+    }
+}
+
+pub type Order(id: string, placedAt: string)
+
+pub type OrderPlaced(id: string)
+
+pub type Stock(sku: string, count: i32)
+
+// One way to provide a bean: a free function over the typed config.
+#[provides]
+fn clock(cfg: AppConfig) -> Clock {
+    return Clock(zone: cfg.zone);
+}
+
+// A hand-written store is a component.
+#[component]
+pub type OrderStore() {
+    pub fn find(self: Self, id: string) -> ?Order {
+        return if (id == "o-1")
+            Order(id: "o-1", placedAt: "<now@UTC>")
+        else
+            null;
+    }
+}
+
+// The destination, declared once and typed.
+pub val orders = Destination<OrderPlaced>("order-events");
+
+#[component]
+pub type Orders(store: OrderStore, clock: Clock) {
+    // Added behaviour is a wrapper.
+    #[transactional]
+    pub fn place(self: Self, id: string) -> Order {
+        return Order(id: id, placedAt: self.clock.stamp());
+    }
+}
+
+// One listener.
+#[component]
+pub type Audit() {
+    #[listen(orders)]
+    pub fn record(self: Self, event: OrderPlaced) -> void {
+        print("audit " + event.id);
+    }
+}
+
+// The HTTP client is a generator on a behavior.
+#[httpClient(InventoryConfig)]
+pub behavior Inventory {
+    #[get("/stock/${sku}")]
+    fn stock(self: Self, sku: string) -> Result<Stock, HttpError>;
+}
+
+// One controller: the return type decides the answer.
+#[controller]
+#[route("/orders")]
+pub type OrderController(orders: Orders) {
+    #[getMapping("/:id")]
+    pub fn byId(self: Self, req: Request) -> Order {
+        return self.orders.place(req.param("id"));
+    }
+
+    #[getMapping("")]
+    pub fn health(self: Self, req: Request) -> Response {
+        return Response.ok("up");
+    }
+}
+
+pub fn main() -> void {
+    val one = rkDispatch("GET", "/orders/o-1");
+    print(one.status.toString() + " " + one.body);
+    val up = rkDispatch("GET", "/orders");
+    print(up.status.toString() + " " + up.body);
+}

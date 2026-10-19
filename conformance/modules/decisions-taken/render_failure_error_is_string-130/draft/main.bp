@@ -1,0 +1,44 @@
+//// Decision 130 — A failing render carries `E = string`; the writers stay infallible
+
+import {io.terminal.print} from "std";
+import {Response, rkDispatchHttp} from "rakun";
+import {ssr.ChunkWriter, ssr.page, ssr.servePages, ssr.writeTo, file_router.rkAppReset} from "rakun-app";
+
+// A renderer answers `Task<Result<void, string>>`; each write is
+// `Task<void>`, so there is nothing to propagate from it.
+fn posts(out: ChunkWriter, store: string) -> Task<Result<void, string>> {
+    await writeTo(out, "<h1>posts</h1>");
+    if (store == "down") return Error("the post store is down: secret-dsn");
+    await writeTo(out, "<ul></ul>");
+    return;
+}
+
+fn unavailable(out: ChunkWriter) -> Task<Result<void, string>> {
+    return Error("the post store is down: secret-dsn");
+}
+
+fn get(path: string) -> Response {
+    return rkDispatchHttp("GET", path, "{}", "{}", "");
+}
+
+pub fn main() -> void {
+    val _reset = rkAppReset();
+    val _serving = servePages();
+    val _ok = page("ok", { req, out -> posts(out, "up") });
+    val _early = page("early", { req, out -> unavailable(out) });
+    val _late = page("late", { req, out -> posts(out, "down") });
+
+    val ok = get("/ok");
+    print(ok.status);
+    print(ok.body);
+
+    // `Error` before the first chunk: a 500, the message never on the wire.
+    val early = get("/early");
+    print(early.status);
+    print(early.body.contains("secret-dsn"));
+
+    // `Error` after the first chunk: the response begun is closed.
+    val late = get("/late");
+    print(late.status);
+    print(late.body);
+}

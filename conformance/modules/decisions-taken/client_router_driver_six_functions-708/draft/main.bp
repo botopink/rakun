@@ -1,0 +1,81 @@
+//// Decision 708 — rakun-bpp's client router driver takes six functions and is asynchronous; `replaceDepth(nav) = nav.shared - 1` (the deepest shared segment, whose children are replaced); `markPending` sets and clears `data-jh-pending` (363 (4)); a failed markup clears the mark, replaces nothing and answers the error.
+
+import {link.reconcile.DomOps, link.reconcile.Navigation, link.reconcile.applyTransition, link.reconcile.replaceDepth} from "rakun-bpp";
+import {router.RouterState} from "rakun-bpp";
+import {compiler, io.terminal.print} from "std";
+
+// A recording DOM: each of the six functions appends one event.
+#[compiler.external(
+    .Erlang("(fun(E) -> put(bp_rec, [E | case get(bp_rec) of undefined -> []; L -> L end]), ok end)($0)"),
+    .JavaScript("((globalThis.__bpRec ??= []).push($0), undefined)"),
+)]
+declare fn record(event: string) -> void;
+
+#[compiler.external(
+    .Erlang("(fun() -> L = case get(bp_rec) of undefined -> []; X -> X end, put(bp_rec, []), lists:reverse(L) end)()"),
+    .JavaScript("((l) => { globalThis.__bpRec = []; return l; })(globalThis.__bpRec ?? [])"),
+)]
+declare fn drain() -> string[];
+
+fn markup(href: string, offline: bool) -> Task<Result<string, string>> {
+    record("markup " + href);
+    if (offline) throw "offline";
+    return "<article>" + href + "</article>";
+}
+
+fn replaced(depth: i32, html: string) -> void {
+    record("replace " + depth.toString() + " " + html);
+}
+
+fn started(depth: i32) -> void {
+    record("islands " + depth.toString());
+}
+
+fn mounts(name: string) -> i32 {
+    return 0;
+}
+
+fn scrolled(depth: i32) -> void {
+    record("scroll " + depth.toString());
+}
+
+fn pending(href: string, on: bool) -> void {
+    val state = if (on) " on" else " off";
+    record("pending " + href + state);
+}
+
+fn dom(offline: bool) -> DomOps {
+    return DomOps(
+        markup: { href -> markup(href, offline) },
+        replaceSubtree: { depth, html -> replaced(depth, html) },
+        startIslands: { depth -> started(depth) },
+        mountCount: { name -> mounts(name) },
+        scrollTo: { depth -> scrolled(depth) },
+        markPending: { href, on -> pending(href, on) },
+    );
+}
+
+fn route(path: string, pattern: string) -> RouterState {
+    return RouterState(path: path, params: [], search: [], pattern: pattern, selected: 0);
+}
+
+fn show(r: Result<Navigation, string>) -> void {
+    case r {
+        Ok(nav) -> print("replaceDepth " + replaceDepth(nav).toString());
+        Error(e) -> print("error " + e);
+    }
+    for (drain()) { e ->
+        print("  " + e);
+    }
+}
+
+fn run() -> Task<void> {
+    val origin = route("/blog", "/blog");
+    val to = route("/blog/hello", "/blog/[slug]");
+    show(await applyTransition(origin, to, dom(false)));
+    show(await applyTransition(origin, to, dom(true)));
+}
+
+pub fn main() -> void {
+    run();
+}

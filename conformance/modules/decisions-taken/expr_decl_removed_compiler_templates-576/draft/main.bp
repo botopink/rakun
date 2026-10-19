@@ -1,0 +1,35 @@
+//// Decision 576 — `@Expr` and `@Decl` go whole; the template model hangs off `compiler`.
+
+import {compiler, compiler.DeclKind, io.terminal.print} from "std";
+import {Element, p, text, renderToString} from "rakun-bpp";
+import {routes.page, routes.PageContext, routes.RouteSegment} from "rakun-bpp";
+
+// The meta record this program's decorator writes.
+pub type Audit(owner: string)
+
+// A decorator is a function whose first parameter is `syntax`: the handle
+// `decl` is read only through `compiler.*`.
+fn audited(syntax decl: unknown, comptime owner: string) -> void {
+    if (compiler.kind(decl) != DeclKind.Fn)
+        compiler.fail("#[audited] marks a function", at: decl);
+    compiler.setMeta(Audit(owner: owner));
+    val declName = compiler.name(decl)!;
+    // The run-time registry is written by the marker itself, in the init list.
+    compiler.init({ -> print("audited " + declName + " by " + owner) });
+}
+
+#[page("/about")]
+#[audited("docs-team")]
+pub fn about(route: PageContext) -> Component<Element> {
+    return p([text("about " + route.pathname)], []);
+}
+
+pub fn main() -> Task<void> {
+    // Build reads in a run-time body are written under `comptime`.
+    val segment = comptime compiler.meta<RouteSegment>(about)?.seg ?? "none";
+    val owner = comptime compiler.meta<Audit>(about)?.owner ?? "nobody";
+    print(segment);
+    print(owner);
+    val route = PageContext(pathname: "/about", pattern: "/about", params: []);
+    print(renderToString(await about(route)));
+}

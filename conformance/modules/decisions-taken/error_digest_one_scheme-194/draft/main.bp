@@ -1,0 +1,37 @@
+//// Decision 194 — One error-digest scheme with one implementation: the first 16 hex of `strongHash` over `module|errorClass|message|top
+
+import {Response} from "rakun";
+import {logging.Logger, digest.errorDigest, digest.clientErrorBody, sink.LogSink, sink.setSink, formats.LogRecord} from "log";
+import {io.terminal.print} from "std";
+
+fn captured(r: LogRecord) -> i32 {
+    print("logged " + r.logger + ": " + r.message + " [" + r.digest + "]");
+    return 0;
+}
+
+// A handler's failure: one call writes the error record and answers the
+// digest; the client sees the digest and nothing else.
+fn charge(amount: i32) -> Response {
+    if (amount < 0) {
+        val digest = Logger(name: "invoice").logError(
+            "invoice",
+            "badarg",
+            "amount is negative",
+            "invoice.bp:42 charge.bp:7 handler.bp:3 boot.bp:1",
+            [#("amount", amount.toString())],
+        );
+        return Response.withStatus(500, clientErrorBody(digest));
+    }
+    return Response.ok("charged");
+}
+
+pub fn main() -> void {
+    val _s = setSink(LogSink(enabled: { logger, level -> true }, write: { r -> captured(r) }));
+    val res = charge(-5);
+    print(res.status.toString() + " " + res.body);
+    // The same fault on another build: other line numbers, a fourth frame,
+    // another argument value — one digest.
+    val again = errorDigest("invoice", "badarg", "amount is negative", "invoice.bp:58 charge.bp:9 handler.bp:12");
+    print(res.body == clientErrorBody(again));
+    print(again.length);
+}

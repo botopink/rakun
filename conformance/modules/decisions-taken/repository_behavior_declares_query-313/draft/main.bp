@@ -1,0 +1,36 @@
+//// Decision 313 — A repository is a `behavior` annotated `#[repository]`; each method declares its query — erika's or native SQL
+
+import {repository, query, nativeQuery, entity, StoreError} from "rakun-data";
+import {rkResolve} from "rakun";
+import {io.terminal.print} from "std";
+
+#[entity("users")]
+pub type User(id: i32, name: string)
+
+// The repository is a behavior: each method declares its query and answers
+// `Result<T, StoreError>`; `#[repository]` generates `Users.Sql(ctx)`, the
+// factory `Users.of(ctx)` and the by-type registration in the container.
+#[repository]
+pub behavior Users {
+    // Checked against `User` at build; its SQL and parameters recorded as the
+    // method's meta.
+    #[query "select * from User where id = ${id} limit 1"]
+    fn find(self: Self, id: i32) -> Result<?User, StoreError>;
+
+    // The driver's SQL, handed over verbatim; `:name` matched to the parameter.
+    #[nativeQuery("select id, name from users where name = :name")]
+    fn named(self: Self, name: string) -> Result<User[], StoreError>;
+}
+
+// A caller depends on the behavior, never on the generated type.
+fn greet(users: Users, id: i32) -> string {
+    return case users.find(id) {
+        Ok(found) -> "hello, " + (found?.name ?? "nobody");
+        Error(e) -> "store error";
+    };
+}
+
+pub fn main() -> void {
+    val users: Users = rkResolve("Users");
+    print(greet(users, 1));
+}

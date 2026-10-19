@@ -1,0 +1,52 @@
+import {compiler} from "std";
+import {Element, State, div, p, text, state} from "rakun-bpp";
+
+// What `#[graph]` records: one rendered node per entry of `compiler.hooks`.
+pub type Graph(nodes: string[])
+
+// Each reachable function once, breadth-first in body order: its `use`s and
+// its calls of components, each with where it is written.
+fn graph(syntax decl: unknown) -> void {
+    var nodes: string[] = [];
+    compiler
+        .hooks(decl)
+        .forEach({ n ->
+            var uses: string[] = [];
+            n.uses.forEach({ u ->
+                val h = u.hook;
+                uses.push(if (h == null) "null" else h.name);
+            });
+            var calls: string[] = [];
+            n.calls.forEach({ c ->
+                val k = c.callee;
+                calls.push(if (k == null) "null" else k.name);
+            });
+            nodes.push(
+                n.function.name
+                    + "(uses: ["
+                    + uses.join(", ")
+                    + "], calls: ["
+                    + calls.join(", ")
+                    + "])",
+            );
+        });
+    compiler.setMeta(Graph(nodes: nodes));
+}
+
+fn Avatar() -> Component<Element> {
+    return p([text("avatar", attrs: [])], attrs: []);
+}
+
+fn Counter() -> Component<Element> {
+    val c: State<i32> = use state(3);
+    return p([text(c.value.toString(), attrs: [])], attrs: []);
+}
+
+fn UserMenu() -> Component<Element> {
+    return div([await Avatar(), await Counter(), await Avatar()], attrs: []);
+}
+
+#[graph]
+pub fn Page() -> Component<Element> {
+    return div([await UserMenu()], attrs: []);
+}

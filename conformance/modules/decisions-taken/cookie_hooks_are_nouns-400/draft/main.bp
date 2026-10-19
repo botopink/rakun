@@ -1,0 +1,57 @@
+//// Decision 400 — A cookie's hooks are nouns in cardume's family — `cookieValue`, `cookieState`, `cookieSetter`, `cookieReset`.
+
+import {Element, p, text, renderToString, RequestData, enterRequest, leaveRequest} from "rakun-bpp";
+import {cookieValue, cookieState, cookieSetter, cookieReset} from "rakun-bpp";
+import {cookie.Cookie} from "http";
+import {io.terminal.print} from "std";
+
+pub type SessionId(value: string)
+
+// Declared once: the name and the attributes every write carries.
+pub val sessionCookie = Cookie<SessionId>("session", httpOnly: true, secure: true);
+
+// A page reads only: `?SessionId`.
+fn Greeting() -> Component<Element> {
+    val id = use cookieValue(sessionCookie);
+    return p([text("hello " + (id?.value ?? "guest"), attrs: [])], attrs: []);
+}
+
+// An action writes: the setter takes the value, the attributes are the declaration's.
+fn signIn(id: SessionId) -> Component<void> {
+    val set = use cookieSetter(sessionCookie);
+    set(id);
+}
+
+// An action reads and writes through one state, then clears.
+fn rotate() -> Component<void> {
+    val st = use cookieState(sessionCookie);
+    st.set(SessionId(value: (st.value?.value ?? "") + "-next"));
+}
+
+fn signOut() -> Component<void> {
+    val reset = use cookieReset(sessionCookie);
+    reset();
+}
+
+fn requestWith(session: string) -> RequestData {
+    return RequestData(
+        method: "GET",
+        path: "/",
+        params: [],
+        query: [],
+        headers: [],
+        cookies: [#("session", session)],
+    );
+}
+
+pub fn main() -> Task<void> {
+    enterRequest(requestWith("s-42"));
+    print(renderToString(await Greeting()));
+    await signIn(SessionId(value: "s-43"));
+    await rotate();
+    await signOut();
+    leaveRequest();
+    enterRequest(requestWith("%zz"));
+    print(renderToString(await Greeting()));
+    leaveRequest();
+}

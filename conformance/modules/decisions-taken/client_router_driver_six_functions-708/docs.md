@@ -1,0 +1,7 @@
+# Decision 708 — rakun-bpp's client router driver takes six functions and is asynchronous; `replaceDepth(nav) = nav.shared - 1` (the deepest shared segment, whose children are replaced); `markPending` sets and clears `data-jh-pending` (363 (4)); a failed markup clears the mark, replaces nothing and answers the error.
+
+rakun-bpp's client router driver, `applyTransition`, run twice over a recording `DomOps` — the six functions an entry supplies, each appending one event: `markup`, `replaceSubtree`, `startIslands`, `mountCount`, `scrollTo`, `markPending`. The driver is asynchronous and is awaited. From `/blog` to `/blog/hello` the routes share the root and `/blog`, so `replaceDepth` is `1`, the deepest shared segment, whose children are replaced. The first run's events: the links to `/blog/hello` marked pending, the markup read, the children at depth 1 replaced with it, the islands of that subtree started, the view scrolled there, the mark cleared. The second run's `markup` answers `Error("offline")`: the mark is set and cleared, nothing is replaced or started, and the error is the driver's answer.
+
+Cells of this repository that prove it: none yet. `rakun-bpp/client-navigation/link_props` covers the link's props, not the driver; the driver's suite is rakun-bpp's `test/link/reconcile_test.bp`, and front 150 s60 step 6 supplies the six functions in the browser.
+
+[draft/main.bp](draft/main.bp)

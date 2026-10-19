@@ -1,0 +1,46 @@
+//// Decision 625 — (b) for the computed member, and the rule behind it: code never enters the compiler as a string — it is written (a `syntax` parameter, a template text) or built as the typed AST; `compiler.build(text)` is removed and `compiler.ast(node) -> anyvalue` takes its place.
+
+import {
+    compiler,
+    compiler.Arg,
+    compiler.Call,
+    compiler.Lit,
+    compiler.Name,
+    io.terminal.print,
+} from "std";
+import {Request, Response, rkRegisterRoute, rkDispatch} from "rakun";
+
+// A route marker: nothing is generated as text. The handler enters the init
+// list as code — `decl` is the annotated function itself — and the run-time
+// registry is what groups the routes.
+fn get(syntax decl: fn(req: Request) -> Response, comptime path: string) -> void {
+    compiler.init({ -> rkRegisterRoute("GET", path, decl); });
+}
+
+#[get("/hello")]
+pub fn hello(req: Request) -> Response {
+    return Response.ok("hello from a route registered as code");
+}
+
+pub type Mail(to: string, subject: string)
+
+// A template answering a constructor call built as the typed AST: the tree
+// names `Mail` and its two labelled arguments; no source string is parsed back.
+fn mail(syntax q: string) -> anyvalue {
+    val parts = compiler.text(q).split("|");
+    return compiler.ast(
+        Call(
+            callee: Name("Mail"),
+            args: [
+                Arg(name: "to", value: Lit(parts.at(0) ?? "")),
+                Arg(name: "subject", value: Lit(parts.at(1) ?? "")),
+            ],
+        ),
+    );
+}
+
+pub fn main() -> void {
+    print(rkDispatch("GET", "/hello").body);
+    val welcome: Mail = mail @`ana@example.com|Welcome`;
+    print(welcome.to + " " + welcome.subject);
+}

@@ -1,0 +1,40 @@
+//// Decision 665 — `compiler.find` goes: no catalogue is read at build; the registry each decorator writes with `compiler.init` is the one way to gather the declarations marked with it.
+
+import {compiler, io.terminal.print} from "std";
+import {rkCatalogueStore, rkCatalogueNames} from "rakun";
+
+// What a health endpoint records about itself, read at build inside the
+// executor and travelling into its registry entry.
+pub type Endpoint(id: string, critical: bool)
+
+// The decorator registers its own declaration; nothing gathers the marked
+// declarations at build.
+fn endpoint(syntax decl: fn() -> string, comptime id: string, comptime critical: bool = false) -> void {
+    compiler.setMeta(Endpoint(id: id, critical: critical));
+    compiler.init({ ->
+        val meta = compiler.meta<Endpoint>(decl)!;
+        val key = if (meta.critical) meta.id + "!" else meta.id;
+        rkCatalogueStore(key, decl);
+    });
+}
+
+#[endpoint("db", critical: true)]
+pub fn database() -> string {
+    return "up";
+}
+
+#[endpoint("disk")]
+pub fn disk() -> string {
+    return "up";
+}
+
+#[endpoint("mail")]
+pub fn mail() -> string {
+    return "unknown";
+}
+
+pub fn main() -> void {
+    // The program reads the registry at run time: every marked declaration,
+    // in the order the init list ran them.
+    print(rkCatalogueNames());
+}

@@ -1,0 +1,35 @@
+//// Decision 304 — A store has one API, answering `@Result<T, StoreError>`; no `try*` twin and no raise on a driver failure.
+
+import {io.terminal.print} from "std";
+import {Response} from "rakun";
+import {sql.template.SqlTemplate, sql.params.param, StoreError} from "rakun-data";
+
+// A handler may answer `Result<Response, E>`: the framework answers the
+// `Error` — `Unavailable` 503, `Conflict` 409, anything else 500.
+fn countUsers(db: SqlTemplate) -> Result<Response, StoreError> {
+    val rows = try db.query("SELECT id FROM users WHERE active = :active", [param("active", "true")]);
+    return Ok(Response.ok(rows.rowCount().toString()));
+}
+
+fn describe(e: StoreError) -> string {
+    return case e {
+        Unavailable(message) -> "unavailable: " + message;
+        Timeout(ms) -> "timeout after " + ms.toString() + "ms";
+        Conflict(message) -> "conflict: " + message;
+        Constraint(name, message) -> "constraint " + name + ": " + message;
+    };
+}
+
+pub fn main() -> void {
+    // No data source of this name is configured: the driver failure is a
+    // value, never a raise.
+    val db = SqlTemplate(dataSourceName: "missing");
+    print(case countUsers(db) {
+        Ok(res) -> res.body;
+        Error(e) -> describe(e);
+    });
+    print(case db.update("DELETE FROM users", []) {
+        Ok(n) -> n.toString();
+        Error(e) -> describe(e);
+    });
+}

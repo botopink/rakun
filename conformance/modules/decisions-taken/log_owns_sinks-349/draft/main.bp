@@ -1,0 +1,40 @@
+//// Decision 349 — `log` owns the sinks; rakun and onze only integrate.
+
+import {levels.Level, levels.Levels, levels.Threshold} from "log";
+import {logfile.LogFile, sink.fileSink, sink.setSink, logging.Logger, reports.captureRuntimeReports, formats.Format} from "log";
+import {io.fs, io.terminal.print} from "std";
+
+// What rakun reads from its typed configuration (299): a choice of sink, a
+// format and the levels — never a sink of its own.
+pub type LoggingConfig(file: string, rootLevel: Level, webLevel: Level)
+
+// rakun's part at boot: choose, configure and install `log`'s sink, then
+// hand the runtime's own reports to it.
+fn install(cfg: LoggingConfig) -> Result<i32, string> {
+    val levels = Levels(
+        root: Threshold.From(cfg.rootLevel),
+        names: [#("rakun.web", Threshold.From(cfg.webLevel))],
+    );
+    val sink = try fileSink(LogFile(path: cfg.file, maxBytes: 1048576, maxFiles: 3), Format.Plain, levels);
+    val _s = setSink(sink);
+    return captureRuntimeReports();
+}
+
+pub fn main() -> void {
+    val cfg = LoggingConfig(file: "logs/app.log", rootLevel: Level.Info, webLevel: Level.Debug);
+    case install(cfg) {
+        Ok(_) -> print("installed");
+        Error(e) -> print(e);
+    }
+    val _a = Logger(name: "rakun.web").debug("route matched");
+    val _b = Logger(name: "app").debug("hidden below info");
+    val _c = Logger(name: "app").info("started");
+    val text = case fs.readText("logs/app.log") {
+        Ok(t) -> t;
+        Error(e) -> "";
+    };
+    print(text.contains("route matched"));
+    print(text.contains("hidden below info"));
+    print(text.contains("started"));
+    val _r = fs.removeTree("logs");
+}

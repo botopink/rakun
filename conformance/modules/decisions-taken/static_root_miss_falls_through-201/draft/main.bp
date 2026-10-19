@@ -1,0 +1,45 @@
+//// Decision 201 — A static root's miss falls through, as Next and `express.static` do: a static root is tried first; when no root resolves
+
+import {Response} from "rakun";
+import {static.StaticRoot, static.registerStaticRoot, static.installStatic} from "rakun-service";
+import {filter.runChain, filter.rkChainSetTerminal} from "rakun-service";
+import {io.fs, io.terminal.print} from "std";
+
+fn show(method: string, path: string) -> void {
+    val res: Response = runChain(method, path, "", "", "");
+    print(method
+        + " "
+        + path
+        + " -> "
+        + res.status.toString()
+        + " "
+        + res.body);
+}
+
+pub fn main() -> void {
+    val _d = fs.mkdirRecursive("public");
+    val _f = fs.writeText("public/robots.txt", "User-agent: *");
+    // The routes: what the chain reaches when no root serves the request.
+    val _t = rkChainSetTerminal({ method, path, headersWire, queryWire, body ->
+        Response.ok("page " + path)
+    });
+    // `public/` at `/**`, tried before the routes, as `Onze.run` registers it.
+    val _r = registerStaticRoot(
+        StaticRoot(
+            pattern: "/**",
+            directory: "public",
+            indexFile: "index.html",
+            cacheSeconds: 0,
+            immutable: false,
+            useLastModified: false,
+            precompressed: false,
+        ),
+    );
+    val _s = installStatic();
+    show("GET", "/robots.txt");
+    show("GET", "/blog");
+    show("POST", "/robots.txt");
+    show("GET", "/a/../robots.txt");
+    show("GET", "/%zz");
+    val _c = fs.removeTree("public");
+}

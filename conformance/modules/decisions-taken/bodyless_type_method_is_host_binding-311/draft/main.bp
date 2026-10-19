@@ -1,0 +1,55 @@
+//// Decision 311 — A method with no body in a `type` is only a host binding; a declared-only method is a `behavior`'s; a template can be an annotation.
+
+import {compiler, io.terminal.print} from "std";
+import {Response} from "rakun";
+
+// What `#[sql]` records on the function it annotates.
+pub type Statement(sql: string, params: string[])
+
+// A template function: its first parameter the text, captured unevaluated;
+// as an annotation it also receives the annotated declaration.
+fn sql(syntax q: string, syntax decl: unknown) -> string {
+    val text = compiler.text(q);
+    var params: string[] = [];
+    var first = true;
+    for (text.split("\${")) { piece ->
+        if (first)
+            first = false
+        else
+            params.push(piece.slice(0, piece.indexOf("}")));
+    }
+    compiler.setMeta(Statement(sql: text, params: params));
+    return compiler.build("\"\"");
+}
+
+// (1) A method with no body in a `type` is a host binding, nothing else.
+pub type Clock(zone: string) {
+    #[compiler.external(.Erlang("""<<"12:00">>"""), .JavaScript("'12:00'"))]
+    pub declare fn now(self: Self) -> string;
+}
+
+// A method declared without a body is a behavior's.
+pub behavior Users {
+    fn find(self: Self, id: i32) -> Response;
+}
+
+pub type MemoryUsers() implement Users {
+    pub fn find(self: Self, id: i32) -> Response {
+        return if (id == 1) Response.ok("ana") else Response.notFound();
+    }
+}
+
+// (2) The template call `sql @`…`` written as an annotation: `${id}` resolves
+// in the annotated function's scope, its parameter `id`.
+#[sql @`select name from users where id = ${id}`]
+fn lookup(id: i32) -> Response {
+    return MemoryUsers().find(id);
+}
+
+pub fn main() -> void {
+    print(Clock(zone: "utc").now());
+    print(lookup(1).body);
+    print(lookup(2).status);
+    val st = comptime compiler.typeInfo(lookup).meta(Statement);
+    print(st!.sql + " <- " + st!.params.join(", "));
+}
