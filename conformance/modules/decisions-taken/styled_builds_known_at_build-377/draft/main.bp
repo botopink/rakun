@@ -1,0 +1,45 @@
+//// Decision 377 — `styled` builds at build what is known at build, fills the rest at render, and registers a component in the render's sheet where it is used, never where it is made.
+
+import {io.terminal} from "std";
+import {io.env} from "std";
+import {context.createContext, context.provide} from "std";
+import styled, {styled.styledProperty, styled.Styled, styled.StyledProperty, styled.StyledSheet} from "rakun-style";
+
+fn padAll(n: i32) -> StyledProperty {
+    return styledProperty @`padding: --spacing(${n});`;
+}
+
+// Every hole known at build: a constant, class and rules written while the
+// program is built.
+pub val mono = styled @`font-family: mono; ${padAll(2)}`;
+
+// A module `val` whose hole reads the environment: legal, computed at module
+// load, and registered only where a render uses it.
+pub val banner = styled @`color: ${env.read("BANNER_COLOR") ?? "navy"};`;
+
+// One hole of the render, `cor`: built at build into a template whose padding
+// is already written, the render filling the one slot.
+fn label(cor: string) -> Component<Styled> {
+    return styled @`font-family: mono; ${padAll(2)} color: ${cor};`;
+}
+
+// The render's sheet: each registration is a line.
+fn printing(layer: string, item: Styled) -> void {
+    terminal.print("registered " + item.rules);
+}
+
+component fn Page() -> Component<string> {
+    use provide(createContext(StyledSheet(layer: "components", add: printing)));
+    val a = use mono;
+    val b = use banner;
+    val c = use label("teal");
+    return [a.className, b.className, c.className].join(" ");
+}
+
+pub async fn main() -> Async<void> {
+    // Made outside every provider and never used: it reads no context and
+    // registers nothing.
+    val _made = label("green");
+    terminal.print("made, not used");
+    terminal.print(await Page());
+}

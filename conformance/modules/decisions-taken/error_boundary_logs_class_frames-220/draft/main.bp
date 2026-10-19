@@ -1,0 +1,42 @@
+//// Decision 220 — The runtime hands the error boundary the caught error's class and frames (erlang: `Class` and the stacktrace; node: `err
+
+import {io.terminal} from "std";
+import {Element, div, p, text, renderToString, ErrorInfo, catchError, renderBoundary} from "rakun-bpp";
+import {formats.LogRecord} from "log";
+import {sink.LogSink, sink.setSink, sink.defaultSink} from "log";
+
+fn post() -> Result<Element, string> {
+    throw "no post with this slug";
+}
+
+// What the client sees: the digest, never the message.
+fn fallback(info: ErrorInfo) -> Element {
+    return div([p([text("something went wrong", attrs: [])], attrs: []), p([text(info.digest, attrs: [])], attrs: [])], attrs: []);
+}
+
+// The error record the boundary writes through log's `logError`.
+fn describe(r: LogRecord) -> string {
+    var parts: string[] = [r.logger, r.message, "digest=" + r.digest];
+    for (r.fields) { f ->
+        if (f._0 == "error.module") parts.push(f._0 + "=" + f._1);
+        if (f._0 == "error.type")
+            parts.push("class given " + (f._1 != "").toString());
+        if (f._0 == "error.stack_trace")
+            parts.push("frames given " + (f._1 != "").toString());
+    }
+    return parts.join(" ");
+}
+
+pub fn main() -> void {
+    val _s = setSink(LogSink(
+        enabled: { logger, level -> true },
+        write: { r ->
+            terminal.print(describe(r));
+            1
+        },
+    ));
+    // The boundary of the route segment `app/blog/[slug]/page`.
+    val page = renderBoundary(catchError("app/blog/[slug]/page", fallback, { -> post() }));
+    terminal.print(renderToString(page));
+    val _d = setSink(defaultSink());
+}
