@@ -1,0 +1,7 @@
+# Decision 641 — (b) for the names, and no contract with one implementor: every primitive type is written lowercase — `i32`, `i64`, `u32`, `u64`, `f32`, `f64`, `bool`, `string`, `bigint`, `bytes`, `array<T>` — and a capitalised name is a contract shared by several types (`Number`, `Integer`, `Signed`, `Float`); `String`, `Bool`, `BigInt`, `Bytes` and `Array` dissolve into their types, which hold their methods and statics.
+
+The program builds a rakun reply and reads it through primitive types written lowercase only. `Response.ok(string.fromCodepoint(65) + "ok")` gets its body from `string`'s own static; `payload` turns the body into `bytes` with `bytes.fromUtf8`, and its `.length` is an `i32`; `array.range(0, 3)` is an `array<i32>`, the same type as `i32[]`, its usual spelling; `size.toF64() / 2.0` is an `f64`; `label` takes an `i64` epoch and a `bool` and calls `i64`'s own `toString`. Every method and static sits on its type: there is no `String`, `Bool`, `BigInt`, `Bytes` or `Array` to call through, and such a name is an unknown name. A capitalised name in a type position is a contract several types share (`Number`, `Integer`, `Signed`, `Float`), never a second name of one type. The program prints `Aok 3 3 1.5 4000000000 ready`.
+
+Cells in this repository that prove it: none yet; rakun's sources are respelled by front 165 s10 (B-148's codemod over the libraries) and its cells follow with front 150's Conformance step.
+
+[draft/main.bp](draft/main.bp)

@@ -1,0 +1,59 @@
+//// Decision 432 — A `@Task<@Result<T, E>>` is the task that fails with `E`: its Promise rejects with `E` and resolves with `T`; a `@Task<T>` does not fail.
+
+import {io.terminal} from "std";
+import {Response} from "rakun";
+
+pub type User(id: i32, name: string) {
+    pub fn guest() -> User {
+        return User(id: 0, name: "guest");
+    }
+}
+
+pub type LookupError {
+    NotFound(id: i32),
+    Unavailable(message: string),
+}
+
+// A task that can fail: it settles with a `User` or fails with a `LookupError`.
+async fn buscar(id: i32) -> Async<Result<User, LookupError>> {
+    if (id == 0) throw LookupError.Unavailable(message: "store down");
+    if (id > 10) throw LookupError.NotFound(id: id);
+    return User(id: id, name: "user" + id.toString());
+}
+
+// `try await` hands the failure up: this task fails with the same error.
+async fn nameOf(id: i32) -> Async<Result<string, LookupError>> {
+    val u = try await buscar(id);
+    return u.name;
+}
+
+// `try await … catch` handles it: a task that does not fail.
+async fn greeting(id: i32) -> Async<string> {
+    val u = try await buscar(id) catch User.guest();
+    return "hello " + u.name;
+}
+
+// `await` alone answers the `Result`, read with `case`.
+async fn show(id: i32) -> Async<Response> {
+    return case await buscar(id) {
+        Ok(u) -> Response.ok(u.name);
+        Error(NotFound(missing)) -> Response.withStatus(404, missing.toString());
+        Error(Unavailable(message)) -> Response.withStatus(503, message);
+    };
+}
+
+pub async fn main() -> Async<void> {
+    terminal.print(await greeting(3));
+    terminal.print(await greeting(42));
+    terminal.print(case await nameOf(42) {
+        Ok(name) -> name;
+        Error(_) -> "no name";
+    });
+    // Composing without awaiting is an `async` block, itself a task.
+    val safe = async { try await nameOf(0) catch "fallback" };
+    terminal.print(await safe);
+    for ([3, 42, 0]) { id ->
+        val r = await show(id);
+        terminal.print(r.status, r.body);
+    }
+}

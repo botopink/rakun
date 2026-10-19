@@ -1,0 +1,7 @@
+# Decision 187 — rakun's 25 members become 16 (a module another always needs is not a plugin): the core absorbs `rakun-actuator-api` and
+
+The program is a web handler's day: a logger, a span, a health answer and HAL links. The logger and the span API come from the core, `from "rakun"` — `logging.logging.logger` and `actuator_api.span.startSpan` / `endSpan` / `traceparentOf`, the modules of the former `rakun-logging` and `rakun-actuator-api` — because every member needs them, and a module another always needs is not a plugin; `healthUp()` is the actuator contract the core holds beside them. The HAL links come from the web layer, `hateoas.hal.link` and `linksObject` `from "rakun-service"`: `rakun-hateoas` was folded into the web member, not kept as a package of its own. The program logs `listing orders` through the core's sink (which writes to `log`, 349), prints the links object, `UP` and `true` (the span's `traceparent` starts with `00-`), and closes the span. The other folds work the same way: `rakun-tx` and `rakun-devtools` are modules of `rakun-data` (`tx/`, `devtools/`), `rakun-release` of `rakun-cli`, `rakun-rsocket` and `rakun-stream` of `rakun-messaging`. Front 165 later named the web member `rakun-service` (the workspace's 17 packages); what this row fixes — which modules live in the core and which fold into another package — is unchanged.
+
+Cells in this repository that prove it: none yet; no cell exercises the core's logging or span modules, and they come with front 150's Conformance step (decision 465).
+
+[draft/main.bp](draft/main.bp)

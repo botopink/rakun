@@ -1,0 +1,53 @@
+//// Decision 330 — `?T` is read with TypeScript's operators and has no methods; `result` goes; a type declared in a type is its associated type.
+
+import {io.terminal} from "std";
+import {rakun, rakun.Service, rakun.Lifecycle} from "rakun";
+import {config.Doc, config.parseJson} from "rakun";
+
+// A route table: `Route.Match`, declared in its body, is its associated type.
+pub type Route(pattern: string, module: string, guard: ?fn(string) -> bool) {
+    pub type Match(module: string, rest: string)
+
+    pub fn match(self: Self, path: string) -> ?Route.Match {
+        if (!path.startsWith(self.pattern)) return null;
+        if (!(self.guard?.(path) ?? true)) return null;
+        return Route.Match(module: self.module, rest: path.slice(self.pattern.length()));
+    }
+}
+
+#[rakun.module]
+pub component fn web() -> Component<Service> {
+    return Service(name: "web");
+}
+
+#[rakun.module(lifecycle: Lifecycle.Manual)]
+pub component fn admin() -> Component<Service> {
+    return Service(name: "admin");
+}
+
+pub fn main() -> void {
+    rakun.boot();
+    val adminOnly: fn(string) -> bool = { path -> !path.contains("..") };
+    val routes = [
+        Route(pattern: "/api/", module: "web", guard: null),
+        Route(pattern: "/admin/", module: "admin", guard: adminOnly),
+    ];
+
+    // `?.` and `??`: the module a path reaches, or a default.
+    val hit = routes[0]?.match("/api/users");
+    terminal.print(hit?.module ?? "none", hit?.rest ?? "");
+    terminal.print(routes[1]?.match("/admin/../etc")?.module ?? "refused");
+
+    // `?.[i]` through an optional list, and `?.` flattening a `?string`.
+    val docs: ?Array<Doc> = parseJson("{\"rakun.web.port\": \"8080\"}", "inline.json").unwrapOr([]);
+    terminal.print(docs?.[0]?.origin ?? "no document");
+
+    // `!`: the module is known to be registered; a `null` here aborts, located.
+    terminal.print(rakun.registry.find("web")!.name);
+    terminal.print(rakun.registry.find("mail")?.name ?? "no module named mail");
+
+    // A `Result` is read by its own methods; there is no `result` namespace.
+    val started = rakun.start("billing");
+    terminal.print(started.isError(), rakun.start("admin").isOk());
+    rakun.stop();
+}

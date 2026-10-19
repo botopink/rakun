@@ -1,0 +1,34 @@
+//// Decision 527 — `Failure`'s kinds exact on every target: wasm never imitates a host raise; an unmarked raise is `crash`; a failing `assert` and an integer division by zero are `panic`; a host raise's message is `~tp` without the stack.
+
+import {io.terminal} from "std";
+import {failure.attempt, failure.Failure} from "std";
+import {runtime.rkBumpTag} from "rakun";
+
+// A host binding of the program's own, declared without `result: true`: a raise
+// in it is the host's.
+#[compiler.external(.Erlang("erlang:binary_to_integer($0)"))]
+declare fn parseInt(text: string) -> i32;
+
+fn show(r: Result<i32, Failure>) -> void {
+    case r {
+        Ok(v) -> terminal.print("ok", v);
+        Error(f) -> terminal.print(f.kind, f.message);
+    }
+}
+
+fn checked(n: i32) -> i32 {
+    assert n > 0;
+    return n;
+}
+
+pub fn main() -> void {
+    val zero = parseInt("0");
+    show(attempt({ -> rkBumpTag("").toI32() }));
+    show(attempt({ -> parseInt("x") }));
+    show(attempt({ -> 10 / zero }));
+    case attempt({ -> checked(zero) }) {
+        Ok(_) -> terminal.print("ok");
+        Error(f) -> terminal.print(f.kind, f.message.startsWith("assertion failed: n > 0 at "));
+    }
+    show(attempt({ -> parseInt("42") }));
+}

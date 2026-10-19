@@ -1,0 +1,32 @@
+//// Decision 396 — Markdown, YAML and JSON are three libraries of their own — `markdown`, `yaml`, `json` (`botopink/{markdown,yaml,json}` at `repository/{markdown,yaml,json}`, 326's rule) — and std knows nothing of JSON.
+
+import {io.terminal} from "std";
+import {Json, encode, object, array, quote} from "json";
+import {decode as readYaml} from "yaml";
+import {markdown.parse, markdown.headings} from "markdown";
+
+// A content file as rakun-ssr reads one: YAML frontmatter, then Markdown.
+val frontmatter = "title: Three formats\ntags: [json, yaml, markdown]\n";
+
+val body = "# Three formats\n\nEach is a **library**.\n\n## Why\n\nstd stays small.\n";
+
+pub fn main() -> void {
+    // The frontmatter is YAML, read into `json`'s `Json`.
+    val meta = try readYaml(frontmatter) catch Json.Null;
+    val title = meta.field("title")?.str() ?? "untitled";
+    val tags = (meta.field("tags")?.items() ?? []).map({ t -> t.str() ?? "" });
+    terminal.print(title, tags.join(" "));
+
+    // The body is Markdown, read into `markdown`'s own tree.
+    val toc = headings(parse(body));
+    terminal.print(toc
+        .map({ h -> h.depth.toString() + ":" + h.text })
+        .join(", "));
+
+    // The page's feed entry is JSON, written with `json`.
+    val entry = object([
+        #("title", quote(title)),
+        #("sections", array(toc.map({ h -> quote(h.slug) }))),
+    ]);
+    terminal.print(entry);
+}

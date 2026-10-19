@@ -1,0 +1,49 @@
+//// Decision 723 — `use provide(ctx)` takes a context value alone — there is no `(ctx, value)` form; a component that provides another value makes a context of the same type in its body, `val c = comptime createContext(Theme(…));` (a build value) or `val c = use memo({ -> createContext(Theme(…)) });` (run time, memoised with the component), then `use provide(c)`; `use context(ctx)` answers the nearest context of `ctx`'s type provided above, else `ctx`'s own default.
+
+import {io.terminal} from "std";
+import {context.createContext, context.provide, context.context, context.memo, context.RenderScope} from "std";
+import {element.Element, element.renderToString, element.div, element.p} from "rakun-bpp";
+import {elements.section} from "rakun-bpp";
+import {render.renderComponent} from "rakun-bpp";
+import {html.html.html} from "rakun-bpp";
+import {theme.Theme, theme.themeContext};
+
+// Reads the nearest `Theme` provided above it, else `themeContext`'s default.
+component fn Card(label: string) -> Component<Element> {
+    val t = use context(themeContext);
+    return html @`<p class={t.cls}>{label}</p>`;
+}
+
+// A value known at build: a context of the same type, made in the body.
+component fn DarkPage() -> Component<Element> {
+    val dark = comptime createContext(Theme(cls: "dark"));
+    use provide(dark);
+    return html @`<section><Card label="dark page" /></section>`;
+}
+
+// A value of run time, memoised with the component's instance.
+component fn BrandPage(brand: string) -> Component<Element> {
+    val branded = use memo({ -> createContext(Theme(cls: "brand-" + brand)) });
+    use provide(branded);
+    return html @`<section><Card label="brand page" /></section>`;
+}
+
+// Provides the declared default again, below a dark page.
+component fn Reset() -> Component<Element> {
+    use provide(themeContext);
+    return html @`<section><Card label="reset" /></section>`;
+}
+
+component fn App() -> Component<Element> {
+    return html @`<div>
+  <Card label="no provider" />
+  <DarkPage />
+  <BrandPage brand="rakun" />
+  <Reset />
+</div>`;
+}
+
+pub async fn main() -> Async<void> {
+    val page = await renderComponent(App(), RenderScope.root());
+    terminal.print(renderToString(page.tree));
+}

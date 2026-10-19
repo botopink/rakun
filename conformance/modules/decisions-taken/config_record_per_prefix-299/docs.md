@@ -1,0 +1,9 @@
+# Decision 299 — rakun's configuration is a typed record per prefix:
+
+The example configures a connection pool. `DataConfig` is the whole of the `rakun.data` section of the config file as one record: `#[config("rakun.data")]` names the prefix, and each field names its key and its default. A file holding `rakun.data: { poolSize: 20, bootstrapMode: Lazy }` binds `poolSize` to `20` and `bootstrapMode` to `BootstrapMode.Lazy`, with the key spelled exactly as the field and the value exactly as the variant; no case conversion is applied. `connectTimeout` is read from `connect-timeout` because its `#[key(…)]` says so, and `url` comes from the environment variable `DB_URL` through `#[env(…)]`. `Pool` asks for the record by type, `cfg: DataConfig`, so rakun binds it once at boot and injects it like any other bean, and `Pool.make()` hands back the pool. With no config file and no `DB_URL`, the program prints the defaults: `postgres://localhost/app pool=10 eager timeout=5000`.
+
+A bad value never becomes a quiet zero. `poolSize: 12abc`, `bootstrapMode: Slow`, a key `rakun.data.poolsize` the record does not declare, or a string where an `i32` goes each stop the boot, and the message names the file, the line and the expected type. There is no `#[value("…")]` field, no `rkProp*` read and no string profile; `#[configurationProperties]` is folded into `#[config]`.
+
+Cells in this repository that prove it: none yet. `rakun/configuration/configuration_properties` and `rakun/configuration/config_document` show today's `#[configurationProperties]` and `rkProp` forms, which this decision replaces. `#[config("…")]`, `#[key]` and `#[env]` and the boot-stopping errors come with front 150 (rakun 04 step 7, 08, 13, 15, 88), and until then the example does not build.
+
+[draft/main.bp](draft/main.bp)

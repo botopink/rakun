@@ -1,0 +1,47 @@
+//// Decision 144 — A `#[validated]` record (306) refuses a key it does not declare: a violation coded `unrecognizedKey`, at the key's own p
+
+import {io.terminal} from "std";
+import {collections.Dict} from "std";
+import {decorators.validated, decorators.stripUnknown, decorators.rest} from "validation";
+import {report.ValidationReport} from "validation";
+import {json.Json} from "json";
+import {Response} from "rakun";
+
+// The default: a key the record does not declare is a violation.
+#[validated]
+pub type Comment(author: string, text: string)
+
+// Said on the type: extra keys are dropped.
+#[validated]
+#[stripUnknown]
+pub type Ping(author: string)
+
+// Said on a field: extra keys are kept, in document order.
+#[validated]
+pub type Event(name: string, #[rest] extra: Dict<string, Json>)
+
+fn codes(report: ValidationReport) -> string {
+    return report.violations.map({ v -> v.field + ":" + v.code }).join(",");
+}
+
+fn postComment(body: string) -> Response {
+    return case Comment.decode(body) {
+        Ok(c) -> Response.created(c.author);
+        Error(report) -> Response.withStatus(400, codes(report));
+    };
+}
+
+pub fn main() -> void {
+    val body = """{"author": "ana", "text": "hi", "admin": true}""";
+    val refused = postComment(body);
+    terminal.print(refused.status, refused.body);
+    terminal.print(postComment("""{"author": "ana", "text": "hi"}""").status);
+    terminal.print(case Ping.decode(body) {
+        Ok(p) -> "ping " + p.author;
+        Error(r) -> codes(r);
+    });
+    terminal.print(case Event.decode("""{"name": "open", "admin": true, "seat": 4}""") {
+        Ok(e) -> e.name + " " + e.extra.keys().join(",");
+        Error(r) -> codes(r);
+    });
+}

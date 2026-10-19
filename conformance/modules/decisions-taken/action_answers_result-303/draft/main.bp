@@ -1,0 +1,50 @@
+//// Decision 303 — An action answers `@Result`; there is no `ActionOutcome`.
+
+import {io.terminal} from "std";
+import {outcome.ActionError} from "actions";
+import {decorators.validated, decorators.email} from "validation";
+import {action, ActionContext, callAction} from "rakun-app";
+
+#[validated]
+pub type Signup(#[email] email: string)
+
+pub type Subscribed(email: string)
+
+// The action: `return v` is its `Ok`, `throw e` an `Error(e)` value. Its input
+// is decoded and validated by the wrapper before the body runs.
+#[action]
+pub async fn signup(
+    input: Signup,
+    ctx: ActionContext,
+) -> Async<Result<Subscribed, ActionError>> {
+    if (ctx.session == null)
+        throw ActionError.Unauthorized(message: "User must be logged in.");
+    if (input.email == "taken@example.com")
+        throw ActionError.Conflict(message: "Already subscribed.");
+    return Subscribed(email: input.email);
+}
+
+fn show(r: Result<Subscribed, ActionError>) -> string {
+    return case r {
+        Ok(s) -> "subscribed " + s.email;
+        Error(Input(fields)) -> "check " + fields.keys().join(", ");
+        Error(Unauthorized(message)) -> "401 " + message;
+        Error(Conflict(message)) -> "409 " + message;
+        Error(_) -> "failed";
+    };
+}
+
+pub async fn main() -> Async<void> {
+    val signedIn = ActionContext(session: "s1");
+    // Through the wrapper, from the form's pairs: the same `Result` comes back.
+    terminal.print(show(await callAction(signup, [#("email", "ana@example.com")], signedIn)));
+    // An input that does not validate: `Error(Input(…))`, the body never runs.
+    terminal.print(show(await callAction(signup, [#("email", "ana")], signedIn)));
+    terminal.print(show(await callAction(
+        signup,
+        [#("email", "ana@example.com")],
+        ActionContext(session: null),
+    )));
+    // Called directly, it is any `async` function that answers a `Result`.
+    terminal.print(show(await signup(Signup(email: "taken@example.com"), signedIn)));
+}

@@ -1,0 +1,38 @@
+//// Decision 341 — A decorator body may call a host function that answers on the comptime runtime
+
+import {compiler} from "std";
+import {hash.contentHash} from "std";
+import {io.terminal} from "std";
+import {decorators.service} from "rakun";
+import {runtime.rkScan, runtime.rkSingleton, runtime.rkEnter, runtime.rkDone} from "rakun";
+import {markers.scheduler, markers.scheduled} from "rakun-scheduling";
+import {registry.rkScheduleCron} from "rakun-scheduling";
+
+// The key a task is known by, recorded at build.
+pub type TaskKey(key: string)
+
+// A decorator body that calls two host functions at build: `toUpper` and
+// `contentHash` each answer on the comptime runtime through their `std:` cell.
+pub fn taskKey(syntax decl: unknown) -> void {
+    val name = compiler.name(decl)!;
+    val key = name.toUpper() + "-" + contentHash(name).slice(0, 8);
+    compiler.setMeta(TaskKey(key: key));
+}
+
+#[service]
+#[scheduler]
+pub type Reports() {
+    #[taskKey]
+    #[scheduled("0 0 6 * * *")]
+    pub fn nightly(self: Self) -> i32 {
+        terminal.print("reports run");
+        return 0;
+    }
+}
+
+pub fn main() -> void {
+    val keys = comptime compiler
+        .find(with: taskKey)
+        .map({ d -> compiler.meta<TaskKey>(d)?.key ?? "" });
+    terminal.print(keys.join(", "));
+}

@@ -1,0 +1,44 @@
+//// Decision 266 — A `comptime` is evaluated at compile time everywhere, calls and records included
+
+import {io.terminal} from "std";
+import {collections.Dict} from "std";
+import {rakun.Lifecycle, rakun.Service} from "rakun";
+
+// The port a module listens on: an ordinary function, called at build below.
+fn portOf(name: string) -> i32 {
+    return if (name == "web") 8080 else 9090;
+}
+
+fn label(s: Service) -> string {
+    return "service " + s.name;
+}
+
+// A call evaluated at build, lifted as the dictionary it built.
+val ports: Dict<string, i32> = comptime Dict.ofEntries([
+    #("web", portOf("web")),
+    #("admin", portOf("admin")),
+]);
+
+// An array of records, lifted as its construction.
+val services: Service[] = comptime [Service(name: "web"), Service(name: "admin")];
+
+// A block: its `break` value is the comptime's value.
+val delay: Lifecycle = comptime {
+    val ms = portOf("admin") - portOf("web");
+    Lifecycle.Lazy(afterMs: ms)
+};
+
+// A reference to a top-level function, lifted as that reference.
+val describe: fn(Service) -> string = comptime label;
+
+pub fn main() -> void {
+    // In a body as at module level.
+    val empty: Dict<string, unknown> = comptime Dict.empty();
+    terminal.print(ports.at("web") ?? 0);
+    terminal.print(services.map(describe).join(", "));
+    terminal.print(case delay {
+        Lazy(afterMs) -> "lazy " + afterMs.toString();
+        _ -> "not lazy";
+    });
+    terminal.print(empty.size());
+}

@@ -1,0 +1,51 @@
+//// Decision 160 — A cell that needs an external service is not a gate cell: the behaviour is asserted against an in-process double; no `--
+
+import {io.terminal} from "std";
+import {mail.Mail, mail.MailServer, mail.TlsMode, mail.deliverNow} from "rakun-mail";
+import {fixture.fixtureStart, fixture.fixtureStop, fixture.fixtureMessages} from "rakun-mail";
+
+// The server a send is pointed at: the in-process fixture, on its port.
+fn fixtureServer(port: i32) -> MailServer {
+    return MailServer(
+        host: "localhost",
+        port: port,
+        username: "",
+        password: "",
+        tlsMode: TlsMode.None,
+        bundle: "",
+        connectTimeoutMs: 2000,
+        readTimeoutMs: 2000,
+        writeTimeoutMs: 2000,
+    );
+}
+
+fn welcome() -> Mail {
+    return Mail(
+        sender: "app@example.com",
+        to: ["ana@example.com"],
+        cc: [],
+        bcc: [],
+        replyTo: "",
+        subject: "Welcome",
+        text: "Hello, Ana.",
+        html: "",
+        attachments: [],
+        headers: [],
+    );
+}
+
+pub fn main() -> void {
+    // The double: rakun-mail's SMTP fixture, a server in this VM.
+    val port = fixtureStart([]);
+    val sent = deliverNow(fixtureServer(port), welcome());
+    terminal.print(if (sent == "") "delivered" else sent);
+    terminal.print(fixtureMessages(port).length);
+    val _a = fixtureStop(port);
+
+    // The same double, told to refuse the recipient.
+    val refusing = fixtureStart(["fail=RCPT:550"]);
+    val refused = deliverNow(fixtureServer(refusing), welcome());
+    terminal.print(refused.startsWith("permanent"));
+    terminal.print(fixtureMessages(refusing).length);
+    val _b = fixtureStop(refusing);
+}

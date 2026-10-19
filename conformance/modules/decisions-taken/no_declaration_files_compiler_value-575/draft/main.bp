@@ -1,0 +1,37 @@
+//// Decision 575 — No declaration files; a builtin is a std declaration marked `#[builtin]`; a `declare fn` names its host sources with `#[compiler.external(…)]`; a build-time body talks to the compiler through the keyword `compiler`; `comptime` and `syntax` on a parameter say how an argument arrives.
+
+import {compiler, compiler.DeclKind} from "std";
+import {io.terminal} from "std";
+import {runtime.rkScan, runtime.rkScannedNames} from "rakun";
+
+// A host function: no declaration file, the source named by the annotation.
+#[compiler.external(.Erlang("erlang:system_time(millisecond)"))]
+declare fn nowMs() -> i64;
+
+// What `#[tagged]` records about a type.
+pub type Tag(label: string)
+
+// A decorator: `syntax decl` is the annotated declaration, `comptime label` a
+// value known at build; the body talks to the compiler through `compiler`.
+pub fn tagged(syntax decl: unknown, comptime label: string) -> void {
+    if (compiler.kind(decl) != DeclKind.Type)
+        compiler.fail("#[tagged] goes on a type", at: decl);
+    val name = compiler.name(decl)!;
+    compiler.setMeta(Tag(label: label));
+    compiler.addMember("label", fn() -> string {
+        return label;
+    });
+    compiler.init({ -> rkScan(name); });
+}
+
+#[tagged("billing")]
+pub type Invoices()
+
+#[tagged("mail")]
+pub type Mailer()
+
+pub fn main() -> void {
+    terminal.print(Invoices.label(), Mailer.label());
+    terminal.print(rkScannedNames());
+    terminal.print(nowMs() > 0);
+}

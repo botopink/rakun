@@ -1,0 +1,48 @@
+//// Decision 347 — A method-level decorator sees its own method; the type-level decorator reads the type.
+
+import {compiler, compiler.DeclKind} from "std";
+import {io.terminal} from "std";
+import {http.Request, http.Response} from "rakun";
+import {decorators.restController, decorators.route, decorators.getMapping} from "rakun";
+import {runtime.rkScan, runtime.rkSingleton, runtime.rkEnter, runtime.rkDone} from "rakun";
+import {runtime.rkRegisterRoute, runtime.rkDispatch} from "rakun";
+
+// A method marker of the program's own: it sees its method — the name, the
+// parameters, the return type — and nothing of the type that holds it.
+pub fn traced(syntax decl: unknown) -> void {
+    if (compiler.kind(decl) != DeclKind.Method)
+        compiler.fail("#[traced] goes on a method", at: decl);
+    val params = compiler.params(decl).map({ p -> p.name }).join(", ");
+    if (compiler.returnType(decl) != "Response")
+        compiler.fail(
+            "#[traced] on `"
+                + compiler.name(decl)!
+                + "("
+                + params
+                + ")`: a traced handler answers Response",
+            at: decl,
+        );
+}
+
+// `#[restController]` reads the type: the `#[route]` prefix and every method
+// with its `#[getMapping]`, and joins them into one route per method.
+#[restController]
+#[route("/users")]
+pub type UserController() {
+    #[traced]
+    #[getMapping("/:id")]
+    pub fn show(self: Self, req: Request) -> Response {
+        return Response.ok("user " + req.param("id"));
+    }
+
+    #[getMapping("/:id/posts")]
+    pub fn posts(self: Self, req: Request) -> Response {
+        return Response.ok("posts of " + req.param("id"));
+    }
+}
+
+pub fn main() -> void {
+    terminal.print(rkDispatch("GET", "/users/7").body);
+    terminal.print(rkDispatch("GET", "/users/7/posts").body);
+    terminal.print(rkDispatch("GET", "/users").status.toString());
+}

@@ -1,0 +1,37 @@
+//// Decision 365 — A deferred `after()` failure reaching the core's logger is front 17's step, not 128's.
+
+import {io.terminal} from "std";
+import {failure.panic} from "std";
+import {request_context.RequestScope, request_context.RequestPhase} from "rakun";
+import {request_context.beginRequest, request_context.endRequest, request_context.after} from "rakun";
+import {request_context.drainAfter, request_context.afterFailed, request_context.afterLog} from "rakun";
+import {logging.cells.rkLogCaptureStart, logging.cells.rkLogCaptureLines, logging.cells.rkLogCaptureStop} from "rakun";
+
+fn sendReceipt() -> i32 {
+    panic("smtp refused");
+}
+
+pub fn main() -> void {
+    val _capture = rkLogCaptureStart("console");
+    val _begun = beginRequest(RequestScope(
+        id: "req-9",
+        phase: RequestPhase.Handler,
+        method: "POST",
+        path: "/orders",
+        query: "",
+        headersWire: "",
+        strict: false,
+    ));
+    // Work deferred until the response is written; this one raises.
+    val _deferred = after({ -> sendReceipt() });
+    val _ended = endRequest();
+    val _settled = drainAfter(30000);
+    terminal.print(afterFailed());
+    // The request's own record keeps the failure, with the request id.
+    terminal.print(afterLog().contains("req-9"));
+    // And the core logger carries it, the request id as the correlation id.
+    val lines = rkLogCaptureLines("console");
+    terminal.print(lines.contains("rakun.request.after"), lines.contains("after: failed"));
+    terminal.print(lines.contains("req-9"));
+    val _stopped = rkLogCaptureStop();
+}

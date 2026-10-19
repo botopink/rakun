@@ -1,0 +1,38 @@
+//// Decision 306 — The type is the only schema, and `#[schema]` becomes `#[validated]`.
+
+import {io.terminal} from "std";
+import {decorators.validated, decorators.email, decorators.minValue, decorators.each, decorators.lowercased} from "validation";
+import {report.ValidationReport} from "validation";
+import {Response} from "rakun";
+
+// The one declaration: the record, its checks and its parse.
+#[validated]
+pub type Signup(
+    #[email] email: string,
+    #[minValue(18)] age: i32,
+    // what only a value could say is a field marker
+    #[each(email, lowercased)] guests: string[],
+)
+
+// A handler: the body is parsed by the type itself; a failure is a report.
+fn register(body: string) -> Response {
+    return case Signup.decode(body) {
+        Ok(s) -> Response.created(s.email + " +" + s.guests.length.toString());
+        Error(report) -> Response.withStatus(400, codes(report));
+    };
+}
+
+fn codes(report: ValidationReport) -> string {
+    return report.violations.map({ v -> v.field + ":" + v.code }).join(",");
+}
+
+pub fn main() -> void {
+    val ok = register("""{"email": "ana@example.com", "age": 30, "guests": ["bo@example.com"]}""");
+    terminal.print(ok.status, ok.body);
+    val bad = register("""{"email": "ana", "age": 7, "guests": ["Bo@Example.com"]}""");
+    terminal.print(bad.status, bad.body);
+    // The checking half, on a value built in code.
+    val built = Signup(email: "nope", age: 40, guests: []);
+    terminal.print(built.validate().isValid());
+    terminal.print(Signup.constraints() != "");
+}

@@ -1,0 +1,57 @@
+//// Decision 697 — A type's or a behavior's methods' decorators run before the owner's; a method's `compiler.setMeta` / `addMeta` is kept for its owner (one value per type and method, `decorator-meta-twice`), and the owner's body reads it through `compiler.methods(decl)` — `compiler.meta<Query>(m)` / `compiler.metaAll<Query>(m)` (576 (8), 313, 298).
+
+import {compiler} from "std";
+import {io.terminal} from "std";
+
+// The statement a repository method issues: one per method.
+pub type Query(sql: string)
+
+// A cache tag of a method: it may repeat.
+pub type Tag(name: string)
+
+// A method's decorators: each keeps its meta for the owner to read.
+pub fn query(syntax decl: unknown, comptime sql: string) -> void {
+    compiler.setMeta(Query(sql: sql));
+}
+
+pub fn tag(syntax decl: unknown, comptime name: string) -> void {
+    compiler.addMeta(Tag(name: name));
+}
+
+// The owner's decorator runs after every method's: it reads what they kept.
+pub fn repository(syntax decl: unknown) -> void {
+    var lines: string[] = [];
+    for (compiler.methods(decl)) { m ->
+        val q = compiler.meta<Query>(m);
+        if (q != null) {
+            val tags = compiler.metaAll<Tag>(m).map({ t -> t.name }).join(",");
+            lines.push(m.name + ": " + q.sql + " [" + tags + "]");
+        }
+    }
+    val text = compiler.name(decl)! + " | " + lines.join(" | ");
+    compiler.init({ -> terminal.print(text) });
+}
+
+#[repository]
+pub type UserRepository() {
+    #[tag("users")]
+    #[query("SELECT id, name FROM users WHERE id = :id")]
+    pub fn findById(self: Self, id: i32) -> string {
+        return "user " + id.toString();
+    }
+
+    #[tag("users")]
+    #[tag("count")]
+    #[query("SELECT count(*) FROM users")]
+    pub fn count(self: Self) -> string {
+        return "count";
+    }
+
+    pub fn describe(self: Self) -> string {
+        return "users";
+    }
+}
+
+pub fn main() -> void {
+    terminal.print(UserRepository().findById(7));
+}

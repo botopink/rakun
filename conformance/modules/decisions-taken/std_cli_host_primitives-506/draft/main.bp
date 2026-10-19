@@ -1,0 +1,33 @@
+//// Decision 506 — std gains a CLI's host primitives (`io.stdin`, `io.terminal`, `io.process` signals and `spawn`), and a new `cli` library (`botopink/cli`) builds typed commands, style and prompts over them; onze uses it.
+
+import {io.terminal, io.stdin, io.env} from "std";
+import {io.process.spawn, io.process.onSignal, io.process.Signal} from "std";
+import {cli} from "cli";
+
+// `rakun-ssr start`, typed: a record is the command, its fields the flags.
+#[cli.command("start", about: "Serve the built application")]
+pub type Start(
+    #[cli.flag(short: "p")]
+    port: i32 = 3000,
+    #[cli.arg]
+    dir: string = "dist",
+)
+
+pub async fn main() -> Async<void> {
+    val start = try cli.parse<Start>(env.args()) catch Start();
+    val wide = terminal.size()?.0 ?? 80;
+    terminal.print(cli.style.bold("rakun-ssr start"), cli.style.dim("on port " + start.port.toString()));
+    terminal.print("tty:", stdin.isTTY(), terminal.stdoutIsTTY(), "columns:", wide);
+
+    val _h = onSignal(Signal.Hup, { -> terminal.print("reloading config") });
+
+    // The node runs as a child; a Ctrl-C or a `kill` reaches it, not only us.
+    case spawn("node", [start.dir + "/server.js", "--port", start.port.toString()]) {
+        Ok(child) -> {
+            val _f = child.forwardSignals();
+            val code = await child.wait();
+            terminal.print(cli.style.green("node exited"), code);
+        }
+        Error(e) -> terminal.print(cli.style.red("could not start node"), e.toString());
+    }
+}

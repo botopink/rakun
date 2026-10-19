@@ -1,0 +1,46 @@
+//// Decision 388 — A `@Component<R>` at run time is a lambda over an opaque `RenderScope`; calling a component only makes the lambda, and the render library decides who runs it, when, and with which scope.
+
+import {io.terminal} from "std";
+import {context.createContext, context.provide, context.context, context.RenderScope} from "std";
+import {element.Element, element.renderToString, element.li, element.ul} from "rakun-bpp";
+import {render.renderComponent} from "rakun-bpp";
+import {html.html.html} from "rakun-bpp";
+
+pub type Item(name: string)
+
+pub type Locale(tag: string)
+
+pub val localeContext = comptime createContext(Locale(tag: "en"));
+
+// A component: at run time a lambda over the scope its renderer hands it.
+component fn Card(item: Item) -> Component<Element> {
+    val locale = use context(localeContext);
+    return html @`<li>{item.name} ({locale.tag})</li>`;
+}
+
+// Generic code: it knows nothing of components and runs none of them.
+fn count<T>(xs: T[]) -> i32 {
+    return xs.length;
+}
+
+component fn List(items: Item[], tag: string) -> Component<Element> {
+    use provide(createContext(Locale(tag: tag)));
+    // `items.map(Card)` answers lambdas: no `Card` body has run yet.
+    val cards = items.map(Card);
+    return html @`<ul data-count={count(cards)}>{cards}</ul>`;
+}
+
+pub async fn main() -> Async<void> {
+    val items = [Item(name: "tea"), Item(name: "bread")];
+    // Calling a component only makes the lambda.
+    val lone = Card(items[0]!);
+    // Outside every body a value runs with a root scope, answering its tree
+    // and the scope its `provide`s made for its children.
+    val r = await lone.run(RenderScope.root());
+    terminal.print(renderToString(r.value));
+    // Two renders, two scopes: neither sees the other's provider.
+    val pt = await renderComponent(List(items, "pt-BR"), RenderScope.root());
+    val fr = await renderComponent(List(items, "fr"), RenderScope.root());
+    terminal.print(renderToString(pt.tree));
+    terminal.print(renderToString(fr.tree));
+}

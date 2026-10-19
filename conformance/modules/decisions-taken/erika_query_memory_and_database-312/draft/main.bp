@@ -1,0 +1,48 @@
+//// Decision 312 — erika queries a database too, as LINQ does: one grammar, two targets, picked by the source.
+
+import {io.terminal} from "std";
+import query from "query";
+import {QueryParam} from "query";
+import {entity, DbContext, Driver, StoreError, Row} from "rakun-data";
+
+#[entity("users")]
+pub type User(id: i32, name: string, active: bool)
+
+// A driver that records each statement and answers one row.
+pub type Recorder() implement Driver<StoreError> {
+    pub fn run(self: Self, sql: string, params: QueryParam[]) -> Result<Row[], StoreError> {
+        terminal.print(sql, params.length);
+        return [Row(columns: ["id", "name", "active"], values: ["1", "ana", "true"])];
+    }
+}
+
+val people: User[] = [
+    User(id: 1, name: "ana", active: true),
+    User(id: 2, name: "bo", active: false),
+];
+
+// An array source: the query runs in memory, as the fluent pipeline.
+fn activeInMemory() -> User[] {
+    return query @`select * from people where active = true`;
+}
+
+// The same grammar on the database context: `from User` names the type.
+pub type Users(db: DbContext) {
+    pub fn active(self: Self) -> Result<User[], StoreError> {
+        return self.db.query @`select * from User where active = true`;
+    }
+
+    // One row is written in the query: `?User` needs `limit 1`.
+    pub fn byId(self: Self, id: i32) -> Result<?User, StoreError> {
+        return self.db.query @`select * from User where id = ${id} limit 1`;
+    }
+}
+
+pub fn main() -> void {
+    terminal.print(activeInMemory().map({ u -> u.name }).join(","));
+    val users = Users(db: DbContext(driver: Recorder()));
+    val all = try users.active() catch [];
+    terminal.print(all.length);
+    val one = try users.byId(1) catch null;
+    terminal.print(one?.name ?? "none");
+}

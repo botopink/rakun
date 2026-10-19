@@ -1,0 +1,60 @@
+//// Decision 282 — No role is declared by an export's name.
+
+import {io.terminal} from "std";
+import {Element, PageContext, page, div, h1, p, text, renderToString} from "rakun-bpp";
+import {ImageSize} from "rakun-ssr";
+
+pub type Post(slug: string, title: string, summary: string)
+
+val posts: Post[] = [
+    Post(slug: "hello", title: "Hello", summary: "The first post."),
+    Post(slug: "roles", title: "Roles", summary: "Said in a decorator."),
+];
+
+// The paths to prerender: a plain function, named whatever the author likes.
+pub fn allPosts() -> string[] {
+    return posts.map({ post -> post.slug });
+}
+
+// The page's head: a plain function too, handed to `#[page]` by value.
+pub fn postHead(route: PageContext) -> string {
+    return "<title>" + titleOf(slugOf(route)) + "</title>";
+}
+
+fn slugOf(route: PageContext) -> string {
+    return route.params.find({ kv -> kv._0 == "slug" })?._1 ?? "";
+}
+
+fn titleOf(slug: string) -> string {
+    return posts.find({ post -> post.slug == slug })?.title ?? "missing";
+}
+
+// What the page is for is said here, in its decorator: the route, the paths
+// to prerender, the head and that it renders as a partial.
+#[page("blog/[slug]", paths: allPosts, head: postHead, partial: true)]
+pub component fn BlogPost(route: PageContext) -> Component<Element> {
+    val post = posts.find({ x -> x.slug == slugOf(route) });
+    return div([
+        h1([text(post?.title ?? "missing")]),
+        p([text(post?.summary ?? "")]),
+    ]);
+}
+
+// The OG image's size and type are the decorator's arguments, never two
+// exports named `size` and `contentType`.
+#[ogImage("blog/[slug]", size: ImageSize(width: 1200, height: 630), contentType: "image/png")]
+pub component fn BlogCard(route: PageContext) -> Component<Element> {
+    return div([h1([text(titleOf(slugOf(route)))])]);
+}
+
+pub async fn main() -> Async<void> {
+    val route = PageContext(
+        pathname: "/blog/roles",
+        pattern: "blog/[slug]",
+        params: [#("slug", "roles")],
+        rest: [],
+    );
+    terminal.print(allPosts().join(" "));
+    terminal.print(postHead(route));
+    terminal.print(renderToString(await BlogPost(route)));
+}

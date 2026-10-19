@@ -1,0 +1,53 @@
+//// Decision 766 — (a), and only (a): `rakun-ssr dev` is `build` then `start`, looped over a file watcher — the node restarts on every change and serves the bytes `start` serves; hot-loading is not a form of the dev loop on any target.
+
+import {io.terminal, io.env, io.fs} from "std";
+import {io.clock.sleep} from "std";
+import {io.process.run, io.process.spawn, io.process.Child, io.process.Signal} from "std";
+import {cli.start.startPort} from "rakun-ssr";
+
+// The newest mtime under `src/`: the watcher compares it between passes.
+fn newest(dir: string) -> i64 {
+    var latest: i64 = 0;
+    for (try fs.walk(dir) catch []) { path ->
+        val m = (try fs.stat(path) catch fs.FileStat(size: 0, mtime: 0, isDir: false)).mtime;
+        if (m > latest) latest = m;
+    }
+    return latest;
+}
+
+// One round of `dev`: `build`, then the `start` node — the same bytes
+// `rakun-ssr start` serves, run the same way.
+fn buildThenStart(port: i32) -> ?Child {
+    case run("botopink", ["build"]) {
+        Ok(exit) -> if (exit.status != 0) {
+            terminal.print("build failed; waiting for a change");
+            return null;
+        };
+        Error(_) -> return null;
+    }
+    case spawn("node", ["out/server.js", "--port", port.toString()]) {
+        Ok(child) {
+            val _f = child.forwardSignals();
+            return child;
+        }
+        Error(_) -> return null;
+    }
+}
+
+pub fn main() -> void {
+    val port = try startPort(env.args(), env.read("PORT") ?? "", 3000) catch 3000;
+    var seen = newest("src");
+    var node = buildThenStart(port);
+    terminal.print("rakun-ssr dev on port", port);
+    loop {
+        sleep(250);
+        val now = newest("src");
+        if (now != seen) {
+            // Every change restarts the node: no module is swapped into it.
+            seen = now;
+            val _k = node?.kill(Signal.Term);
+            node = buildThenStart(port);
+            terminal.print("restarted");
+        }
+    }
+}

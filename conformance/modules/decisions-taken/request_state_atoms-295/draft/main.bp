@@ -1,0 +1,37 @@
+//// Decision 295 — Request state is atoms, read and written through `use`
+
+import {io.terminal} from "std";
+import {http.Response} from "rakun";
+import {convention.middleware, filter.Chain, filter.WebRequest} from "rakun-service";
+import {filter.runChain, filter.rkChainSetTerminal} from "rakun-service";
+import {atom.atom, hooks.atomSetter, hooks.atomValue} from "cardume";
+
+pub type User(name: string)
+
+// A request-scoped atom: its identity is this declaration, no string key.
+pub val currentUser = atom<?User>(null);
+
+// Middleware is a `component` body answering `Component<Response>`, so it may
+// `use`: it writes the atom for the rest of this request.
+#[middleware]
+pub component fn appMiddleware(req: WebRequest, chain: Chain) -> Component<Response> {
+    val setUser = use atomSetter(currentUser);
+    val token = req.header("authorization");
+    if (token != "") setUser(User(name: token.replace("Bearer ", "")));
+    return chain.next(req);
+}
+
+// The handler reads the same atom: `?User`, `null` when nothing set it.
+component fn greet(path: string) -> Component<Response> {
+    val user = use atomValue(currentUser);
+    return Response.ok("hello " + (user?.name ?? "guest") + " at " + path);
+}
+
+pub fn main() -> void {
+    val _s = rkChainSetTerminal({ method, path, headersWire, queryWire, body -> greet(path) });
+    val signedIn: Response = runChain("GET", "/orders", "authorization\tBearer ana", "", "");
+    terminal.print(signedIn.body);
+    // A second request starts with an empty store: the atom reads `null`.
+    val anonymous: Response = runChain("GET", "/orders", "", "", "");
+    terminal.print(anonymous.body);
+}

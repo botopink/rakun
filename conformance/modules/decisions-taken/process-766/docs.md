@@ -1,0 +1,7 @@
+# Decision 766 — (a), and only (a): `rakun-ssr dev` is `build` then `start`, looped over a file watcher — the node restarts on every change and serves the bytes `start` serves; hot-loading is not a form of the dev loop on any target.
+
+The program is the dev loop the decision keeps, and nothing else: `buildThenStart` runs `botopink build` and then spawns the node `rakun-ssr start` runs, on the port `startPort` resolves (`-p`, else `PORT`, else the config's, rakun-ssr's own reader), with `forwardSignals()` so a Ctrl-C reaches the node. The watcher is std's `fs`: `newest` walks `src/` and keeps the latest mtime, and every quarter of a second the loop compares it with the one it saw. On a change it stops the node with `SIGTERM` and runs `build` then `start` again, printing `restarted`. No module is ever swapped into the running node, so the server a developer sees after an edit serves exactly the bytes `start` serves from that build, on every target; an island's client state is lost on each edit (Fast Refresh is not a goal). A failed build prints `build failed; waiting for a change` and the loop waits for the next edit.
+
+Cells in this repository that prove it: none — a CLI loop is no cell; front 150's steps-onze 50 step 2 brings `rakun-ssr dev` (today `dev` answers that it is not available yet) and its acceptance script proves `dev` and `start` answer alike.
+
+[draft/main.bp](draft/main.bp)

@@ -1,0 +1,44 @@
+//// Decision 398 — The persistence layer is a library of its own over erika — `dbcontext` (`botopink/dbcontext` at `repository/dbcontext`, 326's rule), botopink's JPA.
+
+import {io.terminal} from "std";
+import {QueryParam} from "query";
+import {entity, column, repository, query, nativeQuery} from "rakun-data";
+import {DbContext, Driver, StoreError, Row} from "rakun-data";
+
+// The entity: `#[entity]` records `query`'s `QueryTable` for it.
+#[entity("users")]
+pub type User(
+    id: i32,
+    #[column("user_name")] name: string,
+    active: bool,
+)
+
+// The repository is a behavior; `#[repository]` builds `Users.of(ctx)`.
+#[repository]
+pub behavior Users {
+    // In `query`'s grammar, checked against `User` at build.
+    #[query @`select * from User where id = ${id} limit 1`]
+    fn find(self: Self, id: i32) -> Result<?User, StoreError>;
+
+    // The driver's own SQL, its `:active` matched to the parameter by name.
+    #[nativeQuery("SELECT id, user_name, active FROM users WHERE active = :active")]
+    fn byActive(self: Self, active: bool) -> Result<User[], StoreError>;
+}
+
+// A driver that records each statement and answers one row by column name.
+pub type Recorder() implement Driver<StoreError> {
+    pub fn run(self: Self, sql: string, params: QueryParam[]) -> Result<Row[], StoreError> {
+        terminal.print(sql);
+        return [Row(columns: ["id", "user_name", "active"], values: ["7", "ana", "true"])];
+    }
+}
+
+pub fn main() -> void {
+    val users = Users.of(DbContext(driver: Recorder()));
+    val one = try users.find(7) catch null;
+    terminal.print(one?.name ?? "none");
+    val active = try users.byActive(true) catch [];
+    terminal.print(active
+        .map({ u -> u.id.toString() + ":" + u.name })
+        .join(","));
+}

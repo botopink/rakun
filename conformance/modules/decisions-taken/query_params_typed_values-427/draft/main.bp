@@ -1,0 +1,51 @@
+//// Decision 427 — A query's bound parameters are typed values — erika's `QueryParam` —, each built by the template from the type of the column its hole meets, checked at build.
+
+import {io.terminal} from "std";
+import {QueryParam} from "query";
+import {entity, DbContext, Driver, StoreError, Row} from "rakun-data";
+
+#[entity("users")]
+pub type User(id: i32, name: string, active: bool, nickname: ?string, avatar: bytes)
+
+fn shown(p: QueryParam) -> string {
+    return case p {
+        Int(value) -> "Int(" + value.toString() + ")";
+        Float(value) -> "Float(" + value.toString() + ")";
+        Text(value) -> "Text(" + value + ")";
+        Bool(value) -> "Bool(" + value.toString() + ")";
+        Bytes(value) -> "Bytes(" + value.length.toString() + ")";
+        Null -> "Null";
+    };
+}
+
+// The driver receives each value with its type: it prints what it was given.
+pub type Recorder() implement Driver<StoreError> {
+    pub fn run(self: Self, sql: string, params: QueryParam[]) -> Result<Row[], StoreError> {
+        terminal.print(params.map({ p -> shown(p) }).join(" "));
+        return [];
+    }
+}
+
+pub type Users(db: DbContext) {
+    // `id` meets `User.id: i32`, `active` a `bool`, `name` a `string`.
+    pub fn find(
+        self: Self,
+        id: i32,
+        active: bool,
+        name: string,
+    ) -> Result<?User, StoreError> {
+        return self.db.query @`select * from User where id = ${id} and active = ${active} and name = ${name} limit 1`;
+    }
+
+    // A `?string` column: an absent value is a real NULL; a hole after `limit` is `Int`.
+    pub fn byNickname(self: Self, nick: ?string, n: i32) -> Result<User[], StoreError> {
+        return self.db.query @`select * from User where nickname = ${nick} limit ${n}`;
+    }
+}
+
+pub fn main() -> void {
+    val users = Users(db: DbContext(driver: Recorder()));
+    val _one = try users.find(7, true, "ana") catch null;
+    val _none = try users.byNickname(null, 10) catch [];
+    val _some = try users.byNickname("bo", 1) catch [];
+}
