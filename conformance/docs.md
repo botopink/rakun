@@ -37,6 +37,12 @@ package with no reference yet has no row of features.
 | `jhonstart-dom-test` | — | |
 | `onze-server` | — | |
 
+## The decisions
+
+| Directory | What |
+|---|---|
+| `modules/decisions-taken/` | The ledger's index: one `<slug>-<N>/` per code-bearing row of this repository's generated [`../decisions-taken.md`](../decisions-taken.md) (front 166, decisions 646–651), its `docs.md` walking through one example program; in phase 1 the program is `draft/main.bp` (decision 649), so `botopink cell check conformance/` finds no cell there. The decision cells are the ledger's, not a package's feature: they sit outside the package tree, and `modules/botopink.json` is the workspace `scripts/decision-cells.py compile` reads for their dependencies |
+
 ## The suite
 
 ```text

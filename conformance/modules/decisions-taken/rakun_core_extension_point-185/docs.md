@@ -1,0 +1,3 @@
+# Decision 185 — When one rakun member has to tell or ask another and an edge between them would be a cycle or drag a member into consume
+
+[draft/main.bp](draft/main.bp)

@@ -1,0 +1,3 @@
+# Decision 722 — A context is read through a context value the reader imports — `use context(themeContext)`, never a bare type name — answering the nearest context of that type provided above, else the default the handle carries; the handle is imported as any name, so the default is found through the import graph and nothing is searched
+
+[draft/main.bp](draft/main.bp)

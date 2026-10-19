@@ -1,0 +1,3 @@
+# Decision 274 — Pulsar is not split: it stays in `rakun-messaging/src/pulsar/` and rakun keeps 16 members (a split would remove no edge)
+
+[draft/main.bp](draft/main.bp)

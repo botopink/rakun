@@ -1,0 +1,3 @@
+# Decision 363 — A browser-only cell is `#[clientOnly]`: called only where the client runs, never given a server twin.
+
+[draft/main.bp](draft/main.bp)

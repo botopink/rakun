@@ -1,0 +1,3 @@
+# Decision 324 — One function derives an action id: `actions.id.deriveActionId(secret, module, name, buildId)`; rakun-app keeps no wrapper.
+
+[draft/main.bp](draft/main.bp)

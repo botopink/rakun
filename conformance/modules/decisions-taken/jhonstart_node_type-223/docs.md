@@ -1,0 +1,3 @@
+# Decision 223 — jhonstart's node type — what a slot holds and what a hole accepts (191) — is `Node`, imported `import {Node} from "jhons
+
+[draft/main.bp](draft/main.bp)

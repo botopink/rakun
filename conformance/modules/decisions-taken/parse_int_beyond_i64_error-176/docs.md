@@ -1,0 +1,3 @@
+# Decision 176 — † `string.parseInt()` of an integer beyond the `i64` range (−2^63 … 2^63 − 1, 319) is `Error` on every target
+
+[draft/main.bp](draft/main.bp)

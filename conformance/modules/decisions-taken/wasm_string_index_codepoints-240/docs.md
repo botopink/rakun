@@ -1,0 +1,3 @@
+# Decision 240 — wasm counts a string's index in codepoints, as erlang and beam: `length`, `at`, `slice`, `indexOf`, `lastIndexOf` walk U
+
+[draft/main.bp](draft/main.bp)
