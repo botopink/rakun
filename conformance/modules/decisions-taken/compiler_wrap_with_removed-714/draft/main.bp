@@ -1,3 +1,60 @@
 //// Decision 714 — `compiler.wrapWith` goes: a decorator never changes what a call does without the caller seeing it; behaviour around a function is a proxy type the decorator builds or a function written around the call.
 
-pub fn main() -> void {}
+import {io.terminal} from "std";
+import {compiler, collections.Dict} from "std";
+import {decorators.service, decorators.repository} from "rakun";
+import {context.rkAddBean, context.rkInstallBeans} from "rakun";
+import {sql.transactional.transactional} from "rakun-data";
+
+#[repository]
+pub type OrderRepository() {
+    pub fn save(self: Self, total: i32) -> i32 {
+        return 1;
+    }
+}
+
+// `#[transactional]` builds a proxy type, `OrderService.Tx`; the plain type is untouched.
+#[service]
+#[transactional]
+pub type OrderService(orders: OrderRepository) {
+    pub fn place(self: Self, total: i32) -> i32 {
+        return self.orders.save(total);
+    }
+}
+
+// Behaviour around one call is a function written around it, where the call is.
+fn withAttempts(times: i32, call: fn() -> Result<string, string>) -> Result<string, string> {
+    var last: Result<string, string> = Error("never ran");
+    var i = 0;
+    while (i < times) {
+        last = call();
+        if (last.isOk()) return last;
+        i = i + 1;
+    }
+    return last;
+}
+
+var calls = 0;
+
+fn notify() -> Result<string, string> {
+    calls = calls + 1;
+    if (calls < 3) throw "mail server busy";
+    return "sent";
+}
+
+fn beans() -> Dict<string, unknown> {
+    return comptime {
+        var d: Dict<string, unknown> = Dict.empty();
+        for (compiler.find(with: [service, repository], member: "make")) { b ->
+            d = rkAddBean(d, b.name, b.value);
+        }
+        d
+    };
+}
+
+pub fn main() -> void {
+    val _beans = rkInstallBeans(beans());
+    // The caller names the transactional path.
+    terminal.print(OrderService.Tx.make().place(120), "\n");
+    terminal.print(withAttempts(3, { -> notify() }).unwrapOr("failed"), " after ", calls, "\n");
+}

@@ -1,3 +1,42 @@
 //// Decision 197 — † (1) erlang's `indexOf` / `lastIndexOf` count codepoints (320).
 
-pub fn main() -> void {}
+import {io.terminal, io.fs, io.os, path} from "std";
+import {async.RetryPolicy, async.retry, async.nextDelay} from "std";
+import {hash, failure.attempt, failure.attemptTask, failure.Failure} from "std";
+
+fn kindOf<T>(r: Result<T, Failure>) -> string {
+    return case r {
+        Ok(_) -> "ok";
+        Error(f) -> f.kind + ": " + f.message;
+    };
+}
+
+async fn fetchOnce() -> Async<Result<string, string>> {
+    return "pong";
+}
+
+pub async fn main() -> Async<void> {
+    // (1) erlang's `indexOf` / `lastIndexOf` count codepoints.
+    terminal.print("ação/ação".indexOf("/"), " ", "ação/ação".lastIndexOf("ç"), "\n");
+
+    // (2) An unusable retry policy is a programming error, not an `Error` of the work.
+    val never = RetryPolicy(maxAttempts: 0, initialMillis: 100, multiplier: 2.0, maxMillis: 1000);
+    terminal.print(nextDelay(never, 1) == null, "\n");
+    val tried = await attemptTask({ -> retry(never, { -> fetchOnce() }) });
+    terminal.print(kindOf(tried), "\n");
+
+    // (3) pbkdf2 with no iterations: one panic text on every target.
+    terminal.print(kindOf(attempt({ -> hash.pbkdf2Sha256("secret", "salt", 0, 32) })), "\n");
+
+    // (4) `fs.glob`: the same matches on every target.
+    val root = path.join([os.tmpdir(), "rakun-197"]);
+    val _a = fs.mkdirRecursive(path.join([root, "static", "css"]));
+    val _b = fs.writeText(path.join([root, "static", "css", "app.css"]), "");
+    val _c = fs.writeText(path.join([root, "static", "logo.svg"]), "");
+    terminal.print(fs.glob("static/**", root).unwrapOr([]).length, "\n");
+    terminal.print(fs.glob("static/*/", root).unwrapOr([]).join(","), "\n");
+    terminal.print(fs
+        .glob("static/{css/app,logo}.*", root)
+        .unwrapOr([]).length, "\n");
+    val _d = fs.removeTree(root);
+}

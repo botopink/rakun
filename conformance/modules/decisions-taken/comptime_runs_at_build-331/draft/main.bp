@@ -1,3 +1,51 @@
 //// Decision 331 — Every `comptime` runs at compile time, now, independent of the target.
 
-pub fn main() -> void {}
+import {io.terminal} from "std";
+import {compiler, collections.Dict} from "std";
+import {decorators.service, decorators.repository} from "rakun";
+import {context.rkAddBean, context.rkInstallBeans} from "rakun";
+
+#[repository]
+pub type PlanRepository() {
+    pub fn names(self: Self) -> string[] {
+        return ["free", "team", "enterprise"];
+    }
+}
+
+#[service]
+pub type PlanService(plans: PlanRepository) {
+    pub fn count(self: Self) -> i32 {
+        return self.plans.names().length;
+    }
+}
+
+fn add(a: i32, b: i32) -> i32 {
+    return a + b;
+}
+
+// A loop and a call, run while the program is compiled: the program holds `6`.
+fn seatLimit() -> i32 {
+    return comptime {
+        var d = 0;
+        for ([1, 2, 3]) { b ->
+            d = add(d, b);
+        }
+        d
+    };
+}
+
+// The catalogue read and the registry built at build, the same answer on every target.
+fn beans() -> Dict<string, unknown> {
+    return comptime {
+        var d: Dict<string, unknown> = Dict.empty();
+        for (compiler.find(with: [service, repository], member: "make")) { b ->
+            d = rkAddBean(d, b.name, b.value);
+        }
+        d
+    };
+}
+
+pub fn main() -> void {
+    val _beans = rkInstallBeans(beans());
+    terminal.print(seatLimit(), " ", PlanService.make().count(), "\n");
+}

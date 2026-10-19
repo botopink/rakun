@@ -1,3 +1,44 @@
 //// Decision 726 — A type argument's `compiler.Info<unknown>` in a `HookUse` carries the type's whole declaration.
 
-pub fn main() -> void {}
+import {io.terminal, compiler} from "std";
+import {page, PageContext, params, html, Element} from "rakun-bpp";
+// The builders the markup's tags call.
+import {element.h1} from "rakun-bpp";
+
+// A field marker the page's check reads.
+fn required(syntax decl: unknown) -> void {}
+
+pub type BlogParams(
+    #[required] slug: string,
+    page: i32 = 1,
+)
+
+pub type ParamsCheck(required: string[])
+
+// Reads the type arguments of every `use` in the page, at build.
+fn checkedParams(syntax decl: unknown) -> void {
+    var names: string[] = [];
+    for (compiler.hooks(decl)) { node ->
+        for (node.uses) { u ->
+            for (u.typeArgs) { t ->
+                for (compiler.fields(t)) { f ->
+                    val marked = f.annotations.filter({ a -> compiler.same(a.decorator, required) });
+                    if (marked.length > 0) names.push(f.name);
+                }
+            }
+        }
+    }
+    compiler.setMeta(ParamsCheck(required: names));
+}
+
+#[checkedParams]
+#[page("blog/[slug]")]
+component fn BlogPost(route: PageContext) -> Component<Element> {
+    val p = use params<BlogParams>();
+    return html @`<h1>${p.slug} (page ${p.page})</h1>`;
+}
+
+pub fn main() -> void {
+    val check = comptime compiler.typeInfo(BlogPost).meta(ParamsCheck);
+    terminal.print((check?.required ?? []).join(", "), "\n");
+}

@@ -1,3 +1,52 @@
 //// Decision 234 — Constructor injection resolves a field by its type (Spring's model, 281): a stereotyped type's factory is its member `T.
 
-pub fn main() -> void {}
+import {io.terminal} from "std";
+import {compiler, collections.Dict} from "std";
+import {decorators.service, decorators.repository} from "rakun";
+import {context.provides, context.rkAddBean, context.rkInstallBeans} from "rakun";
+
+pub type Clock(zone: string) {
+    pub fn stamp(self: Self) -> string {
+        return "<now@" + self.zone + ">";
+    }
+}
+
+// A function provider: the bean is what it returns, keyed by its type `Clock`.
+#[provides]
+pub fn systemClock() -> Clock {
+    return Clock(zone: "UTC");
+}
+
+#[repository]
+pub type InvoiceRepository() {
+    pub fn open(self: Self) -> string[] {
+        return ["inv-1", "inv-2"];
+    }
+}
+
+// Each field is resolved by its type: `invoices` by `InvoiceRepository`, `clock` by `Clock`.
+#[service]
+pub type InvoiceService(invoices: InvoiceRepository, clock: Clock) {
+    pub fn report(self: Self) -> string {
+        return self.invoices.open().length.toString()
+            + " open at "
+            + self.clock.stamp();
+    }
+}
+
+// The registry, built at build from the catalogue of the stereotypes: every entry's
+// factory is the type's own member `make()`.
+fn beans() -> Dict<string, unknown> {
+    return comptime {
+        var d: Dict<string, unknown> = Dict.empty();
+        for (compiler.find(with: [service, repository], member: "make")) { b ->
+            d = rkAddBean(d, b.name, b.value);
+        }
+        d
+    };
+}
+
+pub fn main() -> void {
+    val _beans = rkInstallBeans(beans());
+    terminal.print(InvoiceService.make().report(), "\n");
+}

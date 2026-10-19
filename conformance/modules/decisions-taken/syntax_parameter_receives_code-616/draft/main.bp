@@ -1,3 +1,35 @@
 //// Decision 616 — The parameter modifier `expr` is renamed `syntax`: a parameter marked `syntax` receives the code as it was written — a declaration, an argument expression, a lambda — and `comptime` one receives a value known at build.
 
-pub fn main() -> void {}
+import {io.terminal} from "std";
+import {compiler} from "std";
+import {decorators.restController, decorators.getMapping} from "rakun";
+import {http.Request, http.Response} from "rakun";
+
+pub type Guard(prefix: string, source: string, deny: fn() -> Response)
+
+var guards: Guard[] = [];
+
+fn addGuard(prefix: string, source: string, deny: fn() -> Response) -> void {
+    guards.push(Guard(prefix: prefix, source: source, deny: deny));
+}
+
+// `decl` and `deny` are code as written (`syntax`); `prefix` is a value known at build (`comptime`).
+pub fn guarded(syntax decl: unknown, comptime prefix: string, syntax deny: fn() -> Response) -> void {
+    val source = compiler.text(deny);
+    compiler.init({ -> addGuard(prefix, source, deny) });
+}
+
+#[restController]
+#[guarded("/admin", { -> Response.withStatus(403, "forbidden") })]
+pub type AdminController() {
+    #[getMapping("/admin/stats")]
+    pub fn stats(self: Self, req: Request) -> Response {
+        return Response.ok("42 users");
+    }
+}
+
+pub fn main() -> void {
+    for (guards) { g ->
+        terminal.print(g.prefix, " -> ", g.source, " = ", g.deny().status, "\n");
+    }
+}

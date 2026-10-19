@@ -1,3 +1,58 @@
 //// Decision 321 — Two providers of one type are told apart by a label, checked at compile time.
 
-pub fn main() -> void {}
+import {io.terminal} from "std";
+import {compiler, collections.Dict} from "std";
+import {decorators.service} from "rakun";
+import {context.provides, context.qualifier, context.primary} from "rakun";
+import {context.Context, context.rootContext, context.rkAddBean, context.rkInstallBeans} from "rakun";
+
+pub type Database(url: string)
+
+// The label is the author's, not the function's name.
+#[provides]
+#[primary]
+pub fn mainDb() -> Database {
+    return Database(url: "postgres://db/main");
+}
+
+#[provides]
+#[qualifier("reports")]
+pub fn reportsDb() -> Database {
+    return Database(url: "postgres://db/reports");
+}
+
+// A constructor field asks for the labelled provider with the same marker.
+#[service]
+pub type ReportJob(#[qualifier("reports")] db: Database) {
+    pub fn target(self: Self) -> string {
+        return self.db.url;
+    }
+}
+
+// An unlabelled field gets the `#[primary]` provider.
+#[service]
+pub type OrderJob(db: Database) {
+    pub fn target(self: Self) -> string {
+        return self.db.url;
+    }
+}
+
+fn beans() -> Dict<string, unknown> {
+    return comptime {
+        var d: Dict<string, unknown> = Dict.empty();
+        for (compiler.find(with: service, member: "make")) { b ->
+            d = rkAddBean(d, b.name, b.value);
+        }
+        d
+    };
+}
+
+pub fn main() -> void {
+    val _beans = rkInstallBeans(beans());
+    val ctx: Context = rootContext();
+    terminal.print(ctx.resolveNamed(Database, "reports")?.url ?? "-", "\n");
+    terminal.print(ctx.resolveNamed(Database)?.url ?? "-", "\n");
+    terminal.print(ReportJob.make().target(), " ", OrderJob
+        .make()
+        .target(), "\n");
+}

@@ -1,3 +1,49 @@
 //// Decision 613 — (d), the rule behind 581 (2): what flows from build into an executor is always admitted — a `comptime` value as a literal, an `syntax` as the code it is, a run-time value as itself — and only the reverse is impossible (611); so `decl` inside an executor is the annotated declaration itself, spliced as code and bound to that declaration, on every kind, and the checker applies its ordinary rules to it, typed by the `syntax decl` parameter's declared type (716).
 
-pub fn main() -> void {}
+import {io.terminal} from "std";
+import {compiler} from "std";
+import {decorators.service} from "rakun";
+
+pub behavior Made {
+    fn make() -> Self;
+}
+
+var warmed: string[] = [];
+
+// `decl` inside the executor is the annotated declaration itself: on a type, `decl.make()`
+// is that type's `make()`; on a function, `decl()` calls it.
+pub fn warm(syntax decl: Made) -> void {
+    val name = compiler.name(decl)!;
+    compiler.init({ ->
+        val _v = decl.make();
+        warmed.push(name);
+    });
+}
+
+pub fn onBoot(syntax decl: fn()) -> void {
+    compiler.init({ -> decl(); });
+}
+
+// A module-level `make` beside the method: the splice names the declaration, not this.
+fn make() -> string {
+    return "module make";
+}
+
+#[service]
+#[warm]
+pub type Users() {
+    pub fn count(self: Self) -> i32 {
+        return 3;
+    }
+}
+
+#[onBoot]
+fn seed() -> void {
+    warmed.push("seed");
+}
+
+pub fn main() -> void {
+    terminal.print(warmed.join(","), " ", Users
+        .make()
+        .count(), " ", make(), "\n");
+}

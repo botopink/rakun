@@ -1,3 +1,40 @@
 //// Decision 305 — The compiler's own annotations speak botopink:
 
-pub fn main() -> void {}
+import {io.terminal} from "std";
+import {compiler, collections.Dict} from "std";
+import {decorators.restController, decorators.getMapping} from "rakun";
+import {http.Request, http.Response} from "rakun";
+
+// Every labelled argument of the compiler's annotations is written `label: value`.
+#[compiler.beamMemory(.Ets(keyed: true))]
+var hits: Dict<string, i32> = Dict.empty();
+
+// The first character of a path segment: host code on the BEAM, inlined; a botopink body on wasm.
+#[compiler.external(
+    .Erlang("string:slice($0, 0, 1)", inline: true),
+    .JavaScript("Array.from($0)[0] ?? \"\""),
+    .Wasm(body: firstBody),
+)]
+declare fn first(s: string) -> string;
+
+fn firstBody(s: string) -> string {
+    return s.slice(0, 1);
+}
+
+// A square root: wasm's own opcode, named by a string checked against the opcode table.
+#[compiler.external(.Erlang("math:sqrt($0)"), .JavaScript("Math.sqrt($0)"), .Wasm(op: "f64.sqrt"))]
+declare fn root(x: f64) -> f64;
+
+#[restController]
+pub type InitialController() {
+    #[getMapping("/initial/:name")]
+    pub fn initial(self: Self, req: Request) -> Response {
+        val name = req.param("name");
+        hits = hits.bump(name, 1);
+        return Response.ok(first(name));
+    }
+}
+
+pub fn main() -> void {
+    terminal.print(first("rakun"), " ", root(16.0), "\n");
+}

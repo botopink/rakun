@@ -1,3 +1,50 @@
 //// Decision 343 — Each decorator invocation is independent:
 
-pub fn main() -> void {}
+import {io.terminal} from "std";
+import {compiler} from "std";
+import {context.provides, context.rkInstallBeans} from "rakun";
+import {collections.Dict} from "std";
+
+pub type Clock(zone: string)
+
+pub type Mailer(host: string)
+
+// Each `#[provides]` runs over its own declaration and knows nothing of the others.
+#[provides]
+pub fn systemClock() -> Clock {
+    return Clock(zone: "UTC");
+}
+
+#[provides]
+pub fn smtpMailer() -> Mailer {
+    return Mailer(host: "smtp.local");
+}
+
+// The duplicate check lives at the entry point: the catalogue is read once, at build,
+// and two providers of one type are refused here, naming both.
+fn providedTypes() -> string[] {
+    return comptime {
+        var types: string[] = [];
+        var owners: string[] = [];
+        for (compiler.find(with: provides)) { d ->
+            val i = types.indexOf(d.returnTypeName);
+            if (i >= 0)
+                compiler.fail(
+                    "two #[provides] of "
+                        + d.returnTypeName
+                        + ": "
+                        + owners.at(i)!
+                        + " and "
+                        + d.name,
+                );
+            types.push(d.returnTypeName);
+            owners.push(d.name);
+        }
+        types
+    };
+}
+
+pub fn main() -> void {
+    val _beans = rkInstallBeans(Dict.empty());
+    terminal.print(providedTypes().join(","), "\n");
+}

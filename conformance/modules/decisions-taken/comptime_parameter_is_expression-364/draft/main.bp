@@ -1,3 +1,39 @@
 //// Decision 364 — Every `comptime` parameter is an expression: `comptime x: @Expr<T>` — a decorator's, a tag annotation's, a template function's, any function's, a builtin's.
 
-pub fn main() -> void {}
+import {io.terminal} from "std";
+import {compiler, compiler.DeclKind} from "std";
+import {decorators.service} from "rakun";
+
+pub type Check(owner: string, message: string, rule: fn(v: i32) -> bool)
+
+var checks: Check[] = [];
+
+fn register(owner: string, message: string, rule: fn(v: i32) -> bool) -> void {
+    checks.push(Check(owner: owner, message: message, rule: rule));
+}
+
+// `limit` is a value known at build, read as itself; `rule` is the code the user wrote,
+// never run at build — the decorator hands it to the program, which runs it.
+pub fn bounded(syntax decl: unknown, comptime limit: i32, comptime message: string, syntax rule: fn(v: i32) -> bool) -> void {
+    if (limit < 1)
+        compiler.fail("#[bounded] needs a limit of at least 1", at: limit);
+    if (compiler.kind(decl) != DeclKind.Type)
+        compiler.fail("#[bounded] goes on a type", at: decl);
+    val owner = compiler.name(decl)!;
+    compiler.init({ -> register(owner, message + " (limit " + limit.toString() + ")", rule) });
+}
+
+#[service]
+#[bounded(10, "a cart holds at most ten lines", { n -> n <= 10 })]
+pub type CartService() {
+    pub fn lines(self: Self) -> i32 {
+        return 12;
+    }
+}
+
+pub fn main() -> void {
+    val n = CartService.make().lines();
+    for (checks) { c ->
+        if (!c.rule(n)) terminal.print(c.owner, ": ", c.message, "\n");
+    }
+}

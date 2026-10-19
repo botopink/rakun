@@ -1,3 +1,49 @@
 //// Decision 431 — `@Result<T, E>` is botopink's checked error — Java's `throws`, Rust's `?` —, and an error that does not arrive as a `@Result` is converted at one boundary: the host binding (`result: true`) or an explicit `attempt`.
 
-pub fn main() -> void {}
+import {io.terminal, compiler} from "std";
+import {failure.attempt, failure.Failure, failure.HostError, failure.panic} from "std";
+import {http.Response} from "rakun";
+
+// The host raises on a numeral it cannot read; `result: true` turns every raise into an `Error`.
+#[compiler.external(.Erlang("binary_to_integer($0)", result: true))]
+declare fn hostInt(text: string) -> Result<i64, HostError>;
+
+pub type BadId(raw: string)
+
+// A checked error: the signature says it, and `throw` needs the `Result` in it.
+fn idOf(raw: string) -> Result<i64, BadId> {
+    val n = try hostInt(raw) catch throw BadId(raw: raw);
+    if (n < 1) throw BadId(raw: raw);
+    return n;
+}
+
+// `try` propagates: every call that may fail writes it.
+fn lookup(raw: string) -> Result<Response, BadId> {
+    val id = try idOf(raw);
+    return Response.ok("item " + id.toString());
+}
+
+fn answer(raw: string) -> Response {
+    return case lookup(raw) {
+        Ok(r) -> r;
+        Error(e) -> Response.badRequest("bad id: " + e.raw);
+    };
+}
+
+// A plugin that crashes: a defect, contained only by `attempt`.
+fn plugin(raw: string) -> Response {
+    if (raw == "boom") panic("plugin crashed");
+    return answer(raw);
+}
+
+pub fn main() -> void {
+    terminal.print(answer("42").body, "\n");
+    terminal.print(answer("x7").body, "\n");
+    terminal.print(answer("0").status, "\n");
+    val contained: Result<Response, Failure> = attempt({ -> plugin("boom") });
+    val shown = case contained {
+        Ok(r) -> r.body;
+        Error(f) -> f.kind + ": " + f.message;
+    };
+    terminal.print(shown, "\n");
+}

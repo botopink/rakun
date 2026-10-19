@@ -1,3 +1,41 @@
 //// Decision 294 — A cookie is declared once, typed:
 
-pub fn main() -> void {}
+import {io.terminal, io.clock.days} from "std";
+import {cookie.Cookie} from "http";
+import {Request} from "rakun";
+import {route_handler.postRoute, route_handler.HandlerResponse} from "rakun-app";
+import {cookieValue, cookieSetter, RequestData, enterRequest, leaveRequest, html, Element, renderToString} from "rakun-bpp";
+// The builders the markup's tags call.
+import {element.p} from "rakun-bpp";
+
+pub type SessionId(value: string)
+
+// The name once, the attributes with it.
+pub val sessionCookie = Cookie<SessionId>("session", httpOnly: true, secure: true, maxAge: days(30));
+
+// A route handler writes it; the attributes come from the declaration.
+#[postRoute("login")]
+pub async fn signIn(req: Request) -> Async<HandlerResponse> {
+    val set = use cookieSetter(sessionCookie);
+    set(SessionId(value: "s-" + req.param("user")));
+    return HandlerResponse.noContent();
+}
+
+// A page only reads: `?SessionId`.
+component fn Greeting() -> Component<Element> {
+    val id = use cookieValue(sessionCookie);
+    return html @`<p>hello ${id?.value ?? "guest"}</p>`;
+}
+
+fn requestWith(cookies: #(string, string)[]) -> RequestData {
+    return RequestData(method: "GET", path: "/", params: [], query: [], headers: [], cookies: cookies);
+}
+
+pub async fn main() -> Async<void> {
+    enterRequest(requestWith([#("session", "s-42")]));
+    terminal.print(renderToString(await Greeting()), "\n");
+    leaveRequest();
+    enterRequest(requestWith([]));
+    terminal.print(renderToString(await Greeting()), "\n");
+    leaveRequest();
+}

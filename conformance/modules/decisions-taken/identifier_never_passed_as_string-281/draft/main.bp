@@ -1,3 +1,47 @@
 //// Decision 281 — No code identifier passes as a string.
 
-pub fn main() -> void {}
+import {io.terminal} from "std";
+import {compiler, collections.Dict} from "std";
+import {decorators.service, decorators.restController, decorators.route, decorators.getMapping, decorators.value} from "rakun";
+import {http.Request, http.Response} from "rakun";
+import {context.Context, context.rootContext, context.rkAddBean, context.rkInstallBeans} from "rakun";
+import {runtime.rkSetProp, runtime.rkDispatch} from "rakun";
+
+// `greeting.salutation` is a configuration path — another system's name, so it stays text.
+#[service]
+pub type GreetingService(#[value("greeting.salutation")] salutation: string) {
+    pub fn greet(self: Self, name: string) -> string {
+        return self.salutation + ", " + name + "!";
+    }
+}
+
+// The route pattern is the URL's, a string; the handler is the method itself.
+#[restController]
+#[route("/api")]
+pub type GreetingController(greeting: GreetingService) {
+    #[getMapping("/hello/:name")]
+    pub fn hello(self: Self, req: Request) -> Response {
+        return Response.ok(self.greeting.greet(req.param("name")));
+    }
+}
+
+// The catalogue is asked for by the decorators themselves, never by their names.
+fn beans() -> Dict<string, unknown> {
+    return comptime {
+        var d: Dict<string, unknown> = Dict.empty();
+        for (compiler.find(with: [service, restController], member: "make")) { b ->
+            d = rkAddBean(d, b.name, b.value);
+        }
+        d
+    };
+}
+
+pub fn main() -> void {
+    val _p = rkSetProp("greeting.salutation", "Hello");
+    val _beans = rkInstallBeans(beans());
+    // A bean is asked for with its type.
+    val ctx: Context = rootContext();
+    val greeting = ctx.resolve(GreetingService);
+    if (greeting != null) terminal.print(greeting.greet("ana"), "\n");
+    terminal.print(rkDispatch("GET", "/api/hello/rui").body, "\n");
+}

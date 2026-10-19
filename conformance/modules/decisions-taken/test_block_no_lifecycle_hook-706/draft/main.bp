@@ -1,3 +1,31 @@
 //// Decision 706 — No test lifecycle hook: nothing implicit runs around a `test` block; a test body calls its reset helper.
 
-pub fn main() -> void {}
+import {io.terminal, testing.asserts} from "std";
+import {runtime.rkProp, runtime.rkSetProp, runtime.rkResetSingletons} from "rakun";
+
+// The reset every test of this file calls itself: nothing runs it implicitly.
+fn freshConfig() -> void {
+    val _s = rkResetSingletons();
+    val _p = rkSetProp("server.port", "8080");
+}
+
+test "the port reads its configured value" {
+    freshConfig();
+    try asserts.equals(rkProp("server.port"), "8080");
+}
+
+test "an override does not leak into the next test" {
+    freshConfig();
+    val _o = rkSetProp("server.port", "9090");
+    try asserts.equals(rkProp("server.port"), "9090");
+}
+
+test "a later test starts from the reset it calls" {
+    freshConfig();
+    try asserts.equals(rkProp("server.port"), "8080");
+}
+
+pub fn main() -> void {
+    freshConfig();
+    terminal.print(rkProp("server.port"), "\n");
+}

@@ -1,3 +1,52 @@
 //// Decision 554 — A library sidecar that unwinds with a thrown term through a `host`-wrapped call is a library gap, never a compiler mechanism
 
-pub fn main() -> void {}
+import {io.terminal, compiler, failure.HostError} from "std";
+import {html.html.html, element.Element, element.renderToString} from "rakun-bpp";
+// The builder the markup's tag calls.
+import {elements.section} from "rakun-bpp";
+
+pub type Problem {
+    Missing,
+    Host(error: HostError),
+}
+
+// What a render answers: navigation is data the renderer reads.
+pub type Rendered {
+    Page(element: Element),
+    Redirect(to: string),
+    NotFound,
+}
+
+// The host boundary converts a raise into an `Error`; no term unwinds through it.
+#[compiler.external(.Erlang("rakun_posts:load($0)", result: true))]
+declare fn hostLoad(id: string) -> Result<string, HostError>;
+
+fn loadPost(id: string) -> Result<string, Problem> {
+    if (id == "") throw Problem.Missing;
+    case hostLoad(id) {
+        Ok(body) -> return body;
+        Error(e) -> throw Problem.Host(error: e);
+    }
+}
+
+fn Post(id: string, signedIn: bool) -> Rendered {
+    if (!signedIn) return Rendered.Redirect(to: "/login");
+    return case loadPost(id) {
+        Ok(body) -> Rendered.Page(element: html @`<section>${body}</section>`);
+        Error(_) -> Rendered.NotFound;
+    };
+}
+
+fn serve(r: Rendered) -> string {
+    return case r {
+        Page(element) -> "200 " + renderToString(element);
+        Redirect(to) -> "303 " + to;
+        NotFound -> "404";
+    };
+}
+
+pub fn main() -> void {
+    terminal.print(serve(Post("7", false)), "\n");
+    terminal.print(serve(Post("", true)), "\n");
+    terminal.print(serve(Post("7", true)), "\n");
+}

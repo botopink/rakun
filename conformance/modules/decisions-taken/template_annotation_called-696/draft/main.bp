@@ -1,3 +1,29 @@
 //// Decision 696 — A template function is an annotation only when its signature declares the annotated declaration as its second parameter (578 (1): `syntax q: string`, then `syntax decl: unknown`); called as `` f @`…` `` it is `template-annotation-only`, and a template without that parameter at `#[f @`…`]` is `template-annotation-without-decl`.
 
-pub fn main() -> void {}
+import {io.terminal, compiler, compiler.Lit} from "std";
+
+pub type Statement(sql: string)
+
+// An annotation template: the annotated declaration is its second parameter.
+fn entityQuery(syntax q: string, syntax decl: unknown) -> anyvalue {
+    compiler.setMeta(Statement(sql: compiler.text(q)));
+    return compiler.ast(Lit(""));
+}
+
+// An expression template: the text alone.
+fn count(syntax q: string) -> anyvalue {
+    return compiler.ast(Lit("select count(*) from " + compiler.text(q)));
+}
+
+pub behavior Users {
+    #[entityQuery @`select * from users where id = ${id}`]
+    fn byId(self: Self, id: i32) -> string;
+}
+
+pub fn main() -> void {
+    val lines: string[] = comptime compiler
+        .methods(Users)
+        .map({ m -> m.name + ": " + (m.meta(Statement)?.sql ?? "none") });
+    terminal.print(lines.join("\n"), "\n");
+    terminal.print(count @`users`, "\n");
+}

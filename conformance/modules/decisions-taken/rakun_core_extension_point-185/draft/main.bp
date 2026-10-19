@@ -1,3 +1,30 @@
 //// Decision 185 — When one rakun member has to tell or ask another and an edge between them would be a cycle or drag a member into consume
 
-pub fn main() -> void {}
+import {io.terminal} from "std";
+import {rkTagEpoch, rkBumpTag} from "rakun";
+
+// `rakun-cache`'s side: a revalidation bumps the tag's epoch in the core.
+fn refreshPrices() -> i64 {
+    return rkBumpTag("prices");
+}
+
+pub type Cached(body: string, epoch: i64)
+
+// `rakun-restclient`'s side: the epoch is stored beside the response; a changed one is a miss.
+pub type PriceClient(tag: string) {
+    pub fn store(self: Self, body: string) -> Cached {
+        return Cached(body: body, epoch: rkTagEpoch(self.tag));
+    }
+
+    pub fn fresh(self: Self, c: Cached) -> bool {
+        return c.epoch == rkTagEpoch(self.tag);
+    }
+}
+
+pub fn main() -> void {
+    val client = PriceClient(tag: "prices");
+    val entry = client.store("{\"eur\": 1.08}");
+    terminal.print(entry.epoch, " ", client.fresh(entry), "\n");
+    val next = refreshPrices();
+    terminal.print(next, " ", client.fresh(entry), "\n");
+}

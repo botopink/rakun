@@ -1,3 +1,40 @@
 //// Decision 606 — No `#[builtin]` and no `@name`: the types and behaviors a program reaches without an import are declared in `primitives.bp`; what the compiler does is a member of `compiler`; the two std functions left are imported.
 
-pub fn main() -> void {}
+import {io.terminal} from "std";
+import {failure.panic} from "std";
+import {compiler} from "std";
+import {decorators.restController, decorators.getMapping} from "rakun";
+import {http.Request, http.Response} from "rakun";
+
+// `Result` is the prelude's, written bare like `string`.
+fn parsePort(raw: string) -> Result<i64, string> {
+    val n = try raw.parseInt();
+    if (n < 1 || n > 65535) throw "out of range: " + raw;
+    return n;
+}
+
+// A host binding: the compiler's decorator, a member of `compiler`.
+#[compiler.external(.Erlang("erlang:system_time(millisecond)"), .JavaScript("Date.now()"))]
+declare fn nowMillis() -> i64;
+
+#[restController]
+pub type PortController() {
+    #[getMapping("/port/:raw")]
+    pub fn port(self: Self, req: Request) -> Response {
+        return case parsePort(req.param("raw")) {
+            Ok(p) -> Response.ok(p.toString());
+            Error(e) -> Response.badRequest(e);
+        };
+    }
+}
+
+pub fn main() -> void {
+    // What the compiler knows, asked of `compiler` at build.
+    val methods = comptime compiler.typeInfo(PortController).methods.length;
+    terminal.print("PortController has ", methods, " handler", "\n");
+    val port = case parsePort("8080") {
+        Ok(p) -> p;
+        Error(e) -> panic(e);
+    };
+    terminal.print(port, " ", nowMillis() > 0, "\n");
+}
