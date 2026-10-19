@@ -49,7 +49,16 @@ declare fn rkMetaExists(file: string) -> bool;
 declare fn rkMetaAdd<T>(family: string, value: T) -> i32;
 
 #[compiler.external(.Erlang("""persistent_term:get({rakun_meta, $0}, [])"""))]
-declare fn rkMetaAll<T>(family: string) -> T[];
+declare fn rkMetaAllRaw(family: string) -> unknown[];
+
+// The `family` registrations that are a `T` (668).
+fn rkMetaAll<T>(t: type<T>, family: string) -> T[] {
+    var out: T[] = [];
+    for (rkMetaAllRaw(family)) { entry ->
+        if (entry is t) out.push(entry);
+    }
+    return out;
+}
 
 #[compiler.external(
     .Erlang("""(fun() -> [persistent_term:erase(K) || {{rakun_meta, _} = K, _} <- persistent_term:get()], 0 end)()"""),
@@ -71,7 +80,7 @@ pub fn resetMetadataRoutes() -> i32 {
 // A family is claimed only once its value validated, so a refused
 // registration leaves nothing behind.
 fn notYet(family: string) -> i32 {
-    val existing: string[] = rkMetaAll(family);
+    val existing = rkMetaAllRaw(family);
     if (existing.length > 0)
         panic(
             "rakun metadata: a "
@@ -208,14 +217,12 @@ declare fn rkMetaRunSitemap(
 ) -> SitemapEntry[];
 
 fn sitemapShards() -> Array<SitemapEntry[]> {
-    val producers: Array<fn() -> Task<SitemapEntry[]>> = rkMetaAll(
-        "sitemap-producer",
-    );
     var entries: SitemapEntry[] = [];
-    for (producers) { p ->
-        for (rkMetaRunSitemap(p)) { e ->
-            entries.push(e);
-        }
+    for (rkMetaAllRaw("sitemap-producer")) { p ->
+        if (p is fn() -> Task<SitemapEntry[]>)
+            for (rkMetaRunSitemap(p)) { e ->
+                entries.push(e);
+            }
     }
     return shardEntries(entries);
 }
@@ -399,7 +406,7 @@ pub fn registerManifest(produce: fn() -> Task<WebManifest>) -> i32 {
 
 // What front 32 links: `/manifest.webmanifest`, or `""` when none is registered.
 pub fn manifestHref() -> string {
-    val m: string[] = rkMetaAll("manifest");
+    val m: string[] = rkMetaAll(string, "manifest");
     return if (m.length > 0) "/manifest.webmanifest" else "";
 }
 
@@ -525,7 +532,7 @@ fn serveFile(
 
 // The nearest registration of each kind at or above `pattern`.
 pub fn iconsFor(pattern: string) -> Array<IconRef> {
-    val all: IconFile[] = rkMetaAll("icon");
+    val all: IconFile[] = rkMetaAll(IconFile, "icon");
     var out: Array<IconRef> = [];
     for (["favicon", "icon", "apple-icon"]) { k ->
         var best = "";
@@ -664,7 +671,7 @@ pub fn setImageRenderer(
     render: PageRenderer,
 ) -> i32 {
     val pattern = patternOfSeg(seg);
-    val regs: ImageReg[] = rkMetaAll("image");
+    val regs: ImageReg[] = rkMetaAll(ImageReg, "image");
     val known = regs.filter(
         { r -> imageFileName(r.route.kind) == imageFileName(kind) && r.route.pattern == pattern && r.file == "" },
     ).length
@@ -734,7 +741,7 @@ fn serveDynamic(
 }
 
 fn nearestImage(kind: ImageKind, pathname: string) -> ?ImageReg {
-    val regs: ImageReg[] = rkMetaAll("image");
+    val regs: ImageReg[] = rkMetaAll(ImageReg, "image");
     var best: ImageReg[] = [];
     for (regs) { r ->
         val applies = imageFileName(r.route.kind) == imageFileName(kind)
@@ -749,7 +756,7 @@ fn nearestImage(kind: ImageKind, pathname: string) -> ?ImageReg {
 
 // The registration answering at `pattern` (a page pattern), nearest ancestor.
 pub fn resolveImage(kind: ImageKind, pattern: string) -> ?ImageRoute {
-    val regs: ImageReg[] = rkMetaAll("image");
+    val regs: ImageReg[] = rkMetaAll(ImageReg, "image");
     var best: ImageRoute[] = [];
     for (regs) { r ->
         val p = r.route.pattern;
@@ -808,7 +815,7 @@ pub fn imagesFor(pathname: string, pattern: string) -> Array<ImageMeta> {
 // ── step 6 — the table and the scan ─────────────────────────────────────────
 
 pub fn metadataRoutePatterns() -> string[] {
-    return rkMetaAll("pattern");
+    return rkMetaAll(string, "pattern");
 }
 
 pub fn metadataFileNames() -> string[] {

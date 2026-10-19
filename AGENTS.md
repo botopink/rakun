@@ -17,7 +17,7 @@ How the wiring works: each component decorator (`decorators.bp`) is a comptime f
 over the annotated `type` (`DeclKind.Type` with no `variants` — an enum-shaped `type` is rejected). It contributes (1) a scan
 self-registration, an executor (`compiler.compile`) run before `main`, and (2) the member `<Type>.make()` (decision 234), a SINGLETON
 factory that constructs the value once (`rkSingleton`) and caches it, injecting
-each field through `rkResolve("<FieldType>")` (§ The catalogue and constructor
+each field through `rkResolve(<FieldType>, "<FieldType>")` (§ The catalogue and constructor
 injection) — except a `#[value("key")]` field, filled from config (`rkProp`/
 `rkPropInt`) and kept OFF the DI graph. A controller additionally registers one
 route per mapped method (its member `<Type>.rkRoutes()`, text because it calls methods named at build, run by an executor) (reading `compiler.methods(decl)` + the `#[route]`
@@ -1471,7 +1471,7 @@ Decision 266 makes a `comptime` block evaluate at compile time everywhere, so th
 refusal becomes a build error; until `01-checker` step 21 lands the lift, the
 block written inside a function runs at boot on erlang (rakun's one target) and
 the refusal is a boot failure. A field `clock: Clock` of a stereotyped type is
-`rkResolve("Clock")` in its `make()`: the catalogue's entry narrowed with
+`rkResolve(Clock, "Clock")` in its `make()`: the catalogue's entry narrowed with
 `is fn() -> T` and built once under `"bean:<name>"`; an entry of another shape
 stops the boot with `beanTypeProblem` (the bean and the expected type); a name
 the catalogue lacks is asked of the context table (`#[managed]`, `#[provides]`,
@@ -1688,8 +1688,8 @@ the surface it may rely on; none of it changes without a note here.
 
 | What | Where | Shape |
 |---|---|---|
-| The root context | `context.rootContext()` (and `rkResolve("Context")`, which `rkInstallBeans` puts in the catalogue) | `Context`, a singleton, exempt from the cycle guard and absent from its own `beanNames()` |
-| Per-render resolution | `ctx.resolve(typeName)` / `ctx.resolveNamed(typeName, qualifier)` | `?T` from an ANNOTATED binding — `val x: ?Foo = ctx.resolve("Foo")`; the string is unchecked against `T` |
+| The root context | `context.rootContext()` (and `rkResolve(Context, "Context")`, which `rkInstallBeans` puts in the catalogue) | `Context`, a singleton, exempt from the cycle guard and absent from its own `beanNames()` |
+| Per-render resolution | `ctx.resolve(typeName)` / `ctx.resolveNamed(typeName, qualifier)` | `?T` from an ANNOTATED binding — `val x: ?Foo = ctx.resolve(Foo, "Foo")`; the string is unchecked against `T` |
 | The per-request child | `ctx.child(name)` → `rkRegisterBeanAt(path, …)` | a bean is visible from a path when registered at it or an ancestor, nearest wins; `""` is the root |
 | Request scope | `rkRequestScoped(key, build)` · `rkRequestScopeEnd()` | the process dictionary on the BEAM, an explicit bracket on node. Front 62 owns the ACCESSORS; this is the storage |
 | Publishing | `ctx.publish(ev)` · `events.publishEvent(ev)` · `events.event(name, source, payload)` | answers how many listeners ran; a listener that raises is recorded, not propagated |
@@ -1730,7 +1730,7 @@ nothing. Every type a test file declares is named for that file
 The catalogue holds one factory per name (`rkAddBean` refuses a second), so a
 tie is only reachable through the context table, from two `#[provides]`
 functions or two `#[bean]` methods producing one type. So `chooseBean` — behind
-`rkFind(typeName)`, `ctx.resolve` and `rkResolve`'s fallback — takes the single candidate, or the single `#[primary]` one,
+`rkFind(T, typeName)`, `ctx.resolve` and `rkResolve`'s fallback — takes the single candidate, or the single `#[primary]` one,
 and otherwise RAISES naming both owners. A tie is an error and never a silent
 first-wins. `rkHasBean` never raises — an ambiguous type IS registered, and a
 caller asking whether the container knows about it deserves the answer rather
@@ -1739,7 +1739,7 @@ than the halt `resolve` owes it.
 `resolve` takes the type name as a STRING because the type argument is not
 reachable at run time: there is no `@typeName<T>()` and explicit generic
 arguments do not parse at a call site. The type comes from the annotated binding
-— `val repo: ?UserRepository = ctx.resolve("UserRepository");` — and the pairing
+— `val repo: ?UserRepository = ctx.resolve(UserRepository, "UserRepository");` — and the pairing
 of `T` with the string is unchecked. Both halves are language gaps, recorded in
 the front's README; dropping the generic and returning `any` would lose the type
 everywhere, and the string is the smaller cost.
@@ -2423,7 +2423,7 @@ which side said no. The spec does not pin that case; this is the restrictive
 reading and it is written down here rather than left to the code.
 
 The global policy is a `#[provides]`d `CorsPolicy` read out of front 06's
-container by TYPE NAME (`rkResolve("CorsPolicy")` — the string and the annotated
+container by TYPE NAME (`rkResolve(CorsPolicy, "CorsPolicy")` — the string and the annotated
 binding are paired by hand, front 06's own recorded gap). A per-controller
 `#[crossOrigin("https://a.test", "GET,POST")]` is keyed by the controller's
 `#[route]` prefix; the LONGEST matching prefix wins, ties go to declaration
@@ -3317,7 +3317,7 @@ on `rakun-service`. `modules/rakun` is untouched by this front.
 | `src/datasource.bp` | `DataSource` / `Connection` behaviors (generic: `connect`, `close`, `stats` — front 09 reads it), `PooledDataSource`, `PoolStats`, arm selection from `rakun.datasource.url`, the refusals, `startDataSource`, `dataSourceBoot`, `rkPoolStats` |
 | `src/sql/params.bp` | `Param`, `param`, `bindNamed` (`:name` → `$1` / `?`), the missing / unused / duplicate refusals |
 | `src/sql/rows.bp` | `SqlOutcome` (the host's one answer), `Row` (`get` / `int` / `long` / `bool` / `has`), `Rows` (`rowCount` / `at` / `first` / `toList` / `column`) |
-| `src/sql/template.bp` | `SqlTemplate`, `Tx`, `defaultSqlTemplate` (the `#[provides]` behind `rkResolve("SqlTemplate")`), `rkTxRun`, the `*Async` twins, `withRollback` |
+| `src/sql/template.bp` | `SqlTemplate`, `Tx`, `defaultSqlTemplate` (the `#[provides]` behind `rkResolve(SqlTemplate, "SqlTemplate")`), `rkTxRun`, the `*Async` twins, `withRollback` |
 | `src/sql/query.bp` | `#[query]`, `rkRegisterQuery`, `rkRegisteredQueries` |
 | `src/sql/transactional.bp` | `#[transactional]` (the `<Type>Tx` proxy), `#[noTransaction]`, `#[propagation]` |
 | `src/sql/health.bp` | the `db` indicator (`#[healthIndicator("db")]` + `registerDbHealth()`) |
@@ -4179,7 +4179,7 @@ and ships no runner (tests are `test` blocks under `botopink test`).
   inside `mocks.bp`, so a consumer writes the double over the qualified runtime
   (`mocks.invoke(self.mockId, "find", [mocks.key(id)], "")`) and a
   `#[configuration]` `#[bean]` returning the behavior makes it the injected
-  implementation — Spring's `@MockBean`. `rkResolve("<Behavior>")` hands the test
+  implementation — Spring's `@MockBean`. `rkResolve(<Behavior>, "<Behavior>")` hands the test
   the same singleton to stub and `verify` (`test/mocks_pairing_test.bp`).
 - **The test-seam convention.** A front that mutates shared state exposes a
   read-only accessor for tests (a value, never a handle; it clears nothing) and
@@ -4991,7 +4991,7 @@ completed handshake.
   per type, shared across a 3-level chain / diamond), collected into the entry
   point's catalogue (decisions 234, 254, 256).
 - **Constructor injection** — a dependency is declared as a field of the `type` and
-  resolved **by type** (`rkResolve("<FieldType>")`: the catalogue, then the
+  resolved **by type** (`rkResolve(<FieldType>, "<FieldType>")`: the catalogue, then the
   context table).
   Immutable-first: no setter/field injection.
 - **`#[value("key")]` property injection** — a `#[value]` field is filled from the
@@ -5196,3 +5196,14 @@ closure of each module it uses (`UserController`, `UserService`,
 declaration in the importing module, so every type its fields and method
 signatures name has to be in scope there too, or the build reds with
 `unknown type '<Name>'`.
+
+## A type parameter is bound by a parameter (decisions 668, 758)
+
+A host cell whose type parameter only the return type named (`rkSessCurrent<S>() -> ?S`) is no longer declared so. The
+cell itself answers `unknown` (`rkSessCurrentRaw`, `rkCacheRowGetRaw`, `rkBeanInvokeRaw`, `rkMetaAllRaw`, …) and a botopink
+function over it takes the run-time type token `t: type<T>` and narrows with `is t`: `rkSessCurrent(Session)`,
+`rkCacheRowGet(CacheRow, name, key)`, `rkFind(T, typeName)`, `rkResolve(T, name)`, `ctx.resolve(T, typeName)`. The token is the
+run-time form (`t: type<T>`, no `comptime`): the per-type copy of a `comptime t: type<T>` function is not emitted across modules
+yet. A cell whose type is one concrete type answers it (`rkAdviceInvoke -> ?ProblemDetail`, `rkActionRunOf -> fn(form: FormData)
+-> ActionResult`); one whose type is a function type answers `unknown` and its caller narrows with `is fn(…) -> …`
+(`rkCacheCustomizers`, `rkStaticParamsGet`).

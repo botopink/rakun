@@ -363,6 +363,14 @@ fn pagePatterns() -> Array<string> {
     return entries.filter({ e -> e.kind == "P" }).map({ e -> e.pattern });
 }
 
+// The params producer recorded for `pattern`, `null` when none (668: the host
+// cell answers `unknown`, narrowed here).
+fn paramsProducer(pattern: string) -> ?fn() -> Task<StaticParams[]> {
+    val found = rkStaticParamsGet(pattern);
+    if (found is fn() -> Task<StaticParams[]>) return found;
+    return null;
+}
+
 fn candidatesOf(pattern: string) -> Array<Candidate> {
     val dynamicPattern = isDynamicPattern(pattern);
     if (dynamicPattern == false)
@@ -374,7 +382,7 @@ fn candidatesOf(pattern: string) -> Array<Candidate> {
                 patternDynamic: false,
             ),
         ];
-    val produce: ?fn() -> Task<StaticParams[]> = rkStaticParamsGet(pattern);
+    val produce = paramsProducer(pattern);
     if (produce == null) return [];
     val rows: StaticParams[] = rkStaticProduce(produce);
     return expandParams(pattern, rows).map(
@@ -423,7 +431,7 @@ pub fn prerenderAll(strict: bool) -> PrerenderReport {
     for (pagePatterns()) { pattern ->
         val config: SegmentConfig = configFor(pattern);
         val dynamicPattern = isDynamicPattern(pattern);
-        val hasParams = rkStaticParamsGet(pattern) != null;
+        val hasParams = paramsProducer(pattern) != null;
         if (dynamicPattern && hasParams == false) {
             val d: KindDecision = decideKind(config, false, true, false, "");
             val _k = rkStaticKindPut(pattern, kindLetter(d.kind), d.reason);
@@ -564,7 +572,7 @@ pub fn staticExport(outDir: string) -> PrerenderReport {
     var lines: string[] = [];
     var stored = 0;
     for (pagePatterns()) { pattern ->
-        if (isDynamicPattern(pattern) && rkStaticParamsGet(pattern) == null)
+        if (isDynamicPattern(pattern) && paramsProducer(pattern) == null)
             panic(
                 "rakun static: `"
                     + pattern

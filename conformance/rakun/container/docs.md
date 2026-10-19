@@ -77,7 +77,7 @@ keeps `?OrderCache` an `?OrderCache`.
 {provides/src/main.bp}
 
 `Clock` is now injectable by type — a `clock: Clock` field gets the `#[primary]`
-one — and `ctx.resolveNamed("Clock", "fixed")` reaches the other. It is not
+one — and `ctx.resolveNamed(Clock, "Clock", "fixed")` reaches the other. It is not
 spelled `#[bean]` because `#[bean]` already exists and is frozen at a METHOD of a
 `#[configuration]`; `#[provides]` is the function form.
 

@@ -236,7 +236,15 @@ pub declare fn rkBeanHasRecord(record: string) -> bool;
 // The factory stored under this EXACT line, invoked. botopink chose the line
 // out of `rkBeanTable()`; the host does an equality test and a call.
 #[compiler.external(.Erlang("rakun_context:bean_invoke($0)"))]
-pub declare fn rkBeanInvoke<T>(record: string) -> ?T;
+declare fn rkBeanInvokeRaw(record: string) -> unknown;
+
+// The bean stored under `record`, as the `T` the caller names (668): `null`
+// when it is no `T`.
+pub fn rkBeanInvoke<T>(t: type<T>, record: string) -> ?T {
+    val built = rkBeanInvokeRaw(record);
+    if (built is t) return built;
+    return null;
+}
 
 // The same call with the value discarded, for the eager pass: the caller has no
 // type to bind the answer to, and a construction that raises must still raise.
@@ -481,7 +489,7 @@ pub fn chooseBeanNamed(
 //     };
 //     val _i = rkInstallBeans(beans);
 //
-// A field `clock: Clock` of a stereotyped type is `rkResolve("Clock")` in the
+// A field `clock: Clock` of a stereotyped type is `rkResolve(Clock, "Clock")` in the
 // type's `make()` member: the catalogue's entry, narrowed with
 // `is fn() -> T`, built once per name. A name the catalogue does not hold is
 // asked of the context table (`#[managed]`, `#[provides]`, `#[imports]` and a
@@ -542,13 +550,13 @@ pub fn rkInstalledBeans() -> string[] {
 
 // Constructor injection's door: the bean named `name`, as a `T`, or the boot
 // stops naming the bean and the type it was expected to be.
-pub fn rkResolve<T>(name: string) -> T {
+pub fn rkResolve<T>(t: type<T>, name: string) -> T {
     val entry = rkCatalogueEntry(name);
     if (entry is fn() -> T) return rkSingleton("bean:" + name, entry);
     if (entry != null) panic(beanTypeProblem(name));
     val record = chooseBean("", name);
     if (record == "") panic(missingBeanProblem(name));
-    val built: ?T = rkBeanInvoke(record);
+    val built: ?T = rkBeanInvoke(t, record);
     if (built == null) panic(missingBeanProblem(name));
     return built;
 }
@@ -556,26 +564,27 @@ pub fn rkResolve<T>(name: string) -> T {
 // The programmatic doors, as free functions, answering `null` for a type no
 // bean provides. `Context` is the record face of the same three, and the
 // former declaration-only `behavior Context` is what they replace.
-pub fn rkFind<T>(typeName: string) -> ?T {
-    return rkFindIn("", typeName);
+pub fn rkFind<T>(t: type<T>, typeName: string) -> ?T {
+    return rkFindIn(t, "", typeName);
 }
 
-pub fn rkFindIn<T>(path: string, typeName: string) -> ?T {
+pub fn rkFindIn<T>(t: type<T>, path: string, typeName: string) -> ?T {
     val record = chooseBean(path, typeName);
-    if (record == "") return null else return rkBeanInvoke(record);
+    if (record == "") return null else return rkBeanInvoke(t, record);
 }
 
-pub fn rkFindNamed<T>(typeName: string, qualifier: string) -> ?T {
-    return rkFindNamedIn("", typeName, qualifier);
+pub fn rkFindNamed<T>(t: type<T>, typeName: string, qualifier: string) -> ?T {
+    return rkFindNamedIn(t, "", typeName, qualifier);
 }
 
 pub fn rkFindNamedIn<T>(
+    t: type<T>,
     path: string,
     typeName: string,
     qualifier: string,
 ) -> ?T {
     val record = chooseBeanNamed(path, typeName, qualifier);
-    if (record == "") return null else return rkBeanInvoke(record);
+    if (record == "") return null else return rkBeanInvoke(t, record);
 }
 
 // `has` never raises. An ambiguous type IS registered, and a caller asking
@@ -614,7 +623,7 @@ pub fn rkBeanNamesIn(path: string) -> string[] {
 // `Context` IS INJECTABLE BY TYPE. `rkInstallBeans` puts `rootContext` in the
 // catalogue under `"Context"`, so a field of type `Context` wires with no extra
 // declaration — a stereotype's `make()` resolves every field through
-// `rkResolve("<FieldType>")` and this is the entry it finds. It
+// `rkResolve(<FieldType>, "<FieldType>")` and this is the entry it finds. It
 // is EXEMPT FROM THE CYCLE GUARD on purpose: it brackets nothing with
 // `rkEnter`/`rkDone` because it is constructed before the scan runs and depends
 // on nothing, so a component holding a `Context` can never be a cycle through
@@ -625,7 +634,7 @@ pub fn rkBeanNamesIn(path: string) -> string[] {
 // reachable at run time: there is no `@typeName<T>()`. The type comes from the
 // annotated binding or an explicit type argument —
 //
-//     val repo: ?UserRepository = self.ctx.resolve("UserRepository");
+//     val repo: ?UserRepository = self.ctx.resolve(UserRepository, "UserRepository");
 //     val same = self.ctx.resolve<UserRepository>("UserRepository");
 //
 // — and the pairing of `T` with the string is unchecked. That is a language
@@ -635,16 +644,17 @@ pub fn rkBeanNamesIn(path: string) -> string[] {
 pub type Context(
     scopePath: string,
 ) {
-    pub fn resolve<T>(self: Self, typeName: string) -> ?T {
-        return rkFindIn(self.scopePath, typeName);
+    pub fn resolve<T>(self: Self, t: type<T>, typeName: string) -> ?T {
+        return rkFindIn(t, self.scopePath, typeName);
     }
 
     pub fn resolveNamed<T>(
         self: Self,
+        t: type<T>,
         typeName: string,
         qualifier: string,
     ) -> ?T {
-        return rkFindNamedIn(self.scopePath, typeName, qualifier);
+        return rkFindNamedIn(t, self.scopePath, typeName, qualifier);
     }
 
     pub fn has(self: Self, typeName: string) -> bool {
@@ -894,7 +904,7 @@ pub fn managed(syntax decl: unknown) {
                     "rkPropInt(" + valKey + ")"
                 else
                     "rkProp(" + valKey + ")";
-            } else "rkResolve(\"" + f.typeName + "\")";
+            } else "rkResolve(" + f.typeName + ", \"" + f.typeName + "\")";
             args.push(f.name + ": " + expr);
         });
     val declName = compiler.name(decl)!;
@@ -1028,7 +1038,7 @@ pub fn managed(syntax decl: unknown) {
 // `decl.returnType` is what a `Fn` decl carries, and it is the same field
 // `#[configuration]` already reads off its `#[bean]` methods.
 //
-// WHO A FIELD GETS. Constructor injection is `rkResolve("<FieldType>")`: the
+// WHO A FIELD GETS. Constructor injection is `rkResolve(<FieldType>, "<FieldType>")`: the
 // catalogue first, then the context table this registration fills, where the
 // unqualified provider or the `#[primary]` one is the answer and two qualified
 // ones with no `#[primary]` are the ambiguity `chooseBean` raises, naming both.
