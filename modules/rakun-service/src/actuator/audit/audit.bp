@@ -40,7 +40,7 @@ pub type AuditEvent(
     atMs: i64,
     principal: string,
     kind: string,
-    data: Array<#(string, string)>,
+    data: array<#(string, string)>,
 )
 
 pub behavior AuditRepository {
@@ -50,7 +50,7 @@ pub behavior AuditRepository {
         principal: string,
         afterMs: i64,
         kind: string,
-    ) -> Array<AuditEvent>;
+    ) -> array<AuditEvent>;
     fn dropped(self: Self) -> i32;
     fn arm(self: Self) -> string;
     fn capacity(self: Self) -> i32;
@@ -77,7 +77,7 @@ declare fn ringPut(table: string, capacity: i32, event: AuditEvent) -> i32;
 #[compiler.external(
     .Erlang("""(fun(__T) -> [__E || {{e, _}, __E} <- ets:tab2list(binary_to_existing_atom(__T))] end)($0)"""),
 )]
-declare fn ringAll(table: string) -> Array<AuditEvent>;
+declare fn ringAll(table: string) -> array<AuditEvent>;
 
 #[compiler.external(
     .Erlang("""(fun(__T) -> case ets:lookup(binary_to_existing_atom(__T), dropped) of [{dropped, __N}] -> __N; _ -> 0 end end)($0)"""),
@@ -110,7 +110,7 @@ pub type MemoryAuditRepository(table: string, size: i32) implement AuditReposito
         principal: string,
         afterMs: i64,
         kind: string,
-    ) -> Array<AuditEvent> {
+    ) -> array<AuditEvent> {
         return ringAll(self.table).filter(
             { e -> matches(e, principal, afterMs, kind) },
         );
@@ -151,8 +151,8 @@ pub fn memoryAuditRepository(capacity: i32) -> MemoryAuditRepository {
     .Erlang("""(fun(__Q, __U) -> persistent_term:put(rakun_audit_sql, {__Q, __U}), 0 end)($0, $1)"""),
 )]
 pub declare fn installAuditSql(
-    query: fn(sql: string, params: Array<#(string, string)>) -> Array<Array<string>>,
-    update: fn(sql: string, params: Array<#(string, string)>) -> i32,
+    query: fn(sql: string, params: array<#(string, string)>) -> array<array<string>>,
+    update: fn(sql: string, params: array<#(string, string)>) -> i32,
 ) -> i32;
 
 #[compiler.external(
@@ -160,15 +160,15 @@ pub declare fn installAuditSql(
 )]
 declare fn sqlQuery(
     sql: string,
-    params: Array<#(string, string)>,
-) -> Array<Array<string>>;
+    params: array<#(string, string)>,
+) -> array<array<string>>;
 
 #[compiler.external(
     .Erlang("""(fun(__S, __P) -> case persistent_term:get(rakun_audit_sql, undefined) of undefined -> erlang:error({panic, <<"rakun-service: the SQL audit repository has no executor">>}); {_, __U} -> try {ok, __U(__S, __P)} catch _:{panic, __R} when is_binary(__R) -> {error, __R}; _:__R -> {error, iolist_to_binary(io_lib:format("~p", [__R]))} end end end)($0, $1)"""),
 )]
 declare fn sqlUpdate(
     sql: string,
-    params: Array<#(string, string)>,
+    params: array<#(string, string)>,
 ) -> Result<i32, string>;
 
 #[compiler.external(
@@ -182,12 +182,12 @@ pub declare fn auditWriteFailures() -> i32;
 #[compiler.external(
     .Erlang("""(fun(__Ps) -> unicode:characters_to_binary(uri_string:compose_query([{unicode:characters_to_list(__K), unicode:characters_to_list(__V)} || {__K, __V} <- __Ps], [{encoding, utf8}])) end)($0)"""),
 )]
-declare fn encodePairs(pairs: Array<#(string, string)>) -> string;
+declare fn encodePairs(pairs: array<#(string, string)>) -> string;
 
 #[compiler.external(
     .Erlang("""(fun(__D) -> case __D of <<>> -> []; _ -> case uri_string:dissect_query(__D) of __L when is_list(__L) -> [{unicode:characters_to_binary(__K), case __V of true -> <<>>; _ -> unicode:characters_to_binary(__V) end} || {__K, __V} <- __L]; _ -> [] end end end)($0)"""),
 )]
-declare fn decodePairs(data: string) -> Array<#(string, string)>;
+declare fn decodePairs(data: string) -> array<#(string, string)>;
 
 #[compiler.external(.Erlang("""(fun(__S) -> try binary_to_integer(__S) catch _:_ -> 0 end end)($0)"""))]
 declare fn toI64(s: string) -> i64;
@@ -199,7 +199,7 @@ pub fn auditSchemaSql(table: string) -> string {
         + " (at_ms integer, principal text, kind text, data text)";
 }
 
-fn eventOf(row: Array<string>) -> AuditEvent {
+fn eventOf(row: array<string>) -> AuditEvent {
     return AuditEvent(
         atMs: toI64(row.at(0) ?? "0"),
         principal: row.at(1) ?? "",
@@ -258,7 +258,7 @@ pub type SqlAuditRepository(table: string) implement AuditRepository {
         principal: string,
         afterMs: i64,
         kind: string,
-    ) -> Array<AuditEvent> {
+    ) -> array<AuditEvent> {
         return sqlQuery(
             auditFindSql(self.table, principal, afterMs, kind),
             [
@@ -332,7 +332,7 @@ declare fn activeSql() -> ?SqlAuditRepository;
 pub fn audit(
     kind: string,
     principal: string,
-    data: Array<#(string, string)>,
+    data: array<#(string, string)>,
 ) -> i32 {
     return recordActive(
         AuditEvent(
@@ -348,7 +348,7 @@ pub fn activeAuditFind(
     principal: string,
     afterMs: i64,
     kind: string,
-) -> Array<AuditEvent> {
+) -> array<AuditEvent> {
     val mem: ?MemoryAuditRepository = activeMemory();
     if (mem != null) return mem.find(principal, afterMs, kind);
     val sql: ?SqlAuditRepository = activeSql();
