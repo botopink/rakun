@@ -65,7 +65,7 @@ pub type HelloController(
     }
 }
 
-fn main() {
+fn main() -> void {
     Rakun.run();
 }
 ```
