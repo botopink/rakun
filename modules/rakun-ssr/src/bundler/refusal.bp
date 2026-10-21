@@ -54,10 +54,10 @@ fn moduleOf(modules: array<AppModule>, id: string) -> AppModule {
 
 pub fn checkServerOnly(graph: ClientGraph, modules: array<AppModule>) -> array<BuildRefusal> {
     var out: array<BuildRefusal> = [];
-    for m in graphModules(graph, modules) {
+    for (graphModules(graph, modules)) { m ->
         if (importsServerOnly(m.refs))
             out.push(BuildRefusal(kind: "server-only", subject: "serverOnly", moduleId: m.id, chain: chainOf(graph, m.id)));
-        for name in requestScopeImports(m.refs) {
+        for (requestScopeImports(m.refs)) { name ->
             out.push(BuildRefusal(kind: "request-scope", subject: name, moduleId: m.id, chain: chainOf(graph, m.id)));
         }
     }
@@ -70,7 +70,7 @@ fn argAfter(text: string, open: i32) -> string {
     var depth = 0;
     var out = "";
     var done = false;
-    for c in text.slice(open).split("") {
+    for (text.slice(open).split("")) { c ->
         if (done == false) {
             if (c == "(") depth = depth + 1;
             if (c == ")") depth = depth - 1;
@@ -107,8 +107,8 @@ fn positionsOf(text: string, needle: string) -> i32[] {
 pub fn checkEnvIn(m: AppModule, chain: array<string>, envOf: fn(name: string) -> string) -> #(array<#(string, string)>, array<BuildRefusal>) {
     var inlined: array<#(string, string)> = [];
     var refused: array<BuildRefusal> = [];
-    for line in m.source.split("\n") {
-        for at in positionsOf(line, "env.read(") {
+    for (m.source.split("\n")) { line ->
+        for (positionsOf(line, "env.read(")) { at ->
             val arg = argAfter(line, at + 8);
             if (isStringLiteral(arg)) {
                 val name = arg.slice(1, arg.length() - 1);
@@ -118,13 +118,13 @@ pub fn checkEnvIn(m: AppModule, chain: array<string>, envOf: fn(name: string) ->
                     refused.push(BuildRefusal(kind: "env-non-public", subject: name, moduleId: m.id, chain: chain));
             } else refused.push(BuildRefusal(kind: "env-dynamic", subject: "(expression)", moduleId: m.id, chain: chain));
         }
-        for at in positionsOf(line, "env.vars(") {
+        for (positionsOf(line, "env.vars(")) { at ->
             refused.push(BuildRefusal(kind: "env-vars", subject: "env.vars()", moduleId: m.id, chain: chain));
         }
-        for at in positionsOf(line, "env.write(") {
+        for (positionsOf(line, "env.write(")) { at ->
             refused.push(BuildRefusal(kind: "env-write", subject: "env.write", moduleId: m.id, chain: chain));
         }
-        for at in positionsOf(line, "env.clear(") {
+        for (positionsOf(line, "env.clear(")) { at ->
             refused.push(BuildRefusal(kind: "env-write", subject: "env.clear", moduleId: m.id, chain: chain));
         }
     }
@@ -134,13 +134,13 @@ pub fn checkEnvIn(m: AppModule, chain: array<string>, envOf: fn(name: string) ->
 pub fn checkEnvReads(graph: ClientGraph, modules: array<AppModule>, envOf: fn(name: string) -> string) -> #(array<#(string, string)>, array<BuildRefusal>) {
     var inlined: array<#(string, string)> = [];
     var refused: array<BuildRefusal> = [];
-    for m in graphModules(graph, modules) {
+    for (graphModules(graph, modules)) { m ->
         val r = checkEnvIn(m, chainOf(graph, m.id), envOf);
-        for p in r._0 {
+        for (r._0) { p ->
             val seen = inlined.any({ q -> q._0 == p._0 });
             if (seen == false) inlined.push(p);
         }
-        for x in r._1 {
+        for (r._1) { x ->
             refused.push(x);
         }
     }
@@ -156,7 +156,7 @@ fn isAscii(text: string) -> bool {
 // The module-level `val`s of a literal token list, as `#(name, literal)`.
 fn literalVals(source: string) -> array<#(string, string)> {
     var out: array<#(string, string)> = [];
-    for raw in source.split("\n") {
+    for (source.split("\n")) { raw ->
         val l = raw.trim();
         val decl = l.startsWith("val ")
             && l.contains("= [")
@@ -183,9 +183,9 @@ pub fn emiliaCallsOf(moduleId: string, source: string) -> array<EmiliaCall> {
     var out: array<EmiliaCall> = [];
     val vals = literalVals(source);
     var n = 0;
-    for line in source.split("\n") {
+    for (source.split("\n")) { line ->
         n = n + 1;
-        for at in positionsOf(line, "emilia(") {
+        for (positionsOf(line, "emilia(")) { at ->
             val before = if (at == 0) "" else line.slice(at - 1, at);
             val standalone = before == "" || " ([{,=!".contains(before);
             if (standalone) {
@@ -209,7 +209,7 @@ pub fn emiliaCallsOf(moduleId: string, source: string) -> array<EmiliaCall> {
 fn flushLines(source: string) -> i32[] {
     var out: i32[] = [];
     var n = 0;
-    for line in source.split("\n") {
+    for (source.split("\n")) { line ->
         n = n + 1;
         val calls = positionsOf(line, "flush(").filter({ at -> at == 0 || " (!=".contains(line.slice(at - 1, at)) });
         if (calls.length > 0) out.push(n);
@@ -220,9 +220,9 @@ fn flushLines(source: string) -> i32[] {
 pub fn checkEmiliaCalls(graph: ClientGraph, modules: array<AppModule>) -> #(array<#(string, string)>, array<BuildRefusal>) {
     var styleMap: array<#(string, string)> = [];
     var refused: array<BuildRefusal> = [];
-    for m in graphModules(graph, modules) {
+    for (graphModules(graph, modules)) { m ->
         var k = 0;
-        for c in emiliaCallsOf(m.id, m.source) {
+        for (emiliaCallsOf(m.id, m.source)) { c ->
             k = k + 1;
             val site = m.id + ":" + c.line.toString();
             if (c.literal == false)
@@ -232,7 +232,7 @@ pub fn checkEmiliaCalls(graph: ClientGraph, modules: array<AppModule>) -> #(arra
             else
                 styleMap.push(#(m.id + "#" + k.toString(), c.tokens));
         }
-        for line in flushLines(m.source) {
+        for (flushLines(m.source)) { line ->
             refused.push(BuildRefusal(kind: "emilia-flush", subject: "flush() in a client module", moduleId: m.id
                 + ":"
                 + line.toString(), chain: chainOf(graph, m.id)));
@@ -279,7 +279,7 @@ pub fn styleProbeSource(styleMap: array<#(string, string)>) -> string {
         "pub fn onzeStyleRules() -> string {",
         "    val rows: string[] = [",
     ];
-    for e in styleMap {
+    for (styleMap) { e ->
         lines.push("        probe(" + sourceString(e._0) + ", " + e._1 + "),");
     }
     lines = lines.append(["    ];", "    return rows.join(\"\\n\");", "}"]);
@@ -289,7 +289,7 @@ pub fn styleProbeSource(styleMap: array<#(string, string)>) -> string {
 // A probe's output: `site|class|hash` lines.
 pub fn parseStyleProbe(text: string) -> array<StyleProbe> {
     var out: array<StyleProbe> = [];
-    for line in text.split("\n") {
+    for (text.split("\n")) { line ->
         val f = line.trim().split("|");
         if (f.length == 3)
             out.push(StyleProbe(site: f.at(0) ?? "", className: f.at(1) ?? "", bodyHash: f.at(2) ?? ""));
@@ -308,7 +308,7 @@ fn probeAt(rows: array<StyleProbe>, site: string) -> StyleProbe {
 pub fn styleParity(styleMap: array<#(string, string)>, js: array<StyleProbe>, beam: array<StyleProbe>) -> #(array<#(string, string)>, array<BuildRefusal>) {
     var classes: array<#(string, string)> = [];
     var refused: array<BuildRefusal> = [];
-    for e in styleMap {
+    for (styleMap) { e ->
         val a = probeAt(js, e._0);
         val b = probeAt(beam, e._0);
         val missing = a.site == "" || b.site == "";
@@ -366,13 +366,13 @@ pub fn refusalMessage(r: BuildRefusal) -> string {
 
 pub fn describeReport(report: BuildReport) -> string {
     var rows: string[] = [];
-    for p in report.inlined {
+    for (report.inlined) { p ->
         rows.push("inlined: " + p._0);
     }
-    for s in report.styleMap {
+    for (report.styleMap) { s ->
         rows.push("styleMap: " + s._0 + " -> " + s._1);
     }
-    for r in report.refusals {
+    for (report.refusals) { r ->
         rows.push("refused: " + refusalMessage(r).trimEnd());
     }
     val n = report.refusals.length;

@@ -1457,7 +1457,7 @@ registry — and installs it before anything resolves:
 ```bp
 val beans: Dict<string, unknown> = comptime {
     var d: Dict<string, unknown> = Dict.empty();
-    for b in @TypeInfo.all(with: [component, service, repository, controller, restController, configuration, autoConfiguration, configurationProperties], member: "make") {
+    for (@TypeInfo.all(with: [component, service, repository, controller, restController, configuration, autoConfiguration, configurationProperties], member: "make")) { b ->
         d = rkAddBean(d, b.name, b.value);
     }
     break d;
@@ -2493,8 +2493,8 @@ quietly matches nothing is the failure mode decision 67 exists to prevent.
 - **A method on a host-supplied `behavior` does not dispatch on erlang.** See
   *The chain's request value is NOT `Request`* above; it is front 04's
   `server_test.bp:74,80` and it is why `WebRequest` exists.
-- **A trailing-lambda `for` body needs its `;`.** `for x in xs { f(x) };`
-  is `unexpected }`; `for x in xs { f(x); };` compiles. Three lines cost a
+- **A trailing-lambda `for` body needs its `;`.** `for (xs) { x -> f(x) };`
+  is `unexpected }`; `for (xs) { x -> f(x); };` compiles. Three lines cost a
   compile each while writing `filter.bp`.
 - **Wrong placement is not expressible as a cell.** `#[filter]` on a function is
   a COMPILE failure, so a file containing one has no cell to run. A clean
