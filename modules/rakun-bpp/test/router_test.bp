@@ -13,6 +13,7 @@ import {router.RouterState, router.pairValue, router.patternSegments, router.seg
 import {element.Element, element.ElementBase, element.div, element.span, element.text, element.renderToString};
 import {encoding} from "std";
 import {refresh.refreshValue} from "actions";
+import {context.RenderScope} from "std";
 
 // ── step 1: the record and its accessors ────────────────────────────────────
 
@@ -185,31 +186,31 @@ test "router: a fill replaces the WHOLE snapshot, never one field of it" {
 // called plainly, renders the server pass, exactly as `hooks.bp` does with
 // `Counter`.
 
-// A hook called WITHOUT `use` answers its `Component<T>` — a Promise on
-// commonJS (decisions 104/128 of botopink 1.0.10-beta) — so the test body awaits it
-// and reads the value; the `use` form below activates it inside a component.
+// A hook called WITHOUT `use` answers its `Component<T>`, a lambda: the test
+// body runs it as a root, `c.run(RenderScope.root())`, and reads the value
+// (decision 791 (2), (4)); the `use` form below activates it inside a component.
 test "router: each hook answers the field it names, called without `use`" {
     val ignored = fill("/blog/hi", "slug=hi", "sort=new", "/blog/[slug]", 0);
-    val path = await pathname();
+    val path = (await pathname().run(RenderScope.root())).value;
     assert path == "/blog/hi";
-    val ps = await params();
+    val ps = (await params().run(RenderScope.root())).value;
     assert ps.length == 1;
-    val qs = await searchParams();
+    val qs = (await searchParams().run(RenderScope.root())).value;
     assert qs.length == 1;
-    val r = await router();
+    val r = (await router().run(RenderScope.root())).value;
     assert r.pattern == "/blog/[slug]";
     assert r.param("slug") == "hi";
 }
 
 test "router: selectedLayoutSegment(s) answer the layout depth, root-first" {
     val ignored = fill("/blog/hi", "slug=hi", "", "/blog/[slug]", 0);
-    val segs = await selectedLayoutSegments();
+    val segs = (await selectedLayoutSegments().run(RenderScope.root())).value;
     assert segs.length == 2;
     assert segs.join("/") == "blog/[slug]";
-    val top = await selectedLayoutSegment();
+    val top = (await selectedLayoutSegment().run(RenderScope.root())).value;
     assert top == "blog";
     val deeper = fill("/blog/hi", "slug=hi", "", "/blog/[slug]", 1);
-    val inner = await selectedLayoutSegment();
+    val inner = (await selectedLayoutSegment().run(RenderScope.root())).value;
     assert inner == "[slug]";
 }
 
@@ -233,7 +234,7 @@ component fn ActiveNav() -> Component<Element> {
 
 test "router: a component activating the hooks renders the server pass" {
     val ignored = fill("/blog/hi", "slug=hi", "", "/blog/[slug]", 0);
-    val e = await ActiveNav();
+    val e = (await ActiveNav().run(RenderScope.root())).value;
     assert e.tag == "div";
     assert e.children.length == 3;
     assert renderToString(e)

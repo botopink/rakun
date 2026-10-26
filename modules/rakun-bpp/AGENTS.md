@@ -507,7 +507,7 @@ question, not a code one.
 | The build | `request()` | six cells in, the record out. A plain function, not a hook, until front 19 step 2 |
 | **The writer pair** | `enterRequest(req)` · `leaveRequest()` | the ONE way request state is installed and removed, called by front 30's render once per render. The four pair lists are stored `encoding.formStringify`-encoded. Between the two `request()`/`cookies()`/`headers()` read it; outside them they RAISE |
 | The shortcuts | `cookies()` · `headers()` | the only two re-exported. `after`, `connection`, `draftMode` and memoization are front 62's, called from there |
-| The render entry | `renderServerComponent(component) -> Task<string>` | takes an **unstarted thunk** `fn() -> Task<Element>`, awaits exactly once, renders synchronously afterwards; `renderComponent` takes a `fn() -> Component<Element>` thunk |
+| The render entry | `renderServerComponent(component) -> Task<string>` | takes an **unstarted thunk** `fn() -> Task<Element>`, awaits exactly once, renders synchronously afterwards; `renderComponent` takes a `fn() -> Component<Element>` thunk and runs it as a root, `c.run(RenderScope.root())` (decision 791) |
 | The host halves | `src/server_runtime.mjs` · `src/sidecars/jhonstart_server.erl` | cell for cell, so one set of assertions runs on both rows. The BEAM store is the CALLING PROCESS's dictionary: a request is a process, it dies with it, two concurrent renders cannot see each other's cookies |
 
 **Two call-site rules.** The first only shows on the erlang row and is a compiler

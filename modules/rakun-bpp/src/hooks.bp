@@ -26,6 +26,7 @@
 // return type; the value is a plain tuple).
 
 import {element.Element, element.ElementBase};
+import {context.RenderScope} from "std";
 
 // The `{value, set}` cell a `state` hook yields (G1: a fn-typed field). A named
 // `type` (not a tuple) so `use state(0)` can be destructured *and* passed around
@@ -71,14 +72,15 @@ pub component fn reducer<S, A>(
 
 // ── tests ──────────────────────────────────────────────────────────────────
 //
-// The hook BODIES are pure `.bp`, so they are exercised by calling them directly
-// — without `use` a hook is an ordinary call (awaited: a `test` body has an
-// await channel), the first-render value. `Counter`
+// The hook BODIES are pure `.bp`, so they are exercised as roots: outside a
+// component body a hook or a component is run by the render library,
+// `c.run(RenderScope.root())`, and its value read (decision 791 (2), (4) —
+// `await` takes an `Async` alone), the first-render value. `Counter`
 // below is the activating form (a `Component` return + `use`), which lowers to the same
 // calls; it type-checks the capability and is rendered as the server pass.
 
 test "state yields its initial value and a callable setter" {
-    val c = await state(7);
+    val c = (await state(7).run(RenderScope.root())).value;
     assert c.value == 7;
     c.set(9); // G1: the fn-typed `set` field is callable
 }
@@ -87,26 +89,26 @@ test "state yields its initial value and a callable setter" {
 // (`#(current: T)`) are lost when `T` is instantiated — a compiler gap, not
 // the intended spelling (`r.current`, `rd.state`).
 test "memo computes eagerly; ref/reducer seed their boxes" {
-    val m = await memo({ ->
+    val m = (await memo({ ->
         3 + 4;
-    }, []);
+    }, []).run(RenderScope.root())).value;
     assert m == 7;
-    val r = await ref(0);
+    val r = (await ref(0).run(RenderScope.root())).value;
     assert r.0 == 0;
-    val rd = await reducer({ s, a -> s + a }, 10);
+    val rd = (await reducer({ s, a -> s + a }, 10).run(RenderScope.root())).value;
     assert rd.0 == 10;
     val dispatch = rd.1;
     dispatch(1);
 }
 
 test "a custom hook composes State and stays the {value,set} shape" {
-    val c = await counter(5);
+    val c = (await counter(5).run(RenderScope.root())).value;
     assert c.value == 5;
     c.set(6);
 }
 
 test "a component activating hooks renders the server pass when called plainly" {
-    val e = await Counter();
+    val e = (await Counter().run(RenderScope.root())).value;
     assert e.tag == "div";
 }
 

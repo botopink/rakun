@@ -474,22 +474,32 @@ fn enterDepth(route: PageContext, depth: i32) -> i32 {
     );
 }
 
+// The view of a segment that has no layout (or no template): the bare
+// `#children` placeholder, so the composition passes straight through.
+component fn markerView(props: LayoutProps) -> Component<Element> {
+    return childrenMarker();
+}
+
+// A layout's (a template's) view is resolved by one `use`, written at the top
+// of the body (357): the segment that has none takes `markerView` in the
+// argument, never a `return` before the `use` (decision 791 (3), (4)).
 component fn layoutOf(
     seg: UiSegment,
     route: PageContext,
     depth: i32,
 ) -> Component<Element> {
     enterDepth(route, depth);
-    if (seg.hasLayout == false) return childrenMarker();
-    val view = seg.layoutView;
-    val tree = await view(propsFor(route));
+    val none: fn(props: LayoutProps) -> Component<Element> = { props -> markerView(props) };
+    val view = if (seg.hasLayout) seg.layoutView else none;
+    val tree = use view(propsFor(route));
     return tree;
 }
 
 component fn templateOf(seg: UiSegment, route: PageContext) -> Component<Element> {
-    if (seg.hasTemplate == false) return childrenMarker();
-    val view = seg.templateView;
-    val tree = await view(propsFor(route));
+    val none: fn(props: LayoutProps) -> Component<Element> = { props -> markerView(props) };
+    val view = if (seg.hasTemplate) seg.templateView else none;
+    val tree = use view(propsFor(route));
+    if (seg.hasTemplate == false) return tree;
     val key = seg.pattern + "#" + __jhNextNav().toString();
     return Element(
         tag: "div",
