@@ -137,7 +137,7 @@ repository/rakun-bpp/
 │   │       ├── link_test.bp     ← `botopink test` flat suite: the props, the anchor's seven attribute rows, the prefetch table, the layout key, and `use linkStatus()` read by a `#[client]` component (front 27) — both rows
 │   │       └── reconcile_test.bp ← `botopink test` flat suite: `layoutKeys`/`sharedDepth`, and `applyTransition` over a RECORDING `DomOps` (inline `put`/`get` · `globalThis` cells; a three-island page counting mounts): the replaced depth, the call order, `data-jh-pending` set first and cleared last, a failed markup (front 27) — both rows
 │   ├── jhonstart-dom-test/ ← MEMBER (front 30's browser half; targets [commonJS]): `src/fake_dom.mjs` — a minimal document (parser for the render's markup, `querySelector(All)` over `tag` / `[attr]` / `[attr="v"]`, `template` content, `replaceChildren`, a serializer; `history` / `location` / `dispatchEvent` recorded) reached through `src/root.bp`'s `#[compiler.external(.JavaScript(…))]` cells and its `callFill(name, id)` / `callSignal(name)` wrappers — and `test/dom_test.bp`: the fill function (replaces its hole, idempotent, a missing hole dropped), `readPayload` (the last payload script, a refused text an `Error`), the signal function (relative redirect = `replaceState` + `popstate`, a listed absolute one `location.replace`, an unlisted one nothing, not-found swaps `[data-jh-root]` and drops later fills). No DOM on the BEAM, hence commonJS only (`decisions-pending.md` 30-g) — a structural restriction under `00-gate` gate-d: `botopink build --target erlang` refuses the member with `` `callGlobal` has no `#[compiler.external(.<Target>(…))]` for the erlang backend `` at `src/root.bp:37`
-│   └── rakun-bpp/ ← MEMBER (front 95; the helpers of `specs/1.0.10-beta/04-jhonstart/modules.md` § 5): `assert<Subject>(loc, …)` over `snap`'s `assertAs`, each with a pure `<subject>Text` twin, plus fixtures and the render harness
+│   └── rakun-bpp/ ← MEMBER (front 95; the helpers of `specs/04-jhonstart/modules.md` § 5): `assert<Subject>(loc, …)` over `snap`'s `assertAs`, each with a pure `<subject>Text` twin, plus fixtures and the render harness
 │       ├── botopink.json  ← name rakun-bpp, files [root.bp, harness.bp, assert_*.bp], dependencies { rakun-bpp, rakun-bpp, rakun-bpp: { workspace: true } }
 │       ├── src/root.bp    ← `pub mod` per helper file + one inline `test` proving the core resolves
 │       ├── src/harness.bp ← `fixtureRouter`, `fixtureRequest(method, path, lists = "")`, `fixturePageOver`, `stubEnvelope` (actions' `writeEnvelope`), `renderToStream` (declaration order), `Navigation` + `simulateNavigation(current, target)`, `recordingResponse` / `RecordedResponse` / `renderRecorded` / `renderStreamCollect` (inline recording cells: `put`/`get`, a `globalThis` entry)
@@ -160,7 +160,7 @@ repository/rakun-bpp/
 ```
 
 `modules/rakun-bpp/` is the `<lib>-test` member
-(`specs/1.0.10-beta/02-packaging/README.md` § 5): it stands on the
+(`specs/02-packaging/README.md` § 5): it stands on the
 `snap` library (`import {assertAs} from "snap"`, a git dependency of the member and of every
 example that records a snapshot; decision 391) — a helper computes its text (the `<subject>Text`
 twin) and hands it to `assertAs(loc, "<subject>", text)` with the CALLER's `compiler.src()` — and
@@ -173,13 +173,13 @@ one edit is `import {Element, ElementBase} from "rakun-bpp";` in `link.bp` (and
 the same line in `link_test.bp`); nothing in the core imported either module.
 The member declares no `targets`, so it inherits both rows — its code is pure;
 the four `#[compiler.external(.JavaScript(…))]` cells front 68 brings reopen that question
-(`specs/1.0.10-beta/04-jhonstart/modules.md` § 4).
+(`specs/04-jhonstart/modules.md` § 4).
 
-The other members `specs/1.0.10-beta/04-jhonstart/modules.md` § 1 plans —
+The other members `specs/04-jhonstart/modules.md` § 1 plans —
 `rakun-bpp` (67) and the `rakun-stylesheet` bridge (30, decision 113) —
 are created by those fronts, not here.
 
-The five example projects of `specs/1.0.10-beta/04-jhonstart/modules.md` § 8
+The five example projects of `specs/04-jhonstart/modules.md` § 8
 (`blog-ssr`, `nav-shell`, `islands`, `forms`, `document-shell`) each test
 through `rakun-bpp`'s helpers into their own `test/__snapshots__/`, every
 snapshot compared with `test-snap-examples.md`'s literal before it was accepted.

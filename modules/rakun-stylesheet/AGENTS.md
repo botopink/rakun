@@ -663,7 +663,7 @@ emilia/
 │   │   │                files [root.bp], `emilia` via { "workspace": true };
 │   │   │                EMPTY `pub` surface until the track-D fronts add the
 │   │   │                `assert<Subject>(loc, …)` helpers
-│   │   │                (`specs/1.0.10-beta/05-emilia/modules.md`)
+│   │   │                (`specs/05-emilia/modules.md`)
 │   │   └── src/root.bp ← one inline `test` proving the core resolves from it
 │   └── emilia/        ← THE CORE — what `from "rakun-stylesheet"` gives a consumer
 │       ├── botopink.json  name emilia · src src/ · entry root.bp ·
@@ -1641,7 +1641,7 @@ here), `runExamplesGate "$bin" <t>`, `runRefusalsGate` (no `refusals/` here).
 | 1.0.10-beta front 54 — theme | DONE — `theme.bp` + `spacing.bp` + `examples/emilia-theme/`; steps 1–7. `spacingNegHalf(n)` is the signed half step (`-0.5` is `spacingNegHalf(0)`; `spacingHalf` refuses a negative whole part), and the unknown-prefix refusal is asserted by its message (`emilia.bp` "front 54 — an entry in no namespace aborts…"). Front 33 hands over `paletteEntries() -> ThemeEntry[]`; fronts 33–47 rewire the dispatchers; front 56 wraps `themeCss`/`keyframeCss`; front 34 consumes `DarkMode` |
 
 The spec is the track README,
-[`specs/1.0.10-beta/05-emilia/README.md`](../../specs/1.0.10-beta/05-emilia/README.md), and its
+[`specs/05-emilia/README.md`](../../specs/1.0.10-beta/05-emilia/README.md), and its
 fronts.
 
 ## Conformance

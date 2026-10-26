@@ -122,7 +122,7 @@
 - **Front 95 — the package cut: `jhonstart-link` member.** Front 27's
   render-time half — `link.bp` and `reconcile.bp`, with `link_test.bp` and
   `reconcile_test.bp` — moves out of the core into `modules/jhonstart-link/`
-  (`from "jhonstart-link"`), as `specs/1.0.10-beta/04-jhonstart/modules.md` § 1
+  (`from "jhonstart-link"`), as `specs/04-jhonstart/modules.md` § 1
   cuts it. A relocation only: the one edit per file is `from "element"` →
   `from "jhonstart"` in `link.bp` and `link_test.bp`; `reconcile.bp` keeps its
   sibling import of `link`. Nothing in the core imported either module. The

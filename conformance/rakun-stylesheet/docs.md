@@ -55,5 +55,5 @@ The spec authors a richer surface that v0 does not yet ship:
   the `Map` for `persistent_term` or an Agent.
 
 The intent + the comptime expansion model live in the spec at
-the meta repository's `specs/1.0.10-beta/05-emilia/README.md`;
+the meta repository's `specs/05-emilia/README.md`;
 the AGENTS.md tracks the deferred items and the maintainer rules.

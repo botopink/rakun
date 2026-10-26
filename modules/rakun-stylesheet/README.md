@@ -134,7 +134,7 @@ identical.
 
 The full intent, the comptime expansion model, and the rakun-bpp
 integration contract live in
-[`specs/1.0.10-beta/05-emilia/README.md`](../../specs/1.0.10-beta/05-emilia/README.md).
+[`specs/05-emilia/README.md`](../../specs/1.0.10-beta/05-emilia/README.md).
 
 ## License
 

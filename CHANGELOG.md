@@ -524,7 +524,7 @@
 ### The package cut: `rakun-app` and `rakun-test` (botopink front 95)
 
 - **`modules/rakun-app/` is new**, the server half of the Next.js `app/` router
-  `specs/1.0.10-beta/03-rakun/modules.md` § The cut splits out of the core: front
+  `specs/03-rakun/modules.md` § The cut splits out of the core: front
   22's `file_router.bp` (+ `file_router.mjs`, `sidecars/rakun_file_router.erl`) and
   front 23's `ssr.bp` (+ `ssr.mjs`, `sidecars/rakun_ssr.erl`) moved with their four
   suites and the `test/fixtures/{routing,conflict-both,conflict-roots,middleware}`

@@ -1,7 +1,7 @@
 # Rakun modules
 
 > Spring Boot 4-style framework for botopink — one workspace, one package per Spring starter.
-> Decision document for the cut: `specs/1.0.10-beta/03-rakun/modules.md` · cross-cutting rules: `specs/1.0.10-beta/02-packaging/README.md` · decisions 75 and 76 in `specs/1.0.10-beta/decisions-taken.md`.
+> Decision document for the cut: `specs/03-rakun/modules.md` · cross-cutting rules: `specs/02-packaging/README.md` · decisions 75 and 76 in `specs/1.0.10-beta/decisions-taken.md`.
 
 `repository/rakun/botopink.json` is a **workspace** (`"workspaces": ["modules/*", "examples/*"]`):
 it compiles nothing, ships nothing, and `botopink build/test` there is a refusal that names the
@@ -188,4 +188,4 @@ rakun-<name>/
 
 ## Version
 
-Current: `0.0.1` (development). Target: `1.0.10-beta` (`specs/1.0.10-beta/03-rakun/`).
+Current: `0.0.1` (development). Target: `1.0.10-beta` (`specs/03-rakun/`).

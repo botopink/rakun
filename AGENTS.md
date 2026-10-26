@@ -213,7 +213,7 @@ rakun/
 │   │                    `validation`, decision 116 rule 5; its `boot.bp` is
 │   │                    `modules/rakun/src/config_check.bp` — § Validation)
 │   ├── rakun-app/     ← THE SERVER HALF OF THE `app/` ROUTER (front 95 relocated fronts 22 and
-│   │   │                23 out of the core — `specs/1.0.10-beta/03-rakun/modules.md` § The cut):
+│   │   │                23 out of the core — `specs/03-rakun/modules.md` § The cut):
 │   │   │                files [root.bp, file_router.bp, ssr.bp], targets [erlang],
 │   │   │                depends on `rakun` by `{ "workspace": true }`; imports the
 │   │   │                core `from "rakun"` (the request context `from "rakun/request_context"`)
@@ -2219,7 +2219,7 @@ silently. Every rakun sidecar is `rakun_<name>.erl`.
 
 ### Why this front ships BOTH host files where its spec said erlang only
 
-The spec (`specs/1.0.10-beta/03-rakun/72-rakun-auto-configuration/README.md`
+The spec (`specs/03-rakun/72-rakun-auto-configuration/README.md`
 § Test plan) declares the host cells `@external(.Erlang(…))`-only and says "the tests
 are declared erlang-only and the lib test runner is told so". Measured against
 the pinned compiler: **there is no per-file target gate.** `botopink test`

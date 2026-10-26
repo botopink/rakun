@@ -32,4 +32,4 @@ compiles nothing and ships nothing. Each member is reached by its manifest name:
 
 A member lists the packages it imports; their own dependencies load transitively (decision 143).
 The cut and the dependency graph are
-`specs/1.0.10-beta/06-onze/modules.md` in the botopink meta repository.
+`specs/06-onze/modules.md` in the botopink meta repository.
