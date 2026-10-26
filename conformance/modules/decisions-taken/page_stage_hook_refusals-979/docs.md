@@ -1,0 +1,9 @@
+# Decision 979 — The stage a page renders in is a compile-time fact read off the hooks list: a page that reaches a `#[serverOnly]` hook renders per request, one that reaches none is prerendered, and no page declares its stage; `#[page]` refuses a `#[serverOnly]` hook inside a `#[client]` component and a `#[clientOnly]` hook outside one — two refusals, no third; restates 186 with 947 folded in (202 read with it), replacing 186 and 947.
+
+Three hooks and two pages. `sortOrder` reads `use searchParams()` and is marked `#[serverOnly]`: it may run only on the server at request time. `viewportWidth` is marked `#[clientOnly]` and is used only inside `#[client] SizeBadge`, the one place it is legal. `greeting` carries no marker and may run at any stage. The compiler reads each page's `use`s at build: `about` reaches only `greeting`, so it is prerendered — rendered once at the build — and the build writes its route kind `S`; `search` reaches `sortOrder`, so it is rendered per request and its kind is `D`. rakun reads those kinds from the build; nothing marks a page dynamic at run time. `main` renders the two pages as the server would and prints them.
+
+Each misuse is refused at the `use`, at build, by `#[page]` and `#[client]` reading the hooks list: `use sortOrder()` inside `SizeBadge` (a server-only hook in a client component) and `use viewportWidth()` in `about` (a client-only hook outside one). There is no third refusal: no page declares or forces its stage (202), so a server-only hook in a page that declares itself prerendered has no case.
+
+Cells of this repository that prove it: none yet. `rakun-bpp/router/router_hooks` reads the router hooks with no marker; the markers, the two refusals and the build-written kinds come with front 150 s36 step 8, over the checker capability of 277 (`Decl.hooks`).
+
+[draft/main.bp](draft/main.bp)
