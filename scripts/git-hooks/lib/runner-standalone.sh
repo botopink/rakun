@@ -79,11 +79,12 @@ gate_runner="$gate_root/scripts/git-hooks/lib/runner-standalone.sh"
 # The total of jobs the cell pools may use, set by `runStandaloneGate --jobs`.
 # Assigned (empty) on every source, never read from the environment.
 gate_jobs_total=""
-# Decision 1061 (1): every compiler run the gate starts is the leader of a session of its own, under
-# `timeout -k`, and is registered as a file named by its pid in this directory (set by `runStandaloneGate`), so an
-# interrupted gate kills the groups it started. The limit per run is `$BOTOPINK_GATE_TIMEOUT` seconds.
+# Decision 1061 (1): every compiler run the gate starts is the leader of a session of its own
+# and registered as a file named by its pid in this directory (set by `runStandaloneGate`), so an
+# interrupted gate kills the groups it started. The whole gate run is bounded by `gate_limit` seconds (decision
+# 1070): at the limit it is interrupted the same way and fails with status 124. No bound per compiler run.
 gate_groups=""
-gate_timeout="${BOTOPINK_GATE_TIMEOUT:-1800}"
+gate_limit=1800
 
 # locateBotopink — the compiler's path on stdout, or status 1.
 #
@@ -290,14 +291,13 @@ gateJobs() {
     echo "$jobs"
 }
 
-# gateRun <cmd…> — run a command as the leader of a new session under `timeout -k 5 <limit>` (SIGTERM at the limit,
-# SIGKILL five seconds later), registered in $gate_groups while it runs, and SIGKILL to its group when it ends, so a
+# gateRun <cmd…> — run a command as the leader of a new session, registered in $gate_groups while it runs, and SIGKILL to its group when it ends, so a
 # `beam.smp` or a `node` the command's children left does not outlive the run. Input and output are the caller's.
-# Without `setsid` or `timeout` (a stock macOS) it runs as it is.
+# Without `setsid` (a stock macOS) it runs as it is.
 gateRun() {
     local pid rc
-    if command -v setsid >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
-        setsid timeout -k 5 "$gate_timeout" "$@" <&0 &
+    if command -v setsid >/dev/null 2>&1; then
+        setsid "$@" <&0 &
     else
         "$@" <&0 &
     fi
@@ -370,7 +370,7 @@ gatePool() {
     mkdir -p "$dir/inflight"
     [ -s "$dir/plan" ] || return 0
     export gate_jobs_total
-    export gate_groups gate_timeout
+    export gate_groups
     export -f gateCell gateCpus gateRun
     xargs -0 -n 3 -P "$(gateJobs)" "$BASH" -c 'gateCell "$@"' gate-cell "$dir" "$mode" "$bin"         < "$dir/plan" || true
 }
@@ -648,9 +648,9 @@ runFormatStaged() {
 # runStandaloneGate [--staged] [--no-conformance] [--jobs <N>] — the gate: the
 # seven stages above.
 runStandaloneGate() {
-    local gpid rc=0
+    local gpid wpid rc=0
     gate_groups=$(mktemp -d "${TMPDIR:-/tmp}/bp-gate-groups.XXXXXX")
-    export gate_groups gate_timeout
+    export gate_groups
     # The gate proper runs in the background so that INT, TERM and HUP reach this shell at once (a trap waits for a
     # foreground command to end) and take every registered group, then the gate, with them.
     # Job control gives it a process group of its own, which an interruption kills first, so the pool launches no
@@ -658,10 +658,15 @@ runStandaloneGate() {
     set -m
     _runStandaloneGate "$@" <&0 &
     gpid=$!
+    # The bound of the whole run (decision 1070): a watcher, in a group of its own, interrupts this shell at the limit.
+    ( sleep "$gate_limit"; kill -USR1 "$$" ) &
+    wpid=$!
     set +m
-    trap 'kill -KILL -- "-$gpid" 2>/dev/null; gateGroupsKill; rm -rf "$gate_groups"; exit 143' INT TERM HUP
+    trap 'kill -KILL -- "-$gpid" "-$wpid" 2>/dev/null; gateGroupsKill; rm -rf "$gate_groups"; exit 143' INT TERM HUP
+    trap 'echo "gate: the run passed its ${gate_limit}s bound" >&2; kill -KILL -- "-$gpid" "-$wpid" 2>/dev/null; gateGroupsKill; rm -rf "$gate_groups"; exit 124' USR1
     wait "$gpid" || rc=$?
-    trap - INT TERM HUP
+    trap - INT TERM HUP USR1
+    kill -KILL -- "-$wpid" 2>/dev/null || true
     gateGroupsKill
     rm -rf "$gate_groups"
     return "$rc"
