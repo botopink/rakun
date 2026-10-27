@@ -79,6 +79,11 @@ gate_runner="$gate_root/scripts/git-hooks/lib/runner-standalone.sh"
 # The total of jobs the cell pools may use, set by `runStandaloneGate --jobs`.
 # Assigned (empty) on every source, never read from the environment.
 gate_jobs_total=""
+# Decision 1061 (1): every compiler run the gate starts is the leader of a session of its own, under
+# `timeout -k`, and is registered as a file named by its pid in this directory (set by `runStandaloneGate`), so an
+# interrupted gate kills the groups it started. The limit per run is `$BOTOPINK_GATE_TIMEOUT` seconds.
+gate_groups=""
+gate_timeout="${BOTOPINK_GATE_TIMEOUT:-1800}"
 
 # locateBotopink — the compiler's path on stdout, or status 1.
 #
@@ -285,6 +290,50 @@ gateJobs() {
     echo "$jobs"
 }
 
+# gateRun <cmd…> — run a command as the leader of a new session under `timeout -k 5 <limit>` (SIGTERM at the limit,
+# SIGKILL five seconds later), registered in $gate_groups while it runs, and SIGKILL to its group when it ends, so a
+# `beam.smp` or a `node` the command's children left does not outlive the run. Input and output are the caller's.
+# Without `setsid` or `timeout` (a stock macOS) it runs as it is.
+gateRun() {
+    local pid rc
+    if command -v setsid >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
+        setsid timeout -k 5 "$gate_timeout" "$@" <&0 &
+    else
+        "$@" <&0 &
+    fi
+    pid=$!
+    [ -z "$gate_groups" ] || : >"$gate_groups/$pid"
+    rc=0
+    wait "$pid" || rc=$?
+    kill -KILL -- "-$pid" 2>/dev/null || true
+    [ -z "$gate_groups" ] || rm -f "$gate_groups/$pid"
+    return "$rc"
+}
+
+# gateGroupsKill — the groups still registered: SIGTERM, up to five seconds of grace, then SIGKILL.
+gateGroupsKill() {
+    local f g i left
+    [ -n "$gate_groups" ] || return 0
+    for f in "$gate_groups"/*; do
+        [ -e "$f" ] || continue
+        kill -TERM -- "-${f##*/}" 2>/dev/null || true
+    done
+    for ((i = 0; i < 50; i++)); do
+        left=0
+        for f in "$gate_groups"/*; do
+            [ -e "$f" ] || continue
+            g="${f##*/}"
+            kill -0 -- "-$g" 2>/dev/null && left=1
+        done
+        [ "$left" -eq 1 ] || return 0
+        sleep 0.1
+    done
+    for f in "$gate_groups"/*; do
+        [ -e "$f" ] || continue
+        kill -KILL -- "-${f##*/}" 2>/dev/null || true
+    done
+}
+
 # gateCell <dir> <test|build> <bin> <index> <cwd> <target> — wait for a CPU
 # while another cell of this stage is in flight, then, in <cwd>, `<bin> test
 # --target <target>` or `<bin> build --target <target>` into a throwaway
@@ -303,10 +352,10 @@ gateCell() {
     : >"$dir/inflight/$i"
     code=0
     case "$mode" in
-        test) ( cd "$cwd" && "$bin" test --target "$target" ) >"$dir/$i.log" 2>&1 </dev/null || code=$? ;;
+        test) ( cd "$cwd" && gateRun "$bin" test --target "$target" ) >"$dir/$i.log" 2>&1 </dev/null || code=$? ;;
         build)
             out=$(mktemp -d)
-            ( cd "$cwd" && "$bin" build --target "$target" --out "$out" ) >"$dir/$i.log" 2>&1 </dev/null || code=$?
+            ( cd "$cwd" && gateRun "$bin" build --target "$target" --out "$out" ) >"$dir/$i.log" 2>&1 </dev/null || code=$?
             rm -rf "$out" ;;
     esac
     echo "$code" >"$dir/$i.rc"
@@ -321,7 +370,8 @@ gatePool() {
     mkdir -p "$dir/inflight"
     [ -s "$dir/plan" ] || return 0
     export gate_jobs_total
-    export -f gateCell gateCpus
+    export gate_groups gate_timeout
+    export -f gateCell gateCpus gateRun
     xargs -0 -n 3 -P "$(gateJobs)" "$BASH" -c 'gateCell "$@"' gate-cell "$dir" "$mode" "$bin"         < "$dir/plan" || true
 }
 
@@ -450,7 +500,7 @@ runRefusalsGate() {
             bad="$bad\n  $rel has no expect.txt"
             continue
         fi
-        if out=$( cd "$dir" && "$bin" check 2>&1 </dev/null ); then
+        if out=$( cd "$dir" && gateRun "$bin" check 2>&1 </dev/null ); then
             echo -e "${RED}✗${NC}"
             bad="$bad\n  $rel compiles — it must be refused"
             continue
@@ -494,7 +544,7 @@ runConformanceGate() {
     echo -n "  Checking conformance/ (botopink cell check)... "
     local log
     log=$(mktemp)
-    if ( cd "$gate_root" && "$bin" cell check conformance/ ) >"$log" 2>&1 </dev/null; then
+    if ( cd "$gate_root" && gateRun "$bin" cell check conformance/ ) >"$log" 2>&1 </dev/null; then
         echo -e "${GREEN}✓${NC}"
         rm -f "$log"
         pass "conformance: every cell of conformance/ answers its snapshots"
@@ -598,6 +648,26 @@ runFormatStaged() {
 # runStandaloneGate [--staged] [--no-conformance] [--jobs <N>] — the gate: the
 # seven stages above.
 runStandaloneGate() {
+    local gpid rc=0
+    gate_groups=$(mktemp -d "${TMPDIR:-/tmp}/bp-gate-groups.XXXXXX")
+    export gate_groups gate_timeout
+    # The gate proper runs in the background so that INT, TERM and HUP reach this shell at once (a trap waits for a
+    # foreground command to end) and take every registered group, then the gate, with them.
+    # Job control gives it a process group of its own, which an interruption kills first, so the pool launches no
+    # further cell while the registered groups (each a session of its own) are taken down.
+    set -m
+    _runStandaloneGate "$@" <&0 &
+    gpid=$!
+    set +m
+    trap 'kill -KILL -- "-$gpid" 2>/dev/null; gateGroupsKill; rm -rf "$gate_groups"; exit 143' INT TERM HUP
+    wait "$gpid" || rc=$?
+    trap - INT TERM HUP
+    gateGroupsKill
+    rm -rf "$gate_groups"
+    return "$rc"
+}
+
+_runStandaloneGate() {
     local staged=0 conformance=1 a
     while [ "$#" -gt 0 ]; do
         a="$1"; shift
