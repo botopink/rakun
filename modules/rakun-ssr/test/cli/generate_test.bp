@@ -2,8 +2,7 @@
 // the staged tree, and a round trip — stage, write, `botopink check`.
 
 import {cli.scan.RouteEntry, cli.scan.scanFiles};
-import {cli.generate.checkTree, cli.generate.stage, cli.generate.stagedPath, cli.generate.rewriteImports, cli.generate.modFiles, cli.generate.routesModule, cli.generate.banner};
-import {types.AliasMap};
+import {cli.generate.checkTree, cli.generate.stage, cli.generate.stagedPath, cli.generate.modFiles, cli.generate.routesModule, cli.generate.banner};
 import {io.fs, io.process, io.clock, path, io.env, compiler, io.terminal.print} from "std";
 import {assertAs} from "snap";
 
@@ -14,10 +13,6 @@ fn testTmp() -> string {
     assert root
         != "", "BOTOPINK_TEST_TMPDIR is not set: run this suite under `botopink test`";
     return root;
-}
-
-fn aliases() -> AliasMap {
-    return AliasMap(entries: [#("@/components", "components"), #("@/lib", "lib")]);
 }
 
 fn jh() -> string {
@@ -33,7 +28,7 @@ fn sources() -> array<#(string, string)> {
         #("app/layout.bp", jh()
             + "\n\n#[layout(\"\")]\npub fn rootLayout(props: LayoutProps) -> Component<Element> {\n    return div([props.children], attrs: []);\n}"),
         #("app/page.bp", jh()
-            + "\nimport {plural} from \"@/lib.format\";\n\n#[page(\"\")]\npub fn home(route: PageContext) -> Component<Element> {\n    return p([text(plural(2, \"post\"), attrs: [])], attrs: []);\n}"),
+            + "\nimport {lib.format.plural};\n\n#[page(\"\")]\npub fn home(route: PageContext) -> Component<Element> {\n    return p([text(plural(2, \"post\"), attrs: [])], attrs: []);\n}"),
         #("app/blog/[slug]/page.bp", jh()
             + "\n\n#[page(\"blog/[slug]\")]\npub fn post(route: PageContext) -> Component<Element> {\n    val ps = pageParams(route);\n    return p([text(ps.get(\"slug\"), attrs: [])], attrs: []);\n}"),
         #("app/blog/[slug]/loading.bp", jh()
@@ -85,7 +80,7 @@ fn dep(name: string, rel: string) -> string {
 }
 
 fn manifest() -> string {
-    return "{ \"name\": \"demo\", \"src\": \"src/\", \"entry\": \"root.bp\", \"target\": \"commonJS\", \"alias\": { \"@/lib\": \"lib\" }, \"dependencies\": { "
+    return "{ \"name\": \"demo\", \"src\": \"src/\", \"entry\": \"root.bp\", \"target\": \"commonJS\", \"dependencies\": { "
         + dep("rakun-bpp", "modules/rakun-bpp")
         + " } }";
 }
@@ -102,8 +97,8 @@ test "generate: check ---- a decorator that disagrees with its directory" {
 test "generate: staged ---- the tree, sorted, deterministic" {
     val es = try entries();
     assert checkTree("src/app", es).length == 0;
-    val a = try stage(aliases(), "app", "src/app", sources(), es, manifest());
-    val b = try stage(aliases(), "app", "src/app", sources(), es, manifest());
+    val a = try stage("app", "src/app", sources(), es, manifest());
+    val b = try stage("app", "src/app", sources(), es, manifest());
     assert a.map({ f -> f._0 + f._1 }).join("")
         == b.map({ f -> f._0 + f._1 }).join("");
     val generated = a.filter({ f -> (f._0.endsWith("mod.bp") && f._0 != "src/lib/mod.bp") || f._0.endsWith("onze_routes.bp") || f._0 == "src/root.bp" });
@@ -120,7 +115,7 @@ test "generate: round trip ---- stage, write, botopink check" {
     val bin = botopinkBin();
     assert bin != "";
     val es = try entries();
-    val staged = try stage(aliases(), "app", "src/app", sources(), es, manifest());
+    val staged = try stage("app", "src/app", sources(), es, manifest());
     val dir = path.join([testTmp(), "gen-" + clock.nowMillis().toString()]);
     for (staged) { f ->
         val made = process.run("mkdir", ["-p", path.dirname(path.join([dir, f._0]))]);
@@ -142,12 +137,4 @@ test "generate: stagedPath renames directories and convention stems" {
     assert stagedPath("app/(marketing)/about/page.bp")
         == "app/g_marketing/about/page.bp";
     assert stagedPath("app/default.bp") == "app/default_view.bp";
-    assert rewriteImports(aliases(), "import {x} from \"@/lib.format\";")
-        == "import {lib.format.x};";
-    assert rewriteImports(aliases(), "import {x, y as z} from \"@/lib.format\"; // kept")
-        == "import {lib.format.x, lib.format.y as z}; // kept";
-    assert rewriteImports(aliases(), "import {\n    x,\n    y,\n} from \"@/lib.format\";\npub fn f() -> i32 { return 1; }")
-        == "import {lib.format.x, lib.format.y};\npub fn f() -> i32 { return 1; }";
-    assert rewriteImports(aliases(), "import {Element} from \"rakun-bpp\";")
-        == "import {Element} from \"rakun-bpp\";";
 }

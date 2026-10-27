@@ -4,7 +4,7 @@ The application keeps its data in `draft/lib/db.bp`, the module `lib.db`, and it
 
 There is no `@/` alias. `import {findPost} from "@/lib/db";` is no longer rewritten by `rakun-ssr`'s staging; it is refused like any `from` that names a module of the importing package, with `module-import-with-from` at the source string and the brace form as the fix. `rakun-ssr`'s scaffold declares no `"alias"` key.
 
-Cells in this repository that prove it: none yet. The bundler's `AliasMap` and `resolveAlias` leave with front 150 s60 step 9.
+Cells in this repository that prove it: none yet.
 
 [draft/main.bp](draft/main.bp)
 [draft/lib/db.bp](draft/lib/db.bp)

@@ -7,8 +7,7 @@
 //// `<outDir>/src/`, renaming each directory and convention file (`d_slug`,
 //// `g_marketing`, `s_feed`, `c_rest`, `o_rest`, `not_found`,
 //// `default_view` — `rakun-ssr`'s `stagedSegment` / `stagedStem`, the one
-//// spelling the graph uses too), rewriting every alias prefix of an import
-//// with front 49's `resolveAlias`, and generating:
+//// spelling the graph uses too), and generating:
 ////
 ////   * a `mod.bp` for every staged directory under the app, one `pub mod`
 ////     line per child, sorted — an authored `mod.bp` under the app is replaced,
@@ -25,7 +24,6 @@
 //// and names the AUTHORED path — the developer has never seen `d_slug`.
 
 import {path, json.Json, json.decode, json.quote} from "std";
-import {types.AliasMap, types.resolveAlias};
 import {conventions.classify} from "routing";
 import {bundler.scan.stagedSegment, bundler.scan.stagedStem, bundler.scan.publicNamesOf};
 import {cli.scan.RouteEntry, cli.scan.decoratorFor};
@@ -69,62 +67,6 @@ pub fn stagedPath(rel: string) -> string {
     else
         file;
     return dirs.append([stem]).join("/");
-}
-
-// `source` with every import `from "<alias>…"` written as the import of the
-// module the alias names: a module of the application is imported by its path
-// inside the braces (decision 206 — `from` names a package), so
-// `import {x, y as z} from "@/lib.format";` stages as
-// `import {lib.format.x, lib.format.y as z};`. An import written over several
-// lines is read up to its `;`. A `from` no alias names is a package and stays.
-pub fn rewriteImports(aliases: AliasMap, source: string) -> string {
-    var out: string[] = [];
-    var pending: string[] = [];
-    for (source.split("\n")) { line ->
-        if (pending.length > 0) {
-            pending.push(line);
-            if (line.indexOf(";") >= 0) {
-                out.push(rewriteImport(aliases, pending.join("\n")));
-                pending = [];
-            }
-        } else if (line.trimStart().startsWith("import {")
-            && line.indexOf(";") < 0)
-            pending.push(line)
-        else
-            out.push(rewriteImport(aliases, line));
-    }
-    return out.append(pending).join("\n");
-}
-
-fn rewriteImport(aliases: AliasMap, text: string) -> string {
-    val marker = "from \"";
-    val at = text.indexOf(marker);
-    if (at < 0) return text;
-    val rest = text.slice(at + marker.length());
-    val close = rest.indexOf("\"");
-    if (close < 0) return text;
-    val spec = rest.slice(0, close);
-    val resolved = resolveAlias(aliases, spec);
-    if (resolved == spec) return text;
-    val open = text.indexOf("{");
-    val shut = text.slice(0, at).lastIndexOf("}");
-    if (open < 0 || shut < open) return text;
-    val prefix = resolved.replaceAll("/", ".") + ".";
-    val inner = text.slice(open + 1, shut);
-    val items = if (inner.indexOf("{") >= 0)
-        [prefix.slice(0, prefix.length() - 1) + ": {" + inner.trim() + "}"]
-    else
-        inner
-            .split(",")
-            .map({ i -> i.trim() })
-            .filter({ i -> i != "" })
-            .map({ i -> prefix + i });
-    val tail = rest.slice(close + 1);
-    return text.slice(0, open)
-        + "{"
-        + items.join(", ")
-        + "}"
-        + tail.trimStart();
 }
 
 fn identOf(moduleId: string) -> string {
@@ -308,7 +250,7 @@ pub fn stagedManifest(
                     + ": "
                     + rerootDeps(m._1, root, workspace, extraDeps),
             )
-        else if (m._0 != "alias")
+        else
             fields.push(quote(m._0) + ": " + jsonText(m._1));
     }
     val hasFiles = members.any({ m -> m._0 == "files" });
@@ -422,11 +364,10 @@ pub fn sortedText(xs: string[]) -> string[] {
 }
 
 // The staged package: every source file of the project (`#(path relative to
-// its src, text)`), staged and alias-rewritten, the generated `mod.bp`s, the
+// its src, text)`), staged, the generated `mod.bp`s, the
 // routes module and the root. `appRel` is the app directory relative to the
 // project's src (`app` for `src/app`). Answers `#(path under <outDir>/, text)`.
 pub fn stage(
-    aliases: AliasMap,
     appRel: string,
     appDir: string,
     sources: array<#(string, string)>,
@@ -434,7 +375,6 @@ pub fn stage(
     manifest: string,
 ) -> Result<array<#(string, string)>, string> {
     return try stageAt(
-        aliases,
         appRel,
         appDir,
         sources,
@@ -452,7 +392,6 @@ pub fn stage(
 // (a generated entry, the style modules, the server's main) and `extraDeps`
 // added to the manifest.
 pub fn stageAt(
-    aliases: AliasMap,
     appRel: string,
     appDir: string,
     sources: array<#(string, string)>,
@@ -474,7 +413,7 @@ pub fn stageAt(
         else if (authoredAppMod)
             rootText = rootText
         else
-            staged.push(#(stagedPath(s._0), rewriteImports(aliases, s._1)));
+            staged.push(#(stagedPath(s._0), s._1));
     }
     val stagedApp = stagedPath(appRel + "/x.bp")
         .split("/")

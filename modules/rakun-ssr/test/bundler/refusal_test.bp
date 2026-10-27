@@ -4,13 +4,9 @@
 import {bundler.scan.parseFixture, bundler.scan.ImportRef};
 import {bundler.graph.AppModule, bundler.graph.ClientGraph, bundler.graph.GraphNode, bundler.graph.loadModules, bundler.graph.clientGraph};
 import {bundler.refusal.BuildReport, bundler.refusal.BuildRefusal, bundler.refusal.checkBuild, bundler.refusal.describeReport, bundler.refusal.refusalMessage, bundler.refusal.emiliaCallsOf, bundler.refusal.StyleProbe, bundler.refusal.styleProbeSource, bundler.refusal.parseStyleProbe, bundler.refusal.styleParity};
-import {types.AliasMap, config.OnzeConfig, config.defaultConfig, config.loadConfig};
+import {config.OnzeConfig, config.defaultConfig, config.loadConfig};
 import {assertAs} from "snap";
 import {compiler} from "std";
-
-fn aliases() -> AliasMap {
-    return AliasMap(entries: [#("@/components", "components"), #("@/lib", "lib")]);
-}
 
 fn fakeEnv(name: string) -> string {
     return if (name == "ONZE_PUBLIC_API_URL") "https://api.example.com" else "";
@@ -18,7 +14,7 @@ fn fakeEnv(name: string) -> string {
 
 fn reportWith(tree: string, cfg: OnzeConfig) -> Result<BuildReport, string> {
     val modules = try loadModules(parseFixture(tree));
-    val graph = clientGraph(modules, aliases(), "app");
+    val graph = clientGraph(modules, "app");
     return checkBuild(graph, modules, cfg, { n -> fakeEnv(n) });
 }
 
@@ -27,13 +23,13 @@ fn report(tree: string) -> Result<BuildReport, string> {
 }
 
 fn page(component: string) -> string {
-    return ["== app/page.bp", "import { "
+    return ["== app/page.bp", "import { components.w."
         + component
-        + " } from \"@/components.w\";", "#[page(\"\")] pub fn home(route: PageContext) -> Component<Element> { return p([]); }", "== components/w.bp", "#[client]"].join("\n");
+        + " };", "#[page(\"\")] pub fn home(route: PageContext) -> Component<Element> { return p([]); }", "== components/w.bp", "#[client]"].join("\n");
 }
 
 test "refusal: server-only ---- the chain from the root" {
-    val r = try report(["== app/page.bp", "import { Status } from \"@/components.status\";", "#[page(\"\")] pub fn home(route: PageContext) -> Component<Element> { return p([]); }", "== components/status.bp", "#[client]", "import { fmt } from \"@/lib.format\";", "pub fn Status(props: P) -> Element { return p([]); }", "== lib/format.bp", "import { listPosts } from \"@/lib.db\";", "pub fn fmt() -> string { return \"\"; }", "== lib/db.bp", "import { serverOnly } from \"rakun-bpp\";", "pub fn listPosts() -> Post[] { return []; }"].join("\n"));
+    val r = try report(["== app/page.bp", "import { components.status.Status };", "#[page(\"\")] pub fn home(route: PageContext) -> Component<Element> { return p([]); }", "== components/status.bp", "#[client]", "import { lib.format.fmt };", "pub fn Status(props: P) -> Element { return p([]); }", "== lib/format.bp", "import { lib.db.listPosts };", "pub fn fmt() -> string { return \"\"; }", "== lib/db.bp", "import { serverOnly } from \"rakun-bpp\";", "pub fn listPosts() -> Post[] { return []; }"].join("\n"));
     val text = describeReport(r);
     assert text.contains("components.status > lib.format > lib.db");
     try assertAs(comptime compiler.src(), "refusals", text);

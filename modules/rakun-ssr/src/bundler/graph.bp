@@ -10,7 +10,6 @@
 //// node carries the import chain from the root that pulled it in — the chain
 //// every refusal prints.
 
-import {types.AliasMap, types.resolveAlias};
 import {conventions.classify} from "routing";
 import {bundler.scan.SourceFile, bundler.scan.ImportRef, bundler.scan.importsOf, bundler.scan.moduleIdOf, bundler.scan.isClientModule, bundler.scan.publicNamesOf};
 
@@ -75,7 +74,6 @@ fn joinId(dir: string, name: string) -> string {
 // not an app edge.
 pub fn edgesOf(
     modules: array<AppModule>,
-    aliases: AliasMap,
     origin: AppModule,
     r: ImportRef,
 ) -> string[] {
@@ -118,7 +116,7 @@ pub fn edgesOf(
             shorthand.filter({ id -> named.contains(id) == false }),
         );
     }
-    val target = resolveAlias(aliases, r.spec).replaceAll("/", ".");
+    val target = r.spec.replaceAll("/", ".");
     return if (hasModule(modules, target)) [target] else [];
 }
 
@@ -134,12 +132,11 @@ fn leafPathOf(item: string) -> string {
 
 fn allEdges(
     modules: array<AppModule>,
-    aliases: AliasMap,
     origin: AppModule,
 ) -> string[] {
     var out: string[] = [];
     for (origin.refs) { r ->
-        for (edgesOf(modules, aliases, origin, r)) { id ->
+        for (edgesOf(modules, origin, r)) { id ->
             if (out.contains(id) == false) out.push(id);
         }
     }
@@ -164,7 +161,6 @@ fn isRenderFile(appDir: string, path: string) -> bool {
 // order.
 pub fn rootsFrom(
     modules: array<AppModule>,
-    aliases: AliasMap,
     starts: string[],
 ) -> string[] {
     var roots: string[] = [];
@@ -181,7 +177,7 @@ pub fn rootsFrom(
                 if (found.client) {
                     if (roots.contains(id) == false) roots.push(id);
                 } else {
-                    val next = allEdges(modules, aliases, found).reverse();
+                    val next = allEdges(modules, found).reverse();
                     for (next) { e ->
                         stack.push(e);
                     }
@@ -197,16 +193,14 @@ pub fn rootsFrom(
 // root that reached it.
 pub fn clientGraph(
     modules: array<AppModule>,
-    aliases: AliasMap,
     appDir: string,
 ) -> ClientGraph {
-    val roots = rootsFrom(modules, aliases, routeModuleIds(modules, appDir));
-    return graphOfRoots(modules, aliases, roots);
+    val roots = rootsFrom(modules, routeModuleIds(modules, appDir));
+    return graphOfRoots(modules, roots);
 }
 
 pub fn graphOfRoots(
     modules: array<AppModule>,
-    aliases: AliasMap,
     roots: string[],
 ) -> ClientGraph {
     var nodes: array<GraphNode> = [];
@@ -234,7 +228,7 @@ pub fn graphOfRoots(
                         isRoot: id == root,
                     ),
                 );
-                val next = allEdges(modules, aliases, m).reverse();
+                val next = allEdges(modules, m).reverse();
                 for (next) { e ->
                     if (placed.contains(e) == false)
                         stack.push(#(e, top._1.append([e])));

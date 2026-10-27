@@ -7,7 +7,7 @@ The **Next.js-style orchestrator**: the one package that imports rakun, rakun-bp
 rakun-ssr, and every value that crosses between them is handed across by `Onze.run`. Pure `.bp`
 client, zero compiler-core surface, reached via `from "rakun-ssr"`.
 
-The package is one (front 165 s2); it was ten: `onze` (the core: config, project, aliases, the boot adapter), `onze-cli`
+The package is one (front 165 s2); it was ten: `onze` (the core: config, project, the boot adapter), `onze-cli`
 (`src/cli/`), `onze-bundler` (`src/bundler/`), `onze-assets`
 (`src/assets/`), `onze-content` (`src/content/`), `onze-og` (`src/og/`), `onze-release` (`src/release/`) and
 `onze-test` (`src/testing/`) — the tests of each in the same sub-folder of `test/`, the command line `rakun-ssr`,
@@ -38,7 +38,7 @@ rakun-ssr/
 │   ├── rakun-ssr/          ← CORE (front 49) — `from "rakun-ssr"`: config.bp (OnzeConfig, rakun-ssr.json,
 │   │                    parsePort, the ONZE_PUBLIC_ rule; a document is read through std's
 │   │                    `Json` methods — `members`, `field`, `str`, `items`, `isObject`,
-│   │                    `kindName` —, `isString` the one test std lacks), types.bp (AliasMap, OnzeProject,
+│   │                    `kindName` —, `isString` the one test std lacks), types.bp (OnzeProject,
 │   │                    describeAppFiles — what an app file is, is `routing`'s
 │   │                    `conventions`, decision 323), integration.bp (the rakun-bpp half of the boot — the one
 │   │                    file that imports rakun-bpp and the rakun-stylesheet bridge: bootSite,
@@ -66,7 +66,7 @@ rakun-ssr/
 │   │                    answers "not available yet". Depends on rakun-ssr, rakun-ssr,
 │   │                    rakun-ssr, rakun-ssr
 │   ├── rakun-ssr/  ← front 68: manifest.bp (both rows — the one parser the server
-│   │                    reads), scan.bp, graph.bp (an edge per `from "<alias>…"`, per
+│   │                    reads), scan.bp, graph.bp (an edge per `from "<module>"`, per
 │   │                    `mod` line, per item naming an app module by its path inside the
 │   │                    braces — `lib.db.Post`, decision 206 — and per shorthand sibling),
 │   │                    refusal.bp (+ the styleMap probe and
@@ -104,7 +104,7 @@ rakun-ssr/
 ├── .gitignore         ← out/, .botopinkbuild/, .onze/ (a build's output); *.snap.new and
 │                        *.snap.md.new (a snapshot mismatch's scratch file — the hook refuses
 │                        one that is staged)
-├── conformance/       ← the reference and its examples (decision 463): `docs.md` (rakun-ssr.json, the alias map, the four seams, the not-built table) and `modules/<example>/` cells, run by `botopink cell check conformance/` (none yet)
+├── conformance/       ← the reference and its examples (decision 463): `docs.md` (rakun-ssr.json, the four seams, the not-built table) and `modules/<example>/` cells, run by `botopink cell check conformance/` (none yet)
 ├── examples/          ← blog/ (53: src/lib/db.bp — the post store —, content/posts/*.md,
 │                        src/components/{nav,post_card}.bp, src/app/ — layout, page, blog/
 │                        layout + page, blog/[slug]/page, (marketing)/about/page —,
@@ -177,9 +177,9 @@ no parser drops a token.
 
 | File | What |
 |---|---|
-| `src/resolve.bp` | `Project`, `findRoot` (walk up to `botopink.json`), `resolveProject` (config + aliases, errors naming their file) |
+| `src/resolve.bp` | `Project`, `findRoot` (walk up to `botopink.json`), `resolveProject` (config, errors naming their file) |
 | `src/scan.bp` | `RouteEntry`, `scanFiles` / `scanApp` (what an app file is: `routing`'s `conventions.classify` / `ConventionFile`, decision 323; the pattern `routing`'s `patternOf(parsePath(…))`, `""` for a segment `pathProblem` refuses — that refusal already fails the scan; the decorator argument, the three refusals — authored paths only) |
-| `src/generate.bp` | `checkTree` (a file's segment is `routing`'s `conventions.classify`), `stagedPath`, `rewriteImports` (an import `from "<alias>…"` — one line or several, up to its `;` — staged as the brace form of the app module the alias names, `import {lib.format.x};`: decision 206, `from` names a package; a `from` no alias names stays), `modFiles`, `routesModule` (the undecorated conventions' registrations, and an import of every decorated convention file — by its path inside the braces — so a program importing it runs their bodies first — decision 140), `stagedManifest` (relative `path` dependencies made absolute against the project root, extra dependencies added — a directory as `{ "path": … }`, a git URL as `{ "git": …, "branch": "feat" }` (`extraDep`)), `stage` / `stageAt` — the staged tree under `<outDir>/src/` |
+| `src/generate.bp` | `checkTree` (a file's segment is `routing`'s `conventions.classify`), `stagedPath`, `modFiles`, `routesModule` (the undecorated conventions' registrations, and an import of every decorated convention file — by its path inside the braces — so a program importing it runs their bodies first — decision 140), `stagedManifest` (relative `path` dependencies made absolute against the project root, extra dependencies added — a directory as `{ "path": … }`, a git URL as `{ "git": …, "branch": "feat" }` (`extraDep`)), `stage` / `stageAt` — the staged tree under `<outDir>/src/` |
 | `src/create.bp` | `CreateOpts`, `createDefaults` (the one defaults record), `createHelp`, `parseCreateOpts` (`--src-dir` / `--no-src-dir`, the root layout by default; `--lang` into `rakun-ssr.json`), `scaffoldLibraries(o)` (what the scaffold imports, and rakun-ssr), `scaffoldFiles(In)`, `writeScaffold`, `mkdirs` |
 | `src/info.bp` | `infoText`, `dependencyVersions`, `versionAt`, `tools` |
 | `src/build.bp` | `buildProject(project, bin)` — the app's sources (`sourceOfApp`: no hidden directory, and no `test/` when `src` is the project root), scan, check, the client graph's refusals, the style modules (generated into the staged tree as `styles.<file>`), the staged server package (+ `onze_main.bp` and a dependency on rakun-ssr, `memberBeside`: the member beside the project's `rakun-ssr`) compiled for erlang into `<outDir>/server/erl/` and by `erlc` into `<outDir>/server/beam/` (`compileBeam`: the dependencies' `.beam` that `botopink build` leaves beside their `.erl` (decision 767) are copied, and the files with no `.beam` beside them — the app's own — are dealt to one `erlc` per CPU, an equal share each — one `erlc` compiles serially on one scheduler, ~80 s for a scaffold's ~4 000 modules; a refusal is still erlc's own text and fails the build), the staged client package (+ the generated entry, and dependencies on the `rakun-bpp` / `rakun-bpp` beside the project's `rakun-bpp`, and on `validation` as a git dependency resolved through the library roots — decision 326 — all three of which the entry imports) compiled for commonJS, the styleMap's probe run under node and under erl and compared (`BuildResult.styles`), the file-level link, the stylesheet, the build id, `static/<buildId>/`, `client-manifest.txt`, `build-id`; an absolute `outDir` is honoured; `srcDirOf`, `workspaceMembers` (a `{ "workspace": true }` dependency becomes a path in the staged manifest) |
@@ -235,3 +235,5 @@ references and the store, over content trees each test writes under `BOTOPINK_TE
 (`#[validated]` records of the test's own); `feeds_test.bp` — the whole document, escaping, the RFC 822
 date. The CommonMark / GFM fixtures, the budget and the tree tests moved with the reader to the
 `markdown` library (front 142 step 3).
+
+- Import aliases do not exist (decision 1050): no `@/…` import, no `alias` manifest key, no `create --import-alias`; the staging rewrites no import text, so a project that builds under `rakun-ssr` passes a bare `botopink check`. A module of the app is imported by its path inside the braces (`import {lib.db.readPost};`, decision 206).

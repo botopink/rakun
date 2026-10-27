@@ -3,18 +3,13 @@
 
 import {bundler.scan.SourceFile, bundler.scan.ImportRef, bundler.scan.parseFixture, bundler.scan.importsOf, bundler.scan.moduleIdOf, bundler.scan.stagedSegment, bundler.scan.isClientModule};
 import {bundler.graph.AppModule, bundler.graph.ClientGraph, bundler.graph.loadModules, bundler.graph.clientGraph, bundler.graph.chainOf, bundler.graph.describeGraph};
-import {types.AliasMap};
 import {bundler.fixture.fixtureApp};
 import {assertAs} from "snap";
 import {compiler} from "std";
 
-fn aliases() -> AliasMap {
-    return AliasMap(entries: [#("@/components", "components"), #("@/lib", "lib")]);
-}
-
 fn graphOf(tree: string) -> Result<ClientGraph, string> {
     val modules = try loadModules(parseFixture(tree));
-    return clientGraph(modules, aliases(), "app");
+    return clientGraph(modules, "app");
 }
 
 fn refsOf(source: string) -> array<ImportRef> {
@@ -79,7 +74,7 @@ test "scan: moduleIdOf is the staged id, the same for both separators" {
 // ── step 2: the graph ───────────────────────────────────────────────────────
 
 test "graph: roots ---- one client island below a server page" {
-    val g = try graphOf(["== app/page.bp", "import { Card } from \"@/components.card\";", "#[page(\"\")] pub fn home(route: PageContext) -> Component<Element> { return p([]); }", "== components/card.bp", "#[client]", "import { plural } from \"@/lib.format\";", "pub fn Card(props: CardProps) -> Element { return p([]); }", "== lib/format.bp", "pub fn plural(n: i32, word: string) -> string { return word; }", "== lib/db.bp", "pub fn listPosts() -> Post[] { return []; }"].join("\n"));
+    val g = try graphOf(["== app/page.bp", "import { components.card.Card };", "#[page(\"\")] pub fn home(route: PageContext) -> Component<Element> { return p([]); }", "== components/card.bp", "#[client]", "import { lib.format.plural };", "pub fn Card(props: CardProps) -> Element { return p([]); }", "== lib/format.bp", "pub fn plural(n: i32, word: string) -> string { return word; }", "== lib/db.bp", "pub fn listPosts() -> Post[] { return []; }"].join("\n"));
     assert chainOf(g, "lib.db").length == 0;
     try assertAs(comptime compiler.src(), "graph", describeGraph(g));
 }
@@ -101,12 +96,12 @@ test "graph: shared ---- a module reached by two roots appears once" {
 }
 
 test "graph: cycle ---- terminates and lists each module once" {
-    val g = try graphOf(["== app/page.bp", "import { A } from \"@/components.a\";", "#[page(\"\")] pub fn home(route: PageContext) -> Component<Element> { return p([]); }", "== components/a.bp", "#[client]", "import { b } from \"@/components.b\";", "pub fn A(props: P) -> Element { return p([]); }", "== components/b.bp", "import { A } from \"@/components.a\";", "pub fn b() -> i32 { return 1; }"].join("\n"));
+    val g = try graphOf(["== app/page.bp", "import { components.a.A };", "#[page(\"\")] pub fn home(route: PageContext) -> Component<Element> { return p([]); }", "== components/a.bp", "#[client]", "import { components.b.b };", "pub fn A(props: P) -> Element { return p([]); }", "== components/b.bp", "import { components.a.A };", "pub fn b() -> i32 { return 1; }"].join("\n"));
     assert g.nodes.length == 2;
     try assertAs(comptime compiler.src(), "graph", describeGraph(g));
 }
 
 test "graph: chainOf three levels below a root is four ids, root first" {
-    val g = try graphOf(["== app/page.bp", "import { A } from \"@/components.a\";", "#[page(\"\")] pub fn home(route: PageContext) -> Component<Element> { return p([]); }", "== components/a.bp", "#[client]", "import { b } from \"@/lib.b\";", "pub fn A(props: P) -> Element { return p([]); }", "== lib/b.bp", "import { c } from \"@/lib.c\";", "pub fn b() -> i32 { return 1; }", "== lib/c.bp", "import { d };", "pub fn c() -> i32 { return 1; }", "== lib/d.bp", "pub fn d() -> i32 { return 1; }"].join("\n"));
+    val g = try graphOf(["== app/page.bp", "import { components.a.A };", "#[page(\"\")] pub fn home(route: PageContext) -> Component<Element> { return p([]); }", "== components/a.bp", "#[client]", "import { lib.b.b };", "pub fn A(props: P) -> Element { return p([]); }", "== lib/b.bp", "import { lib.c.c };", "pub fn b() -> i32 { return 1; }", "== lib/c.bp", "import { d };", "pub fn c() -> i32 { return 1; }", "== lib/d.bp", "pub fn d() -> i32 { return 1; }"].join("\n"));
     assert chainOf(g, "lib.d").join(",") == "components.a,lib.b,lib.c,lib.d";
 }

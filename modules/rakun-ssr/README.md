@@ -5,7 +5,7 @@
 
 **Status: in progress.** The core (`modules/rakun-ssr/`, front 49) and the core helpers of
 `modules/rakun-ssr/` are written; the other members land with their track-E fronts of 1.0.10-beta.
-[`conformance/docs.md`](conformance/docs.md) is the reference: the configuration, the alias map, the four seams, and what
+[`conformance/docs.md`](conformance/docs.md) is the reference: the configuration, the four seams, and what
 rakun-ssr deliberately does not build.
 
 This repository took the name `rakun-ssr` from the old mocking library (decision 79 of 1.0.10-beta):
@@ -19,7 +19,7 @@ compiles nothing and ships nothing. Each member is reached by its manifest name:
 
 | Member | `from` | Target | Front |
 |---|---|---|---|
-| [`modules/rakun-ssr/`](modules/rakun-ssr/) | `"rakun-ssr"` — config, project vocabulary, alias map, env rule, the boot's rakun-bpp half | both | 49 |
+| [`modules/rakun-ssr/`](modules/rakun-ssr/) | `"rakun-ssr"` — config, project vocabulary, env rule, the boot's rakun-bpp half | both | 49 |
 | [`modules/rakun-ssr/`](modules/rakun-ssr/) | `"rakun-ssr"` — `Onze.run`, the boot's rakun half | erlang | 49 |
 | [`modules/rakun-ssr/`](modules/rakun-ssr/) | `"rakun-ssr"` — `assert<Subject>(loc, …)` helpers, fixtures, the E2E runner | both | 49 + each front |
 | [`modules/rakun-ssr/`](modules/rakun-ssr/) | `"rakun-ssr"` — `create · dev · build · start · info` | commonJS | 50 |
