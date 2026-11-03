@@ -13,7 +13,7 @@ import {streaming.Chunk, streaming.resolve, streaming.fillHtml};
 import {json.decode, json.Json, failure.panic} from "std";
 import {render.renderComponent, render.errorBoundaryNode};
 import {error_boundary.ErrorInfo};
-import {context.createContext, context.provide, context.context, context.RenderScope} from "std";
+import {context.createContext, context.provide, context.context, context.Scope, context.run} from "std";
 
 // ── step 3: the escaping walker ─────────────────────────────────────────────
 
@@ -293,7 +293,7 @@ test "render: islands take i0, i1 in render order, and the i rows follow" {
     assert (rows.at(1) ?? #("", "", ""))._0 == "i1";
 }
 
-// ── decisions 388, 414: a boundary around a component is a node ─────────────
+// ── decisions 388, 414, 1103: a boundary around a component is a node ──────
 
 type Label(text: string)
 
@@ -314,26 +314,14 @@ fn caughtView(info: ErrorInfo) -> Element {
 
 component fn Panel() -> Component<Element> {
     use provide(createContext(Label(text: "inside")));
-    return div(
-        [
-            errorBoundaryNode(
-                "ok",
-                { -> LabelView() },
-                { info -> caughtView(info) },
-            ),
-            errorBoundaryNode(
-                "bad",
-                { -> Broken() },
-                { info -> caughtView(info) },
-            ),
-        ],
-        attrs: [],
-    );
+    val ok = use errorBoundaryNode("ok", { -> LabelView() }, { info -> caughtView(info) });
+    val bad = use errorBoundaryNode("bad", { -> Broken() }, { info -> caughtView(info) });
+    return div([ok, bad], attrs: []);
 }
 
-test "an error boundary node runs its child with the scope its parent answered, and catches a failure" {
+test "an error boundary node keeps the scope its own placing body stood in, and catches a failure (decision 1103)" {
     val _r = resetRender();
-    val w = await renderComponent(Panel(), RenderScope.root());
+    val w = await renderComponent(Panel(), Scope.root());
     assert renderNode(w.tree)
         == "<div><div data-jh-e=\"ok\">inside</div><div data-jh-e=\"bad\">caught</div></div>";
 }
