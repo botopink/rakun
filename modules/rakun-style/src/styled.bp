@@ -19,7 +19,7 @@
 //// the provider's, `styled` holds no store. A `${p}` splice and a literal
 //// computed at build register nothing.
 
-import {hash, context.createContext, context.provide, context.context, compiler, compiler.CustomNode, compiler.Span, failure.panic} from "std";
+import {hash, context.createContext, context.provide, context.context, context.all, compiler, compiler.CustomNode, compiler.Span, failure.panic} from "std";
 import {theme.baseTheme};
 import {reader.Source, reader.readBlock, reader.firstNonDeclaration, reader.classMark};
 import {hash.classHash};
@@ -103,13 +103,13 @@ pub component fn propertyConstant(
     );
 }
 
-// The text between holes, each spliced property's declarations in its place.
-// LANGUAGE GAP: std's `context` has no `all<T>(cs: Component<T>[]) -> Component<T[]>` (decision 969, 144 B-162), so a run-time list of components cannot be resolved under one `use`; the body is to be `val props = use all(views);` and `styledComputed` / `propertyComputed`'s `await spliced(…)` `use spliced(…)` — refused today as `await-component` (791 (4)).
+// The text between holes, each spliced property's declarations in its place
+// (decision 969): `views` resolved under one `use all`, in order.
 component fn spliced(texts: string[], views: Component<StyledProperty>[]) -> Component<string> {
+    val props = use all(views);
     var out = texts.at(0) ?? "";
     var k = 0;
-    for (views) { v ->
-        val p = await v;
+    for (props) { p ->
         out = out + p.declarations + texts.at(k + 1) ?? "";
         k = k + 1;
     }
@@ -126,7 +126,7 @@ pub component fn styledComputed(
     views: Component<StyledProperty>[],
 ) -> Component<Styled> {
     val sheet = use context(styledContext);
-    val text = await spliced(texts, views);
+    val text = use spliced(texts, views);
     val className = classFor(prefix, text);
     val out = Styled(className: className, rules: withClass(text, className));
     sheet.add(sheet.layer, out);
@@ -139,7 +139,7 @@ pub component fn propertyComputed(
     views: Component<StyledProperty>[],
 ) -> Component<StyledProperty> {
     val sheet = use context(styledContext);
-    val declarations = await spliced(texts, views);
+    val declarations = use spliced(texts, views);
     val text = classMark() + "{" + declarations + "}";
     val className = classFor(prefix, text);
     val rules = withClass(text, className);
@@ -156,7 +156,7 @@ pub component fn propertyComputed(
 // `p`, computed at render, would otherwise add its class when it runs.
 pub component fn splice(view: fn() -> Component<StyledProperty>) -> Component<StyledProperty> {
     use provide(createContext(StyledSheet(layer: "", add: discard)));
-    val p = await view();
+    val p = use view();
     return p;
 }
 

@@ -8,7 +8,7 @@
 //// sheet with the component in it (a record has no assignable field).
 
 import {styled.Styled, styled.Styleable};
-import {failure.panic} from "std";
+import {context.all, failure.panic} from "std";
 
 // A layer: its name and the class prefix of the components it holds.
 pub type Layer(name: string, prefix: string)
@@ -82,17 +82,18 @@ pub type Sheet(layers: Layer[], entries: SheetEntry[]) {
 
     // `@layer <name>{…}` for each layer holding a component, in declaration
     // order; each layer's components in the order they were added, each once,
-    // under the layer's prefix. Each entry runs with the render's scope.
-    // LANGUAGE GAP: std's `context` has no `all<T>(cs: Component<T>[]) -> Component<T[]>` (decision 969, 144 B-162); the body is to be a `component fn` resolving its entries by `val items = use all(self.entries.map({ e -> e.view }));` — refused today as `await-without-async` (791 (4)).
-    pub fn render(self: Self) -> Component<string> {
+    // under the layer's prefix. Every entry resolved under one `use all`
+    // (decision 969), in `self.entries`' order.
+    pub component fn render(self: Self) -> Component<string> {
+        val items = use all(self.entries.map({ e -> e.view }));
         var out = "";
         for (self.layers) { l ->
             var classes: string[] = [];
             var held = "";
+            var i = 0;
             for (self.entries) { e ->
                 if (e.layer == l.name) {
-                    val view = e.view;
-                    val item = await view();
+                    val item = items.at(i) ?? Styled(className: "", rules: "");
                     val className = self.classIn(l.name, item);
                     if (!classes.contains(className)) {
                         classes = classes.append([className]);
@@ -102,6 +103,7 @@ pub type Sheet(layers: Layer[], entries: SheetEntry[]) {
                                 .join("." + className);
                     }
                 }
+                i = i + 1;
             }
             if (held != "") out = out + "@layer " + l.name + "{" + held + "}";
         }

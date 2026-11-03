@@ -1,7 +1,7 @@
 //// styled: the two template functions — what a literal renders, its class,
 //// its holes — on both targets. Every expected text is a literal.
 
-import {testing.asserts, hash, context.createContext, context.provide} from "std";
+import {testing.asserts, hash, context.createContext, context.provide, context.run} from "std";
 import {styled.styled, styled.styledProperty, styled.StyledSheet, styled.Styled, styled.StyledProperty};
 import {hash.classHash};
 
@@ -20,7 +20,7 @@ fn hover(inner: Component<StyledProperty>) -> Component<Styled> {
 // sheet keeps nothing — what registers is `context_test.bp`'s.
 component fn Render(view: fn() -> Component<Styled>) -> Component<Styled> {
     use provide(createContext(StyledSheet(layer: "components", add: dropped)));
-    val out = await view();
+    val out = use view();
     return out;
 }
 
@@ -28,7 +28,7 @@ component fn RenderProperty(
     view: fn() -> Component<StyledProperty>,
 ) -> Component<StyledProperty> {
     use provide(createContext(StyledSheet(layer: "components", add: dropped)));
-    val out = await view();
+    val out = use view();
     return out;
 }
 
@@ -81,7 +81,7 @@ pub val half = "50%";
 pub val sizedAtBuild = styled @`width: ${half}; columns: ${3}; aspect-ratio: ${1.5};`;
 
 test "a property's hole is a value; --spacing() expands" {
-    val p = await RenderProperty({ -> padAll(4) });
+    val p = await run(RenderProperty({ -> padAll(4) }));
     try asserts.equals(
         p.rules,
         "." + p.className + "{padding:calc(var(--spacing) * 4)}",
@@ -90,7 +90,7 @@ test "a property's hole is a value; --spacing() expands" {
 }
 
 test "a property with no hole is computed at build, its class std's contentHash of its rules" {
-    val t = await tab4;
+    val t = await run(tab4);
     try asserts.equals(t.className, "s_e8b00b8b");
     try asserts.equals(t.rules, ".s_e8b00b8b{tab-size:4}");
     try asserts.equals(
@@ -113,7 +113,7 @@ test "classHash is std's contentHash" {
 }
 
 test "a Component<StyledProperty> in a hole inlines its declarations (@apply)" {
-    val c = await Render({ -> code() });
+    val c = await run(Render({ -> code() }));
     try asserts.isTrue(
         c.rules.contains(
             "." + c.className + "{tab-size:4;font-family:var(--font-mono)}",
@@ -127,7 +127,7 @@ test "a Component<StyledProperty> in a hole inlines its declarations (@apply)" {
 }
 
 test "@variant md reads the theme's breakpoint at build" {
-    val c = await Render({ -> code() });
+    val c = await run(Render({ -> code() }));
     try asserts.isTrue(
         c.rules.contains(
             "@media (width >= 48rem){." + c.className + "{max-width:48rem}}",
@@ -136,7 +136,7 @@ test "@variant md reads the theme's breakpoint at build" {
 }
 
 test "the whole of a component, in order" {
-    val c = await Render({ -> code() });
+    val c = await run(Render({ -> code() }));
     val k = "." + c.className;
     try asserts.equals(
         c.rules,
@@ -150,7 +150,7 @@ test "the whole of a component, in order" {
 }
 
 test "nesting: & is the class, a selector without & is a descendant, lists cross" {
-    val n = await nested;
+    val n = await run(nested);
     val k = "." + n.className;
     try asserts.equals(
         n.rules,
@@ -166,7 +166,7 @@ test "nesting: & is the class, a selector without & is a descendant, lists cross
 }
 
 test "at-rules and variants wrap the class; the rules nest inside" {
-    val w = await wrapped;
+    val w = await run(wrapped);
     val k = "." + w.className;
     try asserts.equals(
         w.rules,
@@ -184,7 +184,7 @@ test "at-rules and variants wrap the class; the rules nest inside" {
 }
 
 test "--alpha() and --spacing() expand anywhere in a value; a comment is dropped" {
-    val f = await functions;
+    val f = await run(functions);
     val k = "." + f.className;
     try asserts.equals(
         f.rules,
@@ -194,7 +194,7 @@ test "--alpha() and --spacing() expand anywhere in a value; a comment is dropped
 }
 
 test "a value hole takes a string, an i32 or an f64" {
-    val s = await Render({ -> sized("50%", 3, 1.5) });
+    val s = await run(Render({ -> sized("50%", 3, 1.5) }));
     try asserts.equals(
         s.rules,
         "." + s.className + "{width:50%;columns:3;aspect-ratio:1.5}",
@@ -202,22 +202,22 @@ test "a value hole takes a string, an i32 or an f64" {
 }
 
 test "a hole spliced in a nested block" {
-    val h = await Render({ -> hover(tab4) });
+    val h = await run(Render({ -> hover(tab4) }));
     try asserts.equals(h.rules, "." + h.className + ":hover{tab-size:4}");
 }
 
 test "the same rules are the same class, under the layer's prefix" {
-    val a = await RenderProperty({ -> padAll(4) });
-    val b = await RenderProperty({ -> padAll(4) });
-    val c = await RenderProperty({ -> padAll(8) });
+    val a = await run(RenderProperty({ -> padAll(4) }));
+    val b = await run(RenderProperty({ -> padAll(4) }));
+    val c = await run(RenderProperty({ -> padAll(8) }));
     try asserts.equals(a.className, b.className);
     try asserts.notEquals(a.className, c.className);
     try asserts.isTrue(a.className.startsWith("s_"));
 }
 
 test "a computed class is the one a constant literal of the same rules gets" {
-    val computed = await RenderProperty({ -> padAll(4) });
-    val constant = await styledProperty @`padding: --spacing(4);`;
+    val computed = await run(RenderProperty({ -> padAll(4) }));
+    val constant = await run(styledProperty @`padding: --spacing(4);`);
     try asserts.equals(computed.className, constant.className);
     try asserts.equals(computed.rules, constant.rules);
 }
@@ -225,18 +225,18 @@ test "a computed class is the one a constant literal of the same rules gets" {
 // A hole known at build is computed at render all the same: the template
 // never reads a hole's value (decision 577 (5)).
 test "a literal whose every hole is known at build is the one the render computes" {
-    val built = await Render({ -> tabRed });
+    val built = await run(Render({ -> tabRed }));
     try asserts.equals(built.className, "s_b480a37a");
     try asserts.equals(built.rules, ".s_b480a37a{tab-size:4;color:red}");
-    val values = await Render({ -> sizedAtBuild });
-    val rendered = await Render({ -> sized("50%", 3, 1.5) });
+    val values = await run(Render({ -> sizedAtBuild }));
+    val rendered = await run(Render({ -> sized("50%", 3, 1.5) }));
     try asserts.equals(values.className, rendered.className);
     try asserts.equals(values.rules, rendered.rules);
 }
 
 test "toStyled answers the component under its class" {
-    val t = await tab4;
-    val s = await t.toStyled();
+    val t = await run(tab4);
+    val s = await run(t.toStyled());
     try asserts.equals(s.className, t.className);
     try asserts.equals(s.rules, t.rules);
 }

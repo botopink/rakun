@@ -14,8 +14,8 @@
 // at render registers in the render's sheet through `use
 // context(StyledContext)` (decisions 352, 354), so it runs below a provider.
 
-import {styled.styled, styled.styledProperty, styled.StyledSheet, styled.Styled, styled.StyledProperty, layers.Sheet, layers.layer};
-import {context.createContext, context.provide} from "std";
+import {styled.styled, styled.styledProperty, styled.StyledSheet, styled.Styled, styled.StyledProperty, styled.Styleable, layers.Sheet, layers.layer};
+import {context.createContext, context.provide, context.run} from "std";
 
 pub val tab4 = styledProperty @`tab-size: 4;`;
 
@@ -42,7 +42,7 @@ fn code() -> Component<Styled> {
 // render, emilia's `flush()` (decision 354 (7)). This one keeps nothing.
 component fn Render(view: fn() -> Component<Styled>) -> Component<Styled> {
     use provide(createContext(StyledSheet(layer: "components", add: dropped)));
-    val out = await view();
+    val out = use view();
     return out;
 }
 
@@ -50,19 +50,19 @@ component fn RenderProperty(
     view: fn() -> Component<StyledProperty>,
 ) -> Component<StyledProperty> {
     use provide(createContext(StyledSheet(layer: "components", add: dropped)));
-    val out = await view();
+    val out = use view();
     return out;
 }
 
 fn dropped(layer: string, item: Styled) -> void {}
 
 test "styled: a property's hole is a value; --spacing() expands" {
-    val p = await RenderProperty({ -> padAll(4) });
+    val p = await run(RenderProperty({ -> padAll(4) }));
     assert p.rules == "." + p.className + "{padding:calc(var(--spacing) * 4)}";
 }
 
 test "styled: a Component<StyledProperty> in a hole inlines its declarations (@apply)" {
-    val c = await Render({ -> code() });
+    val c = await run(Render({ -> code() }));
     assert c.rules.contains(
         "." + c.className + "{tab-size:4;font-family:var(--font-mono)}",
     );
@@ -74,31 +74,31 @@ test "styled: a Component<StyledProperty> in a hole inlines its declarations (@a
 test "styled: @variant md reads the theme's breakpoint at build" {
     // the base theme's md (48rem); an app's #[theme] entry moves it once a
     // template function reads the program's catalogue (language-gaps.md)
-    val c = await Render({ -> code() });
+    val c = await run(Render({ -> code() }));
     assert c.rules.contains(
         "@media (width >= 48rem){." + c.className + "{max-width:48rem}}",
     );
 }
 
 test "styled: the same rules are the same class, under the layer's prefix" {
-    val a = await RenderProperty({ -> padAll(4) });
-    val b = await RenderProperty({ -> padAll(4) });
-    val c = await RenderProperty({ -> padAll(8) });
+    val a = await run(RenderProperty({ -> padAll(4) }));
+    val b = await run(RenderProperty({ -> padAll(4) }));
+    val c = await run(RenderProperty({ -> padAll(8) }));
     assert a.className == b.className;
     assert a.className != c.className;
     assert a.className.startsWith("s_");
 }
 
 test "styled: a sheet renders its layers in declaration order, each component once" {
-    val c = await Render({ -> code() });
-    val p = await RenderProperty({ -> padAll(2) });
+    val c = await run(Render({ -> code() }));
+    val p = await run(RenderProperty({ -> padAll(2) }));
     // LANGUAGE GAP: a sheet is a value (no assignment to a record's field) and so `add` answers the sheet.
     val sheet = Sheet
         .of([layer("base"), layer("components")])
         .add("components", c)
         .add("components", c)
         .add("base", p);
-    val out = await sheet.render();
+    val out = await run(sheet.render());
     assert out.indexOf("@layer base") < out.indexOf("@layer components");
     assert out.split(c.rules).length == 2;
 }
