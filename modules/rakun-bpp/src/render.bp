@@ -267,14 +267,16 @@ fn nodePlaceholder(n: fn(scope: Scope) -> Async<Walked>) -> Element {
 // Run `c` with `scope`, then every boundary node of its tree with the same
 // scope: a boundary built through `keptAt` — every boundary this module
 // places, `errorBoundaryNode`'s included (1103) — ignores it and runs over
-// the cell it was kept at (809 (8), 908).
+// the cell it was kept at (809 (8), 908). A `Suspense` fill carries
+// `scope.detach()`: it is resolved in a process of its own on erlang and
+// beam, where the render's root is unreadable (970 (3), (4)).
 pub async fn renderComponent(
     c: Component<Element>,
     scope: Scope,
 ) -> Async<Walked> {
     val value = await run(c, scope);
     val own = __jhTakeBoundaries().map(
-        { b -> Fill(boundary: b, scope: scope) },
+        { b -> Fill(boundary: b, scope: scope.detach()) },
     );
     val inner = await resolveTree(value, scope);
     return Walked(tree: inner.tree, fills: own.append(inner.fills));
@@ -607,7 +609,10 @@ fn errorId(seg: UiSegment) -> string {
 
 // The loading boundary of segment `i`, as a plain value: no `use` of its own
 // — `caughtBelow`'s content is kept for later over `myScope` (`keptAt`,
-// decision 809 (8)), never resolved here.
+// decision 809 (8)), never resolved here. Its fill runs in a process of its
+// own on erlang and beam, so it is kept over `myScope.detach()` — the
+// contexts as they stand at the placement, the one form of a scope that
+// crosses a process (970 (3)).
 fn loadingBoundary(
     seg: UiSegment,
     chain: array<UiSegment>,
@@ -618,7 +623,7 @@ fn loadingBoundary(
 ) -> Element {
     val loading = seg.loadingView;
     val hole = holeId(nextHoleOrdinal());
-    val child = keptAt(myScope, { -> caughtBelow(chain, i, route, page) });
+    val child = keptAt(myScope.detach(), { -> caughtBelow(chain, i, route, page) });
     val placeholder = Suspense(
         Boundary(id: hole, fallback: loading(), child: child),
     );
