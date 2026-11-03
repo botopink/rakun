@@ -12,7 +12,7 @@
 // and lives outside this pure core.
 
 import {Element, ElementBase, div, p, span, text, state, renderToString} from "rakun-bpp";
-import {io.terminal.print} from "std";
+import {io.terminal.print, context.run} from "std";
 
 // Pure view: the counter markup for a given count.
 fn counterView(count: i32) -> Element {
@@ -30,12 +30,12 @@ pub component fn Counter() -> Component<Element> {
     return counterView(c.value);
 }
 
-// A component reading a hook WITHOUT `use`: an ordinary call, which answers the
-// hook's `@Component` — a Promise on commonJS (decisions 104/128 of botopink
-// 1.0.10-beta: every `@Component` body is async there), so the body `await`s it
-// and returns `@Async<Element>`. Its value is the first-render value.
-async fn StatefulBadge() -> Async<Element> {
-    val c = await state(7);
+// A second stateful component: a hook is a component, so it is resolved with
+// `use` inside a component body — never awaited (decision 791 (4)); a root
+// outside every body runs it with std's `run` (822). Its value is the
+// first-render value.
+component fn StatefulBadge() -> Component<Element> {
+    val c = use state(7);
     val doubled = c.value + c.value;
     return div([
         p([text("count: " + c.value.toString(), [])], []),
@@ -55,18 +55,18 @@ test "the counter view renders its count and sign" {
 }
 
 test "the state hook seeds the initial count and exposes a setter" {
-    val c = await state(0);
+    val c = await run(state(0));
     assert c.value == 0;
     c.set(5);
 }
 
 test "renderToString of a component consuming a hook produces the SSR string" {
-    assert renderToString(await StatefulBadge())
+    assert renderToString(await run(StatefulBadge()))
         == "<div><p>count: 7</p><span>x2=14</span></div>";
 }
 
 test "a @Component component activating `use state` renders the server pass" {
-    assert renderToString(await Counter())
+    assert renderToString(await run(Counter()))
         == "<div><p>count: 0</p><span>non-negative</span></div>";
 }
 
