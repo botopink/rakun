@@ -172,14 +172,16 @@ pub async fn componentOutcome(
 // with — the kept `(child, scope)` of 809 (8): `Scope` hands no caller "the
 // scope the body made for its children" (822, 825), and a child resolved
 // from outside the cell that placed it is refused by the model (908), so
-// `caughtBelow` / `notFoundLevel` / `errorLevel` / `errorBoundaryNode`, each
-// a `component fn` of its own, keep THEIR OWN cell (`use selfScope`, 809 (8)
-// case B, 1103) and the node runs `run(b.child, b.scope)` — over the
-// providers visible where the boundary was PLACED (`compose`'s `use
+// `caughtBelow` / `notFoundLevel` / `errorLevel` / `errorBoundaryNode` /
+// `suspense.Suspense`, each a `component fn` of its own, keep THEIR OWN cell
+// (`use selfScope`, 809 (8) case B, 1103) and the node (or the fill) runs
+// over the providers visible where the boundary was PLACED (`compose`'s `use
 // provide(StyledSheet)` included), exactly as a nested `use` would see them
 // there. A `Suspense` fill crosses a process on erlang and beam, so it keeps
-// a detached seed instead, `Fill(boundary, scope: myScope.detach())`, and the
-// fill opens its own cell under it (966 (5), 970 (3)).
+// a detached seed instead, `Fill(boundary, scope: myScope.detach())` — kept
+// by `suspense.Suspense` itself for a boundary written directly in a page
+// body (mt-0373 (3)), and by `placeFill` for the composition's own loading
+// level — and the fill opens its own cell under it (966 (5), 970 (3)).
 
 // The ambient scope a body currently stands in (809 (8) case B): a raw
 // `Composition<Scope>` that answers the cell it is handed, so `use
@@ -260,8 +262,11 @@ fn nodePlaceholder(n: fn(scope: Scope) -> Async<Walked>) -> Element {
 // 908), whatever scope the walk hands it. A `Suspense` fill carries a
 // detached seed: it is resolved in a process of its own on erlang and beam,
 // where the render's root is unreadable (970 (3), (4)) — the seed the
-// placement detached (`placeFill`), or this run's scope detached for a
-// `Suspense` written in an application's page.
+// placement detached (`placeFill`), or, for a `Suspense` written directly in
+// an application's page, the seed `Suspense` itself detached from ITS OWN
+// placement's cell (`use selfScope`, mt-0373 (3)) — never `scope` here,
+// which is only the scope the ENCLOSING run was handed, not what that run's
+// own body may have since provided above the `Suspense` call.
 pub async fn renderComponent(
     c: Component<Element>,
     scope: Scope,

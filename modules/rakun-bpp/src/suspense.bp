@@ -18,6 +18,19 @@
 // shell. A boundary's id is an ordinal assigned by the render in shell order
 // (`holeId`), never derived from the route: a client navigation is a new
 // response with a new set of ordinals.
+//
+// `Suspense` is itself a `component fn` keeping its OWN cell (`use
+// selfScope`, 809 (8) case B, 1103), exactly the device `render.bp`'s
+// `errorBoundaryNode` keeps for an application's error boundary: a bare
+// `Suspense` written directly in a page body — not nested under
+// `errorBoundaryNode` or under the composition's own loading level
+// (`placeFill`) — sees every `use provide` written above it at ITS OWN
+// placement, the same guarantee a nested `use` would have (mt-0373 (3)).
+// Before this, the fill's seed was the scope of the RUN that met the hole
+// (`renderComponent`'s own `scope` argument) rather than the placing body's
+// own cell, so a context provided inside that body, above the `Suspense`
+// call, never reached the fill — the known gap the boundaries-hold-a-value
+// fix (5c90bc0a) left open.
 
 import {element.Element, element.ElementBase};
 import {compiler} from "std";
@@ -33,10 +46,9 @@ pub type Boundary(
 // one form of a scope that crosses a process (970 (3), (4)).
 pub type Fill(boundary: Boundary, scope: Scope)
 
-// A boundary as the render learns it: `at` answers the fill's scope from the
-// scope of the run that meets the hole. `Suspense` detaches that run's
-// scope; the composition's loading level hands the seed it detached from its
-// own cell at the placement (`placeFill`).
+// A boundary as the render learns it: `at` answers the fill's scope — the
+// seed `Suspense` or `placeFill` already detached at the placement, never
+// read from the scope of the run that meets the hole (mt-0373 (3)).
 pub type Placed(boundary: Boundary, at: fn(scope: Scope) -> Scope)
 
 // The boundary is registered with the render as the hole is written: an
@@ -47,12 +59,19 @@ pub type Placed(boundary: Boundary, at: fn(scope: Scope) -> Scope)
 #[compiler.external(.JavaScript("require('./render.mjs').pushBoundary($0)"), .Erlang("jhonstart_render:push_boundary($0)"))]
 declare fn __jhPushBoundary(p: Placed) -> i32;
 
-fn detached(scope: Scope) -> Scope {
-    return scope.detach();
-}
+// The ambient scope a body currently stands in (809 (8) case B): `render.bp`
+// keeps an identical `val selfScope`, kept here too rather than imported —
+// `render.bp` imports `suspense.bp`, so the arrow cannot run the other way.
+// Stateless, so one value is `use`d from every body that needs it.
+val selfScope: Component<Scope> = { scope, key -> scope };
 
-pub fn Suspense(b: Boundary) -> Element {
-    __jhPushBoundary(Placed(boundary: b, at: { scope -> detached(scope) }));
+// `component fn` so `use selfScope` sees every provider above THIS call's
+// own placement (mt-0373 (3)) — never the scope of whatever run later meets
+// the hole, which may be a detached seed of an entirely different cell once
+// the fill crosses a process on erlang and beam (970 (3), (4)).
+pub component fn Suspense(b: Boundary) -> Component<Element> {
+    val myScope = use selfScope;
+    __jhPushBoundary(Placed(boundary: b, at: { scope -> myScope.detach() }));
     return hole(b);
 }
 

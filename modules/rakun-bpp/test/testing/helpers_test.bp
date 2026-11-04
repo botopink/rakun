@@ -17,7 +17,7 @@ import {testing.assert_render.jsonMembers, testing.assert_render.documentText, t
 import {testing.assert_error_boundary.errorBoundaryText, testing.assert_error_boundary.assertErrorBoundary};
 import {testing.assert_metadata.metadataText};
 import {testing.assert_form.actionStateText, testing.assert_form.optimisticText, testing.assert_form.assertOptimistic};
-import {compiler} from "std";
+import {compiler, context.run} from "std";
 
 // ── fixtures the cases share ────────────────────────────────────────────────
 
@@ -46,8 +46,9 @@ fn postsBoundary(ordinal: i32) -> Boundary {
     return Boundary(id: holeId(ordinal), fallback: skeleton("Loading posts…"), child: postList());
 }
 
-fn page(b: Boundary) -> Element {
-    return div([header([text("botopink")]), h1([text("Blog")]), section([Suspense(b)], attrs: [#("class", "main")])], attrs: [#("class", "page")]);
+async fn page(b: Boundary) -> Async<Element> {
+    val hole = await run(Suspense(b));
+    return div([header([text("botopink")]), h1([text("Blog")]), section([hole], attrs: [#("class", "main")])], attrs: [#("class", "page")]);
 }
 
 fn fallback(info: ErrorInfo) -> Element {
@@ -123,7 +124,8 @@ test "helpers: clientBundleEntryText is the i rows, then the placeholders" {
 
 test "helpers: renderToStream is the shell then each fill in declaration order" {
     val b = postsBoundary(1);
-    val chunks = await renderToStream(page(b), [b]);
+    val shell = await page(b);
+    val chunks = await renderToStream(shell, [b]);
     assert streamText(chunks)
         == "--- chunk 0 (shell)\n<div class=\"page\"><header>botopink</header><h1>Blog</h1><section class=\"main\"><div data-jh-h=\"h1\"><div class=\"skeleton\">Loading posts…</div></div></section></div>\n--- chunk 1\n<template data-jh-f=\"h1\"><ul class=\"posts\"><li>one</li><li>two</li></ul></template><script>__bp1(\"h1\")</script>";
 }
@@ -206,7 +208,8 @@ test "request: fixture with a locale cookie and an auth header" {
 
 test "stream: shell then one fill" {
     val b = postsBoundary(1);
-    val chunks = await renderToStream(page(b), [b]);
+    val shell = await page(b);
+    val chunks = await renderToStream(shell, [b]);
     try assertStream(comptime compiler.src(), chunks);
 }
 

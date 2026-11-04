@@ -189,23 +189,25 @@ component fn fastAside() -> Component<Element> {
 }
 
 component fn StreamedPage(afterAside: Gate) -> Component<Element> {
+    val hole1 = use Suspense(
+        Boundary(
+            id: holeId(1),
+            fallback: div([text("wait", attrs: [])], attrs: []),
+            child: slowPosts(afterAside),
+        ),
+    );
+    val hole2 = use Suspense(
+        Boundary(
+            id: holeId(2),
+            fallback: div([text("wait2", attrs: [])], attrs: []),
+            child: fastAside(),
+        ),
+    );
     return section(
         [
             h2([text("Blog", attrs: [])], attrs: []),
-            Suspense(
-                Boundary(
-                    id: holeId(1),
-                    fallback: div([text("wait", attrs: [])], attrs: []),
-                    child: slowPosts(afterAside),
-                ),
-            ),
-            Suspense(
-                Boundary(
-                    id: holeId(2),
-                    fallback: div([text("wait2", attrs: [])], attrs: []),
-                    child: fastAside(),
-                ),
-            ),
+            hole1,
+            hole2,
         ],
         attrs: [],
     );
@@ -341,23 +343,22 @@ component fn loader(mine: Gate, theirs: Gate, value: string) -> Component<Elemen
 }
 
 component fn TwoLoaders(a: Gate, b: Gate) -> Component<Element> {
+    val hole1 = use Suspense(
+        Boundary(
+            id: holeId(1),
+            fallback: div([], attrs: []),
+            child: loader(a, b, "a"),
+        ),
+    );
+    val hole2 = use Suspense(
+        Boundary(
+            id: holeId(2),
+            fallback: div([], attrs: []),
+            child: loader(b, a, "b"),
+        ),
+    );
     return div(
-        [
-            Suspense(
-                Boundary(
-                    id: holeId(1),
-                    fallback: div([], attrs: []),
-                    child: loader(a, b, "a"),
-                ),
-            ),
-            Suspense(
-                Boundary(
-                    id: holeId(2),
-                    fallback: div([], attrs: []),
-                    child: loader(b, a, "b"),
-                ),
-            ),
-        ],
+        [hole1, hole2],
         attrs: [],
     );
 }
@@ -395,16 +396,15 @@ component fn ToneAside() -> Component<Element> {
 }
 
 component fn TonedSection() -> Component<Element> {
+    val hole = use Suspense(
+        Boundary(
+            id: holeId(1),
+            fallback: div([text("wait", attrs: [])], attrs: []),
+            child: ToneAside(),
+        ),
+    );
     return section(
-        [
-            Suspense(
-                Boundary(
-                    id: holeId(1),
-                    fallback: div([text("wait", attrs: [])], attrs: []),
-                    child: ToneAside(),
-                ),
-            ),
-        ],
+        [hole],
         attrs: [],
     );
 }
@@ -426,6 +426,40 @@ test "stream: a Suspense fill reads a context provided above its placement, from
     val fill = writes().at(1) ?? "";
     assert fill.contains(
         "<template data-jh-f=\"h1\"><span>dark</span></template>",
+    );
+}
+
+// mt-0373 (3) — the gap the boundaries-hold-a-value fix (5c90bc0a) left open:
+// a BARE `Suspense`, placed directly in a page body (no `errorBoundaryNode`,
+// no composition loading level between it and the page), still has to read a
+// context `use provide`d above it in that SAME body. `Suspense` is itself a
+// `component fn` keeping its own cell (`use selfScope`, 809 (8) case B,
+// 1103), so it sees `BareTonedPage`'s provide exactly as a nested `use`
+// would, instead of falling back to the detached scope of whatever run later
+// meets the hole.
+component fn BareTonedPage() -> Component<Element> {
+    use provide(createContext(Tone(name: "bright")));
+    val hole = use Suspense(
+        Boundary(
+            id: holeId(1),
+            fallback: div([text("wait", attrs: [])], attrs: []),
+            child: ToneAside(),
+        ),
+    );
+    return div([hole], attrs: []);
+}
+
+test "stream: a bare Suspense placed directly in a page body reads a context provided above it, with no errorBoundaryNode between (mt-0373 (3))" {
+    val site = app([], []);
+    val out = await site.renderStream(
+        inputOf("/blog", [], { -> BareTonedPage() }),
+        req(),
+        recorder(),
+    );
+    assert outcomeText(out) == "ok";
+    val fill = writes().at(1) ?? "";
+    assert fill.contains(
+        "<template data-jh-f=\"h1\"><span>bright</span></template>",
     );
 }
 
@@ -679,48 +713,36 @@ component fn lateNowhere() -> Component<Element> {
 }
 
 component fn LateNotFoundPage() -> Component<Element> {
-    return div(
-        [
-            Suspense(
-                Boundary(
-                    id: holeId(1),
-                    fallback: div([], attrs: []),
-                    child: lateMissing(),
-                ),
-            ),
-        ],
-        attrs: [],
+    val hole = use Suspense(
+        Boundary(
+            id: holeId(1),
+            fallback: div([], attrs: []),
+            child: lateMissing(),
+        ),
     );
+    return div([hole], attrs: []);
 }
 
 component fn LateRedirectPage() -> Component<Element> {
-    return div(
-        [
-            Suspense(
-                Boundary(
-                    id: holeId(1),
-                    fallback: div([], attrs: []),
-                    child: lateLogin(),
-                ),
-            ),
-        ],
-        attrs: [],
+    val hole = use Suspense(
+        Boundary(
+            id: holeId(1),
+            fallback: div([], attrs: []),
+            child: lateLogin(),
+        ),
     );
+    return div([hole], attrs: []);
 }
 
 component fn LateNowherePage() -> Component<Element> {
-    return div(
-        [
-            Suspense(
-                Boundary(
-                    id: holeId(1),
-                    fallback: div([], attrs: []),
-                    child: lateNowhere(),
-                ),
-            ),
-        ],
-        attrs: [],
+    val hole = use Suspense(
+        Boundary(
+            id: holeId(1),
+            fallback: div([], attrs: []),
+            child: lateNowhere(),
+        ),
     );
+    return div([hole], attrs: []);
 }
 
 test "late: a notFound after the shell is the last chunk, status 200, no later fill" {
@@ -1110,18 +1132,14 @@ component fn sortedChild() -> Component<Element> {
 }
 
 component fn StreamedSortedPage() -> Component<Element> {
-    return section(
-        [
-            Suspense(
-                Boundary(
-                    id: holeId(1),
-                    fallback: div([], attrs: []),
-                    child: sortedChild(),
-                ),
-            ),
-        ],
-        attrs: [],
+    val hole = use Suspense(
+        Boundary(
+            id: holeId(1),
+            fallback: div([], attrs: []),
+            child: sortedChild(),
+        ),
     );
+    return section([hole], attrs: []);
 }
 
 fn lastWrite() -> string {
