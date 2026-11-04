@@ -6,7 +6,9 @@ A package declares what it contributes at its root: one component function per
 module, marked `#[rakun.module]`, answering `Component<Service>`. The
 decorator's executor writes `Module(name, lifecycle, make)` into the run-time
 `registry` before `main` (decisions 575 (3), 580), `make` the annotated function
-itself (581 (2)), so the program's `main` only writes `rakun.boot();`.
+itself (581 (2)), so the program's `main` only writes `await rakun.boot();` —
+a boot is a root (decision 825 (1)), so `main` is itself an
+`async fn … -> Async<void>`.
 
 {boot_modules/src/main.bp}
 

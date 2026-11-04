@@ -14,18 +14,22 @@
 ////         return Service(name: "web");
 ////     }
 ////
-//// and the program's `main` writes `rakun.boot();`. The decorator's executor
-//// writes the module into the run-time `registry` before `main` (decision
-//// 575 (3), 580), the function itself as its `make` (581 (2)); `boot()` is
-//// ordinary run-time code over that registry: nothing is discovered at run
-//// time and nothing is reflected.
+//// and the program's `main` writes `await rakun.boot();` — a boot is a root
+//// (decision 825 (1)), and `main` itself an `async fn … -> Async<void>`
+//// (decision 809 (4)). The decorator's executor writes the module into the
+//// run-time `registry` before `main` (decision 575 (3), 580), the function
+//// itself as its `make` (581 (2)); `boot()` is ordinary run-time code over
+//// that registry: nothing is discovered at run time and nothing is
+//// reflected.
 ////
-//// A module runs as a component over a `ServiceScope` — the render scope
-//// without a DOM (decisions 388, 504) — so its body `use`s hooks:
-//// `inject(name)` starts the module of that name once, on demand, and answers
-//// its `Service` (a module therefore starts after everything it injects: the
-//// boot order is the dependency order); `onStop(f)` runs `f` at `stop()`,
-//// the last module started stopping first.
+//// A module runs as a component over a `ServiceScope` — one `Scope`, the
+//// render tree without a DOM (decisions 388, 504), shared by every module —
+//// so its body `use`s hooks: `inject(name)` starts the module of that name
+//// once, on demand, resolved as a child of its caller's own cell keyed by
+//// `name` so two different dependencies never collide (decision 966 (5)),
+//// and answers its `Service` (a module therefore starts after everything it
+//// injects: the boot order is the dependency order); `onStop(f)` runs `f` at
+//// `stop()`, the last module started stopping first.
 ////
 //// A program overrides a package's defaults with a typed record:
 ////
@@ -37,7 +41,7 @@
 //// defaults when the program declares none.
 
 import {compiler, compiler.DeclKind, failure.panic} from "std";
-import {context.RenderScope} from "std";
+import {context.resolve, context.Scope, context.Place} from "std";
 import {io.clock.sleep} from "std";
 import {runtime.rkSingleton};
 
@@ -147,23 +151,28 @@ fn configKey(typeName: string) -> string {
 
 // ── the scope and the hooks ─────────────────────────────────────────────────
 
-/// The scope modules run in: the render scope without a DOM (decisions 388,
-/// 504). `boot()` makes one and mounts every module into it.
-pub type ServiceScope(render: RenderScope) {
+/// The scope modules run in: one `Scope`, the render tree without a DOM
+/// (decisions 388, 504). `boot()` makes one and mounts every module into it,
+/// each at `Place.key(m.name)` — never `Place.none()`, which would put every
+/// module in the one cell `scope.root()` opens and their hooks would collide
+/// (decision 966 (5), `openChild`).
+pub type ServiceScope(scope: Scope) {
     /// The empty scope a boot starts from.
     pub fn root() -> ServiceScope {
-        return ServiceScope(render: RenderScope.root());
+        return ServiceScope(scope: Scope.root());
     }
 
     /// Starts `m` once and answers its service; a module already started
     /// answers the service it started with.
-    pub fn mount(self: Self, m: Module) -> Service {
+    pub async fn mount(self: Self, m: Module) -> Async<Service> {
         val known = startedService(m.name);
         if (known != null) return known;
         val c: Component<Service> = m.make();
-        val r = c.run(self.render);
-        started.push(Started(name: m.name, service: r.value));
-        return r.value;
+        val root = self.scope;
+        val r = resolve(c, root, Place.key(m.name));
+        val v = if (r is Async<Service>) await r else r;
+        started.push(Started(name: m.name, service: v));
+        return v;
     }
 }
 
@@ -177,12 +186,30 @@ fn moduleNamed(name: string) -> Module {
 }
 
 /// The service of the module named `name`, started once, on demand: a module
-/// that injects another starts after it.
-pub component fn inject(name: string) -> Component<Service> {
+/// that injects another starts after it. Resolved by hand over its own cell,
+/// the scope the calling module was handed, at `Place.key(name)` — never the
+/// call site's own (stamped) place, which would collide with a sibling
+/// `inject` of a different name over the same caller (decision 966 (5)).
+pub fn inject(name: string) -> Component<Service> {
+    val composition: Component<Service> = { scope, key -> injectOver(scope, name) };
+    return composition;
+}
+
+fn injectOver(scope: Scope, name: string) -> Service | Async<Service> {
     val known = startedService(name);
     if (known != null) return known;
     val c: Component<Service> = moduleNamed(name).make();
-    val s = await c;
+    val r = resolve(c, scope, Place.key(name));
+    if (r is Async<Service>) return injectSettled(r, name);
+    started.push(Started(name: name, service: r));
+    return r;
+}
+
+// The async half of `injectOver`: the module's own component awaited before
+// it joins `started`, so a second `inject(name)` racing it still finds it
+// absent until it has truly answered.
+async fn injectSettled(r: Async<Service>, name: string) -> Async<Service> {
+    val s = await r;
     started.push(Started(name: name, service: s));
     return s;
 }
@@ -196,14 +223,17 @@ pub component fn onStop(f: fn()) -> Component<void> {
 
 /// Starts the program's modules over one `ServiceScope`: every `.Eager` one in
 /// registry order, then every `.Lazy` one once its `afterMs` has passed since
-/// boot began, in `afterMs` order; a `.Manual` one waits for `start(name)`.
-pub fn boot() -> void {
+/// boot began, in `afterMs` order; a `.Manual` one waits for `start(name)`. A
+/// boot is a root (decision 825 (1)), so it is `async` — `main` writes
+/// `await rakun.boot();` (decision 809 (4): on commonJS a module body may
+/// await).
+pub async fn boot() -> Async<void> {
     val scope = ServiceScope.root();
     val all = registry.all();
     var i = 0;
     while (i < all.length) {
         val m = all.at(i)!;
-        if (m.lifecycle == Lifecycle.Eager) val _s = scope.mount(m);
+        if (m.lifecycle == Lifecycle.Eager) val _s = await scope.mount(m);
         i = i + 1;
     }
     // The `.Lazy` ones, smallest `afterMs` first: each pass starts the one
@@ -228,7 +258,7 @@ pub fn boot() -> void {
                 sleep(ms - waited);
                 waited = ms;
             }
-            val _s = scope.mount(m);
+            val _s = await scope.mount(m);
             more = true;
         }
     }
