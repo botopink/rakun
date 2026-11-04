@@ -48,7 +48,7 @@ import {escape, json.quote, json.arrayOf, json.object, encoding, failure, compil
 import {router.fill, router.snapshot};
 import {client.islandId, client.islandAttr, client.Island, client.clientMount, client.islandEntry};
 import {error_boundary.ErrorInfo, error_boundary.infoFor, error_boundary.isSignal, error_boundary.notFoundReason, error_boundary.wrap};
-import {suspense.Boundary, suspense.Suspense, suspense.holeId};
+import {suspense.Boundary, suspense.Fill, suspense.Placed, suspense.placeFill, suspense.holeId};
 import {globals.globals};
 import {plugin.Json as PayloadJson};
 import {routes.PageContext, routes.LayoutProps, routes.UiSegment, routes.segment};
@@ -61,7 +61,7 @@ import {context.createContext, context.provide, context.Scope, context.run} from
 pub declare fn __jhStateReset() -> i32;
 
 #[compiler.external(.JavaScript("require('./render.mjs').takeBoundaries()"), .Erlang("jhonstart_render:take_boundaries()"))]
-pub declare fn __jhTakeBoundaries() -> array<Boundary>;
+pub declare fn __jhTakeBoundaries() -> array<Placed>;
 
 #[compiler.external(
     .JavaScript("require('./render.mjs').nextIslandOrdinal()"),
@@ -128,7 +128,7 @@ pub fn renderedIslands() -> array<#(string, string, string)> {
 }
 
 pub fn registeredBoundaries() -> array<Boundary> {
-    return __jhTakeBoundaries();
+    return __jhTakeBoundaries().map({ p -> p.boundary });
 }
 
 // `f`'s task under std's `failure.attemptTask` (botopink decisions 431, 494):
@@ -142,16 +142,18 @@ pub async fn attemptTask<T>(f: fn() -> Async<T>) -> Async<Result<T, string>> {
 }
 
 // A component's run walked with `scope`, under `attemptTask` —
-// `Error(reason)` for a raise.
+// `Error(reason)` for a raise. `c` is the component VALUE, made where its
+// call is written (966 (3), (4)); calling it only made its lambda, so the
+// run is what the try catches.
 pub async fn componentOutcome(
-    f: fn() -> Component<Element>,
+    c: Component<Element>,
     scope: Scope,
 ) -> Async<Result<Walked, string>> {
-    val out = await attemptTask({ -> renderComponent(f(), scope) });
+    val out = await attemptTask({ -> renderComponent(c, scope) });
     return try out;
 }
 
-// ── the renderer holds the scope (decisions 388, 414, 809, 908) ─────────────
+// ── the renderer holds the scope (decisions 388, 414, 809, 908, 966) ────────
 //
 // A component at run time is a lambda over a `Scope` (388); calling one runs
 // nothing, `resolve(c, scope, key)` / `run(c, scope)` runs it, so a try
@@ -161,23 +163,23 @@ pub async fn componentOutcome(
 // beside `suspense.Boundary`): `caughtBelow` / `notFoundLevel` / an
 // application's own `errorBoundaryNode` each answer a placeholder (`#node`,
 // the node registered per render) and call no host try, and the plain
-// functions below run each inside the host's try with whatever scope
-// `resolveTree` is threading — but that threaded scope is never what `child`
-// actually sees: `Scope` no longer hands a caller back "the scope the body
-// made for its children" (809 (8), 822, 825 retire 388 (2)'s `Rendered`),
-// and resolving a child from outside the cell that made it is refused by the
-// model (908) — a run elsewhere would never see `compose`'s own `use
-// provide(StyledSheet)`, and an application calling `errorBoundaryNode`
-// would never see its own providers either (1103). So `caughtBelow` /
-// `notFoundLevel` / `errorLevel` / `errorBoundaryNode`, each a `component
-// fn` of its own, keep THEIR OWN cell (`use selfScope`, 809 (8) case B)
-// before placing a boundary, and `keptAt` closes over it: whatever scope the
-// boundary is later resolved with is ignored, and `inner`'s own `enter`
-// opens its cell against the kept one instead — which sits over the
-// providers visible where the boundary was PLACED, exactly as a nested `use`
-// would see it there. A `Suspense` boundary's `child` is kept the same way;
-// `Fill.scope` stays (streaming.bp's shape) but is no longer load-bearing
-// for a boundary built through `keptAt`.
+// functions below run each inside the host's try.
+//
+// Every boundary holds the component VALUE, never a thunk (964 (2) 30-c /
+// 30-d, 809 (7)): the placing body evaluates the child's call where it is
+// written, so the call is counted on that body's cell, in that body's
+// process (966 (3), (4)). With it the boundary keeps the scope it is run
+// with — the kept `(child, scope)` of 809 (8): `Scope` hands no caller "the
+// scope the body made for its children" (822, 825), and a child resolved
+// from outside the cell that placed it is refused by the model (908), so
+// `caughtBelow` / `notFoundLevel` / `errorLevel` / `errorBoundaryNode`, each
+// a `component fn` of its own, keep THEIR OWN cell (`use selfScope`, 809 (8)
+// case B, 1103) and the node runs `run(b.child, b.scope)` — over the
+// providers visible where the boundary was PLACED (`compose`'s `use
+// provide(StyledSheet)` included), exactly as a nested `use` would see them
+// there. A `Suspense` fill crosses a process on erlang and beam, so it keeps
+// a detached seed instead, `Fill(boundary, scope: myScope.detach())`, and the
+// fill opens its own cell under it (966 (5), 970 (3)).
 
 // The ambient scope a body currently stands in (809 (8) case B): a raw
 // `Composition<Scope>` that answers the cell it is handed, so `use
@@ -186,39 +188,27 @@ pub async fn componentOutcome(
 // map. Stateless, so one value is `use`d from every body that needs it.
 val selfScope: Component<Scope> = { scope, key -> scope };
 
-// A thunk resolved later — inside a host's try, or a stream's fill — kept
-// over `scope` from where it was placed, never a scope reselected from
-// outside (809 (8), 908): whatever scope the caller later resolves it with
-// is ignored, and `inner`'s own cell opens against the kept one.
-fn keptAt(scope: Scope, inner: fn() -> Component<Element>) -> fn() -> Component<Element> {
-    return { -> boundTo(scope, inner) };
-}
-
-component fn boundTo(scope: Scope, inner: fn() -> Component<Element>) -> Component<Element> {
-    val e = await run(inner(), scope);
-    return e;
-}
-
-// The error boundary of a segment: `child` runs inside the host's try; a
-// signal is re-raised, any other failure renders `view` (wrapped in
-// `data-jh-e` unless the segment streams, `wrapped`).
+// The error boundary of a segment: `child` runs over `scope`, the placing
+// body's cell, inside the host's try; a signal is re-raised, any other
+// failure renders `view` (wrapped in `data-jh-e` unless the segment streams,
+// `wrapped`).
 pub type ErrorBoundaryNode(
     id: string,
-    child: fn() -> Component<Element>,
+    child: Component<Element>,
+    scope: Scope,
     view: fn(info: ErrorInfo) -> Element,
     wrapped: bool,
 )
 
-// The not-found level of a segment: `data-jh-n` around `child`, and `view`
-// stashed as the nearest not-found tree when a not-found signal leaves it.
+// The not-found level of a segment: `data-jh-n` around `child` (run over
+// `scope`, the placing body's cell), and `view` stashed as the nearest
+// not-found tree when a not-found signal leaves it.
 pub type NotFoundBoundaryNode(
     pattern: string,
-    child: fn() -> Component<Element>,
+    child: Component<Element>,
+    scope: Scope,
     view: fn() -> Element,
 )
-
-// A `Suspense` boundary with the scope its fill runs with.
-pub type Fill(boundary: Boundary, scope: Scope)
 
 // A run walked: its tree, every boundary node resolved, and the fills the run
 // and the nodes below it registered.
@@ -226,21 +216,22 @@ pub type Walked(tree: Element, fills: Fill[])
 
 // An application's error boundary around a component (decisions 414 (3),
 // 1103): it writes no try around its children — it places this node, and the
-// renderer runs `child` inside the host's try. `child` is kept over THIS
-// call's own scope (`keptAt`, 809 (8)) rather than the scope the node is
-// later resolved with — an application's `errorBoundaryNode` is itself a
-// `component fn` now, so its placement sees every `use provide` written
-// above it, the same guarantee `caughtBelow` keeps for the composition's own
-// levels. Renders `fallback` (in `data-jh-e="ID"`) for an ordinary failure
-// and re-raises a signal.
+// renderer runs `child` inside the host's try. `child` is the component
+// value the caller made where it wrote the call (966 (3), (4)), run over
+// THIS call's own cell (809 (8)) rather than the scope the node is later
+// walked with — an application's `errorBoundaryNode` is itself a `component
+// fn`, so its placement sees every `use provide` written above it, the same
+// guarantee `caughtBelow` keeps for the composition's own levels. Renders
+// `fallback` (in `data-jh-e="ID"`) for an ordinary failure and re-raises a
+// signal.
 pub component fn errorBoundaryNode(
     id: string,
-    child: fn() -> Component<Element>,
+    child: Component<Element>,
     fallback: fn(info: ErrorInfo) -> Element,
 ) -> Component<Element> {
     val myScope = use selfScope;
     return errorNode(
-        ErrorBoundaryNode(id: id, child: keptAt(myScope, child), view: fallback, wrapped: true),
+        ErrorBoundaryNode(id: id, child: child, scope: myScope, view: fallback, wrapped: true),
     );
 }
 
@@ -264,22 +255,26 @@ fn nodePlaceholder(n: fn(scope: Scope) -> Async<Walked>) -> Element {
     );
 }
 
-// Run `c` with `scope`, then every boundary node of its tree with the same
-// scope: a boundary built through `keptAt` — every boundary this module
-// places, `errorBoundaryNode`'s included (1103) — ignores it and runs over
-// the cell it was kept at (809 (8), 908). A `Suspense` fill carries
-// `scope.detach()`: it is resolved in a process of its own on erlang and
-// beam, where the render's root is unreadable (970 (3), (4)).
+// Run `c` with `scope`, then every boundary node of its tree: an error or
+// a not-found node runs its child over the cell it was placed in (809 (8),
+// 908), whatever scope the walk hands it. A `Suspense` fill carries a
+// detached seed: it is resolved in a process of its own on erlang and beam,
+// where the render's root is unreadable (970 (3), (4)) — the seed the
+// placement detached (`placeFill`), or this run's scope detached for a
+// `Suspense` written in an application's page.
 pub async fn renderComponent(
     c: Component<Element>,
     scope: Scope,
 ) -> Async<Walked> {
     val value = await run(c, scope);
-    val own = __jhTakeBoundaries().map(
-        { b -> Fill(boundary: b, scope: scope.detach()) },
-    );
+    val own = __jhTakeBoundaries().map({ p -> fillOf(p, scope) });
     val inner = await resolveTree(value, scope);
     return Walked(tree: inner.tree, fills: own.append(inner.fills));
+}
+
+fn fillOf(p: Placed, scope: Scope) -> Fill {
+    val at = p.at;
+    return Fill(boundary: p.boundary, scope: at(scope));
 }
 
 async fn resolveTree(e: Element, scope: Scope) -> Async<Walked> {
@@ -317,7 +312,7 @@ pub async fn renderErrorBoundary(
     b: ErrorBoundaryNode,
     scope: Scope,
 ) -> Async<Walked> {
-    val outcome = await componentOutcome(b.child, scope);
+    val outcome = await componentOutcome(b.child, b.scope);
     val failure = failureOf(outcome);
     if (isSignal(failure))
         return Walked(tree: raiseElement(failure), fills: []);
@@ -335,7 +330,7 @@ pub async fn renderNotFound(
     b: NotFoundBoundaryNode,
     scope: Scope,
 ) -> Async<Walked> {
-    val outcome = await componentOutcome(b.child, scope);
+    val outcome = await componentOutcome(b.child, b.scope);
     val failure = failureOf(outcome);
     if (failure == notFoundReason()) {
         val view = b.view;
@@ -554,13 +549,18 @@ component fn templateOf(seg: UiSegment, route: PageContext) -> Component<Element
 }
 
 // The page, composed through `chain`: root-first, layouts before the page.
+// `page` is the page's component VALUE, made where its call is written —
+// `compose(chain, route, Page())` —, never a thunk (964 (2) 30-c): a
+// function handed through the composition's bodies would be numbered in each
+// of them (821), so a loading level's fill, run in a process of its own on
+// erlang and beam, would count it on a cell of the render's process.
 // The root of every page render: it provides `styled`'s `StyledSheet`
 // context (decisions 352, 354 (7), 379), so a `styled` component computed at
 // render below it writes to this render's sheet (`styled_sheet.bp`).
 pub component fn compose(
     chain: array<UiSegment>,
     route: PageContext,
-    page: fn() -> Component<Element>,
+    page: Component<Element>,
 ) -> Component<Element> {
     use provide(createContext(renderSheet()));
     val tree = use composeAt(chain, 0, route, page);
@@ -579,11 +579,12 @@ component fn composeAt(
     chain: array<UiSegment>,
     i: i32,
     route: PageContext,
-    page: fn() -> Component<Element>,
+    page: Component<Element>,
 ) -> Component<Element> {
     val segmentStep: fn() -> Component<Element> = { -> composeSegment(chain, i, route, page) };
+    val pageStep: fn() -> Component<Element> = { -> page };
     val step: fn() -> Component<Element> = if (i >= chain.length)
-        page
+        pageStep
     else
         segmentStep;
     val tree = use step();
@@ -594,7 +595,7 @@ component fn composeSegment(
     chain: array<UiSegment>,
     i: i32,
     route: PageContext,
-    page: fn() -> Component<Element>,
+    page: Component<Element>,
 ) -> Component<Element> {
     val seg = segmentOf(chain, i);
     val shell = use layoutOf(seg, route, i);
@@ -608,24 +609,31 @@ fn errorId(seg: UiSegment) -> string {
 }
 
 // The loading boundary of segment `i`, as a plain value: no `use` of its own
-// — `caughtBelow`'s content is kept for later over `myScope` (`keptAt`,
-// decision 809 (8)), never resolved here. Its fill runs in a process of its
-// own on erlang and beam, so it is kept over `myScope.detach()` — the
-// contexts as they stand at the placement, the one form of a scope that
-// crosses a process (970 (3)).
+// — `caughtBelow(…)` is evaluated here, in the render's process, so its call
+// is counted where it is written (966 (3), (4)), and never resolved here.
+// Its fill runs in a process of its own on erlang and beam, so it carries
+// `myScope.detach()` — the contexts as they stand at the placement, the one
+// form of a scope that crosses a process (970 (3)) — and the fill runs
+// `run(b.child, fill.scope)`, opening its own cell under that seed (966 (5)).
 fn loadingBoundary(
     seg: UiSegment,
     chain: array<UiSegment>,
     i: i32,
     route: PageContext,
-    page: fn() -> Component<Element>,
+    page: Component<Element>,
     myScope: Scope,
 ) -> Element {
     val loading = seg.loadingView;
     val hole = holeId(nextHoleOrdinal());
-    val child = keptAt(myScope.detach(), { -> caughtBelow(chain, i, route, page) });
-    val placeholder = Suspense(
-        Boundary(id: hole, fallback: loading(), child: child),
+    val placeholder = placeFill(
+        Fill(
+            boundary: Boundary(
+                id: hole,
+                fallback: loading(),
+                child: caughtBelow(chain, i, route, page),
+            ),
+            scope: myScope.detach(),
+        ),
     );
     if (seg.hasError) return wrap(errorId(seg), placeholder);
     return placeholder;
@@ -639,7 +647,7 @@ component fn errorLevel(
     chain: array<UiSegment>,
     i: i32,
     route: PageContext,
-    page: fn() -> Component<Element>,
+    page: Component<Element>,
 ) -> Component<Element> {
     val seg = segmentOf(chain, i);
     val myScope = use selfScope;
@@ -660,7 +668,7 @@ component fn caughtBelow(
     chain: array<UiSegment>,
     i: i32,
     route: PageContext,
-    page: fn() -> Component<Element>,
+    page: Component<Element>,
 ) -> Component<Element> {
     val seg = segmentOf(chain, i);
     val myScope = use selfScope;
@@ -669,7 +677,8 @@ component fn caughtBelow(
         literalElement(errorNode(
             ErrorBoundaryNode(
                 id: errorId(seg),
-                child: keptAt(myScope, { -> notFoundLevel(chain, i, route, page) }),
+                child: notFoundLevel(chain, i, route, page),
+                scope: myScope,
                 view: seg.errorView,
                 wrapped: seg.hasLoading == false,
             ),
@@ -690,7 +699,7 @@ component fn notFoundLevel(
     chain: array<UiSegment>,
     i: i32,
     route: PageContext,
-    page: fn() -> Component<Element>,
+    page: Component<Element>,
 ) -> Component<Element> {
     val seg = segmentOf(chain, i);
     val myScope = use selfScope;
@@ -699,7 +708,8 @@ component fn notFoundLevel(
         literalElement(notFoundNode(
             NotFoundBoundaryNode(
                 pattern: seg.pattern,
-                child: keptAt(myScope, { -> composeAt(chain, i + 1, route, page) }),
+                child: composeAt(chain, i + 1, route, page),
+                scope: myScope,
                 view: seg.notFoundView,
             ),
         ))

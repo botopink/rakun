@@ -51,8 +51,8 @@ import {table.parseTable, table.RouteEntry, match.matchPath, match.RouteMatch, n
 import {server.RequestData, server.enterRequest, server.leaveRequest};
 import {router.fill, router.renderIsDynamic, router.markDynamic, router.resetDynamic};
 import {error_boundary.ErrorInfo, error_boundary.isSignal, error_boundary.notFoundReason};
-import {suspense.Boundary};
-import {render.renderNode, render.compose, render.Payload, render.renderKeys, render.documentStart, render.documentEnd, render.isLangTag, render.__jhStateReset, render.__jhIslands, render.__jhStashedNotFound, render.componentOutcome, render.attemptRender, render.Fill};
+import {suspense.Boundary, suspense.Fill};
+import {render.renderNode, render.compose, render.Payload, render.renderKeys, render.documentStart, render.documentEnd, render.isLangTag, render.__jhStateReset, render.__jhIslands, render.__jhStashedNotFound, render.componentOutcome, render.attemptRender};
 import {globals.globals};
 import {plugin.RenderPlugin, plugin.Json as PayloadJson};
 import {routes.PageContext, routes.LayoutProps, routes.UiSegment};
@@ -64,11 +64,12 @@ import {context.Scope, context.run} from "std";
 
 pub type Chunk(id: string, html: string)
 
-// Awaits the boundary's child EXACTLY ONCE, at statement level, and renders it
-// through the escaping walker.
+// Runs the boundary's child EXACTLY ONCE, at statement level, as a root of
+// its own (`run` closes it, 825 (1)), and renders it through the escaping
+// walker. Outside a render: a render's fill runs over its `Fill.scope`
+// (`resolveIn`).
 pub async fn resolve(b: Boundary) -> Async<Chunk> {
-    val child = b.child;
-    val tree = await run(child(), Scope.root());
+    val tree = await run(b.child);
     return Chunk(id: b.id, html: renderNode(tree));
 }
 
@@ -617,7 +618,7 @@ pub async fn renderWith(
     val page = input.page;
     val chain = input.chain;
     val outcome = await componentOutcome(
-        { -> compose(chain, route, page) },
+        compose(chain, route, page()),
         Scope.root(),
     );
     val failure = case outcome {

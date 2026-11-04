@@ -14,13 +14,13 @@ import {server.RequestData, server.cookies, server.request};
 import {router.selectedLayoutSegment, router.pathname, router.searchParams};
 import {error_boundary.notFound, error_boundary.redirect, error_boundary.ErrorInfo};
 import {suspense.Boundary, suspense.Suspense, suspense.holeId};
-import {render.compose, render.resetRender, render.registeredBoundaries, render.renderNode, render.RenderHooks, render.setHooks, render.defaultHooks, render.attemptTask, render.attemptRender, render.isLangTag};
+import {render.errorBoundaryNode, render.compose, render.resetRender, render.registeredBoundaries, render.renderNode, render.RenderHooks, render.setHooks, render.defaultHooks, render.attemptTask, render.attemptRender, render.isLangTag};
 import {streaming.Response, streaming.PageInput, streaming.App, streaming.app, streaming.redirectAllowed, streaming.extrasProblem, streaming.guarded};
 import {plugin.RenderPlugin, plugin.Json as PayloadJson};
 import {routes.PageContext, routes.LayoutProps, routes.UiSegment, routes.segment, routes.withLayout, routes.withTemplate, routes.withError, routes.withLoading, routes.withNotFound};
 import {metadata.Metadata, metadata.Viewport, metadata.emptyMetadata};
 import {async, async.Gate, compiler} from "std";
-import {context.Scope, context.run} from "std";
+import {context.createContext, context.provide, context.context, context.Scope, context.run} from "std";
 
 // ── the recorder ────────────────────────────────────────────────────────────
 
@@ -196,14 +196,14 @@ component fn StreamedPage(afterAside: Gate) -> Component<Element> {
                 Boundary(
                     id: holeId(1),
                     fallback: div([text("wait", attrs: [])], attrs: []),
-                    child: { -> slowPosts(afterAside) },
+                    child: slowPosts(afterAside),
                 ),
             ),
             Suspense(
                 Boundary(
                     id: holeId(2),
                     fallback: div([text("wait2", attrs: [])], attrs: []),
-                    child: { -> fastAside() },
+                    child: fastAside(),
                 ),
             ),
         ],
@@ -347,14 +347,14 @@ component fn TwoLoaders(a: Gate, b: Gate) -> Component<Element> {
                 Boundary(
                     id: holeId(1),
                     fallback: div([], attrs: []),
-                    child: { -> loader(a, b, "a") },
+                    child: loader(a, b, "a"),
                 ),
             ),
             Suspense(
                 Boundary(
                     id: holeId(2),
                     fallback: div([], attrs: []),
-                    child: { -> loader(b, a, "b") },
+                    child: loader(b, a, "b"),
                 ),
             ),
         ],
@@ -376,6 +376,57 @@ test "stream: two boundaries resolve concurrently — each waits on the other" {
     assert allText().contains("<span>a</span>");
     assert allText().contains("<span>b</span>");
     assert allText().contains("gate never opened") == false;
+}
+
+// A fill runs in a process of its own on erlang and beam, over the detached
+// seed of the scope its boundary was placed under (966 (5), 970 (3)): a
+// context provided above the placement reaches the boundary's child there.
+// The child is the component VALUE `ToneAside()`, counted where it is
+// written, on `TonedSection`'s cell in the render's process (966 (3), (4));
+// written as a thunk the call was counted in the fill's process over that
+// cell — `scope-foreign` (144 B-217).
+type Tone(name: string)
+
+val toneContext = comptime createContext(Tone(name: "none"));
+
+component fn ToneAside() -> Component<Element> {
+    val t = use context(toneContext);
+    return span([text(t.name, attrs: [])], attrs: []);
+}
+
+component fn TonedSection() -> Component<Element> {
+    return section(
+        [
+            Suspense(
+                Boundary(
+                    id: holeId(1),
+                    fallback: div([text("wait", attrs: [])], attrs: []),
+                    child: ToneAside(),
+                ),
+            ),
+        ],
+        attrs: [],
+    );
+}
+
+component fn TonedPage() -> Component<Element> {
+    use provide(createContext(Tone(name: "dark")));
+    val inner = use errorBoundaryNode("tone", TonedSection(), { info -> ErrorView(info) });
+    return div([inner], attrs: []);
+}
+
+test "stream: a Suspense fill reads a context provided above its placement, from the fill's own process" {
+    val site = app([], []);
+    val out = await site.renderStream(
+        inputOf("/blog", [], { -> TonedPage() }),
+        req(),
+        recorder(),
+    );
+    assert outcomeText(out) == "ok";
+    val fill = writes().at(1) ?? "";
+    assert fill.contains(
+        "<template data-jh-f=\"h1\"><span>dark</span></template>",
+    );
 }
 
 // ── step 4: composition ─────────────────────────────────────────────────────
@@ -634,7 +685,7 @@ component fn LateNotFoundPage() -> Component<Element> {
                 Boundary(
                     id: holeId(1),
                     fallback: div([], attrs: []),
-                    child: { -> lateMissing() },
+                    child: lateMissing(),
                 ),
             ),
         ],
@@ -649,7 +700,7 @@ component fn LateRedirectPage() -> Component<Element> {
                 Boundary(
                     id: holeId(1),
                     fallback: div([], attrs: []),
-                    child: { -> lateLogin() },
+                    child: lateLogin(),
                 ),
             ),
         ],
@@ -664,7 +715,7 @@ component fn LateNowherePage() -> Component<Element> {
                 Boundary(
                     id: holeId(1),
                     fallback: div([], attrs: []),
-                    child: { -> lateNowhere() },
+                    child: lateNowhere(),
                 ),
             ),
         ],
@@ -1065,7 +1116,7 @@ component fn StreamedSortedPage() -> Component<Element> {
                 Boundary(
                     id: holeId(1),
                     fallback: div([], attrs: []),
-                    child: { -> sortedChild() },
+                    child: sortedChild(),
                 ),
             ),
         ],

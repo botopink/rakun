@@ -1,12 +1,17 @@
 // rakun-bpp/suspense — the streaming boundary and its hole (front 30).
 //
 // An `Element` cannot carry a deferred child — `Children` coerces from an
-// array, an element or a string, never from a thunk — so a boundary is a
+// array, an element or a string, never from a component — so a boundary is a
 // RECORD beside the tree: its fallback goes out with the shell, and its child
-// is an UNSTARTED thunk over a server component. `Async` is eager on the erlang
-// row, so a boundary that held a started Async would hold a value that has
-// already run; the thunk is what lets front 30's render spawn the child and
-// flush the shell first.
+// is the component VALUE, `child: Component<Element>` (decisions 964 (2)
+// 30-d, 809 (7)). The caller evaluates it where it writes the boundary —
+// `Boundary(…, child: Slow())` — so the call is counted where it is written,
+// on the placing body's cell, in the render's own process (966 (3), (4)).
+// Calling a component only makes its lambda (791 (1)): nothing runs until the
+// fill runs it, `run(b.child, fill.scope)`, over the cell the fill opens under
+// its detached seed (966 (5), 970 (3)). A thunk here would stamp the call
+// inside the fill's process over the page's cell, which is another process's
+// there — `scope-foreign`.
 //
 // `Suspense(b)` renders only the HOLE: the fallback inside
 // `<div data-jh-h="h1">` (`contracts.md § 2`). The child never appears in the
@@ -16,23 +21,50 @@
 
 import {element.Element, element.ElementBase};
 import {compiler} from "std";
+import {context.Scope} from "std";
 
 pub type Boundary(
     id: string,
     fallback: Element,
-    child: fn() -> Component<Element>,
+    child: Component<Element>,
 )
 
+// A boundary with the scope its fill runs with: always a detached seed, the
+// one form of a scope that crosses a process (970 (3), (4)).
+pub type Fill(boundary: Boundary, scope: Scope)
+
+// A boundary as the render learns it: `at` answers the fill's scope from the
+// scope of the run that meets the hole. `Suspense` detaches that run's
+// scope; the composition's loading level hands the seed it detached from its
+// own cell at the placement (`placeFill`).
+pub type Placed(boundary: Boundary, at: fn(scope: Scope) -> Scope)
+
 // The boundary is registered with the render as the hole is written: an
-// `Element` has nowhere to carry the thunk, so the render learns the
-// boundaries a tree holds from this cell (`render.mjs` /
-// `sidecars/jhonstart_render.erl`, per render). Outside a render the
-// registration is simply never read.
+// `Element` has nowhere to carry a component until the tree's children are
+// components themselves (809 (7)), so the render learns the boundaries a
+// tree holds from this cell (`render.mjs` / `sidecars/jhonstart_render.erl`,
+// per render). Outside a render the registration is simply never read.
 #[compiler.external(.JavaScript("require('./render.mjs').pushBoundary($0)"), .Erlang("jhonstart_render:push_boundary($0)"))]
-declare fn __jhPushBoundary(b: Boundary) -> i32;
+declare fn __jhPushBoundary(p: Placed) -> i32;
+
+fn detached(scope: Scope) -> Scope {
+    return scope.detach();
+}
 
 pub fn Suspense(b: Boundary) -> Element {
-    __jhPushBoundary(b);
+    __jhPushBoundary(Placed(boundary: b, at: { scope -> detached(scope) }));
+    return hole(b);
+}
+
+// A hole whose fill runs over the seed `f` already carries — the placing
+// body's own cell, detached where it was placed (970 (3)).
+pub fn placeFill(f: Fill) -> Element {
+    val seed = f.scope;
+    __jhPushBoundary(Placed(boundary: f.boundary, at: { scope -> seed }));
+    return hole(f.boundary);
+}
+
+fn hole(b: Boundary) -> Element {
     return Element(
         tag: "div",
         value: "",
