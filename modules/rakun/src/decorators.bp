@@ -18,7 +18,7 @@
 ////
 //// Reached via `from "rakun"`; see ./AGENTS.md and ./conformance/docs.md.
 
-import {compiler, compiler.DeclKind} from "std";
+import {compiler, compiler.DeclKind, compiler.Call, compiler.Member, compiler.Name} from "std";
 import {runtime.rkScan};
 
 // ---- component markers (annotate a record-shaped type) ----
@@ -182,8 +182,11 @@ pub fn repository(syntax decl: unknown) -> void {
 // routes: for every method carrying a `#[getMapping(path)]`/… annotation, its
 // member `rkRoutes()` calls `rkRegisterRoute(verb, prefix + path, handler)`,
 // whose handler builds the controller via its factory and calls the method;
-// the executor `decl.rkRoutes()` runs it before `main`. The `#[route("/prefix")]` on
-// the type (if any) is the path prefix.
+// the executor runs it before `main`. The executor calls the member from the
+// value the decorator built — a `compiler.ast` tree `Name.rkRoutes()` held in a
+// local — never read back through `decl`, which counts no member it added
+// (842 (1), 797). The `#[route("/prefix")]` on the type (if any) is the path
+// prefix.
 
 pub fn controller(syntax decl: unknown) -> void {
     val declName = compiler.name(decl)!;
@@ -259,8 +262,11 @@ pub fn controller(syntax decl: unknown) -> void {
             });
         });
     if (routes.length > 0) {
-        compiler.addMember("pub fn rkRoutes() { " + routes.join(" ") + " }");
-        compiler.init({ -> decl.rkRoutes(); });
+        compiler.addMember("pub fn rkRoutes() -> void { "
+            + routes.join(" ")
+            + " }");
+        val callRoutes = Call(callee: Member(target: Name(declName), member: "rkRoutes"), args: []);
+        compiler.init({ -> compiler.ast(callRoutes); });
     }
     if (compiler.kind(decl) != DeclKind.Type)
         compiler.fail("#[controller] must annotate a type", at: decl);
@@ -345,8 +351,11 @@ pub fn restController(syntax decl: unknown) -> void {
             });
         });
     if (routes.length > 0) {
-        compiler.addMember("pub fn rkRoutes() { " + routes.join(" ") + " }");
-        compiler.init({ -> decl.rkRoutes(); });
+        compiler.addMember("pub fn rkRoutes() -> void { "
+            + routes.join(" ")
+            + " }");
+        val callRoutes = Call(callee: Member(target: Name(declName), member: "rkRoutes"), args: []);
+        compiler.init({ -> compiler.ast(callRoutes); });
     }
     if (compiler.kind(decl) != DeclKind.Type)
         compiler.fail("#[restController] must annotate a type", at: decl);
@@ -423,8 +432,11 @@ pub fn configuration(syntax decl: unknown) -> void {
                 );
         });
     if (beans.length > 0) {
-        compiler.addMember("pub fn rkBeans() { " + beans.join(" ") + " }");
-        compiler.init({ -> decl.rkBeans(); });
+        compiler.addMember("pub fn rkBeans() -> void { "
+            + beans.join(" ")
+            + " }");
+        val callBeans = Call(callee: Member(target: Name(declName), member: "rkBeans"), args: []);
+        compiler.init({ -> compiler.ast(callBeans); });
     }
     if (compiler.kind(decl) != DeclKind.Type)
         compiler.fail("#[configuration] must annotate a type", at: decl);

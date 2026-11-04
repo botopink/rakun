@@ -33,7 +33,7 @@
 //// call a sibling function. When `decorators.bp` unfreezes, this body folds
 //// into the six stereotypes and the extra line goes away.
 
-import {collections.Dict, compiler, compiler.DeclKind, failure.panic} from "std";
+import {collections.Dict, compiler, compiler.DeclKind, compiler.Call, compiler.Member, compiler.Name, failure.panic} from "std";
 import {runtime.rkScan, runtime.rkSingleton, runtime.rkProp, runtime.rkConfigCheckRun};
 import {events.Event, events.event, events.publishEvent, events.bootEventNames, events.bootEventPayloads, events.applicationFailedEvent};
 import {lifecycle.postConstructFailure, lifecycle.postConstructProblem};
@@ -924,9 +924,11 @@ pub fn managed(syntax decl: unknown) -> void {
                 + "); }",
         );
     }
+    val callMake = Call(callee: Member(target: Name(declName), member: "make"), args: []);
+    val callNew = Call(callee: Member(target: Name(declName), member: "new"), args: []);
     if (singleton)
         compiler.init({ ->
-            rkRegisterBean(declName, qualName, scopeName, primaryOn, lazyOn, declName, { -> decl.make() });
+            rkRegisterBean(declName, qualName, scopeName, primaryOn, lazyOn, declName, { -> compiler.ast(callMake) });
         })
     else if (request)
         compiler.init({ ->
@@ -937,12 +939,12 @@ pub fn managed(syntax decl: unknown) -> void {
                 primaryOn,
                 lazyOn,
                 declName,
-                { -> rkRequestScoped(declName, { -> decl.new() }) },
+                { -> rkRequestScoped(declName, { -> compiler.ast(callNew) }) },
             );
         })
     else
         compiler.init({ ->
-            rkRegisterBean(declName, qualName, scopeName, primaryOn, lazyOn, declName, { -> decl.new() });
+            rkRegisterBean(declName, qualName, scopeName, primaryOn, lazyOn, declName, { -> compiler.ast(callNew) });
         });
     val instance = if (singleton) declName + ".make()" else declName + ".new()";
     var hooked = "";
@@ -1002,8 +1004,11 @@ pub fn managed(syntax decl: unknown) -> void {
                 );
         });
     if (hooks.length > 0) {
-        compiler.addMember("pub fn rkHooks() { " + hooks.join(" ") + " }");
-        compiler.init({ -> decl.rkHooks(); });
+        compiler.addMember("pub fn rkHooks() -> void { "
+            + hooks.join(" ")
+            + " }");
+        val callHooks = Call(callee: Member(target: Name(declName), member: "rkHooks"), args: []);
+        compiler.init({ -> compiler.ast(callHooks); });
     }
     if (compiler.kind(decl) != DeclKind.Type)
         compiler.fail("#[managed] must annotate a type", at: decl);
@@ -1186,10 +1191,14 @@ pub fn imports(syntax decl: unknown, comptime names: string) -> void {
                 );
         });
     if (registrations.length > 0) {
-        compiler.addMember("pub fn rkImports() { "
+        compiler.addMember("pub fn rkImports() -> void { "
             + registrations.join(" ")
             + " }");
-        compiler.init({ -> decl.rkImports(); });
+        val callImports = Call(
+            callee: Member(target: Name(compiler.name(decl)!), member: "rkImports"),
+            args: [],
+        );
+        compiler.init({ -> compiler.ast(callImports); });
     }
     if (compiler.kind(decl) != DeclKind.Type)
         compiler.fail("#[imports] must annotate a type (a #[configuration])", at: decl);
