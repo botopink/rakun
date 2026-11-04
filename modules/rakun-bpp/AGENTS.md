@@ -62,7 +62,7 @@ repository/rakun-bpp/
 │   │   ├── src/
 │   │   │   ├── AGENTS.md
 │   │   │   ├── root.bp        ← module-tree root: `pub mod element; pub mod hooks; pub mod router; pub mod server; pub mod client; pub mod suspense; pub mod streaming; pub mod render; pub mod plugin; pub mod globals; pub mod routes; pub mod error_boundary; pub mod metadata; pub mod elements; pub mod html_attrs; pub mod node; pub mod prelude; mod client_runtime;`
-│   │   │   ├── element.bp     ← COMPILED CORE: `type ElementBase()` (the empty-record phantom decision 128's wrapper named, until `ElementContext` retires it — 354 (7)) + type Element (`implement Renderable`) + `pub type View = Component<Element>` (decision 276, front 118) + builders (Children) + renderToString + test {}
+│   │   │   ├── element.bp     ← COMPILED CORE: `type ElementBase()` (the empty-record phantom decision 128's wrapper named, until `ElementContext` retires it — 354 (7)) + type Element (`implement Renderable`) + `pub type View = Component<Element>` (decision 276, front 118) + `pub type NodeChildren = Element[]` (rakun-bpp's child list, decision 804 (4); interim until 809 (7) makes a child `Component<Element>`) + builders (NodeChildren) + renderToString + test {}
 │   │   │   ├── node.bp        ← COMPILED (front 118), PURE: `pub type Node = string | i32 | i64 | f32 | f64 | bool | Element | Element[]` — what a template hole and a `children` field hold (decisions 191, 223)
 │   │   │   ├── hooks.bp       ← COMPILED: State<T> + state/effect/memo/ref/reducer (Component<_>, pure server-pass bodies) + test {} (imports `Element`)
 │   │   │   ├── prelude.bp     ← COMPILED (front 118): the `.bpp` prelude (decision 270) — `import` items of the core's own modules only (`Element`, `ElementBase`, `View`, `Node`, `raw`, `el`, every builder; `timeTag as time`), and the marker `#[bpp.htmlPrelude] pub val prelude = bpp.Prelude();` by which the toolchain finds it (decision 361, std's `bpp`)
@@ -245,8 +245,10 @@ were promoted rather than filled in. A host-bound module here is now an ordinary
   `element.bp` (type, builders, `renderToString`) and `hooks.bp` (the
   `{value, set}` hook family) are ordinary `.bp`. Keep `.d.bp` only for genuinely
   host-bound intrinsics or async-gated surface — and say which gap gates each one.
-- Builders take a `Children` arg (`div([a, b])` / single / `string` — the G4
-  coercion); the **list form** is what V1 renders and what `html` emits. The
+- Builders take a `NodeChildren` arg, always a list (`div([a, b])`,
+  `div([text("x")])`): the compiler-known `Children` and its single-child and
+  string coercions retired with decision 804 (4); the list form is what V1
+  renders and what `html` emits. The
   trailing-lambda sugar (`div { [a, b] }`) is a recorded follow-up.
 - A hook is `pub fn <noun>(…) -> Component<R>` — the noun, never a
   `use` prefix (`counter`, `router`, `toggle`; not `useCounter`). Activation is
@@ -278,8 +280,8 @@ were promoted rather than filled in. A host-bound module here is now an ordinary
 rakun-bpp is a *consumer*. What it relies on:
 
 - **Landed**: `context-inference` (`@Context`/`use`), `expr-templates` (`syntax` parameters),
-  the G1–G4 gaps (fn-typed fields, labeled tuple types, `fn() -> T[]`, `Children`
-  coercion), the generic `from "<lib>"` loader, and — new in this port — generic
+  the G1–G4 gaps (fn-typed fields, labeled tuple types, `fn() -> T[]`; the G4
+  `Children` coercion since retired, 804 (4)), the generic `from "<lib>"` loader, and — new in this port — generic
   **cross-module nominal-type resolution** (a local component `fn … -> Element`
   whose result feeds an imported `renderToString`/`use` now type-checks; see
   `modules/compiler-core/src/comptime` `type_decl_registry` + `resolveTypeName`).
