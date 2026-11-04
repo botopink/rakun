@@ -16,9 +16,23 @@
 //// text. The sink that writes it into the head and each boundary fill, the
 //// order after a CSS library's own layers and payload key `s` are step 2,
 //// 3 and 5's.
+////
+//// `renderedStyles()` resolves `Sheet.render()` in the CALLER's scope, never
+//// a fresh `Scope.root()` (decisions 969, 809; mt-0410): a `component fn`
+//// keeping its own cell, the same device `suspense.bp`'s `Suspense` fix
+//// (c01f4a3f) uses — `val myScope = use selfScope;` sees every provider
+//// above THIS call's own placement. Plain code (a `test {}` block, a
+//// top-level `fn`, where `use` is refused) calls `renderedStylesAt(scope)`
+//// instead, passing the scope it already holds — never opening a new root.
 
 import {StyledSheet, Styled, Styleable, Sheet, layer} from "rakun-style";
-import {compiler, context.run} from "std";
+import {compiler, context.Scope, context.run} from "std";
+
+// The ambient scope a body currently stands in (809 (8) case B): `suspense.bp`
+// and `render.bp` each keep an identical `val selfScope`, duplicated rather
+// than imported — every one of the three modules is a different point in the
+// dependency order, and `selfScope` is not `pub` in either of the other two.
+val selfScope: Component<Scope> = { scope, key -> scope };
 
 #[compiler.external(.JavaScript("require('./render.mjs').styledSheet($0)"), .Erlang("jhonstart_render:styled_sheet($0)"))]
 declare fn __jhStyledSheet(fallback: Sheet) -> Sheet;
@@ -52,8 +66,19 @@ pub fn renderSheet() -> StyledSheet {
 
 // This render's sheet as text: `@layer styled{…}`, `""` when nothing was
 // registered. `Sheet.render` resolves its entries under one `use all`
-// (decision 969), so reading it crosses an `await` now.
-pub async fn renderedStyles() -> Async<string> {
-    val s = await run(__jhStyledSheet(emptySheet()).render());
+// (decision 969), so reading it crosses an `await` now. `component fn` so
+// `use renderedStyles()` sees every provider above THIS call's own
+// placement (mt-0410) — never a fresh, disconnected `Scope.root()`.
+pub component fn renderedStyles() -> Component<string> {
+    val myScope = use selfScope;
+    val s = await run(__jhStyledSheet(emptySheet()).render(), myScope);
+    return s;
+}
+
+// The plain-code form of `renderedStyles()`: no render tree stands where
+// `use` is refused (a `test {}` block, a top-level `fn`), so the caller
+// hands its own scope through instead — never a fresh root (mt-0410).
+pub async fn renderedStylesAt(scope: Scope) -> Async<string> {
+    val s = await run(__jhStyledSheet(emptySheet()).render(), scope);
     return s;
 }

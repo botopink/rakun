@@ -3,9 +3,16 @@
 // sheet. Built on erlang and commonJS by the pre-commit gate; the repository
 // stage reads its emitted module for `tab4`'s constant class and `code`'s
 // computed call.
+//
+// Every piece resolves under ONE shared root (decisions 969, 809; mt-0410):
+// `code()`, `padAll(2)`, `tabRed` and `sheet.render()` all run inside
+// `renderAll`'s own tree, under the ONE provider it sets up at its top — never
+// four independent `run()` calls each opening its own disconnected root,
+// which left `tabRed` and `sheet.render()` with no provider at all and
+// panicked `no StyledContext provider`.
 
 import styled, {styledProperty, StyledSheet, Styled, StyledProperty, Sheet, layer} from "rakun-style";
-import {context.createContext, context.provide, context.run, io.terminal.print} from "std";
+import {context.createContext, context.provide, context.run, context.Scope, io.terminal.print} from "std";
 import {theme.theme, extendTheme, baseTheme, entry, clear, Ns, ThemeValue} from "rakun-style";
 
 // LANGUAGE GAP: a library's template function cannot read the program's catalogue (`@TypeInfo.all(with: theme)` in an imported module), so the literals below read the base theme (md 48rem), not this one; and `comptime` cannot build it (an enum variant in a comptime block).
@@ -60,13 +67,22 @@ component fn RenderProperty(
 
 fn dropped(layer: string, item: Styled) -> void {}
 
-pub async fn main() -> Async<void> {
-    val c = await run(Render({ -> code() }));
-    val p = await run(RenderProperty({ -> padAll(2) }));
+// Every piece of the page, resolved in the ONE tree `main` opens below —
+// `Render`/`RenderProperty` are placed here, so their own `use provide(…)`
+// reaches `code()`, `padAll(2)` and `tabRed` without a fresh root apiece.
+component fn renderAll() -> Component<string> {
+    val c = use Render({ -> code() });
+    val p = use RenderProperty({ -> padAll(2) });
+    val red = use Render({ -> tabRed });
     val sheet = Sheet
         .of([layer("base"), layer("components")])
         .add("components", c)
-        .add("components", await run(tabRed))
+        .add("components", red)
         .add("base", p);
-    print(await run(sheet.render()));
+    val out = use sheet.render();
+    return out;
+}
+
+pub async fn main() -> Async<void> {
+    print(await run(renderAll(), Scope.root()));
 }
