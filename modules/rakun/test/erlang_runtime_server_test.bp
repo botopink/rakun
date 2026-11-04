@@ -226,12 +226,29 @@ test "rakun server: a handler that sets no header writes the same head as before
         == "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: keep-alive\r\n\r\nhello";
 }
 
+// Poll `rkConnectionCount()` every 5 ms until it reports at least `atLeast`
+// connections, or `timeoutMs` passed. The max-connections test below races
+// the held connection's own accept/registration against the probe
+// connection it fires next: a full HTTP round trip on `held` proves the
+// connection was DISPATCHED, but not that the server's connection count
+// already counts it (mt-0367, mt-0392 — an explicit readiness wait on the
+// server's own signal, never a sleep or a mocked clock).
+fn waitForConnectionCount(atLeast: i32, timeoutMs: i32) -> i32 {
+    var waited = 0;
+    while ((rkConnectionCount() < atLeast) && (waited < timeoutMs)) {
+        val _s = sleepMs(5);
+        waited = waited + 5;
+    }
+    return waited;
+}
+
 test "rakun server: over max-connections the next connection is answered 503 and closed" {
     val port = start();
     val _m = rkSetProp("rakun.server.max-connections", "1");
     val held = open(port);
     val _h = held.send("GET /srv/hello HTTP/1.1\r\nHost: x\r\n\r\n");
     val _r = readResponse(held);
+    val _w = waitForConnectionCount(1, 2000);
     val answer = get(port, "/srv/hello");
     val _c = held.close();
     val _u = rkSetProp("rakun.server.max-connections", "16384");
