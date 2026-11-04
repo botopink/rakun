@@ -17,6 +17,7 @@
 //// laid out on the BEAM.
 
 import {actuator_api.contract.Health, actuator_api.contract.EndpointResponse};
+import {http.Request};
 import {compiler, compiler.DeclKind, failure.panic} from "std";
 
 // ── the host cells ──────────────────────────────────────────────────────────
@@ -245,9 +246,34 @@ pub fn registryListing() -> string {
 // Decorator bodies are comment-free and call no sibling (the comptime rules
 // `context.bp`'s `#[managed]` docblock records).
 
-pub fn healthIndicator(syntax decl: unknown, comptime id: string) -> void {
+// `decl.make().check()` (and the two below) read a member a DIFFERENT
+// decorator adds — the stereotype's `make()` — never the SAME decorator's
+// own (797 is about that case, not this one; 613 stands as written for
+// `decl.make()`). What 716 (1) needs is the member counted in `decl`'s type at
+// all: `syntax decl: unknown` gives it none, so each marker's `decl` is typed
+// by a behavior naming both `make()` and its own method, met only by a type
+// that writes `implement` — the stereotype's `make()` and the type's own
+// method together (842 (2)). The placement checks below name the fix the
+// behavior's own refusal would not (which stereotype, which method), so they
+// stay; the method-presence checks they used to duplicate go — a missing
+// method is `decorator-decl-behavior-not-implemented` now, at the annotation.
+pub behavior HealthCheckOwner {
+    fn make() -> Self;
+    fn check(self: Self) -> Health;
+}
+
+pub behavior InfoContributorOwner {
+    fn make() -> Self;
+    fn contribute(self: Self) -> string;
+}
+
+pub behavior EndpointOwner {
+    fn make() -> Self;
+    fn read(self: Self, req: Request) -> EndpointResponse;
+}
+
+pub fn healthIndicator(syntax decl: HealthCheckOwner, comptime id: string) -> void {
     var stereotype = "";
-    var hasCheck = false;
     compiler
         .annotations(decl)
         .forEach({ a ->
@@ -259,12 +285,6 @@ pub fn healthIndicator(syntax decl: unknown, comptime id: string) -> void {
                 || a.name == "configuration";
             val st = if (isStereo) a.name else stereotype;
             stereotype = st;
-        });
-    compiler
-        .methods(decl)
-        .forEach({ m ->
-            val c = if (m.name == "check") true else hasCheck;
-            hasCheck = c;
         });
     val declName = compiler.name(decl)!;
     compiler.init({ -> rkRegisterHealthIndicator(id, declName, { -> decl.make().check() }); });
@@ -275,16 +295,10 @@ pub fn healthIndicator(syntax decl: unknown, comptime id: string) -> void {
             "#[healthIndicator] needs a stereotype on the same type (#[component] or #[service]) - the stereotype emits the singleton factory the registration calls",
             at: decl,
         );
-    if (hasCheck == false)
-        compiler.fail(
-            "#[healthIndicator] must annotate a type with a check(self) -> Health method",
-            at: decl,
-        );
 }
 
-pub fn infoContributor(syntax decl: unknown, comptime id: string) -> void {
+pub fn infoContributor(syntax decl: InfoContributorOwner, comptime id: string) -> void {
     var stereotype = "";
-    var hasContribute = false;
     compiler
         .annotations(decl)
         .forEach({ a ->
@@ -297,12 +311,6 @@ pub fn infoContributor(syntax decl: unknown, comptime id: string) -> void {
             val st = if (isStereo) a.name else stereotype;
             stereotype = st;
         });
-    compiler
-        .methods(decl)
-        .forEach({ m ->
-            val c = if (m.name == "contribute") true else hasContribute;
-            hasContribute = c;
-        });
     val declName = compiler.name(decl)!;
     compiler.init({ -> rkRegisterInfoContributor(id, declName, { -> decl.make().contribute() }); });
     if (compiler.kind(decl) != DeclKind.Type)
@@ -312,14 +320,9 @@ pub fn infoContributor(syntax decl: unknown, comptime id: string) -> void {
             "#[infoContributor] needs a stereotype on the same type (#[component] or #[service]) - the stereotype emits the singleton factory the registration calls",
             at: decl,
         );
-    if (hasContribute == false)
-        compiler.fail(
-            "#[infoContributor] must annotate a type with a contribute(self) -> string method",
-            at: decl,
-        );
 }
 
-pub fn endpoint(syntax decl: unknown, comptime id: string) -> void {
+pub fn endpoint(syntax decl: EndpointOwner, comptime id: string) -> void {
     var stereotype = "";
     var ops: array<string> = [];
     compiler
@@ -348,11 +351,6 @@ pub fn endpoint(syntax decl: unknown, comptime id: string) -> void {
     if (stereotype == "")
         compiler.fail(
             "#[endpoint] needs a stereotype on the same type (#[component] or #[service]) - the stereotype emits the singleton factory the registration calls",
-            at: decl,
-        );
-    if (ops.indexOf("read") < 0)
-        compiler.fail(
-            "#[endpoint] must annotate a type with a read(self, req: Request) -> EndpointResponse method",
             at: decl,
         );
 }
