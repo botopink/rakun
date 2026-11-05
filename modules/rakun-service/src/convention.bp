@@ -30,7 +30,7 @@ import {apiversion.apiVersionEntry};
 import {cors.corsEntry, cors.globalPolicy, cors.validatePolicy, cors.registerCorsMapping};
 import {error.errorEntry};
 import {compression.compressionEntry, compression.serverIdEntry, compression.validateCompression};
-import {compiler, compiler.DeclKind} from "std";
+import {compiler, compiler.DeclKind, compiler.Call, compiler.Member, compiler.Name} from "std";
 
 // ── the markers ─────────────────────────────────────────────────────────────
 
@@ -79,7 +79,14 @@ pub fn filter(syntax decl: unknown) -> void {
             { a -> if (a.name == "order") ord = a.args.join("") },
         );
     val ordText = ord.replaceAll("\"", "");
-    compiler.init({ -> registerFilter(declName, toI32(ordText), { req, chain -> decl.make().handle(req, chain) }); });
+    val callHandle = Call(
+        callee: Member(
+            target: Call(callee: Member(target: Name(declName), member: "make"), args: []),
+            member: "handle",
+        ),
+        args: [Name("req"), Name("chain")],
+    );
+    compiler.init({ -> registerFilter(declName, toI32(ordText), { req, chain -> compiler.ast(callHandle) }); });
     if (compiler.kind(decl) != DeclKind.Type)
         compiler.fail("#[filter] must annotate a type", at: decl);
     if (compiler.variants(decl).length > 0)
@@ -126,7 +133,21 @@ pub fn messageConverter(syntax decl: unknown, comptime media: string) -> void {
             + compiler.name(decl)!
             + "\"); v }); }",
     );
-    compiler.init({ -> registerConverter(media, { v -> decl.make().write(v) }, { b -> decl.make().read(b) }); });
+    val callWrite = Call(
+        callee: Member(
+            target: Call(callee: Member(target: Name(declName), member: "make"), args: []),
+            member: "write",
+        ),
+        args: [Name("v")],
+    );
+    val callRead = Call(
+        callee: Member(
+            target: Call(callee: Member(target: Name(declName), member: "make"), args: []),
+            member: "read",
+        ),
+        args: [Name("b")],
+    );
+    compiler.init({ -> registerConverter(media, { v -> compiler.ast(callWrite) }, { b -> compiler.ast(callRead) }); });
     if (compiler.kind(decl) != DeclKind.Type)
         compiler.fail("#[messageConverter] must annotate a type", at: decl);
     if (compiler.variants(decl).length > 0)
@@ -183,7 +204,14 @@ pub fn webCustomizer(syntax decl: unknown) -> void {
             { a -> if (a.name == "order") ord = a.args.join("") },
         );
     val ordText = ord.replaceAll("\"", "");
-    compiler.init({ -> rkCustomizerRegister(declName, toI32(ordText), { reg -> decl.make().customize(reg) }); });
+    val callCustomize = Call(
+        callee: Member(
+            target: Call(callee: Member(target: Name(declName), member: "make"), args: []),
+            member: "customize",
+        ),
+        args: [Name("reg")],
+    );
+    compiler.init({ -> rkCustomizerRegister(declName, toI32(ordText), { reg -> compiler.ast(callCustomize) }); });
     if (compiler.kind(decl) != DeclKind.Type)
         compiler.fail("#[webCustomizer] must annotate a type", at: decl);
     if (compiler.variants(decl).length > 0)
@@ -328,8 +356,12 @@ pub fn controllerAdvice(syntax decl: unknown) -> void {
             });
         });
     if (handlers.length > 0) {
-        compiler.addMember("pub fn rkAdvice() { " + handlers.join(" ") + " }");
-        compiler.init({ -> decl.rkAdvice(); });
+        compiler.addMember("pub fn rkAdvice() -> void { " + handlers.join(" ") + " }");
+        val callAdvice = Call(
+            callee: Member(target: Name(declName), member: "rkAdvice"),
+            args: [],
+        );
+        compiler.init({ -> compiler.ast(callAdvice); });
     }
     if (compiler.kind(decl) != DeclKind.Type)
         compiler.fail("#[controllerAdvice] must annotate a type", at: decl);
